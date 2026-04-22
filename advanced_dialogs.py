@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QListWidgetItem,
     QSpinBox,
+    QDoubleSpinBox,
+    QFrame,
 )
 
 
@@ -63,6 +65,10 @@ class MultiSelectPicker(QDialog):
         self.checkbox_order = []
         self.last_clicked_item = None
         self._applying_shift_range = False
+
+        self.group_collapsed = {}
+        self.group_rows = {}
+        self.group_headers = {}
 
         layout = QVBoxLayout(self)
         self.filter_edit = QLineEdit()
@@ -108,6 +114,31 @@ class MultiSelectPicker(QDialog):
     def _sorted_values(self, values):
         return sorted(values, key=self._natural_sort_key)
 
+    def _group_sort_key(self, group_name):
+        text = str(group_name).strip()
+        lower = text.lower()
+
+        # Put unassigned groups first
+        if "unassigned" in lower:
+            return (0, self._natural_sort_key(text))
+
+        return (1, self._natural_sort_key(text))
+
+    def _set_group_collapsed(self, group_name, collapsed):
+        self.group_collapsed[group_name] = bool(collapsed)
+
+        for widget in self.group_rows.get(group_name, []):
+            if widget is not None:
+                widget.setVisible(not collapsed)
+
+        header_btn = self.group_headers.get(group_name)
+        if header_btn is not None:
+            header_btn.setText("▶" if collapsed else "▼")
+
+    def _toggle_group(self, group_name):
+        collapsed = bool(self.group_collapsed.get(group_name, False))
+        self._set_group_collapsed(group_name, not collapsed)
+
     def refresh(self):
         self._sync_visible_state()
         while self.container_layout.count():
@@ -125,21 +156,36 @@ class MultiSelectPicker(QDialog):
                 continue
             grouped.setdefault(self.group_resolver(item), []).append(item)
 
-        for group_name in self._sorted_values(grouped.keys()):
+        self.group_rows = {}
+        self.group_headers = {}
+
+        for group_name in sorted(grouped.keys(), key=self._group_sort_key):
+            self.group_rows[group_name] = []
             items = self._sorted_values(grouped[group_name])
             header = QHBoxLayout()
+
+            toggle_btn = QToolButton()
+            toggle_btn.setText("▶" if self.group_collapsed.get(group_name, False) else "▼")
+            toggle_btn.setAutoRaise(True)
+            toggle_btn.clicked.connect(
+                lambda _=False, g=group_name: self._toggle_group(g)
+            )
+            header.addWidget(toggle_btn)
+            self.group_headers[group_name] = toggle_btn
+
             label = QLabel(f"{group_name} ({len(items)})")
             header.addWidget(label)
             header.addStretch(1)
+
             btn_all = QPushButton("All")
             btn_none = QPushButton("None")
             btn_all.setFixedWidth(52)
             btn_none.setFixedWidth(52)
             btn_all.clicked.connect(
-                lambda _=False, its=items: self._set_items(its, True)
+                lambda _, its=list(items): self._set_items(its, True)
             )
             btn_none.clicked.connect(
-                lambda _=False, its=items: self._set_items(its, False)
+                lambda _, its=list(items): self._set_items(its, False)
             )
             header.addWidget(btn_all)
             header.addWidget(btn_none)
@@ -147,6 +193,12 @@ class MultiSelectPicker(QDialog):
             header_widget = QWidget()
             header_widget.setLayout(header)
             self.container_layout.addWidget(header_widget)
+
+            divider = QFrame()
+            divider.setFrameShape(QFrame.HLine)
+            divider.setFrameShadow(QFrame.Sunken)
+            self.container_layout.addWidget(divider)
+            self.group_rows[group_name].append(divider)
 
             for item in items:
                 checked = item in self.selected
@@ -156,6 +208,7 @@ class MultiSelectPicker(QDialog):
                         checked = existing.isChecked()
                     except RuntimeError:
                         pass
+
                 chk = QCheckBox(item)
                 chk.setChecked(checked)
                 chk.clicked.connect(
@@ -163,13 +216,21 @@ class MultiSelectPicker(QDialog):
                 )
                 self.checkboxes[item] = chk
                 self.checkbox_order.append(item)
+
                 row = QWidget()
                 row_layout = QHBoxLayout(row)
                 row_layout.setContentsMargins(18, 0, 0, 0)
                 row_layout.addWidget(chk)
                 row_layout.addStretch(1)
+
                 self.container_layout.addWidget(row)
+                self.group_rows[group_name].append(row)
                 self.visible.append(item)
+
+            self._set_group_collapsed(
+                group_name,
+                self.group_collapsed.get(group_name, False),
+            )
 
         self.container_layout.addStretch(1)
 
@@ -777,6 +838,105 @@ class BulkConnectionDialog(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "Invalid bulk connection set", str(exc))
 
+class FloorTemplateCopyDialog(QDialog):
+    def __init__(self, parent, source_floor, point_names, selected_points=None, group_resolver=None):
+        super().__init__(parent)
+        self.setWindowTitle("Copy Template Between Floors")
+        self.resize(720, 420)
+        self.result = None
+        self.source_floor = int(source_floor)
+        self.point_names = list(point_names)
+        self.group_resolver = group_resolver or (lambda item: "Other")
+        self.selected_points = sorted(selected_points or [])
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        points_row = QHBoxLayout()
+        self.points_summary = QLabel("None")
+        self.points_summary.setWordWrap(True)
+        pick_points_btn = QPushButton("Pick...")
+        pick_points_btn.clicked.connect(self.pick_points)
+        points_row.addWidget(self.points_summary, 1)
+        points_row.addWidget(pick_points_btn)
+
+        self.target_floor_spin = QSpinBox()
+        self.target_floor_spin.setRange(0, 999)
+        self.target_floor_spin.setValue(self.source_floor)
+
+        self.include_edges_check = QCheckBox("Recreate internal edges between copied items")
+        self.include_edges_check.setChecked(True)
+
+        self.offset_x_spin = QDoubleSpinBox()
+        self.offset_x_spin.setRange(-100000.0, 100000.0)
+        self.offset_x_spin.setDecimals(3)
+        self.offset_x_spin.setSingleStep(0.5)
+        self.offset_x_spin.setValue(0.0)
+
+        self.offset_y_spin = QDoubleSpinBox()
+        self.offset_y_spin.setRange(-100000.0, 100000.0)
+        self.offset_y_spin.setDecimals(3)
+        self.offset_y_spin.setSingleStep(0.5)
+        self.offset_y_spin.setValue(0.0)
+
+        form.addRow("Selected corridor nodes / data points", points_row)
+        form.addRow("Source floor", QLabel(str(self.source_floor)))
+        form.addRow("Target floor", self.target_floor_spin)
+        form.addRow("", self.include_edges_check)
+        form.addRow("Offset X", self.offset_x_spin)
+        form.addRow("Offset Y", self.offset_y_spin)
+
+        if self.selected_points:
+            self.points_summary.setText(self._summarize(self.selected_points))
+
+        info = QLabel(
+            "Only corridor nodes and data points are copied.\n"
+            "New names are created automatically.\n"
+            "Edges are only recreated where both original endpoints are in the selected set."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _summarize(self, values):
+        if not values:
+            return "None"
+        if len(values) <= 6:
+            return ", ".join(values)
+        return f"{len(values)} selected"
+
+    def pick_points(self):
+        picker = MultiSelectPicker(
+            self,
+            "Select template items",
+            self.point_names,
+            selected=self.selected_points,
+            group_resolver=self.group_resolver,
+        )
+        if picker.exec() == QDialog.Accepted and picker.result is not None:
+            self.selected_points = sorted(picker.result)
+            self.points_summary.setText(self._summarize(self.selected_points))
+
+    def accept(self):
+        try:
+            if not self.selected_points:
+                raise ValueError("Select one or more corridor nodes or data points")
+
+            self.result = {
+                "source_names": list(self.selected_points),
+                "target_floor": int(self.target_floor_spin.value()),
+                "include_internal_edges": bool(self.include_edges_check.isChecked()),
+                "offset_x": float(self.offset_x_spin.value()),
+                "offset_y": float(self.offset_y_spin.value()),
+            }
+            super().accept()
+        except Exception as exc:
+            QMessageBox.critical(self, "Invalid template copy", str(exc))
 
 class DataPointDepartmentsBulkDialog(QDialog):
     def __init__(

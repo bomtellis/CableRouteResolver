@@ -3,7 +3,7 @@ import math
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, Qt, Signal, QRectF, QThread, Slot
+from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal, QRect, QRectF, QThread, Slot
 from PySide6.QtGui import QColor, QBrush, QPainter, QPen, QFont, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
     QWidget,
     QInputDialog,
     QDoubleSpinBox,
+    QRubberBand,
+    QScrollArea,
 )
 
 from dxf_scene import DXFScene
@@ -46,6 +48,7 @@ from dialogs import (
 from advanced_dialogs import (
     ConnectionEditorWindow,
     DataPointDepartmentsBulkDialog,
+    FloorTemplateCopyDialog,
     LocationDepartmentsBulkDialog,
     RouteProfilesEditorV2,
 )
@@ -222,13 +225,19 @@ class CableRouteEditor(QMainWindow):
         self.last_pan = None
         self.selected_for_edge = None
         self.selected_point_name = None
+        self.selected_template_names = set()
         self.dragging_point_name = None
         self.drag_mode_active = False
+        self.selection_rect_active = False
+        self.selection_rect_origin = None
+        self.selection_rect_current = None
+        self._rubber_band = None
         self.edge_delete_start = None
         self._item_lookup = {}
         self._point_item_lookup = {}
         self.bulk_location_session = None
         self.bulk_data_point_session = None
+        self._clear_canvas_multi_selection()
 
         self._build_ui()
         self.refresh_canvas()
@@ -238,15 +247,25 @@ class CableRouteEditor(QMainWindow):
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
 
+        self.sidebar_scroll = QScrollArea()
+        self.sidebar_scroll.setWidgetResizable(True)
+        self.sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sidebar_scroll.setMinimumWidth(280)
+        self.sidebar_scroll.setMaximumWidth(320)
+
         self.sidebar = QWidget()
-        self.sidebar.setFixedWidth(260)
+        self.sidebar.setMinimumWidth(260)
+        self.sidebar.setMaximumWidth(260)
         sidebar_layout = QVBoxLayout(self.sidebar)
-        layout.addWidget(self.sidebar)
+
+        self.sidebar_scroll.setWidget(self.sidebar)
+        layout.addWidget(self.sidebar_scroll)
 
         self.scene = QGraphicsScene(self)
         self.canvas = EditorGraphicsView(self)
         self.canvas.setScene(self.scene)
         self.canvas.set_overlay_provider(self.draw_overlay_panels)
+        self._rubber_band = QRubberBand(QRubberBand.Rectangle, self.canvas.viewport())
         layout.addWidget(self.canvas, 1)
 
         self.canvas.leftClicked.connect(self.on_left_click)
@@ -340,6 +359,7 @@ class CableRouteEditor(QMainWindow):
             ("Location Departments", self.manage_location_departments),
             ("Mass Create Locations", self.start_bulk_location_placement),
             ("Mass Create Data Points", self.start_bulk_data_point_placement),
+            ("Copy Template Between Floors", self.copy_template_between_floors),
             ("Data Point Departments", self.manage_data_point_departments),
             ("Data Points", self.manage_data_points),
             ("Transitions", self.manage_transitions),
@@ -428,6 +448,7 @@ class CableRouteEditor(QMainWindow):
         self.status_label.setText(text)
 
     def on_floor_changed(self, *_):
+        self._clear_canvas_multi_selection()
         self.refresh_canvas()
         self._queue_all_floor_dxf_loads(
             active_floor=self.floor_spin.value(), force_reload=False
@@ -678,6 +699,88 @@ class CableRouteEditor(QMainWindow):
             self.canvas.viewport().update()
         self.refresh_canvas()
 
+    def _clear_canvas_multi_selection(self):
+        self.selected_template_names.clear()
+
+    def _eligible_template_name_set(self, floor):
+        return set(self.template_copy_candidate_names(floor))
+
+    def _set_canvas_multi_selection(self, names, append=False, toggle=False):
+        floor = self.floor_spin.value()
+        eligible = self._eligible_template_name_set(floor)
+        filtered = {str(name).strip() for name in (names or []) if str(name).strip() in eligible}
+
+        if toggle:
+            for name in filtered:
+                if name in self.selected_template_names:
+                    self.selected_template_names.discard(name)
+                else:
+                    self.selected_template_names.add(name)
+        elif append:
+            self.selected_template_names.update(filtered)
+        else:
+            self.selected_template_names = set(filtered)
+
+        if self.selected_template_names:
+            self.selected_point_name = next(iter(sorted(self.selected_template_names)))
+        elif self.selected_point_name in eligible:
+            self.selected_point_name = None
+
+    def _begin_selection_rect(self, event):
+        origin = event.position().toPoint()
+        self.selection_rect_active = True
+        self.selection_rect_origin = origin
+        self.selection_rect_current = origin
+        if self._rubber_band is not None:
+            self._rubber_band.setGeometry(QRect(origin, origin))
+            self._rubber_band.show()
+
+    def _update_selection_rect(self, event):
+        if not self.selection_rect_active or self.selection_rect_origin is None:
+            return
+        self.selection_rect_current = event.position().toPoint()
+        if self._rubber_band is not None:
+            rect = QRect(self.selection_rect_origin, self.selection_rect_current).normalized()
+            self._rubber_band.setGeometry(rect)
+
+    def _finish_selection_rect(self, event):
+        if not self.selection_rect_active or self.selection_rect_origin is None:
+            return False
+
+        end_point = event.position().toPoint()
+        rect = QRect(self.selection_rect_origin, end_point).normalized()
+        if self._rubber_band is not None:
+            self._rubber_band.hide()
+
+        self.selection_rect_active = False
+        self.selection_rect_current = None
+        self.selection_rect_origin = None
+
+        if rect.width() < 4 and rect.height() < 4:
+            return False
+
+        scene_rect = self.canvas.mapToScene(rect).boundingRect()
+        floor = self.floor_spin.value()
+        selected = []
+
+        for name, point in self.store.points_for_floor(floor).items():
+            if point.get('kind') not in {'corridor_node', 'data_point'}:
+                continue
+            pos = self.world_to_scene(point['x'], point['y'])
+            if scene_rect.contains(pos):
+                selected.append(name)
+
+        modifiers = Qt.KeyboardModifiers(QApplication.keyboardModifiers())
+        append = bool(modifiers & Qt.ShiftModifier)
+        toggle = bool(modifiers & Qt.ControlModifier)
+        self._set_canvas_multi_selection(selected, append=append, toggle=toggle)
+        self.refresh_canvas()
+        if selected:
+            self.set_status(f'Selected {len(selected)} template item(s)')
+        else:
+            self.set_status('No template items found in selection box')
+        return True
+
     def refresh_canvas(self):
         self.scene.clear()
         self._item_lookup = {}
@@ -752,7 +855,7 @@ class CableRouteEditor(QMainWindow):
     def draw_points(self, floor):
         for name, point in self.store.points_for_floor(floor).items():
             pos = self.world_to_scene(point["x"], point["y"])
-            selected = name == self.selected_point_name
+            selected = (name == self.selected_point_name) or (name in self.selected_template_names)
             kind = point.get("kind")
             outline = QPen(QColor("#ffffff") if selected else QColor("transparent"), 0)
 
@@ -820,7 +923,7 @@ class CableRouteEditor(QMainWindow):
                 label = self.scene.addText(name)
                 label.setDefaultTextColor(label_color)
                 label.setPos(pos.x() + 0.35, pos.y() - 0.35)
-                label.setScale(0.08)
+                label.setScale(0.05)
                 self._item_lookup[label] = ("label", name)
 
     def _edge_rows_for_point(self, point_name):
@@ -876,6 +979,8 @@ class CableRouteEditor(QMainWindow):
             f"Mode: {self.mode_combo.currentText()} | Floor: {floor}",
             f"DXF: {dxf_name}",
             f"Edge chain start: {active_edge_start}",
+            f"Template selection: {len(self.selected_template_names)}",
+            "Drag in select_move to multi-select template items",
             "Double-click a point to edit",
         ]
         self._draw_overlay_box(painter, 12, 12, 330, lines, "#333333", "white")
@@ -1611,6 +1716,69 @@ class CableRouteEditor(QMainWindow):
 
         return group_map
 
+    def template_copy_candidate_names(self, floor):
+        floor = int(floor)
+        result = []
+
+        for item in self.store.data.get("corridors", {}).get("nodes", []):
+            if int(item.get("floor", 0)) != floor:
+                continue
+            name = str(item.get("name", "")).strip()
+            if name:
+                result.append(name)
+
+        for item in self.store.data.get("data_points", []):
+            if int(item.get("floor", 0)) != floor:
+                continue
+            name = str(item.get("name", "")).strip()
+            if name:
+                result.append(name)
+
+        return sorted(set(result))
+
+    def template_copy_group_map(self, floor):
+        floor = int(floor)
+        group_map = {}
+
+        for item in self.store.data.get("corridors", {}).get("nodes", []):
+            if int(item.get("floor", 0)) != floor:
+                continue
+            name = str(item.get("name", "")).strip()
+            if name:
+                group_map[name] = f"Corridor nodes / Floor {floor}"
+
+        department_name_by_id = {}
+        for department in self.store.data.get("departments", []):
+            department_id = str(department.get("id", "")).strip()
+            if not department_id:
+                continue
+            department_name_by_id[department_id] = (
+                str(department.get("name", department_id)).strip() or department_id
+            )
+
+        for item in self.store.data.get("data_points", []):
+            if int(item.get("floor", 0)) != floor:
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+
+            department_ids = [
+                str(x).strip()
+                for x in item.get("department_ids", [])
+                if str(x).strip()
+            ]
+            if department_ids:
+                labels = [
+                    department_name_by_id.get(dept_id, dept_id)
+                    for dept_id in department_ids
+                ]
+                group_map[name] = "Data points / " + ", ".join(sorted(set(labels)))
+            else:
+                group_map[name] = f"Data points / Unassigned / Floor {floor}"
+
+        return group_map
+
     def _format_bulk_location_name(self, prefix, number):
         return f"{prefix}{int(number)}"
 
@@ -1871,8 +2039,9 @@ class CableRouteEditor(QMainWindow):
                         department_name_by_id.get(dept_id, dept_id)
                         for dept_id in department_ids
                     ]
-                    return " / ".join(sorted(set(labels)))
-                return f"Floor {item.get('floor', 0)} / Unassigned"
+                    return "Assigned / " + " / ".join(sorted(set(labels)))
+
+                return f"Unassigned / Floor {item.get('floor', 0)}"
             return "Other"
 
         dialog = DataPointDepartmentsBulkDialog(
@@ -1917,6 +2086,81 @@ class CableRouteEditor(QMainWindow):
                 f"Mass create active: {count} {kind} item(s) starting at {next_name}. Click to place."
             )
 
+    def copy_template_between_floors(self):
+        source_floor = self.floor_spin.value()
+        point_names = self.template_copy_candidate_names(source_floor)
+        if not point_names:
+            QMessageBox.information(
+                self,
+                "Copy Template Between Floors",
+                "No corridor nodes or data points found on the current floor.",
+            )
+            return
+
+        group_map = self.template_copy_group_map(source_floor)
+
+        def group_resolver(name):
+            return group_map.get(name, "Other")
+
+        preselected = sorted(
+            name for name in self.selected_template_names if name in set(point_names)
+        )
+        dialog = FloorTemplateCopyDialog(
+            self,
+            source_floor=source_floor,
+            point_names=point_names,
+            selected_points=preselected,
+            group_resolver=group_resolver,
+        )
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+
+        try:
+            payload = dialog.result
+            result = self.store.clone_template_between_floors(
+                source_names=payload["source_names"],
+                target_floor=payload["target_floor"],
+                include_internal_edges=payload["include_internal_edges"],
+                offset_x=payload["offset_x"],
+                offset_y=payload["offset_y"],
+            )
+
+            created_count = (
+                len(result.get("created_corridors", []))
+                + len(result.get("created_data_points", []))
+            )
+            created_edges = len(result.get("created_edges", []))
+
+            self.selected_point_name = None
+            self._clear_canvas_multi_selection()
+            self.refresh_canvas()
+
+            lines = [
+                f"Copied {created_count} item(s) to floor {payload['target_floor']}.",
+                f"Corridor nodes created: {len(result.get('created_corridors', []))}",
+                f"Data points created: {len(result.get('created_data_points', []))}",
+                f"Edges recreated: {created_edges}",
+            ]
+            skipped = result.get("skipped", [])
+            if skipped:
+                lines.append("Skipped: " + ", ".join(skipped[:10]))
+
+            QMessageBox.information(
+                self,
+                "Copy Template Between Floors",
+                "\n".join(lines),
+            )
+            self.set_status(
+                f"Copied template to floor {payload['target_floor']} "
+                f"({created_count} items, {created_edges} edges)"
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Copy Template Between Floors",
+                str(exc),
+            )
+
     def _save_route_profiles(self, profiles):
         self.store.data["route_profiles"] = profiles
         self.set_status("Route profiles updated")
@@ -1935,10 +2179,30 @@ class CableRouteEditor(QMainWindow):
         self.selected_point_name = picked
 
         if mode == "select_move":
+            modifiers = Qt.KeyboardModifiers(QApplication.keyboardModifiers())
+            template_eligible = picked in self._eligible_template_name_set(floor) if picked else False
+
             if picked:
+                if template_eligible:
+                    if modifiers & Qt.ControlModifier:
+                        self._set_canvas_multi_selection([picked], toggle=True)
+                    elif modifiers & Qt.ShiftModifier:
+                        self._set_canvas_multi_selection([picked], append=True)
+                    else:
+                        self._set_canvas_multi_selection([picked], append=False)
+                else:
+                    if not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier)):
+                        self._clear_canvas_multi_selection()
+
                 self.dragging_point_name = picked
                 self.drag_mode_active = True
                 self.set_status(f"Selected {picked}")
+                self.refresh_canvas()
+                return
+
+            if not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier)):
+                self._clear_canvas_multi_selection()
+            self._begin_selection_rect(event)
             self.refresh_canvas()
             return
 
@@ -2354,6 +2618,13 @@ class CableRouteEditor(QMainWindow):
             self.refresh_canvas()
 
     def on_left_release(self, event):
+        if self.selection_rect_active:
+            handled = self._finish_selection_rect(event)
+            self.dragging_point_name = None
+            self.drag_mode_active = False
+            self.last_pan = None
+            if handled:
+                return
         self.dragging_point_name = None
         self.drag_mode_active = False
         self.last_pan = None
@@ -2444,11 +2715,15 @@ class CableRouteEditor(QMainWindow):
             self.last_pan = current
             self.canvas.viewport().update()
             return
-        if mode == "select_move" and self.drag_mode_active and self.dragging_point_name:
-            x, y = self.scene_to_world(sx, sy)
-            x, y = self.snap(x, y)
-            self.store.set_point_position(self.dragging_point_name, x, y)
-            self.refresh_canvas()
+        if mode == "select_move":
+            if self.selection_rect_active:
+                self._update_selection_rect(event)
+                return
+            if self.drag_mode_active and self.dragging_point_name:
+                x, y = self.scene_to_world(sx, sy)
+                x, y = self.snap(x, y)
+                self.store.set_point_position(self.dragging_point_name, x, y)
+                self.refresh_canvas()
 
     def on_middle_click(self, event):
         self.last_pan = event.position().toPoint()

@@ -723,6 +723,134 @@ class JsonStore:
                 nums.append(int(connection_id[1:]))
         return f"C{max(nums, default=0) + 1}"
 
+    def _point_record_by_name(self, name: str):
+        name = str(name).strip()
+
+        for item in self.data.get("corridors", {}).get("nodes", []):
+            if str(item.get("name", "")).strip() == name:
+                return "corridor_node", item
+
+        for item in self.data.get("data_points", []):
+            if str(item.get("name", "")).strip() == name:
+                return "data_point", item
+
+        return None, None
+
+    def _suggest_next_corridor_name_for_floor(self, floor: int, used_names: set) -> str:
+        prefix = f"C{int(floor)}-"
+        nums = []
+        for name in used_names:
+            if str(name).startswith(prefix):
+                tail = str(name)[len(prefix) :]
+                if tail.isdigit():
+                    nums.append(int(tail))
+        return f"C{int(floor)}-{max(nums, default=0) + 1}"
+
+    def _suggest_next_data_point_name_for_floor(self, floor: int, used_names: set) -> str:
+        prefix = f"DP{int(floor)}-"
+        nums = []
+        for name in used_names:
+            if str(name).startswith(prefix):
+                tail = str(name)[len(prefix) :]
+                if tail.isdigit():
+                    nums.append(int(tail))
+        return f"DP{int(floor)}-{max(nums, default=0) + 1}"
+
+    def clone_template_between_floors(
+        self,
+        source_names: List[str],
+        target_floor: int,
+        include_internal_edges: bool = True,
+        offset_x: float = 0.0,
+        offset_y: float = 0.0,
+    ) -> dict:
+        selected_names = [str(x).strip() for x in (source_names or []) if str(x).strip()]
+        if not selected_names:
+            raise ValueError("Select one or more corridor nodes or data points")
+
+        used_names = set(self.names_in_use())
+        selected_set = set(selected_names)
+
+        id_map = {}
+        created_corridors = []
+        created_data_points = []
+        skipped = []
+
+        for old_name in selected_names:
+            kind, record = self._point_record_by_name(old_name)
+            if kind is None or record is None:
+                skipped.append(old_name)
+                continue
+
+            if kind == "corridor_node":
+                new_name = self._suggest_next_corridor_name_for_floor(target_floor, used_names)
+                used_names.add(new_name)
+
+                new_record = {
+                    "name": new_name,
+                    "floor": int(target_floor),
+                    "x": round(float(record.get("x", 0.0)) + float(offset_x), 3),
+                    "y": round(float(record.get("y", 0.0)) + float(offset_y), 3),
+                    "height_affl_m": float(record.get("height_affl_m", 0.0) or 0.0),
+                    "cable_limit": int(record.get("cable_limit", 0) or 0),
+                }
+                self.data.setdefault("corridors", {}).setdefault("nodes", []).append(new_record)
+                id_map[old_name] = new_name
+                created_corridors.append(new_name)
+
+            elif kind == "data_point":
+                new_name = self._suggest_next_data_point_name_for_floor(target_floor, used_names)
+                used_names.add(new_name)
+
+                new_record = {
+                    "name": new_name,
+                    "floor": int(target_floor),
+                    "x": round(float(record.get("x", 0.0)) + float(offset_x), 3),
+                    "y": round(float(record.get("y", 0.0)) + float(offset_y), 3),
+                    "qty": int(record.get("qty", 1) or 1),
+                    "extension_distance_m": float(record.get("extension_distance_m", 0.0) or 0.0),
+                    "department_ids": [],
+                }
+                self.data.setdefault("data_points", []).append(new_record)
+                id_map[old_name] = new_name
+                created_data_points.append(new_name)
+
+        created_edges = []
+        if include_internal_edges and id_map:
+            existing_edges = self.data.setdefault("corridors", {}).setdefault("edges", [])
+            existing_pairs = {
+                (str(edge.get("from", "")).strip(), str(edge.get("to", "")).strip())
+                for edge in existing_edges
+            }
+
+            for edge in list(existing_edges):
+                start = str(edge.get("from", "")).strip()
+                end = str(edge.get("to", "")).strip()
+
+                if start not in selected_set or end not in selected_set:
+                    continue
+                if start not in id_map or end not in id_map:
+                    continue
+
+                new_start = id_map[start]
+                new_end = id_map[end]
+                pair = (new_start, new_end)
+
+                if pair in existing_pairs:
+                    continue
+
+                existing_edges.append({"from": new_start, "to": new_end})
+                existing_pairs.add(pair)
+                created_edges.append({"from": new_start, "to": new_end})
+
+        return {
+            "id_map": id_map,
+            "created_corridors": created_corridors,
+            "created_data_points": created_data_points,
+            "created_edges": created_edges,
+            "skipped": skipped,
+        }
+
     @staticmethod
     def basename(path: Optional[str]) -> str:
         if not path:
