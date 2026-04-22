@@ -346,6 +346,7 @@ class DataPointEditorDialog(QDialog):
         default_x=0.0,
         default_y=0.0,
         default_name="",
+        department_options=None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Data Point")
@@ -353,6 +354,7 @@ class DataPointEditorDialog(QDialog):
         self.default_floor = default_floor
         self.default_x = default_x
         self.default_y = default_y
+        self.department_options = list(department_options or [])
         self.result = None
 
         layout = QVBoxLayout(self)
@@ -372,17 +374,51 @@ class DataPointEditorDialog(QDialog):
             )
         )
 
+        self.departments_list = QListWidget()
+        self.departments_list.setSelectionMode(QAbstractItemView.NoSelection)
+
+        selected = {
+            str(x).strip()
+            for x in self.seed.get("department_ids", [])
+            if str(x).strip()
+        }
+
+        for department_id, department_name in self.department_options:
+            text = (
+                f"{department_id} - {department_name}"
+                if department_name
+                else department_id
+            )
+            item = QListWidgetItem(text)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setData(Qt.UserRole, department_id)
+            item.setCheckState(
+                Qt.Checked if str(department_id).strip() in selected else Qt.Unchecked
+            )
+            self.departments_list.addItem(item)
+
         form.addRow("Name", self.name_edit)
         form.addRow("X", self.x_edit)
         form.addRow("Y", self.y_edit)
         form.addRow("Floor", QLabel(str(self.seed.get("floor", default_floor))))
         form.addRow("Qty", self.qty_edit)
         form.addRow("Extension distance (m)", self.extension_edit)
+        form.addRow("Departments", self.departments_list)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+        self.resize(520, 500)
+
+    def _checked_department_ids(self):
+        result = []
+        for i in range(self.departments_list.count()):
+            item = self.departments_list.item(i)
+            if item.checkState() == Qt.Checked:
+                result.append(str(item.data(Qt.UserRole)).strip())
+        return result
 
     def accept(self):
         try:
@@ -396,6 +432,7 @@ class DataPointEditorDialog(QDialog):
                 "floor": int(self.seed.get("floor", self.default_floor)),
                 "qty": int(self.qty_edit.text()),
                 "extension_distance_m": float(self.extension_edit.text()),
+                "department_ids": self._checked_department_ids(),
             }
             super().accept()
         except Exception as exc:
@@ -584,9 +621,9 @@ class TransitionEditorDialog(QDialog):
         self.setWindowTitle("Transition Editor")
         self.result = None
         self.transition = transition or {}
-        self.default_floor = default_floor
-        self.default_x = default_x
-        self.default_y = default_y
+        self.default_floor = int(default_floor)
+        self.default_x = float(default_x)
+        self.default_y = float(default_y)
 
         floors = self.transition.get("floors", [self.default_floor])
         floor_locations = self.transition.get("floor_locations", {})
@@ -598,48 +635,104 @@ class TransitionEditorDialog(QDialog):
         self.id_edit = QLineEdit(self.transition.get("id", default_id))
         self.floors_edit = QLineEdit(", ".join(str(x) for x in floors))
         self.cable_limit_edit = QLineEdit(str(self.transition.get("cable_limit", 0)))
-        self.positions_edit = QPlainTextEdit()
 
-        if floor_locations:
-            payload = {int(k): [v["x"], v["y"]] for k, v in floor_locations.items()}
-        else:
-            payload = {self.default_floor: [self.default_x, self.default_y]}
-        self.positions_edit.setPlainText(json.dumps(payload, indent=2))
+        self.base_position_label = QLabel(
+            f"Floor {self.default_floor}: X={self.default_x:.3f}, Y={self.default_y:.3f}"
+        )
+        self.base_position_label.setWordWrap(True)
+
+        self.positions_preview = QPlainTextEdit()
+        self.positions_preview.setReadOnly(True)
 
         form.addRow("Transition ID", self.id_edit)
         form.addRow("Floors", self.floors_edit)
         form.addRow("Cable limit", self.cable_limit_edit)
-        form.addRow("Per-floor positions", self.positions_edit)
-        form.addRow("", QLabel("Format: {floor: [x, y]}"))
+        form.addRow("Base position", self.base_position_label)
+        form.addRow("Generated positions", self.positions_preview)
+        form.addRow(
+            "",
+            QLabel(
+                "Per-floor position JSON is generated automatically.\n"
+                "For new floors, the clicked position is reused.\n"
+                "When editing, any existing saved floor positions are preserved."
+            ),
+        )
+
+        self.floors_edit.textChanged.connect(self._refresh_positions_preview)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-        self.resize(520, 420)
+        self.resize(560, 420)
+
+        self._refresh_positions_preview()
+
+    def _parsed_floors(self):
+        floors = [
+            int(x.strip()) for x in self.floors_edit.text().split(",") if x.strip()
+        ]
+        deduped = []
+        seen = set()
+        for floor in floors:
+            if floor not in seen:
+                deduped.append(floor)
+                seen.add(floor)
+        return deduped
+
+    def _build_floor_locations(self, floors):
+        existing_locations = self.transition.get("floor_locations", {}) or {}
+        payload = {}
+
+        for floor in floors:
+            existing = existing_locations.get(str(floor))
+            if existing is None:
+                existing = existing_locations.get(floor)
+
+            if isinstance(existing, dict):
+                x = float(existing.get("x", self.default_x))
+                y = float(existing.get("y", self.default_y))
+            elif isinstance(existing, (list, tuple)) and len(existing) >= 2:
+                x = float(existing[0])
+                y = float(existing[1])
+            else:
+                x = self.default_x
+                y = self.default_y
+
+            payload[int(floor)] = (round(x, 3), round(y, 3))
+
+        return payload
+
+    def _refresh_positions_preview(self):
+        try:
+            floors = self._parsed_floors()
+            if not floors:
+                self.positions_preview.setPlainText("")
+                return
+
+            payload = {
+                int(floor): [x, y]
+                for floor, (x, y) in self._build_floor_locations(floors).items()
+            }
+            self.positions_preview.setPlainText(json.dumps(payload, indent=2))
+        except Exception:
+            self.positions_preview.setPlainText("")
 
     def accept(self):
         try:
             transition_id = self.id_edit.text().strip()
             if not transition_id:
                 raise ValueError("Transition ID is required")
-            floors = [
-                int(x.strip()) for x in self.floors_edit.text().split(",") if x.strip()
-            ]
+
+            floors = self._parsed_floors()
             if not floors:
                 raise ValueError("At least one floor is required")
-            positions = json.loads(self.positions_edit.toPlainText().strip())
-            key_map = {str(k) for k in positions.keys()}
-            for floor in floors:
-                if str(floor) not in key_map:
-                    raise ValueError(f"Missing position for floor {floor}")
+
             self.result = {
                 "id": transition_id,
                 "floors": floors,
                 "cable_limit": int(self.cable_limit_edit.text()),
-                "floor_locations": {
-                    int(k): (float(v[0]), float(v[1])) for k, v in positions.items()
-                },
+                "floor_locations": self._build_floor_locations(floors),
             }
             super().accept()
         except Exception as exc:

@@ -165,7 +165,9 @@ class MultiSelectPicker(QDialog):
             header = QHBoxLayout()
 
             toggle_btn = QToolButton()
-            toggle_btn.setText("▶" if self.group_collapsed.get(group_name, False) else "▼")
+            toggle_btn.setText(
+                "▶" if self.group_collapsed.get(group_name, False) else "▼"
+            )
             toggle_btn.setAutoRaise(True)
             toggle_btn.clicked.connect(
                 lambda _=False, g=group_name: self._toggle_group(g)
@@ -838,8 +840,16 @@ class BulkConnectionDialog(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "Invalid bulk connection set", str(exc))
 
+
 class FloorTemplateCopyDialog(QDialog):
-    def __init__(self, parent, source_floor, point_names, selected_points=None, group_resolver=None):
+    def __init__(
+        self,
+        parent,
+        source_floor,
+        point_names,
+        selected_points=None,
+        group_resolver=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Copy Template Between Floors")
         self.resize(720, 420)
@@ -865,7 +875,9 @@ class FloorTemplateCopyDialog(QDialog):
         self.target_floor_spin.setRange(0, 999)
         self.target_floor_spin.setValue(self.source_floor)
 
-        self.include_edges_check = QCheckBox("Recreate internal edges between copied items")
+        self.include_edges_check = QCheckBox(
+            "Recreate internal edges between copied items"
+        )
         self.include_edges_check.setChecked(True)
 
         self.offset_x_spin = QDoubleSpinBox()
@@ -938,9 +950,16 @@ class FloorTemplateCopyDialog(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "Invalid template copy", str(exc))
 
+
 class DataPointDepartmentsBulkDialog(QDialog):
     def __init__(
-        self, parent, data_points, department_options, on_apply, group_resolver=None
+        self,
+        parent,
+        data_points,
+        department_options,
+        on_apply,
+        group_resolver=None,
+        selected_data_points=None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Data Point Departments")
@@ -949,7 +968,7 @@ class DataPointDepartmentsBulkDialog(QDialog):
         self.department_options = list(department_options)
         self.on_apply = on_apply
         self.group_resolver = group_resolver or (lambda item: "Other")
-        self.selected_data_points = []
+        self.selected_data_points = sorted(selected_data_points or [])
 
         layout = QVBoxLayout(self)
 
@@ -961,6 +980,14 @@ class DataPointDepartmentsBulkDialog(QDialog):
         points_row.addWidget(self.points_summary, 1)
         points_row.addWidget(pick_points_btn)
         layout.addLayout(points_row)
+
+        if self.selected_data_points:
+            if len(self.selected_data_points) <= 6:
+                self.points_summary.setText(", ".join(self.selected_data_points))
+            else:
+                self.points_summary.setText(
+                    f"{len(self.selected_data_points)} selected"
+                )
 
         form = QFormLayout()
         layout.addLayout(form)

@@ -3,7 +3,17 @@ import math
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal, QRect, QRectF, QThread, Slot
+from PySide6.QtCore import (
+    QObject,
+    QPoint,
+    QPointF,
+    Qt,
+    Signal,
+    QRect,
+    QRectF,
+    QThread,
+    Slot,
+)
 from PySide6.QtGui import QColor, QBrush, QPainter, QPen, QFont, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
@@ -708,7 +718,9 @@ class CableRouteEditor(QMainWindow):
     def _set_canvas_multi_selection(self, names, append=False, toggle=False):
         floor = self.floor_spin.value()
         eligible = self._eligible_template_name_set(floor)
-        filtered = {str(name).strip() for name in (names or []) if str(name).strip() in eligible}
+        filtered = {
+            str(name).strip() for name in (names or []) if str(name).strip() in eligible
+        }
 
         if toggle:
             for name in filtered:
@@ -740,7 +752,9 @@ class CableRouteEditor(QMainWindow):
             return
         self.selection_rect_current = event.position().toPoint()
         if self._rubber_band is not None:
-            rect = QRect(self.selection_rect_origin, self.selection_rect_current).normalized()
+            rect = QRect(
+                self.selection_rect_origin, self.selection_rect_current
+            ).normalized()
             self._rubber_band.setGeometry(rect)
 
     def _finish_selection_rect(self, event):
@@ -764,9 +778,9 @@ class CableRouteEditor(QMainWindow):
         selected = []
 
         for name, point in self.store.points_for_floor(floor).items():
-            if point.get('kind') not in {'corridor_node', 'data_point'}:
+            if point.get("kind") not in {"corridor_node", "data_point"}:
                 continue
-            pos = self.world_to_scene(point['x'], point['y'])
+            pos = self.world_to_scene(point["x"], point["y"])
             if scene_rect.contains(pos):
                 selected.append(name)
 
@@ -776,9 +790,9 @@ class CableRouteEditor(QMainWindow):
         self._set_canvas_multi_selection(selected, append=append, toggle=toggle)
         self.refresh_canvas()
         if selected:
-            self.set_status(f'Selected {len(selected)} template item(s)')
+            self.set_status(f"Selected {len(selected)} template item(s)")
         else:
-            self.set_status('No template items found in selection box')
+            self.set_status("No template items found in selection box")
         return True
 
     def refresh_canvas(self):
@@ -855,7 +869,9 @@ class CableRouteEditor(QMainWindow):
     def draw_points(self, floor):
         for name, point in self.store.points_for_floor(floor).items():
             pos = self.world_to_scene(point["x"], point["y"])
-            selected = (name == self.selected_point_name) or (name in self.selected_template_names)
+            selected = (name == self.selected_point_name) or (
+                name in self.selected_template_names
+            )
             kind = point.get("kind")
             outline = QPen(QColor("#ffffff") if selected else QColor("transparent"), 0)
 
@@ -1764,9 +1780,7 @@ class CableRouteEditor(QMainWindow):
                 continue
 
             department_ids = [
-                str(x).strip()
-                for x in item.get("department_ids", [])
-                if str(x).strip()
+                str(x).strip() for x in item.get("department_ids", []) if str(x).strip()
             ]
             if department_ids:
                 labels = [
@@ -2044,12 +2058,23 @@ class CableRouteEditor(QMainWindow):
                 return f"Unassigned / Floor {item.get('floor', 0)}"
             return "Other"
 
+        data_point_names = {
+            str(item.get("name", "")).strip()
+            for item in self.store.data.get("data_points", [])
+            if str(item.get("name", "")).strip()
+        }
+
+        preselected = sorted(
+            name for name in self.selected_template_names if name in data_point_names
+        )
+
         dialog = DataPointDepartmentsBulkDialog(
             self,
             self.store.data.get("data_points", []),
             self.department_options(),
             self._save_data_points,
             group_resolver=group_resolver,
+            selected_data_points=preselected,
         )
         dialog.exec()
 
@@ -2125,9 +2150,8 @@ class CableRouteEditor(QMainWindow):
                 offset_y=payload["offset_y"],
             )
 
-            created_count = (
-                len(result.get("created_corridors", []))
-                + len(result.get("created_data_points", []))
+            created_count = len(result.get("created_corridors", [])) + len(
+                result.get("created_data_points", [])
             )
             created_edges = len(result.get("created_edges", []))
 
@@ -2180,7 +2204,9 @@ class CableRouteEditor(QMainWindow):
 
         if mode == "select_move":
             modifiers = Qt.KeyboardModifiers(QApplication.keyboardModifiers())
-            template_eligible = picked in self._eligible_template_name_set(floor) if picked else False
+            template_eligible = (
+                picked in self._eligible_template_name_set(floor) if picked else False
+            )
 
             if picked:
                 if template_eligible:
@@ -2405,11 +2431,12 @@ class CableRouteEditor(QMainWindow):
 
             dialog = DataPointEditorDialog(
                 self,
-                seed={"floor": floor},
+                seed={"floor": floor, "department_ids": []},
                 default_floor=floor,
                 default_x=x,
                 default_y=y,
                 default_name=self.store.suggest_next_data_point_name(floor),
+                department_options=self.department_options(),
             )
             if dialog.exec() == QDialog.Accepted and dialog.result:
                 if dialog.result["name"] in self.store.names_in_use():
@@ -2422,6 +2449,7 @@ class CableRouteEditor(QMainWindow):
                     dialog.result["y"],
                     dialog.result["qty"],
                     dialog.result["extension_distance_m"],
+                    department_ids=dialog.result.get("department_ids", []),
                 )
                 self.set_status(f"Added data point {dialog.result['name']}")
                 self.refresh_canvas()
@@ -2550,6 +2578,7 @@ class CableRouteEditor(QMainWindow):
                 default_x=point["x"],
                 default_y=point["y"],
                 default_name=picked,
+                department_options=self.department_options(),
             )
             if dialog.exec() == QDialog.Accepted and dialog.result:
                 self.store.set_point_position(
@@ -2562,6 +2591,9 @@ class CableRouteEditor(QMainWindow):
                         item["extension_distance_m"] = dialog.result[
                             "extension_distance_m"
                         ]
+                        item["department_ids"] = list(
+                            dialog.result.get("department_ids", [])
+                        )
                         break
                 self.selected_point_name = dialog.result["name"]
                 self.set_status(f"Edited {dialog.result['name']}")
