@@ -1,0 +1,26 @@
+{
+  "project": {
+    "name": "Cable Routing Project"
+  },
+  "building": {
+    "floor_height_m": 4.0
+  },
+  "departments": [],
+  "locations": [],
+  "data_points": [],
+  "corridors": {
+    "nodes": [],
+    "edges": [],
+    "auto_connect": false
+  },
+  "transitions": [],
+  "floor_dxf_files": [],
+  "connections": [],
+  "route_profiles": {
+    "default": {
+      "allowed_transitions": [],
+      "allowed_nodes": [],
+      "allowed_edges": []
+    }
+  }
+}
