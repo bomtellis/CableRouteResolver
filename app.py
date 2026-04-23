@@ -2,6 +2,7 @@ import heapq
 import math
 import sys
 from pathlib import Path
+from itertools import combinations
 
 from PySide6.QtCore import (
     QObject,
@@ -374,6 +375,7 @@ class CableRouteEditor(QMainWindow):
             ("Data Points", self.manage_data_points),
             ("Transitions", self.manage_transitions),
             ("Connections", self.manage_connections),
+            ("Optimise Comms Rooms", self.optimise_comms_rooms_for_model),
             ("Autoroute Data Points", self.autoroute_data_points),
             ("Suggest Comms Room", self.suggest_comms_room_for_department),
             ("Route Profiles", self.manage_route_profiles),
@@ -2859,6 +2861,400 @@ class CableRouteEditor(QMainWindow):
 
         QMessageBox.information(self, title, "\n".join(lines))
 
+    def _next_connection_id(self, existing_ids=None):
+        existing_ids = set(existing_ids or [])
+        for item in self.store.data.get("connections", []):
+            value = str(item.get("id", "")).strip()
+            if value:
+                existing_ids.add(value)
+
+        n = 1
+        while f"C{n}" in existing_ids:
+            n += 1
+
+        new_id = f"C{n}"
+        existing_ids.add(new_id)
+        return new_id, existing_ids
+
+    def _next_comms_room_name(self, used_names):
+        n = 1
+        while True:
+            name = f"CR{n}"
+            if name not in used_names:
+                used_names.add(name)
+                return name
+            n += 1
+
+    def _candidate_cover_map(self, graph, points, data_point_names, candidate_nodes, max_cable_length_m):
+        """
+        Returns:
+            cover_map[candidate_name] = {
+                point_name: {
+                    "cable_length": float,
+                    "route_length": float,
+                    "spur_length": float,
+                    "anchor_name": str,
+                }
+            }
+        """
+        cover_map = {}
+        anchor_cache = {}
+
+        for point_name in data_point_names:
+            if point_name not in points:
+                anchor_cache[point_name] = (None, None)
+                continue
+            anchor_cache[point_name] = self._nearest_routing_anchor_for_point(point_name)
+
+        for candidate_name in candidate_nodes:
+            if candidate_name not in points:
+                continue
+
+            candidate_cover = {}
+
+            for point_name in data_point_names:
+                point = points.get(point_name)
+                if not point:
+                    continue
+
+                anchor_name, spur_length = anchor_cache.get(point_name, (None, None))
+                if anchor_name is None or spur_length is None:
+                    continue
+
+                if anchor_name == candidate_name:
+                    route_length = 0.0
+                else:
+                    route_length, _route_path = self._shortest_path_length(
+                        graph, anchor_name, candidate_name
+                    )
+                    if route_length is None:
+                        continue
+
+                extension = float(point.get("extension_distance_m", 0.0) or 0.0)
+                cable_length = float(spur_length) + float(route_length) + extension
+
+                if cable_length <= max_cable_length_m:
+                    candidate_cover[point_name] = {
+                        "cable_length": float(cable_length),
+                        "route_length": float(route_length),
+                        "spur_length": float(spur_length),
+                        "anchor_name": anchor_name,
+                    }
+
+            if candidate_cover:
+                cover_map[candidate_name] = candidate_cover
+
+        return cover_map
+
+    def _score_candidate_set(self, room_nodes, cover_map, data_point_names):
+        """
+        Lower is better.
+        Sort order:
+          1. fewer rooms
+          2. lower total assigned cable
+          3. lower worst assigned cable
+        """
+        assigned_total = 0.0
+        assigned_worst = 0.0
+
+        for point_name in data_point_names:
+            best_length = None
+            for candidate_name in room_nodes:
+                info = cover_map.get(candidate_name, {}).get(point_name)
+                if not info:
+                    continue
+                length = float(info["cable_length"])
+                if best_length is None or length < best_length:
+                    best_length = length
+
+            if best_length is None:
+                return None
+
+            assigned_total += best_length
+            assigned_worst = max(assigned_worst, best_length)
+
+        return (len(room_nodes), assigned_total, assigned_worst)
+
+    def _solve_minimum_comms_room_nodes(self, cover_map, data_point_names, exact_combo_limit=250000):
+        all_points = set(data_point_names)
+        candidate_names = sorted(cover_map.keys())
+
+        if not candidate_names:
+            return None, "No candidate corridor nodes can reach any data points."
+
+        union_cover = set()
+        for candidate_name in candidate_names:
+            union_cover.update(cover_map[candidate_name].keys())
+
+        missing = sorted(all_points - union_cover)
+        if missing:
+            return None, (
+                "Some data points cannot be covered within the limit: "
+                + ", ".join(missing[:15])
+                + (" ..." if len(missing) > 15 else "")
+            )
+
+        # Exact search first: smallest combination count that covers all points.
+        for room_count in range(1, len(candidate_names) + 1):
+            combo_count = math.comb(len(candidate_names), room_count)
+            if combo_count > exact_combo_limit:
+                break
+
+            best_combo = None
+            best_score = None
+
+            for combo in combinations(candidate_names, room_count):
+                covered = set()
+                for candidate_name in combo:
+                    covered.update(cover_map[candidate_name].keys())
+
+                if covered != all_points:
+                    continue
+
+                score = self._score_candidate_set(combo, cover_map, data_point_names)
+                if score is None:
+                    continue
+
+                if best_score is None or score < best_score:
+                    best_combo = combo
+                    best_score = score
+
+            if best_combo is not None:
+                return list(best_combo), None
+
+        # Greedy fallback when exact search becomes too expensive.
+        uncovered = set(all_points)
+        selected = []
+
+        while uncovered:
+            best_candidate = None
+            best_key = None
+
+            for candidate_name in candidate_names:
+                if candidate_name in selected:
+                    continue
+
+                newly_covered = uncovered & set(cover_map[candidate_name].keys())
+                if not newly_covered:
+                    continue
+
+                gain = len(newly_covered)
+                incremental_total = sum(
+                    float(cover_map[candidate_name][point_name]["cable_length"])
+                    for point_name in newly_covered
+                )
+                worst_new = max(
+                    float(cover_map[candidate_name][point_name]["cable_length"])
+                    for point_name in newly_covered
+                )
+
+                # More coverage is better, then lower total, then lower worst, then name.
+                key = (-gain, incremental_total, worst_new, candidate_name)
+
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_candidate = candidate_name
+
+            if best_candidate is None:
+                return None, "Greedy fallback failed to cover all data points."
+
+            selected.append(best_candidate)
+            uncovered -= set(cover_map[best_candidate].keys())
+
+        return selected, None
+
+    def optimise_comms_rooms_for_model(self):
+        if not self.store.data.get("data_points"):
+            QMessageBox.critical(
+                self,
+                "Optimise Comms Rooms",
+                "No data points found in the model.",
+            )
+            return
+
+        max_cable_length_m, ok = QInputDialog.getDouble(
+            self,
+            "Optimise Comms Rooms",
+            "Maximum cable length per data point (m)",
+            90.0,
+            0.0,
+            100000.0,
+            2,
+        )
+        if not ok:
+            return
+
+        replace_existing = (
+            QMessageBox.question(
+                self,
+                "Optimise Comms Rooms",
+                "Replace existing comms rooms and their comms-room connections?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            == QMessageBox.Yes
+        )
+
+        graph, points = self._build_routing_graph()
+        data_point_names = self.data_point_names()
+        candidate_nodes = self._candidate_comms_room_nodes()
+
+        if not candidate_nodes:
+            QMessageBox.critical(
+                self,
+                "Optimise Comms Rooms",
+                "No corridor nodes are available as candidate comms room positions.",
+            )
+            return
+
+        cover_map = self._candidate_cover_map(
+            graph=graph,
+            points=points,
+            data_point_names=data_point_names,
+            candidate_nodes=candidate_nodes,
+            max_cable_length_m=float(max_cable_length_m),
+        )
+
+        selected_nodes, error_message = self._solve_minimum_comms_room_nodes(
+            cover_map=cover_map,
+            data_point_names=data_point_names,
+        )
+        if not selected_nodes:
+            QMessageBox.information(
+                self,
+                "Optimise Comms Rooms",
+                error_message or "No valid solution found.",
+            )
+            return
+
+        # Assign each data point to the best selected room node.
+        assignments = {}
+        total_length = 0.0
+        worst_length = 0.0
+
+        for point_name in data_point_names:
+            best_candidate = None
+            best_length = None
+
+            for candidate_name in selected_nodes:
+                info = cover_map.get(candidate_name, {}).get(point_name)
+                if not info:
+                    continue
+
+                cable_length = float(info["cable_length"])
+                if best_length is None or cable_length < best_length:
+                    best_candidate = candidate_name
+                    best_length = cable_length
+
+            if best_candidate is None:
+                QMessageBox.critical(
+                    self,
+                    "Optimise Comms Rooms",
+                    f"Internal error: no selected room covers {point_name}.",
+                )
+                return
+
+            assignments[point_name] = {
+                "candidate_node": best_candidate,
+                "cable_length": best_length,
+            }
+            total_length += best_length
+            worst_length = max(worst_length, best_length)
+
+        existing_comms_rooms = set(self.comms_room_names())
+
+        if replace_existing:
+            self.store.data["locations"] = [
+                item
+                for item in self.store.data.get("locations", [])
+                if str(item.get("kind", "location")) != "comms_room"
+            ]
+            self.store.data["connections"] = [
+                item
+                for item in self.store.data.get("connections", [])
+                if str(item.get("from", "")).strip() not in existing_comms_rooms
+            ]
+
+        used_names = set(self.store.names_in_use())
+        room_name_by_candidate = {}
+
+        for candidate_name in selected_nodes:
+            candidate_point = points[candidate_name]
+            room_name = self._next_comms_room_name(used_names)
+            room_name_by_candidate[candidate_name] = room_name
+
+            self.store.add_location(
+                room_name,
+                int(candidate_point["floor"]),
+                float(candidate_point["x"]),
+                float(candidate_point["y"]),
+                kind="comms_room",
+            )
+
+        existing_connection_ids = {
+            str(item.get("id", "")).strip()
+            for item in self.store.data.get("connections", [])
+            if str(item.get("id", "")).strip()
+        }
+
+        existing_targets = self._existing_connection_targets()
+        created_connections = 0
+
+        for item in self.store.data.get("data_points", []):
+            point_name = str(item.get("name", "")).strip()
+            if not point_name or point_name not in assignments:
+                continue
+
+            if point_name in existing_targets:
+                continue
+
+            room_name = room_name_by_candidate[assignments[point_name]["candidate_node"]]
+            connection_id, existing_connection_ids = self._next_connection_id(existing_connection_ids)
+
+            self.store.data.setdefault("connections", []).append(
+                {
+                    "id": connection_id,
+                    "from": room_name,
+                    "to": point_name,
+                    "qty": int(item.get("qty", 1) or 1),
+                    "route_profile": "",
+                }
+            )
+            created_connections += 1
+
+        self.selected_point_name = room_name_by_candidate[selected_nodes[0]]
+        self.refresh_canvas()
+
+        placed_lines = []
+        for candidate_name in selected_nodes:
+            room_name = room_name_by_candidate[candidate_name]
+            floor = points[candidate_name]["floor"]
+            placed_lines.append(f"{room_name} -> {candidate_name} (floor {floor})")
+
+        QMessageBox.information(
+            self,
+            "Optimise Comms Rooms",
+            "\n".join(
+                [
+                    f"Placed {len(selected_nodes)} comms room(s).",
+                    f"Created {created_connections} connection(s).",
+                    f"Total assigned cable length: {total_length:.2f} m",
+                    f"Longest assigned cable: {worst_length:.2f} m",
+                    "",
+                    "Rooms:",
+                    *placed_lines[:20],
+                    *(
+                        [f"... and {len(placed_lines) - 20} more"]
+                        if len(placed_lines) > 20
+                        else []
+                    ),
+                ]
+            ),
+        )
+
+        self.set_status(
+            f"Optimised {len(selected_nodes)} comms room(s) for {len(data_point_names)} data point(s)"
+        )
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
