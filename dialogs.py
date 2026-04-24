@@ -50,6 +50,9 @@ class PointEditorDialog(QDialog):
         form.addRow("Y", self.y_edit)
         form.addRow("Floor", QLabel(str(point["floor"])))
         form.addRow("Kind", QLabel(str(point.get("kind", ""))))
+        self.restricted_check = QCheckBox("Restricted - cannot host comms room")
+        self.restricted_check.setChecked(bool(point.get("restricted", False)))
+        form.addRow("", self.restricted_check)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -63,7 +66,12 @@ class PointEditorDialog(QDialog):
             name = self.name_edit.text().strip()
             if not name:
                 raise ValueError("Name is required")
-            self.result = {"name": name, "x": x, "y": y}
+            self.result = {
+                "name": name,
+                "x": x,
+                "y": y,
+                "restricted": self.restricted_check.isChecked(),
+            }
             super().accept()
         except Exception as exc:
             QMessageBox.critical(self, "Invalid value", str(exc))

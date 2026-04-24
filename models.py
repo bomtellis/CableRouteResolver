@@ -851,6 +851,7 @@ class JsonStore:
                     "y": round(float(record.get("y", 0.0)) + float(offset_y), 3),
                     "height_affl_m": float(record.get("height_affl_m", 0.0) or 0.0),
                     "cable_limit": int(record.get("cable_limit", 0) or 0),
+                    "restricted": bool(record.get("restricted", False)),
                 }
                 self.data.setdefault("corridors", {}).setdefault("nodes", []).append(
                     new_record

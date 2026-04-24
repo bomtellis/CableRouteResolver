@@ -965,7 +965,14 @@ class DataPointDepartmentsBulkDialog(QDialog):
         self.setWindowTitle("Data Point Departments")
         self.resize(760, 640)
         self.data_points = data_points
-        self.department_options = list(department_options)
+        self.department_options = sorted(
+            list(department_options),
+            key=lambda item: (
+                str(item[1] or item[0]).lower(),
+                int(item[2]) if len(item) > 2 else 0,
+                str(item[0]).lower(),
+            ),
+        )
         self.on_apply = on_apply
         self.group_resolver = group_resolver or (lambda item: "Other")
         self.selected_data_points = sorted(selected_data_points or [])
@@ -1005,11 +1012,15 @@ class DataPointDepartmentsBulkDialog(QDialog):
         self.departments_list = QListWidget()
         self.departments_list.setSelectionMode(QAbstractItemView.NoSelection)
 
-        for department_id, department_name in self.department_options:
+        for option in self.department_options:
+            department_id = option[0]
+            department_name = option[1] if len(option) > 1 else ""
+            department_floor = option[2] if len(option) > 2 else ""
+
             text = (
-                f"{department_id} - {department_name}"
+                f"{department_name} ({department_id}) - Floor {department_floor}"
                 if department_name
-                else department_id
+                else f"{department_id} - Floor {department_floor}"
             )
             item = QListWidgetItem(text)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)

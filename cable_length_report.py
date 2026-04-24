@@ -9,6 +9,11 @@ from heapq import heappop, heappush
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+SWITCH_PORTS = 48
+SWITCH_U = 1.0
+PATCHING_CABLES_PER_HALF_U = 24
+PATCHING_U_PER_GROUP = 0.5
+CABINET_U = 42.0
 
 @dataclass(frozen=True)
 class Point:
@@ -237,15 +242,109 @@ def connection_rows(data: dict) -> List[dict]:
         )
     return rows
 
+def comms_room_breakdown_rows(data: dict) -> List[dict]:
+    points = build_points(data)
+
+    comms_rooms = {
+        str(item.get("name", "")).strip(): item
+        for item in data.get("locations", [])
+        if str(item.get("kind", "")).strip() == "comms_room"
+    }
+
+    data_points = {
+        str(item.get("name", "")).strip(): item
+        for item in data.get("data_points", [])
+        if str(item.get("name", "")).strip()
+    }
+
+    departments = {
+        str(item.get("id", "")).strip(): str(item.get("name", item.get("id", ""))).strip()
+        for item in data.get("departments", [])
+        if str(item.get("id", "")).strip()
+    }
+
+    grouped = {}
+
+    for connection in data.get("connections", []):
+        start = str(connection.get("from", "")).strip()
+        end = str(connection.get("to", "")).strip()
+        qty = int(connection.get("qty", 1) or 1)
+
+        if start in comms_rooms:
+            comms_room = start
+            data_point_name = end
+        elif end in comms_rooms:
+            comms_room = end
+            data_point_name = start
+        else:
+            continue
+
+        data_point = data_points.get(data_point_name, {})
+        floor = data_point.get("floor", points[data_point_name].floor if data_point_name in points else "")
+
+        department_ids = data_point.get("department_ids", [])
+        if not department_ids:
+            department_ids = [""]
+
+        for department_id in department_ids:
+            department_id = str(department_id).strip()
+            department_name = departments.get(department_id, "Unassigned")
+
+            key = (comms_room, floor, department_id, department_name)
+
+            if key not in grouped:
+                grouped[key] = {
+                    "comms_room": comms_room,
+                    "source_floor": floor,
+                    "department_id": department_id,
+                    "department_name": department_name,
+                    "connection_count": 0,
+                    "cable_qty": 0,
+                    "data_points": [],
+                }
+
+            grouped[key]["connection_count"] += 1
+            grouped[key]["cable_qty"] += qty
+            grouped[key]["data_points"].append(data_point_name)
+
+    rows = []
+    for row in grouped.values():
+        row["data_points"] = ", ".join(sorted(set(row["data_points"])))
+        rows.append(row)
+
+    return sorted(
+        rows,
+        key=lambda r: (
+            str(r["comms_room"]),
+            int(r["source_floor"]) if str(r["source_floor"]).isdigit() else 9999,
+            str(r["department_name"]),
+        ),
+    )
 
 def write_csv(rows: Iterable[dict], output_path: Path) -> None:
-    fieldnames = ["start_location", "end_location", "cable_length_m"]
+    fieldnames = ["start_location", "end_location", "cable_length_m", "qty"]
     with output_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row[key] for key in fieldnames})
 
+def write_comms_room_breakdown_csv(rows: Iterable[dict], output_path: Path) -> None:
+    fieldnames = [
+        "comms_room",
+        "source_floor",
+        "department_id",
+        "department_name",
+        "connection_count",
+        "cable_qty",
+        "data_points",
+    ]
+
+    with output_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -271,7 +370,14 @@ def main() -> None:
     rows = connection_rows(data)
     write_csv(rows, output_path)
 
+    breakdown_path = output_path.with_name(
+        f"{output_path.stem}_comms_room_breakdown.csv"
+    )
+    breakdown_rows = comms_room_breakdown_rows(data)
+    write_comms_room_breakdown_csv(breakdown_rows, breakdown_path)
+
     print(f"Wrote {len(rows)} row(s) to {output_path}")
+    print(f"Wrote {len(breakdown_rows)} comms room breakdown row(s) to {breakdown_path}")
     if args.verbose:
         for row in rows:
             print(
