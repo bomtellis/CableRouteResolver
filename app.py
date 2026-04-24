@@ -1,3 +1,7 @@
+import os
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from itertools import combinations
+
 import heapq
 import math
 import sys
@@ -55,6 +59,7 @@ from dialogs import (
     TableListEditor,
     TransitionEditorDialog,
     SuggestCommsRoomDialog,
+    CommsRoomOptimisationProgressDialog,
 )
 from advanced_dialogs import (
     ConnectionEditorWindow,
@@ -64,6 +69,84 @@ from advanced_dialogs import (
     RouteProfilesEditorV2,
 )
 from models import JsonStore
+
+try:
+    import pulp
+except Exception:
+    pulp = None
+
+_COMMS_CANDIDATES = None
+_COMMS_ALL_MASK = None
+_COMMS_POINT_COUNT = None
+
+
+def _init_comms_process(candidate_payload, all_mask, point_count):
+    global _COMMS_CANDIDATES, _COMMS_ALL_MASK, _COMMS_POINT_COUNT
+    _COMMS_CANDIDATES = candidate_payload
+    _COMMS_ALL_MASK = int(all_mask)
+    _COMMS_POINT_COUNT = int(point_count)
+
+
+def _evaluate_comms_batch(batch):
+    candidates = _COMMS_CANDIDATES
+    all_mask = _COMMS_ALL_MASK
+    point_count = _COMMS_POINT_COUNT
+
+    best_combo = None
+    best_score = None
+    processed = 0
+
+    for combo in batch:
+        processed += 1
+
+        covered = 0
+        for candidate_idx in combo:
+            covered |= candidates[candidate_idx]["mask"]
+
+        if covered != all_mask:
+            continue
+
+        total = 0.0
+        worst = 0.0
+
+        for point_idx in range(point_count):
+            best_length = None
+
+            for candidate_idx in combo:
+                value = candidates[candidate_idx]["lengths"][point_idx]
+                if value is None:
+                    continue
+                if best_length is None or value < best_length:
+                    best_length = value
+
+            if best_length is None:
+                total = None
+                break
+
+            total += best_length
+            worst = max(worst, best_length)
+
+        if total is None:
+            continue
+
+        score = (len(combo), total, worst)
+
+        if best_score is None or score < best_score:
+            best_score = score
+            best_combo = combo
+
+    return processed, best_combo, best_score
+
+
+def _batched_combinations(iterable, batch_size):
+    batch = []
+    for item in iterable:
+        batch.append(tuple(item))
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 class DXFLoadWorker(QObject):
@@ -248,6 +331,7 @@ class CableRouteEditor(QMainWindow):
         self._point_item_lookup = {}
         self.bulk_location_session = None
         self.bulk_data_point_session = None
+        self._comms_optimisation_dialog = None
         self._clear_canvas_multi_selection()
 
         self._build_ui()
@@ -312,12 +396,38 @@ class CableRouteEditor(QMainWindow):
         self.bidirectional_check.setChecked(True)
         self.chain_edges_check = QCheckBox("Chain edges")
         self.chain_edges_check.setChecked(True)
+
         self.show_dxf_check = QCheckBox("Show DXF")
         self.show_dxf_check.setChecked(True)
+
         self.show_labels_check = QCheckBox("Show labels")
         self.show_labels_check.setChecked(True)
-        self.show_dxf_check.toggled.connect(self.refresh_canvas)
-        self.show_labels_check.toggled.connect(self.refresh_canvas)
+
+        self.show_edges_check = QCheckBox("Show edges")
+        self.show_edges_check.setChecked(True)
+
+        self.show_nodes_check = QCheckBox("Show corridor nodes")
+        self.show_nodes_check.setChecked(True)
+
+        self.show_data_points_check = QCheckBox("Show data points")
+        self.show_data_points_check.setChecked(True)
+
+        self.show_locations_check = QCheckBox("Show locations")
+        self.show_locations_check.setChecked(True)
+
+        self.show_comms_rooms_check = QCheckBox("Show comms rooms")
+        self.show_comms_rooms_check.setChecked(True)
+
+        for check in [
+            self.show_dxf_check,
+            self.show_labels_check,
+            self.show_edges_check,
+            self.show_nodes_check,
+            self.show_data_points_check,
+            self.show_locations_check,
+            self.show_comms_rooms_check,
+        ]:
+            check.toggled.connect(self.refresh_canvas)
 
         self.quick_add_corridor_check = QCheckBox("Quick add corridor nodes")
         self.quick_add_corridor_check.setChecked(False)
@@ -348,6 +458,11 @@ class CableRouteEditor(QMainWindow):
         sidebar_layout.addWidget(self.chain_edges_check)
         sidebar_layout.addWidget(self.show_dxf_check)
         sidebar_layout.addWidget(self.show_labels_check)
+        sidebar_layout.addWidget(self.show_edges_check)
+        sidebar_layout.addWidget(self.show_nodes_check)
+        sidebar_layout.addWidget(self.show_data_points_check)
+        sidebar_layout.addWidget(self.show_locations_check)
+        sidebar_layout.addWidget(self.show_comms_rooms_check)
         sidebar_layout.addSpacing(10)
 
         sidebar_layout.addWidget(self.quick_add_corridor_check)
@@ -782,6 +897,10 @@ class CableRouteEditor(QMainWindow):
         for name, point in self.store.points_for_floor(floor).items():
             if point.get("kind") not in {"corridor_node", "data_point"}:
                 continue
+
+            if not self._is_point_kind_visible(point):
+                continue
+
             pos = self.world_to_scene(point["x"], point["y"])
             if scene_rect.contains(pos):
                 selected.append(name)
@@ -822,6 +941,8 @@ class CableRouteEditor(QMainWindow):
         self.canvas.viewport().update()
 
     def draw_edges(self, floor):
+        if not self.show_edges_check.isChecked():
+            return
         points = self.store.all_points()
         pen_same_floor = QPen(QColor("#6aa9ff"), 0)
         pen_cross_floor = QPen(QColor("#ff4d4f"), 0)
@@ -875,6 +996,19 @@ class CableRouteEditor(QMainWindow):
                 name in self.selected_template_names
             )
             kind = point.get("kind")
+
+            if kind == "corridor_node" and not self.show_nodes_check.isChecked():
+                continue
+
+            if kind == "data_point" and not self.show_data_points_check.isChecked():
+                continue
+
+            if kind == "location" and not self.show_locations_check.isChecked():
+                continue
+
+            if kind == "comms_room" and not self.show_comms_rooms_check.isChecked():
+                continue
+
             outline = QPen(QColor("#ffffff") if selected else QColor("transparent"), 0)
 
             if kind in {"location", "comms_room"}:
@@ -1020,6 +1154,34 @@ class CableRouteEditor(QMainWindow):
             painter.drawText(x + margin_x, y + margin_y + 12 + (i * line_h), line)
         painter.restore()
 
+    def _is_point_kind_visible(self, point):
+        if not point:
+            return False
+
+        kind = str(point.get("kind", "")).strip()
+
+        if kind == "corridor_node":
+            return self.show_nodes_check.isChecked()
+
+        if kind == "data_point":
+            return self.show_data_points_check.isChecked()
+
+        if kind == "location":
+            return self.show_locations_check.isChecked()
+
+        if kind == "comms_room":
+            return self.show_comms_rooms_check.isChecked()
+
+        # Keep transitions visible/selectable unless you add a transition checkbox.
+        if kind == "transition_node":
+            return True
+
+        return True
+
+    def _is_department_visible(self):
+        # Change this later if you add a department checkbox.
+        return True
+
     def find_nearest_point_name(self, x, y, floor, radius_world=3.0):
         best = None
         best_dist = radius_world
@@ -1035,16 +1197,20 @@ class CableRouteEditor(QMainWindow):
         best_dist = radius_world
 
         for name, point in self.store.points_for_floor(floor).items():
+            if not self._is_point_kind_visible(point):
+                continue
+
             d = math.hypot(point["x"] - x, point["y"] - y)
             if d <= best_dist:
                 best = name
                 best_dist = d
 
-        for department_id, dept in self.store.departments_for_floor(floor).items():
-            d = math.hypot(dept["x"] - x, dept["y"] - y)
-            if d <= best_dist:
-                best = department_id
-                best_dist = d
+        if self._is_department_visible():
+            for department_id, dept in self.store.departments_for_floor(floor).items():
+                d = math.hypot(dept["x"] - x, dept["y"] - y)
+                if d <= best_dist:
+                    best = department_id
+                    best_dist = d
 
         return best
 
@@ -2476,6 +2642,14 @@ class CableRouteEditor(QMainWindow):
             start_name = self.selected_for_edge
             end_name = picked
 
+            ok, message = self._can_create_corridor_edge(start_name, end_name)
+            if not ok:
+                QMessageBox.warning(self, "Invalid edge", message)
+                self.selected_for_edge = None
+                self.selected_point_name = None
+                self.refresh_canvas()
+                return
+
             self.store.add_edge(start_name, end_name)
             if self.bidirectional_check.isChecked():
                 self.store.add_edge(end_name, start_name)
@@ -2511,12 +2685,42 @@ class CableRouteEditor(QMainWindow):
                 default_id=self.store.suggest_next_transition_id(),
             )
             if dialog.exec() == QDialog.Accepted and dialog.result:
-                self.store.upsert_transition(
-                    dialog.result["id"],
-                    dialog.result["floors"],
-                    dialog.result["floor_locations"],
-                    dialog.result["cable_limit"],
-                )
+                old_id = transition_id
+                new_id = dialog.result["id"]
+
+                if old_id == new_id:
+                    edited_locations = dialog.result["floor_locations"]
+                    edited_current = edited_locations.get(floor)
+                    if edited_current is None:
+                        edited_current = edited_locations.get(str(floor))
+
+                    if edited_current is not None:
+                        new_x, new_y = edited_current
+                        self.store.move_transition_from_floor_up(
+                            old_id,
+                            floor,
+                            new_x,
+                            new_y,
+                        )
+
+                        existing_transition["floors"] = dialog.result["floors"]
+                        existing_transition["cable_limit"] = dialog.result[
+                            "cable_limit"
+                        ]
+                    else:
+                        self.store.upsert_transition(
+                            dialog.result["id"],
+                            dialog.result["floors"],
+                            dialog.result["floor_locations"],
+                            dialog.result["cable_limit"],
+                        )
+                else:
+                    self.store.upsert_transition(
+                        dialog.result["id"],
+                        dialog.result["floors"],
+                        dialog.result["floor_locations"],
+                        dialog.result["cable_limit"],
+                    )
                 self.set_status(f"Saved {dialog.result['id']}")
                 self.refresh_canvas()
             return
@@ -2754,9 +2958,15 @@ class CableRouteEditor(QMainWindow):
                 self._update_selection_rect(event)
                 return
             if self.drag_mode_active and self.dragging_point_name:
+                point = self.store.all_points().get(self.dragging_point_name)
+                if point and not self._is_point_kind_visible(point):
+                    self.dragging_point_name = None
+                    self.drag_mode_active = False
+                    return
+
                 x, y = self.scene_to_world(sx, sy)
                 x, y = self.snap(x, y)
-                self.store.set_point_position(self.dragging_point_name, x, y)
+                self._move_point_or_transition(self.dragging_point_name, x, y)
                 self.refresh_canvas()
 
     def on_middle_click(self, event):
@@ -2794,6 +3004,15 @@ class CableRouteEditor(QMainWindow):
         except Exception:
             pass
         super().closeEvent(event)
+
+    def _safe_add_same_floor_edge(self, from_name, to_name):
+        ok, _message = self._can_create_corridor_edge(from_name, to_name)
+        if not ok:
+            return False
+
+        self.store.add_edge(from_name, to_name)
+        self.store.add_edge(to_name, from_name)
+        return True
 
     def estimate_cables_through_node(self, node_name):
         graph, points = self._build_routing_graph()
@@ -2876,39 +3095,118 @@ class CableRouteEditor(QMainWindow):
         existing_ids.add(new_id)
         return new_id, existing_ids
 
-    def _next_comms_room_name(self, used_names):
+    def _next_comms_room_name(self, used_names, floor):
+        floor = int(floor)
+
         n = 1
         while True:
-            name = f"CR{n}"
+            name = f"CR{n}-F{floor}"
             if name not in used_names:
                 used_names.add(name)
                 return name
             n += 1
 
-    def _candidate_cover_map(self, graph, points, data_point_names, candidate_nodes, max_cable_length_m):
-        """
-        Returns:
-            cover_map[candidate_name] = {
-                point_name: {
-                    "cable_length": float,
-                    "route_length": float,
-                    "spur_length": float,
-                    "anchor_name": str,
-                }
-            }
-        """
+    def _single_source_distances(self, graph, start):
+        if start not in graph:
+            return {}
+
+        distances = {start: 0.0}
+        heap = [(0.0, start)]
+
+        while heap:
+            current_dist, node = heapq.heappop(heap)
+
+            if current_dist > distances.get(node, math.inf):
+                continue
+
+            for neighbour, weight in graph.get(node, []):
+                new_dist = current_dist + float(weight)
+
+                if new_dist < distances.get(neighbour, math.inf):
+                    distances[neighbour] = new_dist
+                    heapq.heappush(heap, (new_dist, neighbour))
+
+        return distances
+
+    def _candidate_cover_map(
+        self,
+        graph,
+        points,
+        data_point_names,
+        candidate_nodes,
+        max_cable_length_m,
+    ):
         cover_map = {}
+
+        candidate_nodes = [name for name in candidate_nodes if name in points]
+
+        # Cache routing anchors once.
+        routing_anchors = self._routing_anchor_names()
+
         anchor_cache = {}
+        unique_anchors = set()
 
         for point_name in data_point_names:
-            if point_name not in points:
+            point = points.get(point_name)
+            if not point:
                 anchor_cache[point_name] = (None, None)
                 continue
-            anchor_cache[point_name] = self._nearest_routing_anchor_for_point(point_name)
 
-        for candidate_name in candidate_nodes:
-            if candidate_name not in points:
-                continue
+            best_name = None
+            best_dist = None
+
+            for anchor_name in routing_anchors:
+                if anchor_name == point_name:
+                    continue
+
+                anchor = points.get(anchor_name)
+                if not anchor:
+                    continue
+
+                if int(anchor["floor"]) != int(point["floor"]):
+                    continue
+
+                dist = math.hypot(
+                    float(point["x"]) - float(anchor["x"]),
+                    float(point["y"]) - float(anchor["y"]),
+                )
+
+                if best_dist is None or dist < best_dist:
+                    best_name = anchor_name
+                    best_dist = dist
+
+            anchor_cache[point_name] = (best_name, best_dist)
+
+            if best_name is not None:
+                unique_anchors.add(best_name)
+
+        # Run Dijkstra once per unique anchor.
+        anchor_distances = {}
+        total_anchor_steps = max(1, len(unique_anchors))
+
+        for index, anchor_name in enumerate(sorted(unique_anchors), start=1):
+            self._update_comms_optimisation_progress(
+                current=index,
+                total=total_anchor_steps,
+                message=("Precalculating shortest paths from data point anchors..."),
+                rooms_to_place=None,
+            )
+
+            anchor_distances[anchor_name] = self._single_source_distances(
+                graph,
+                anchor_name,
+            )
+
+        # Build cover map using cached distances.
+        total_steps = max(1, len(candidate_nodes))
+
+        for current_step, candidate_name in enumerate(candidate_nodes, start=1):
+            self._update_comms_optimisation_progress(
+                current=current_step,
+                total=total_steps,
+                message="Building candidate comms room coverage map...",
+                rooms_to_place=None,
+            )
 
             candidate_cover = {}
 
@@ -2918,17 +3216,14 @@ class CableRouteEditor(QMainWindow):
                     continue
 
                 anchor_name, spur_length = anchor_cache.get(point_name, (None, None))
+
                 if anchor_name is None or spur_length is None:
                     continue
 
-                if anchor_name == candidate_name:
-                    route_length = 0.0
-                else:
-                    route_length, _route_path = self._shortest_path_length(
-                        graph, anchor_name, candidate_name
-                    )
-                    if route_length is None:
-                        continue
+                route_length = anchor_distances.get(anchor_name, {}).get(candidate_name)
+
+                if route_length is None:
+                    continue
 
                 extension = float(point.get("extension_distance_m", 0.0) or 0.0)
                 cable_length = float(spur_length) + float(route_length) + extension
@@ -2975,8 +3270,199 @@ class CableRouteEditor(QMainWindow):
 
         return (len(room_nodes), assigned_total, assigned_worst)
 
-    def _solve_minimum_comms_room_nodes(self, cover_map, data_point_names, exact_combo_limit=250000):
-        all_points = set(data_point_names)
+    def _remove_dominated_comms_candidates(self, candidate_payload):
+        """
+        Remove candidate B if candidate A covers every point B covers and
+        A is no longer for every covered point.
+
+        This reduces n before n-choose-k search, which is the biggest win.
+        """
+        keep = [True] * len(candidate_payload)
+
+        for i, a in enumerate(candidate_payload):
+            if not keep[i]:
+                continue
+
+            a_mask = int(a["mask"])
+            a_lengths = a["lengths"]
+
+            for j, b in enumerate(candidate_payload):
+                if i == j or not keep[j]:
+                    continue
+
+                b_mask = int(b["mask"])
+
+                # A must cover all points that B covers.
+                if (a_mask | b_mask) != a_mask:
+                    continue
+
+                no_worse = True
+                strictly_better = False
+
+                for point_idx, b_len in enumerate(b["lengths"]):
+                    if b_len is None:
+                        continue
+
+                    a_len = a_lengths[point_idx]
+                    if a_len is None:
+                        no_worse = False
+                        break
+
+                    if a_len > b_len:
+                        no_worse = False
+                        break
+
+                    if a_len < b_len:
+                        strictly_better = True
+
+                if no_worse and strictly_better:
+                    keep[j] = False
+
+        return [
+            candidate
+            for candidate, should_keep in zip(candidate_payload, keep)
+            if should_keep
+        ]
+
+    def _solve_minimum_comms_room_nodes_ilp(
+        self,
+        cover_map,
+        data_point_names,
+        time_limit_sec=120,
+    ):
+        if pulp is None:
+            return None, "PuLP is not installed. Install with: pip install pulp"
+
+        all_points = list(data_point_names)
+        candidate_names = sorted(cover_map.keys())
+
+        if not candidate_names:
+            return None, "No candidate corridor nodes can reach any data points."
+
+        missing = []
+        for point_name in all_points:
+            if not any(
+                point_name in cover_map.get(candidate, {})
+                for candidate in candidate_names
+            ):
+                missing.append(point_name)
+
+        if missing:
+            return None, (
+                "Some data points cannot be covered within the limit: "
+                + ", ".join(missing[:15])
+                + (" ..." if len(missing) > 15 else "")
+            )
+
+        # Phase 1: minimise number of comms rooms.
+        model = pulp.LpProblem("Minimum_Comms_Rooms", pulp.LpMinimize)
+
+        x = {
+            candidate: pulp.LpVariable(f"use_{i}", cat="Binary")
+            for i, candidate in enumerate(candidate_names)
+        }
+
+        model += pulp.lpSum(x[candidate] for candidate in candidate_names)
+
+        for point_name in all_points:
+            covering_candidates = [
+                candidate
+                for candidate in candidate_names
+                if point_name in cover_map.get(candidate, {})
+            ]
+
+            model += (
+                pulp.lpSum(x[candidate] for candidate in covering_candidates) >= 1,
+                f"cover_{point_name}",
+            )
+
+        solver = pulp.PULP_CBC_CMD(
+            msg=False,
+            timeLimit=int(time_limit_sec),
+        )
+
+        status = model.solve(solver)
+
+        if pulp.LpStatus.get(status) not in {"Optimal", "Feasible"}:
+            return None, f"ILP solver failed: {pulp.LpStatus.get(status, status)}"
+
+        minimum_room_count = int(round(sum(pulp.value(x[c]) for c in candidate_names)))
+
+        # Phase 2: keep minimum room count, then minimise total cable assignment.
+        model2 = pulp.LpProblem("Minimum_Comms_Rooms_Cable_Length", pulp.LpMinimize)
+
+        x2 = {
+            candidate: pulp.LpVariable(f"use_{i}", cat="Binary")
+            for i, candidate in enumerate(candidate_names)
+        }
+
+        y = {}
+
+        for candidate in candidate_names:
+            for point_name in all_points:
+                if point_name not in cover_map.get(candidate, {}):
+                    continue
+                y[(candidate, point_name)] = pulp.LpVariable(
+                    f"assign_{candidate}_{point_name}",
+                    cat="Binary",
+                )
+
+        model2 += pulp.lpSum(
+            float(cover_map[candidate][point_name]["cable_length"]) * var
+            for (candidate, point_name), var in y.items()
+        )
+
+        model2 += (
+            pulp.lpSum(x2[candidate] for candidate in candidate_names)
+            == minimum_room_count
+        )
+
+        for point_name in all_points:
+            assign_vars = [
+                y[(candidate, point_name)]
+                for candidate in candidate_names
+                if (candidate, point_name) in y
+            ]
+
+            model2 += (
+                pulp.lpSum(assign_vars) == 1,
+                f"assign_once_{point_name}",
+            )
+
+        for (candidate, point_name), var in y.items():
+            model2 += var <= x2[candidate]
+
+        status2 = model2.solve(solver)
+
+        if pulp.LpStatus.get(status2) not in {"Optimal", "Feasible"}:
+            selected = [
+                candidate
+                for candidate in candidate_names
+                if pulp.value(x[candidate]) and pulp.value(x[candidate]) > 0.5
+            ]
+            return selected, None
+
+        selected = [
+            candidate
+            for candidate in candidate_names
+            if pulp.value(x2[candidate]) and pulp.value(x2[candidate]) > 0.5
+        ]
+
+        return selected, None
+
+    def _solve_minimum_comms_room_nodes(
+        self,
+        cover_map,
+        data_point_names,
+        exact_combo_limit=5_000_000,
+        batch_size=20000,
+        max_workers=None,
+    ):
+        all_points = list(data_point_names)
+        point_index = {name: idx for idx, name in enumerate(all_points)}
+        point_count = len(all_points)
+        all_mask = (1 << point_count) - 1
+
         candidate_names = sorted(cover_map.keys())
 
         if not candidate_names:
@@ -2986,7 +3472,7 @@ class CableRouteEditor(QMainWindow):
         for candidate_name in candidate_names:
             union_cover.update(cover_map[candidate_name].keys())
 
-        missing = sorted(all_points - union_cover)
+        missing = sorted(set(all_points) - union_cover)
         if missing:
             return None, (
                 "Some data points cannot be covered within the limit: "
@@ -2994,74 +3480,197 @@ class CableRouteEditor(QMainWindow):
                 + (" ..." if len(missing) > 15 else "")
             )
 
-        # Exact search first: smallest combination count that covers all points.
-        for room_count in range(1, len(candidate_names) + 1):
-            combo_count = math.comb(len(candidate_names), room_count)
+        candidate_payload = []
+
+        for candidate_name in candidate_names:
+            mask = 0
+            lengths = [None] * point_count
+
+            for point_name, info in cover_map[candidate_name].items():
+                idx = point_index.get(point_name)
+                if idx is None:
+                    continue
+
+                mask |= 1 << idx
+                lengths[idx] = float(info["cable_length"])
+
+            if mask:
+                candidate_payload.append(
+                    {
+                        "name": candidate_name,
+                        "mask": mask,
+                        "lengths": lengths,
+                    }
+                )
+
+        before_count = len(candidate_payload)
+        candidate_payload = self._remove_dominated_comms_candidates(candidate_payload)
+        after_count = len(candidate_payload)
+
+        self._update_comms_optimisation_progress(
+            current=0,
+            total=1,
+            message=(
+                f"Reduced candidates from {before_count} to {after_count}. "
+                "Starting exact search..."
+            ),
+            rooms_to_place=None,
+        )
+
+        worker_count = max_workers or max(1, (os.cpu_count() or 2) - 1)
+        max_pending = max(1, worker_count * 3)
+
+        for room_count in range(1, len(candidate_payload) + 1):
+            combo_count = math.comb(len(candidate_payload), room_count)
+
             if combo_count > exact_combo_limit:
                 break
 
+            processed = 0
             best_combo = None
             best_score = None
+            last_progress_emit = 0
 
-            for combo in combinations(candidate_names, room_count):
-                covered = set()
-                for candidate_name in combo:
-                    covered.update(cover_map[candidate_name].keys())
+            self._update_comms_optimisation_progress(
+                current=0,
+                total=max(1, combo_count),
+                message=(
+                    f"Testing {room_count} room combination(s) "
+                    f"using {worker_count} process(es)..."
+                ),
+                rooms_to_place=room_count,
+            )
 
-                if covered != all_points:
-                    continue
+            combo_iter = combinations(range(len(candidate_payload)), room_count)
+            batch_iter = iter(_batched_combinations(combo_iter, batch_size))
 
-                score = self._score_candidate_set(combo, cover_map, data_point_names)
-                if score is None:
-                    continue
+            with ProcessPoolExecutor(
+                max_workers=worker_count,
+                initializer=_init_comms_process,
+                initargs=(candidate_payload, all_mask, point_count),
+            ) as pool:
+                pending = set()
 
-                if best_score is None or score < best_score:
-                    best_combo = combo
-                    best_score = score
+                def submit_next_batch():
+                    try:
+                        batch = next(batch_iter)
+                    except StopIteration:
+                        return False
+
+                    pending.add(pool.submit(_evaluate_comms_batch, batch))
+                    return True
+
+                for _ in range(max_pending):
+                    if not submit_next_batch():
+                        break
+
+                while pending:
+                    done, pending = wait(
+                        pending,
+                        return_when=FIRST_COMPLETED,
+                    )
+
+                    for future in done:
+                        batch_processed, batch_combo, batch_score = future.result()
+                        processed += int(batch_processed)
+
+                        if batch_combo is not None and (
+                            best_score is None or batch_score < best_score
+                        ):
+                            best_combo = batch_combo
+                            best_score = batch_score
+
+                        submit_next_batch()
+
+                    # Throttle UI updates. Updating every batch slows the solve.
+                    if (
+                        processed - last_progress_emit >= batch_size * max_pending
+                        or processed >= combo_count
+                    ):
+                        last_progress_emit = processed
+                        self._update_comms_optimisation_progress(
+                            current=processed,
+                            total=max(1, combo_count),
+                            message=(
+                                f"Testing {room_count} room combination(s) "
+                                f"using {worker_count} process(es)..."
+                            ),
+                            rooms_to_place=room_count,
+                        )
 
             if best_combo is not None:
-                return list(best_combo), None
+                return [candidate_payload[idx]["name"] for idx in best_combo], None
 
-        # Greedy fallback when exact search becomes too expensive.
-        uncovered = set(all_points)
+        return self._greedy_minimum_comms_room_nodes(
+            candidate_payload,
+            all_mask,
+        )
+
+    def _can_create_corridor_edge(self, start_name, end_name):
+        points = self.store.all_points()
+        start = points.get(start_name)
+        end = points.get(end_name)
+
+        if not start or not end:
+            return False, "Both edge endpoints must exist."
+
+        if int(start.get("floor", 0)) != int(end.get("floor", 0)):
+            return (
+                False,
+                "Cross-floor corridor edges are not allowed. Use a transition instead.",
+            )
+
+        return True, ""
+
+    def _greedy_minimum_comms_room_nodes(self, candidate_payload, all_mask):
+        uncovered = all_mask
         selected = []
 
         while uncovered:
-            best_candidate = None
+            best_idx = None
             best_key = None
 
-            for candidate_name in candidate_names:
-                if candidate_name in selected:
+            for idx, candidate in enumerate(candidate_payload):
+                if idx in selected:
                     continue
 
-                newly_covered = uncovered & set(cover_map[candidate_name].keys())
-                if not newly_covered:
+                newly_covered = uncovered & candidate["mask"]
+                gain = newly_covered.bit_count()
+
+                if gain <= 0:
                     continue
 
-                gain = len(newly_covered)
-                incremental_total = sum(
-                    float(cover_map[candidate_name][point_name]["cable_length"])
-                    for point_name in newly_covered
-                )
-                worst_new = max(
-                    float(cover_map[candidate_name][point_name]["cable_length"])
-                    for point_name in newly_covered
-                )
+                lengths = [
+                    length
+                    for point_idx, length in enumerate(candidate["lengths"])
+                    if length is not None and newly_covered & (1 << point_idx)
+                ]
 
-                # More coverage is better, then lower total, then lower worst, then name.
-                key = (-gain, incremental_total, worst_new, candidate_name)
+                key = (
+                    -gain,
+                    sum(lengths),
+                    max(lengths) if lengths else 0.0,
+                    candidate["name"],
+                )
 
                 if best_key is None or key < best_key:
                     best_key = key
-                    best_candidate = candidate_name
+                    best_idx = idx
 
-            if best_candidate is None:
+            if best_idx is None:
                 return None, "Greedy fallback failed to cover all data points."
 
-            selected.append(best_candidate)
-            uncovered -= set(cover_map[best_candidate].keys())
+            selected.append(best_idx)
+            uncovered &= ~candidate_payload[best_idx]["mask"]
 
-        return selected, None
+            self._update_comms_optimisation_progress(
+                current=len(selected),
+                total=len(candidate_payload),
+                message="Large search space detected. Using greedy fallback...",
+                rooms_to_place=len(selected),
+            )
+
+        return [candidate_payload[idx]["name"] for idx in selected], None
 
     def optimise_comms_rooms_for_model(self):
         if not self.store.data.get("data_points"):
@@ -3107,18 +3716,59 @@ class CableRouteEditor(QMainWindow):
             )
             return
 
-        cover_map = self._candidate_cover_map(
-            graph=graph,
-            points=points,
-            data_point_names=data_point_names,
-            candidate_nodes=candidate_nodes,
-            max_cable_length_m=float(max_cable_length_m),
+        self._update_comms_optimisation_progress(
+            current=0,
+            total=max(1, len(candidate_nodes)),
+            message="Preparing optimisation...",
+            rooms_to_place=None,
         )
 
-        selected_nodes, error_message = self._solve_minimum_comms_room_nodes(
-            cover_map=cover_map,
-            data_point_names=data_point_names,
-        )
+        try:
+            cover_map = self._candidate_cover_map(
+                graph=graph,
+                points=points,
+                data_point_names=data_point_names,
+                candidate_nodes=candidate_nodes,
+                max_cable_length_m=float(max_cable_length_m),
+            )
+
+            use_ilp = False  # Keep False until ILP is moved to a worker thread/process.
+
+            if use_ilp:
+                self._update_comms_optimisation_progress(
+                    current=0,
+                    total=1,
+                    message="Solving minimum comms room placement using ILP...",
+                    rooms_to_place=None,
+                )
+
+                selected_nodes, error_message = (
+                    self._solve_minimum_comms_room_nodes_ilp(
+                        cover_map=cover_map,
+                        data_point_names=data_point_names,
+                        time_limit_sec=30,
+                    )
+                )
+            else:
+                selected_nodes = None
+                error_message = None
+
+            if not selected_nodes:
+                selected_nodes, error_message = self._solve_minimum_comms_room_nodes(
+                    cover_map=cover_map,
+                    data_point_names=data_point_names,
+                )
+
+            if selected_nodes:
+                self._update_comms_optimisation_progress(
+                    current=1,
+                    total=1,
+                    message="Applying solution to the model...",
+                    rooms_to_place=len(selected_nodes),
+                )
+        finally:
+            self._finish_comms_optimisation_progress("Optimisation complete")
+
         if not selected_nodes:
             QMessageBox.information(
                 self,
@@ -3180,7 +3830,8 @@ class CableRouteEditor(QMainWindow):
 
         for candidate_name in selected_nodes:
             candidate_point = points[candidate_name]
-            room_name = self._next_comms_room_name(used_names)
+            floor = int(candidate_point["floor"])
+            room_name = self._next_comms_room_name(used_names, floor)
             room_name_by_candidate[candidate_name] = room_name
 
             self.store.add_location(
@@ -3190,6 +3841,8 @@ class CableRouteEditor(QMainWindow):
                 float(candidate_point["y"]),
                 kind="comms_room",
             )
+
+            self._safe_add_same_floor_edge(room_name, candidate_name)
 
         existing_connection_ids = {
             str(item.get("id", "")).strip()
@@ -3208,8 +3861,20 @@ class CableRouteEditor(QMainWindow):
             if point_name in existing_targets:
                 continue
 
-            room_name = room_name_by_candidate[assignments[point_name]["candidate_node"]]
-            connection_id, existing_connection_ids = self._next_connection_id(existing_connection_ids)
+            room_name = room_name_by_candidate[
+                assignments[point_name]["candidate_node"]
+            ]
+
+            anchor_name = cover_map[assignments[point_name]["candidate_node"]][
+                point_name
+            ].get("anchor_name")
+
+            if anchor_name:
+                self._safe_add_same_floor_edge(point_name, anchor_name)
+
+            connection_id, existing_connection_ids = self._next_connection_id(
+                existing_connection_ids
+            )
 
             self.store.data.setdefault("connections", []).append(
                 {
@@ -3255,6 +3920,58 @@ class CableRouteEditor(QMainWindow):
         self.set_status(
             f"Optimised {len(selected_nodes)} comms room(s) for {len(data_point_names)} data point(s)"
         )
+
+    def _ensure_comms_optimisation_dialog(self):
+        if self._comms_optimisation_dialog is None:
+            self._comms_optimisation_dialog = CommsRoomOptimisationProgressDialog(self)
+        return self._comms_optimisation_dialog
+
+    def _update_comms_optimisation_progress(
+        self,
+        current,
+        total,
+        message,
+        rooms_to_place=None,
+    ):
+        dialog = self._ensure_comms_optimisation_dialog()
+        dialog.update_progress(
+            current=current,
+            total=total,
+            message=message,
+            rooms_to_place=rooms_to_place,
+        )
+        if not dialog.isVisible():
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        QApplication.processEvents()
+
+    def _finish_comms_optimisation_progress(self, message="Finished"):
+        if self._comms_optimisation_dialog is not None:
+            self._comms_optimisation_dialog.mark_complete(message)
+
+    def _move_point_or_transition(self, point_name, x, y):
+        point = self.store.all_points().get(point_name)
+
+        if point and point.get("kind") == "transition_node":
+            transition_id = str(point.get("transition_id", "")).strip()
+            from_floor = int(point.get("floor", 0))
+
+            moved_count = self.store.move_transition_from_floor_up(
+                transition_id,
+                from_floor,
+                x,
+                y,
+            )
+
+            self.set_status(
+                f"Moved {transition_id} on floor {from_floor} and "
+                f"{max(0, moved_count - 1)} floor(s) above"
+            )
+            return
+
+        self.store.set_point_position(point_name, x, y)
+
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)

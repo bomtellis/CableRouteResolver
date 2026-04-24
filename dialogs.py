@@ -1,5 +1,6 @@
 import json
 from typing import Any
+import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QCheckBox,
     QDoubleSpinBox,
+    QProgressBar,
 )
 
 
@@ -510,6 +512,94 @@ class SuggestCommsRoomDialog(QDialog):
             super().accept()
         except Exception as exc:
             QMessageBox.critical(self, "Invalid input", str(exc))
+
+
+class CommsRoomOptimisationProgressDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Optimising Comms Rooms")
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, False)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setMinimumWidth(460)
+
+        self._completed = False
+        self._started_at = time.monotonic()
+
+        layout = QVBoxLayout(self)
+
+        self.message_label = QLabel("Preparing optimisation...")
+        self.message_label.setWordWrap(True)
+        layout.addWidget(self.message_label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+
+        self.detail_label = QLabel("0 / 0")
+        self.detail_label.setWordWrap(True)
+        layout.addWidget(self.detail_label)
+
+        self.rooms_label = QLabel("Rooms to place: calculating...")
+        self.rooms_label.setWordWrap(True)
+        layout.addWidget(self.rooms_label)
+
+        self.eta_label = QLabel("ETA: calculating...")
+        self.eta_label.setWordWrap(True)
+        layout.addWidget(self.eta_label)
+
+    def update_progress(
+        self,
+        current,
+        total,
+        message,
+        rooms_to_place=None,
+    ):
+        total = max(1, int(total))
+        current = max(0, min(int(current), total))
+
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(current)
+        self.message_label.setText(str(message))
+        self.detail_label.setText(f"{current} / {total}")
+
+        if rooms_to_place is None:
+            self.rooms_label.setText("Rooms to place: calculating...")
+        else:
+            self.rooms_label.setText(f"Rooms to place: {int(rooms_to_place)}")
+
+        if current <= 0:
+            eta_text = "ETA: calculating..."
+        else:
+            elapsed = max(0.001, time.monotonic() - self._started_at)
+            rate = elapsed / float(current)
+            remaining = max(0.0, (total - current) * rate)
+
+            mins = int(remaining // 60)
+            secs = int(round(remaining % 60))
+            if mins > 0:
+                eta_text = f"ETA: {mins}m {secs:02d}s"
+            else:
+                eta_text = f"ETA: {secs}s"
+
+        self.eta_label.setText(eta_text)
+
+    def mark_complete(self, message="Finished"):
+        self._completed = True
+        self.message_label.setText(message)
+        self.eta_label.setText("ETA: complete")
+        self.accept()
+
+    def reject(self):
+        if self._completed:
+            super().reject()
+
+    def closeEvent(self, event):
+        if self._completed:
+            super().closeEvent(event)
+        else:
+            event.ignore()
 
 
 class EdgeConnectionsDialog(QDialog):

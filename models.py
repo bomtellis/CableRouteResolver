@@ -391,6 +391,58 @@ class JsonStore:
                     transition["floor_locations"][floor_text]["y"] = y
                     return
 
+    def move_transition_from_floor_up(
+        self,
+        transition_id: str,
+        from_floor: int,
+        new_x: float,
+        new_y: float,
+    ) -> int:
+        transition_id = str(transition_id).strip()
+        from_floor = int(from_floor)
+        new_x = round(float(new_x), 3)
+        new_y = round(float(new_y), 3)
+
+        for transition in self.data.get("transitions", []):
+            if str(transition.get("id", "")).strip() != transition_id:
+                continue
+
+            floor_locations = transition.setdefault("floor_locations", {})
+            current = floor_locations.get(str(from_floor))
+            if current is None:
+                current = floor_locations.get(from_floor)
+
+            if not isinstance(current, dict):
+                return 0
+
+            old_x = float(current.get("x", 0.0))
+            old_y = float(current.get("y", 0.0))
+
+            dx = new_x - old_x
+            dy = new_y - old_y
+
+            moved_count = 0
+
+            for floor_key, pos in list(floor_locations.items()):
+                try:
+                    floor = int(floor_key)
+                except Exception:
+                    continue
+
+                if floor < from_floor:
+                    continue
+
+                if not isinstance(pos, dict):
+                    continue
+
+                pos["x"] = round(float(pos.get("x", 0.0)) + dx, 3)
+                pos["y"] = round(float(pos.get("y", 0.0)) + dy, 3)
+                moved_count += 1
+
+            return moved_count
+
+        return 0
+
     def rename_point(self, old_name: str, new_name: str) -> None:
         if old_name == new_name:
             return
@@ -746,7 +798,9 @@ class JsonStore:
                     nums.append(int(tail))
         return f"C{int(floor)}-{max(nums, default=0) + 1}"
 
-    def _suggest_next_data_point_name_for_floor(self, floor: int, used_names: set) -> str:
+    def _suggest_next_data_point_name_for_floor(
+        self, floor: int, used_names: set
+    ) -> str:
         prefix = f"DP{int(floor)}-"
         nums = []
         for name in used_names:
@@ -764,7 +818,9 @@ class JsonStore:
         offset_x: float = 0.0,
         offset_y: float = 0.0,
     ) -> dict:
-        selected_names = [str(x).strip() for x in (source_names or []) if str(x).strip()]
+        selected_names = [
+            str(x).strip() for x in (source_names or []) if str(x).strip()
+        ]
         if not selected_names:
             raise ValueError("Select one or more corridor nodes or data points")
 
@@ -783,7 +839,9 @@ class JsonStore:
                 continue
 
             if kind == "corridor_node":
-                new_name = self._suggest_next_corridor_name_for_floor(target_floor, used_names)
+                new_name = self._suggest_next_corridor_name_for_floor(
+                    target_floor, used_names
+                )
                 used_names.add(new_name)
 
                 new_record = {
@@ -794,12 +852,16 @@ class JsonStore:
                     "height_affl_m": float(record.get("height_affl_m", 0.0) or 0.0),
                     "cable_limit": int(record.get("cable_limit", 0) or 0),
                 }
-                self.data.setdefault("corridors", {}).setdefault("nodes", []).append(new_record)
+                self.data.setdefault("corridors", {}).setdefault("nodes", []).append(
+                    new_record
+                )
                 id_map[old_name] = new_name
                 created_corridors.append(new_name)
 
             elif kind == "data_point":
-                new_name = self._suggest_next_data_point_name_for_floor(target_floor, used_names)
+                new_name = self._suggest_next_data_point_name_for_floor(
+                    target_floor, used_names
+                )
                 used_names.add(new_name)
 
                 new_record = {
@@ -808,7 +870,9 @@ class JsonStore:
                     "x": round(float(record.get("x", 0.0)) + float(offset_x), 3),
                     "y": round(float(record.get("y", 0.0)) + float(offset_y), 3),
                     "qty": int(record.get("qty", 1) or 1),
-                    "extension_distance_m": float(record.get("extension_distance_m", 0.0) or 0.0),
+                    "extension_distance_m": float(
+                        record.get("extension_distance_m", 0.0) or 0.0
+                    ),
                     "department_ids": [],
                 }
                 self.data.setdefault("data_points", []).append(new_record)
@@ -817,7 +881,9 @@ class JsonStore:
 
         created_edges = []
         if include_internal_edges and id_map:
-            existing_edges = self.data.setdefault("corridors", {}).setdefault("edges", [])
+            existing_edges = self.data.setdefault("corridors", {}).setdefault(
+                "edges", []
+            )
             existing_pairs = {
                 (str(edge.get("from", "")).strip(), str(edge.get("to", "")).strip())
                 for edge in existing_edges
