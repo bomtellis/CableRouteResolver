@@ -450,30 +450,36 @@ class DataPointEditorDialog(QDialog):
 
 
 class SuggestCommsRoomDialog(QDialog):
-    def __init__(self, parent, department_options, default_name=""):
+    def __init__(
+        self, parent, data_point_options, default_name="", selected_data_points=None
+    ):
         super().__init__(parent)
         self.setWindowTitle("Suggest Comms Room")
         self.result = None
-        self.department_options = list(department_options)
+        self.data_point_options = list(data_point_options)
+        selected_data_points = set(selected_data_points or [])
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
         layout.addLayout(form)
 
-        self.departments_list = QListWidget()
-        self.departments_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.data_points_list = QListWidget()
+        self.data_points_list.setSelectionMode(QAbstractItemView.NoSelection)
 
-        for department_id, department_name in self.department_options:
-            label = (
-                f"{department_id} - {department_name}"
-                if department_name
-                else department_id
+        for item in self.data_point_options:
+            name = item["name"]
+            floor = item.get("floor", "")
+            qty = item.get("qty", 1)
+
+            label = f"{name} | Floor {floor} | Qty {qty}"
+
+            row = QListWidgetItem(label)
+            row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
+            row.setData(Qt.UserRole, name)
+            row.setCheckState(
+                Qt.Checked if name in selected_data_points else Qt.Unchecked
             )
-            item = QListWidgetItem(label)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setData(Qt.UserRole, department_id)
-            item.setCheckState(Qt.Unchecked)
-            self.departments_list.addItem(item)
+            self.data_points_list.addItem(row)
 
         self.max_length_spin = QDoubleSpinBox()
         self.max_length_spin.setRange(0.0, 100000.0)
@@ -481,9 +487,18 @@ class SuggestCommsRoomDialog(QDialog):
         self.max_length_spin.setSingleStep(1.0)
         self.max_length_spin.setValue(90.0)
 
+        self.search_mode_combo = QComboBox()
+        self.search_mode_combo.addItems(
+            [
+                "Graph route length",
+                "XY straight-line distance",
+            ]
+        )
+
         self.name_edit = QLineEdit(default_name)
 
-        form.addRow("Departments", self.departments_list)
+        form.addRow("Data points", self.data_points_list)
+        form.addRow("Search mode", self.search_mode_combo)
         form.addRow("Max cable length (m)", self.max_length_spin)
         form.addRow("New comms room name", self.name_edit)
 
@@ -492,30 +507,31 @@ class SuggestCommsRoomDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-        self.resize(460, 360)
+        self.resize(520, 500)
 
-    def _checked_department_ids(self):
+    def _checked_data_point_names(self):
         result = []
-        for i in range(self.departments_list.count()):
-            item = self.departments_list.item(i)
+        for i in range(self.data_points_list.count()):
+            item = self.data_points_list.item(i)
             if item.checkState() == Qt.Checked:
                 result.append(str(item.data(Qt.UserRole)).strip())
         return result
 
     def accept(self):
         try:
-            department_ids = self._checked_department_ids()
-            if not department_ids:
-                raise ValueError("Select one or more departments")
+            data_point_names = self._checked_data_point_names()
+            if not data_point_names:
+                raise ValueError("Select one or more data points")
 
             room_name = self.name_edit.text().strip()
             if not room_name:
                 raise ValueError("New comms room name is required")
 
             self.result = {
-                "department_ids": department_ids,
+                "data_point_names": data_point_names,
                 "max_cable_length_m": float(self.max_length_spin.value()),
                 "room_name": room_name,
+                "search_mode": self.search_mode_combo.currentText(),
             }
             super().accept()
         except Exception as exc:
@@ -853,7 +869,7 @@ class TableListEditor(QMainWindow):
         self.table = QTableWidget(0, len(columns))
         self.table.setHorizontalHeaderLabels([c[1] for c in columns])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         for idx, (_, _, width) in enumerate(columns):
             self.table.setColumnWidth(idx, width)
@@ -942,10 +958,35 @@ class TableListEditor(QMainWindow):
         self.table.selectRow(row)
 
     def delete_item(self):
-        row = self.table.currentRow()
-        if row < 0:
+        rows = sorted(
+            {index.row() for index in self.table.selectionModel().selectedRows()},
+            reverse=True,
+        )
+
+        if not rows:
+            row = self.table.currentRow()
+            if row < 0:
+                return
+            rows = [row]
+
+        count = len(rows)
+
+        if (
+            QMessageBox.question(
+                self,
+                "Delete selected rows",
+                f"Delete {count} selected row(s)?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
             return
-        del self.items[row]
+
+        for row in rows:
+            if 0 <= row < len(self.items):
+                del self.items[row]
+
         self._refresh_table()
 
     def save(self):
