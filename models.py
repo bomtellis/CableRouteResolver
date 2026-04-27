@@ -2,6 +2,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import re
 
 
 DEFAULT_JSON = {
@@ -12,6 +13,8 @@ DEFAULT_JSON = {
         "floor_height_m": 4.0,
     },
     "departments": [],
+    "room_types": [],
+    "assets": [],
     "locations": [],
     "data_points": [],
     "corridors": {
@@ -77,6 +80,8 @@ class JsonStore:
             self.data[key] = value
 
         self.data.setdefault("departments", [])
+        self.data.setdefault("room_types", [])
+        self.data.setdefault("assets", [])
         self.data.setdefault("locations", [])
         self.data.setdefault("data_points", [])
         self.data.setdefault("corridors", {}).setdefault("nodes", [])
@@ -93,21 +98,41 @@ class JsonStore:
             dept.setdefault("x", 0.0)
             dept.setdefault("y", 0.0)
 
-        for location in self.data.get("locations", []):
-            if "department_ids" not in location:
-                legacy = str(location.get("department_id", "")).strip()
-                location["department_ids"] = [legacy] if legacy else []
-            elif not isinstance(location.get("department_ids"), list):
-                legacy_value = location.get("department_ids")
-                if legacy_value in (None, ""):
-                    location["department_ids"] = []
-                else:
-                    location["department_ids"] = [str(legacy_value).strip()]
-            location["department_ids"] = [
-                str(x).strip()
-                for x in location.get("department_ids", [])
-                if str(x).strip()
+        for asset in self.data.get("assets", []):
+            asset.setdefault("id", "")
+            asset.setdefault("name", asset.get("id", ""))
+            asset.setdefault("qty", 1)
+            asset.setdefault("data_points", 1)
+
+        for room_type in self.data.get("room_types", []):
+            room_type.setdefault("id", "")
+            room_type.setdefault("name", room_type.get("id", ""))
+            if "asset_ids" not in room_type:
+                room_type["asset_ids"] = [
+                    str(asset.get("id", "")).strip()
+                    for asset in room_type.get("assets", [])
+                    if isinstance(asset, dict) and str(asset.get("id", "")).strip()
+                ]
+            room_type["asset_ids"] = [
+                str(x).strip() for x in room_type.get("asset_ids", []) if str(x).strip()
             ]
+            room_type.pop("assets", None)
+
+            for location in self.data.get("locations", []):
+                if "department_ids" not in location:
+                    legacy = str(location.get("department_id", "")).strip()
+                    location["department_ids"] = [legacy] if legacy else []
+                elif not isinstance(location.get("department_ids"), list):
+                    legacy_value = location.get("department_ids")
+                    if legacy_value in (None, ""):
+                        location["department_ids"] = []
+                    else:
+                        location["department_ids"] = [str(legacy_value).strip()]
+                location["department_ids"] = [
+                    str(x).strip()
+                    for x in location.get("department_ids", [])
+                    if str(x).strip()
+                ]
 
         for point in self.data.get("data_points", []):
             if "department_ids" not in point:
@@ -329,14 +354,19 @@ class JsonStore:
         qty: int = 1,
         extension_distance_m: float = 0.0,
         department_ids: Optional[List[str]] = None,
+        room_type_id: str = "",
     ) -> None:
+        room_type_id = str(room_type_id or "").strip()
+        resolved_qty = self.room_type_cable_qty(room_type_id) if room_type_id else int(qty)
+
         self.data["data_points"].append(
             {
                 "name": name,
                 "floor": floor,
                 "x": round(x, 3),
                 "y": round(y, 3),
-                "qty": int(qty),
+                "qty": int(resolved_qty),
+                "room_type_id": room_type_id,
                 "extension_distance_m": float(extension_distance_m),
                 "department_ids": [
                     str(x).strip() for x in (department_ids or []) if str(x).strip()
@@ -781,12 +811,33 @@ class JsonStore:
         for item in self.data.get("corridors", {}).get("nodes", []):
             if str(item.get("name", "")).strip() == name:
                 return "corridor_node", item
+    
+        for item in self.data.get("locations", []):
+            if str(item.get("name", "")).strip() == name:
+                kind = str(item.get("kind", "location") or "location").strip()
+                if kind in {"comms_room", "distributed_equipment_room"}:
+                    return kind, item
 
         for item in self.data.get("data_points", []):
             if str(item.get("name", "")).strip() == name:
                 return "data_point", item
 
         return None, None
+
+    def _suggest_next_comms_room_name_for_floor(
+        self, floor: int, used_names: set, kind: str
+    ) -> str:
+        prefix = "DER" if kind == "distributed_equipment_room" else "CR"
+        floor = int(floor)
+        pattern = re.compile(rf"^{re.escape(prefix)}(\d+)-F{floor}$", re.IGNORECASE)
+
+        nums = []
+        for name in used_names:
+            match = pattern.match(str(name).strip())
+            if match:
+                nums.append(int(match.group(1)))
+
+        return f"{prefix}{max(nums, default=0) + 1}-F{floor}"
 
     def _suggest_next_corridor_name_for_floor(self, floor: int, used_names: set) -> str:
         prefix = f"C{int(floor)}-"
@@ -830,6 +881,7 @@ class JsonStore:
         id_map = {}
         created_corridors = []
         created_data_points = []
+        created_locations = []
         skipped = []
 
         for old_name in selected_names:
@@ -859,6 +911,25 @@ class JsonStore:
                 id_map[old_name] = new_name
                 created_corridors.append(new_name)
 
+            elif kind in {"comms_room", "distributed_equipment_room"}:
+                new_name = self._suggest_next_comms_room_name_for_floor(
+                    target_floor, used_names, kind
+                )
+                used_names.add(new_name)
+
+                new_record = {
+                    "name": new_name,
+                    "floor": int(target_floor),
+                    "x": round(float(record.get("x", 0.0)) + float(offset_x), 3),
+                    "y": round(float(record.get("y", 0.0)) + float(offset_y), 3),
+                    "kind": kind,
+                    "department_ids": [],
+                }
+
+                self.data.setdefault("locations", []).append(new_record)
+                id_map[old_name] = new_name
+                created_locations.append(new_name)
+
             elif kind == "data_point":
                 new_name = self._suggest_next_data_point_name_for_floor(
                     target_floor, used_names
@@ -875,6 +946,7 @@ class JsonStore:
                         record.get("extension_distance_m", 0.0) or 0.0
                     ),
                     "department_ids": [],
+                    "created_locations": created_locations,
                 }
                 self.data.setdefault("data_points", []).append(new_record)
                 id_map[old_name] = new_name
@@ -917,6 +989,88 @@ class JsonStore:
             "created_edges": created_edges,
             "skipped": skipped,
         }
+    
+    def room_type_options(self) -> List[Tuple[str, str]]:
+        return [
+            (
+                str(item.get("id", "")).strip(),
+                str(item.get("name", item.get("id", ""))).strip(),
+            )
+            for item in self.data.get("room_types", [])
+            if str(item.get("id", "")).strip()
+        ]
+
+    def room_type_cable_qty(self, room_type_id: str) -> int:
+        room_type_id = str(room_type_id or "").strip()
+        if not room_type_id:
+            return 0
+
+        room_type = next(
+            (
+                item
+                for item in self.data.get("room_types", [])
+                if str(item.get("id", "")).strip() == room_type_id
+            ),
+            None,
+        )
+        if not room_type:
+            return 0
+
+        assets_by_id = {
+            str(asset.get("id", "")).strip(): asset
+            for asset in self.data.get("assets", [])
+            if str(asset.get("id", "")).strip()
+        }
+
+        total = 0
+        for asset_id in room_type.get("asset_ids", []) or []:
+            asset = assets_by_id.get(str(asset_id).strip())
+            if not asset:
+                continue
+            asset_qty = int(asset.get("qty", asset.get("quantity", 1)) or 1)
+            data_points = int(
+                asset.get(
+                    "data_points",
+                    asset.get("data_points_each", asset.get("cables", 1)),
+                )
+                or 1
+            )
+            total += asset_qty * data_points
+
+        return max(1, int(total))
+
+    def asset_options(self) -> List[Tuple[str, str]]:
+        return [
+            (
+                str(item.get("id", "")).strip(),
+                str(item.get("name", item.get("id", ""))).strip(),
+            )
+            for item in self.data.get("assets", [])
+            if str(item.get("id", "")).strip()
+        ]
+
+    def sync_data_point_qty_from_room_type(self, data_point_name: str) -> int:
+        data_point_name = str(data_point_name or "").strip()
+        for point in self.data.get("data_points", []):
+            if str(point.get("name", "")).strip() != data_point_name:
+                continue
+
+            room_type_id = str(point.get("room_type_id", "") or "").strip()
+            if room_type_id:
+                point["qty"] = self.room_type_cable_qty(room_type_id)
+            return int(point.get("qty", 1) or 1)
+
+        return 1
+
+
+    def sync_connection_qty_for_data_point(self, data_point_name: str) -> int:
+        qty = self.sync_data_point_qty_from_room_type(data_point_name)
+        for connection in self.data.get("connections", []):
+            if str(connection.get("to", "")).strip() == data_point_name:
+                connection["qty"] = qty
+            elif str(connection.get("from", "")).strip() == data_point_name:
+                connection["qty"] = qty
+        return qty
 
     @staticmethod
     def basename(path: Optional[str]) -> str:

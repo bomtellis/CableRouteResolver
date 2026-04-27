@@ -75,6 +75,8 @@ from dialogs import (
     TransitionEditorDialog,
     SuggestCommsRoomDialog,
     CommsRoomOptimisationProgressDialog,
+    RoomTypesEditorWindow,
+    AssetsEditorWindow,
 )
 from advanced_dialogs import (
     ConnectionEditorWindow,
@@ -162,6 +164,89 @@ def _batched_combinations(iterable, batch_size):
             batch = []
     if batch:
         yield batch
+
+_AUTOROUTE_GRAPH = None
+_AUTOROUTE_POINTS = None
+_AUTOROUTE_COMMS_ROOMS = None
+
+
+def _init_autoroute_process(graph, points, comms_rooms):
+    global _AUTOROUTE_GRAPH, _AUTOROUTE_POINTS, _AUTOROUTE_COMMS_ROOMS
+    _AUTOROUTE_GRAPH = graph
+    _AUTOROUTE_POINTS = points
+    _AUTOROUTE_COMMS_ROOMS = comms_rooms
+
+
+def _autoroute_shortest_path(graph, start, end):
+    if start not in graph or end not in graph:
+        return None, []
+
+    heap = [(0.0, start)]
+    dist = {start: 0.0}
+
+    while heap:
+        cost, node = heapq.heappop(heap)
+
+        if cost > dist.get(node, math.inf):
+            continue
+
+        if node == end:
+            return cost, []
+
+        for next_node, weight in graph.get(node, []):
+            new_cost = cost + float(weight)
+            if new_cost < dist.get(next_node, math.inf):
+                dist[next_node] = new_cost
+                heapq.heappush(heap, (new_cost, next_node))
+
+    return None, []
+
+
+def _autoroute_data_point_worker(data_point):
+    graph = _AUTOROUTE_GRAPH
+    points = _AUTOROUTE_POINTS
+    comms_rooms = _AUTOROUTE_COMMS_ROOMS
+
+    point_name = str(data_point.get("name", "")).strip()
+    if not point_name:
+        return {"status": "skip_empty"}
+
+    if point_name not in points:
+        return {"status": "unreachable", "point_name": point_name}
+
+    best_room = None
+    best_cost = None
+
+    for comms_room in comms_rooms:
+        if comms_room not in points:
+            continue
+
+        route_cost, _route_path = _autoroute_shortest_path(
+            graph, point_name, comms_room
+        )
+        if route_cost is None:
+            continue
+
+        total_cost = float(route_cost) + float(
+            data_point.get("extension_distance_m", 0.0) or 0.0
+        )
+
+        if best_cost is None or total_cost < best_cost:
+            best_cost = total_cost
+            best_room = comms_room
+
+    if best_room is None:
+        return {"status": "unreachable", "point_name": point_name}
+
+    return {
+        "status": "created",
+        "point_name": point_name,
+        "from": best_room,
+        "to": point_name,
+        "qty": int(data_point.get("qty", 1) or 1),
+        "route_profile": "",
+        "cost": best_cost,
+    }
 
 
 def _load_dxf_floor_process(args):
@@ -704,6 +789,8 @@ class CableRouteEditor(QMainWindow):
             ("Fit View", self.fit_view),
             ("Validate", self.validate_json),
             ("Departments", self.manage_departments),
+            ("Assets", self.manage_assets),
+            ("Room Types", self.manage_room_types),
             ("Locations", self.manage_locations),
             ("Location Departments", self.manage_location_departments),
             ("Mass Create Locations", self.start_bulk_location_placement),
@@ -1789,18 +1876,28 @@ class CableRouteEditor(QMainWindow):
                 result.append(name)
         return sorted(set(result))
 
-    def suggest_next_comms_room_name(self, floor):
-        prefix = f"CR{int(floor)}-"
+    def _comms_prefix_for_kind(self, kind):
+            kind = str(kind or "").strip()
+            if kind == "distributed_equipment_room":
+                return "DER"
+            return "CR"
+
+    def suggest_next_comms_room_name(self, floor, kind="comms_room"):
+        prefix = self._comms_prefix_for_kind(kind)
+        floor = int(floor)
+        pattern = re.compile(rf"^{re.escape(prefix)}(\d+)-F{floor}$", re.IGNORECASE)
+
         nums = []
         for item in self.store.data.get("locations", []):
-            if str(item.get("kind", "location")) != "comms_room":
+            if str(item.get("kind", "")) not in {"comms_room", "distributed_equipment_room"}:
                 continue
-            name = str(item.get("name", ""))
-            if name.startswith(prefix):
-                tail = name[len(prefix) :]
-                if tail.isdigit():
-                    nums.append(int(tail))
-        return f"{prefix}{max(nums, default=0) + 1}"
+
+            name = str(item.get("name", "")).strip()
+            match = pattern.match(name)
+            if match:
+                nums.append(int(match.group(1)))
+
+        return f"{prefix}{max(nums, default=0) + 1}-F{floor}"
 
     def _distance_between_points(self, a, b):
         if int(a["floor"]) == int(b["floor"]):
@@ -2223,7 +2320,7 @@ class CableRouteEditor(QMainWindow):
     def comms_room_names(self):
         result = []
         for item in self.store.data.get("locations", []):
-            if str(item.get("kind", "location")) == "comms_room":
+            if str(item.get("kind", "location")) in {"comms_room", "distributed_equipment_room"}:
                 name = str(item.get("name", "")).strip()
                 if name:
                     result.append(name)
@@ -2336,10 +2433,111 @@ class CableRouteEditor(QMainWindow):
         graph, points = self._build_routing_graph()
         existing_targets = self._existing_connection_targets()
 
-        created = 0
-        skipped_existing = 0
+        data_points = [
+            item
+            for item in self.store.data.get("data_points", [])
+            if str(item.get("name", "")).strip()
+            and str(item.get("name", "")).strip() not in existing_targets
+        ]
+
+        skipped_existing = len(self.store.data.get("data_points", [])) - len(data_points)
+
+        if not data_points:
+            QMessageBox.information(
+                self,
+                "Autoroute",
+                f"No data points to autoroute. {skipped_existing} already had connections.",
+            )
+            return
+
+        progress = QDialog(self)
+        progress.setWindowTitle("Autorouting Data Points")
+        progress.setWindowModality(Qt.ApplicationModal)
+        progress.setMinimumWidth(460)
+
+        layout = QVBoxLayout(progress)
+
+        message_label = QLabel("Preparing multiprocessing autoroute...")
+        message_label.setWordWrap(True)
+        layout.addWidget(message_label)
+
+        bar = QProgressBar()
+        bar.setRange(0, len(data_points))
+        bar.setValue(0)
+        layout.addWidget(bar)
+
+        detail_label = QLabel(f"0 / {len(data_points)}")
+        layout.addWidget(detail_label)
+
+        cancel_btn = QPushButton("Cancel")
+        layout.addWidget(cancel_btn)
+
+        cancelled = {"value": False}
+
+        def cancel_autoroute():
+            cancelled["value"] = True
+            cancel_btn.setEnabled(False)
+            message_label.setText("Cancelling...")
+
+        cancel_btn.clicked.connect(cancel_autoroute)
+
+        progress.show()
+        QApplication.processEvents()
+
+        created_results = []
         skipped_unreachable = []
-        created_rows = []
+
+        worker_count = max(1, min(os.cpu_count() or 1, len(data_points)))
+
+        try:
+            with ProcessPoolExecutor(
+                max_workers=worker_count,
+                initializer=_init_autoroute_process,
+                initargs=(graph, points, comms_rooms),
+            ) as pool:
+                futures = [
+                    pool.submit(_autoroute_data_point_worker, data_point)
+                    for data_point in data_points
+                ]
+
+                completed = 0
+
+                for future in as_completed(futures):
+                    completed += 1
+
+                    if cancelled["value"]:
+                        pool.shutdown(cancel_futures=True)
+                        break
+
+                    result = future.result()
+
+                    if result.get("status") == "created":
+                        created_results.append(result)
+                    elif result.get("status") == "unreachable":
+                        skipped_unreachable.append(result.get("point_name", ""))
+
+                    bar.setValue(completed)
+                    detail_label.setText(f"{completed} / {len(data_points)}")
+                    message_label.setText(
+                        f"Autorouting with {worker_count} process(es)..."
+                    )
+                    QApplication.processEvents()
+
+        except Exception as exc:
+            progress.accept()
+            QMessageBox.critical(self, "Autoroute failed", str(exc))
+            return
+
+        progress.accept()
+
+        if cancelled["value"]:
+            QMessageBox.information(
+                self,
+                "Autoroute Cancelled",
+                "Autoroute cancelled. No changes were applied.",
+            )
+            self.set_status("Autoroute cancelled")
+            return
 
         existing_connection_ids = {
             str(item.get("id", "")).strip()
@@ -2355,75 +2553,32 @@ class CableRouteEditor(QMainWindow):
             existing_connection_ids.add(new_id)
             return new_id
 
-        for data_point in self.store.data.get("data_points", []):
-            point_name = str(data_point.get("name", "")).strip()
-            if not point_name:
-                continue
-
-            if point_name in existing_targets:
-                skipped_existing += 1
-                continue
-
-            if point_name not in points:
-                skipped_unreachable.append(point_name)
-                continue
-
-            best_room = None
-            best_cost = None
-            best_path = []
-
-            for comms_room in comms_rooms:
-                if comms_room not in points:
-                    continue
-
-                route_cost, route_path = self._shortest_path_length(
-                    graph, point_name, comms_room
-                )
-                if route_cost is None:
-                    continue
-
-                total_cost = float(route_cost) + float(
-                    data_point.get("extension_distance_m", 0.0) or 0.0
-                )
-
-                if best_cost is None or total_cost < best_cost:
-                    best_cost = total_cost
-                    best_room = comms_room
-                    best_path = route_path
-
-            if best_room is None:
-                skipped_unreachable.append(point_name)
-                continue
-
+        created_rows = []
+        for result in created_results:
             created_rows.append(
                 {
                     "id": next_connection_id(),
-                    "from": best_room,
-                    "to": point_name,
-                    "qty": int(data_point.get("qty", 1) or 1),
-                    "route_profile": "",
+                    "from": result["from"],
+                    "to": result["to"],
+                    "qty": result["qty"],
+                    "route_profile": result.get("route_profile", ""),
                 }
             )
 
-            created += 1
-
-        if not created_rows and not skipped_unreachable and skipped_existing:
-            QMessageBox.information(
-                self,
-                "Autoroute",
-                f"No new routes created. {skipped_existing} data point(s) already had connections.",
-            )
-            return
-
         if created_rows:
+            self.push_undo_state("Autoroute data points")
             self.store.data.setdefault("connections", []).extend(created_rows)
-            self.set_status(f"Autorouted {created} data point(s) to best comms rooms")
+            self.set_status(
+                f"Autorouted {len(created_rows)} data point(s) using {worker_count} process(es)"
+            )
 
-        message_lines = [f"Created {created} connection(s)."]
+        message_lines = [f"Created {len(created_rows)} connection(s)."]
+
         if skipped_existing:
             message_lines.append(
                 f"Skipped {skipped_existing} already-connected data point(s)."
             )
+
         if skipped_unreachable:
             message_lines.append(
                 "Unreachable data point(s): "
@@ -2516,18 +2671,25 @@ class CableRouteEditor(QMainWindow):
         result = []
 
         for item in self.store.data.get("corridors", {}).get("nodes", []):
+            if int(item.get("floor", 0)) == floor:
+                name = str(item.get("name", "")).strip()
+                if name:
+                    result.append(name)
+
+        for item in self.store.data.get("locations", []):
             if int(item.get("floor", 0)) != floor:
                 continue
-            name = str(item.get("name", "")).strip()
-            if name:
-                result.append(name)
+            kind = str(item.get("kind", "location") or "location").strip()
+            if kind in {"comms_room", "distributed_equipment_room"}:
+                name = str(item.get("name", "")).strip()
+                if name:
+                    result.append(name)
 
         for item in self.store.data.get("data_points", []):
-            if int(item.get("floor", 0)) != floor:
-                continue
-            name = str(item.get("name", "")).strip()
-            if name:
-                result.append(name)
+            if int(item.get("floor", 0)) == floor:
+                name = str(item.get("name", "")).strip()
+                if name:
+                    result.append(name)
 
         return sorted(set(result))
 
@@ -2550,6 +2712,21 @@ class CableRouteEditor(QMainWindow):
             department_name_by_id[department_id] = (
                 str(department.get("name", department_id)).strip() or department_id
             )
+
+        for item in self.store.data.get("locations", []):
+            if int(item.get("floor", 0)) != floor:
+                continue
+
+            name = str(item.get("name", "")).strip()
+            kind = str(item.get("kind", "location") or "location").strip()
+
+            if not name:
+                continue
+
+            if kind == "distributed_equipment_room":
+                group_map[name] = f"Distributed equipment rooms / Floor {floor}"
+            elif kind == "comms_room":
+                group_map[name] = f"Comms rooms / Floor {floor}"
 
         for item in self.store.data.get("data_points", []):
             if int(item.get("floor", 0)) != floor:
@@ -2780,6 +2957,33 @@ class CableRouteEditor(QMainWindow):
         self.set_status("Departments updated")
         self.refresh_canvas()
 
+    def manage_room_types(self):
+        assets_by_id = {
+            str(asset.get("id", "")).strip(): asset
+            for asset in self.store.data.get("assets", [])
+            if str(asset.get("id", "")).strip()
+        }
+
+        RoomTypesEditorWindow(
+            self,
+            self.store.data.get("room_types", []),
+            self._save_room_types,
+            asset_options=self.store.asset_options(),
+            assets_by_id=assets_by_id,
+        )
+
+    def _save_room_types(self, items):
+        self.push_undo_state("Save room types")
+        self.store.data["room_types"] = items
+
+        for point in self.store.data.get("data_points", []):
+            name = str(point.get("name", "")).strip()
+            if name:
+                self.store.sync_connection_qty_for_data_point(name)
+
+        self.set_status("Room types updated and data point quantities recalculated")
+        self.refresh_canvas()
+
     def manage_data_points(self):
         columns = [
             ("name", "Name", 180),
@@ -2788,6 +2992,7 @@ class CableRouteEditor(QMainWindow):
             ("y", "Y", 80),
             ("qty", "Qty", 70),
             ("extension_distance_m", "Extension m", 100),
+            ("room_type_id", "Room Type", 120),
         ]
         TableListEditor(
             self,
@@ -2798,7 +3003,14 @@ class CableRouteEditor(QMainWindow):
         )
 
     def _save_data_points(self, items):
+        self.push_undo_state("Save data points")
         self.store.data["data_points"] = items
+
+        for point in self.store.data.get("data_points", []):
+            name = str(point.get("name", "")).strip()
+            if name:
+                self.store.sync_connection_qty_for_data_point(name)
+
         self.set_status("Data points updated")
         self.refresh_canvas()
 
@@ -2944,6 +3156,73 @@ class CableRouteEditor(QMainWindow):
             name for name in self.selected_template_names if name in data_point_names
         )
 
+    def assign_room_type_to_selected_data_points(self):
+        selected = self._selected_data_point_names()
+
+        if not selected:
+            QMessageBox.information(
+                self,
+                "Assign Room Type",
+                "No selected data points found.",
+            )
+            return
+
+        room_types = self.store.room_type_options()
+        if not room_types:
+            QMessageBox.information(
+                self,
+                "Assign Room Type",
+                "No room types have been created.",
+            )
+            return
+
+        labels = ["Manual / no room type"]
+        values = [""]
+
+        for room_type_id, room_type_name in room_types:
+            labels.append(
+                f"{room_type_id} - {room_type_name}"
+                if room_type_name
+                else room_type_id
+            )
+            values.append(room_type_id)
+
+        label, ok = QInputDialog.getItem(
+            self,
+            "Assign Room Type",
+            f"Room type for {len(selected)} selected data point(s):",
+            labels,
+            0,
+            False,
+        )
+
+        if not ok:
+            return
+
+        room_type_id = values[labels.index(label)]
+        selected_set = set(selected)
+
+        self.push_undo_state("Assign room type to data points")
+
+        updated = 0
+        for point in self.store.data.get("data_points", []):
+            name = str(point.get("name", "")).strip()
+            if name not in selected_set:
+                continue
+
+            point["room_type_id"] = room_type_id
+
+            if room_type_id:
+                point["qty"] = self.store.room_type_cable_qty(room_type_id)
+
+            self.store.sync_connection_qty_for_data_point(name)
+            updated += 1
+
+        self.set_status(
+            f"Assigned room type {room_type_id or 'Manual'} to {updated} data point(s)"
+        )
+        self.refresh_canvas()
+
     def update_selected_data_point_qty(self):
         selected = self._selected_data_point_names()
 
@@ -2996,15 +3275,21 @@ class CableRouteEditor(QMainWindow):
             department_options=self.department_options_with_floor(),
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
-            prefix = dialog.result["prefix"]
-            start_number = int(dialog.result["start_number"])
-            count = int(dialog.result["count"])
             kind = dialog.result["kind"]
+            count = int(dialog.result["count"])
             department_ids = list(dialog.result.get("department_ids", []))
 
-            next_name, next_number = self._next_available_bulk_location_name(
-                prefix, start_number
-            )
+            if kind in {"comms_room", "distributed_equipment_room"}:
+                prefix = self._comms_prefix_for_kind(kind)
+                next_name = self.suggest_next_comms_room_name(floor, kind)
+                match = re.match(rf"^{prefix}(\d+)-F{int(floor)}$", next_name)
+                next_number = int(match.group(1)) if match else 1
+            else:
+                prefix = dialog.result["prefix"]
+                start_number = int(dialog.result["start_number"])
+                next_name, next_number = self._next_available_bulk_location_name(
+                    prefix, start_number
+                )
 
             self.bulk_location_session = {
                 "prefix": prefix,
@@ -3018,7 +3303,6 @@ class CableRouteEditor(QMainWindow):
             self.set_status(
                 f"Mass create active: {count} {kind} item(s) starting at {next_name}. Click to place."
             )
-
     def copy_template_between_floors(self):
         source_floor = self.floor_spin.value()
         point_names = self.template_copy_candidate_names(source_floor)
@@ -3026,7 +3310,7 @@ class CableRouteEditor(QMainWindow):
             QMessageBox.information(
                 self,
                 "Copy Template Between Floors",
-                "No corridor nodes or data points found on the current floor.",
+                "No corridor nodes, comms rooms, or data points found on the current floor.",
             )
             return
 
@@ -3062,6 +3346,11 @@ class CableRouteEditor(QMainWindow):
                 result.get("created_data_points", [])
             )
             created_edges = len(result.get("created_edges", []))
+            created_count = (
+                len(result.get("created_corridors", []))
+                + len(result.get("created_locations", []))
+                + len(result.get("created_data_points", []))
+            )
 
             self.selected_point_name = None
             self._clear_canvas_multi_selection()
@@ -3071,6 +3360,7 @@ class CableRouteEditor(QMainWindow):
                 f"Copied {created_count} item(s) to floor {payload['target_floor']}.",
                 f"Corridor nodes created: {len(result.get('created_corridors', []))}",
                 f"Data points created: {len(result.get('created_data_points', []))}",
+                f"Comms rooms created: {len(result.get('created_locations', []))}",
                 f"Edges recreated: {created_edges}",
             ]
             skipped = result.get("skipped", [])
@@ -3254,10 +3544,18 @@ class CableRouteEditor(QMainWindow):
         if mode == "location":
             if self.bulk_location_session:
                 session = self.bulk_location_session
-                name, number = self._next_available_bulk_location_name(
-                    session["prefix"],
-                    session["next_number"],
-                )
+                if session["kind"] in {"comms_room", "distributed_equipment_room"}:
+                    name, number = self._next_comms_room_name(
+                        self.store.names_in_use(),
+                        floor,
+                        session["next_number"],
+                        session["kind"],
+                    )
+                else:
+                    name, number = self._next_available_bulk_location_name(
+                        session["prefix"],
+                        session["next_number"],
+                    )
                 self.push_undo_state("Add location")
                 self.store.add_location(
                     name,
@@ -3268,7 +3566,7 @@ class CableRouteEditor(QMainWindow):
                     department_ids=list(session.get("department_ids", [])),
                 )
 
-                session["next_number"] = number + 1
+                session["next_number"] = number
                 session["remaining"] -= 1
                 self.selected_point_name = name
                 self.refresh_canvas()
@@ -3341,6 +3639,7 @@ class CableRouteEditor(QMainWindow):
                     y,
                     session["qty"],
                     session["extension_distance_m"],
+                    dialog.result["room_type_id"],
                 )
 
                 session["next_number"] = number + 1
@@ -3370,6 +3669,7 @@ class CableRouteEditor(QMainWindow):
                 default_y=y,
                 default_name=self.store.suggest_next_data_point_name(floor),
                 department_options=self.department_options(),
+                room_type_options=self.store.room_type_options(),
             )
             if dialog.exec() == QDialog.Accepted and dialog.result:
                 if dialog.result["name"] in self.store.names_in_use():
@@ -3383,6 +3683,7 @@ class CableRouteEditor(QMainWindow):
                     dialog.result["qty"],
                     dialog.result["extension_distance_m"],
                     department_ids=dialog.result.get("department_ids", []),
+                    room_type_id=dialog.result["room_type_id"],
                 )
                 self.set_status(f"Added data point {dialog.result['name']}")
                 self.refresh_canvas()
@@ -3436,62 +3737,44 @@ class CableRouteEditor(QMainWindow):
             return
 
         if mode == "transition":
+            transition_id = None
             existing_transition = None
+
             if picked and "-F" in picked:
                 transition_id = picked.rsplit("-F", 1)[0]
                 for item in self.store.data.get("transitions", []):
                     if item["id"] == transition_id:
                         existing_transition = item
                         break
+
             dialog = TransitionEditorDialog(
                 self,
                 existing_transition,
                 default_floor=floor,
                 default_x=x,
                 default_y=y,
-                default_id=self.store.suggest_next_transition_id(),
+                default_id=transition_id or self.store.suggest_next_transition_id(),
             )
+
             if dialog.exec() == QDialog.Accepted and dialog.result:
+                self.push_undo_state("Upsert transition")
+
                 old_id = transition_id
                 new_id = dialog.result["id"]
 
-                if old_id == new_id:
-                    edited_locations = dialog.result["floor_locations"]
-                    edited_current = edited_locations.get(floor)
-                    if edited_current is None:
-                        edited_current = edited_locations.get(str(floor))
+                self.store.upsert_transition(
+                    new_id,
+                    dialog.result["floors"],
+                    dialog.result["floor_locations"],
+                    dialog.result["cable_limit"],
+                )
 
-                    if edited_current is not None:
-                        new_x, new_y = edited_current
-                        self.store.move_transition_from_floor_up(
-                            old_id,
-                            floor,
-                            new_x,
-                            new_y,
-                        )
+                if old_id and old_id != new_id:
+                    self._rename_transition_references(old_id, new_id)
 
-                        existing_transition["floors"] = dialog.result["floors"]
-                        existing_transition["cable_limit"] = dialog.result[
-                            "cable_limit"
-                        ]
-                    else:
-                        self.push_undo_state("Upsert department")
-                        self.store.upsert_transition(
-                            dialog.result["id"],
-                            dialog.result["floors"],
-                            dialog.result["floor_locations"],
-                            dialog.result["cable_limit"],
-                        )
-                else:
-                    self.push_undo_state("Upsert department")
-                    self.store.upsert_transition(
-                        dialog.result["id"],
-                        dialog.result["floors"],
-                        dialog.result["floor_locations"],
-                        dialog.result["cable_limit"],
-                    )
-                self.set_status(f"Saved {dialog.result['id']}")
+                self.set_status(f"Saved transition {new_id}")
                 self.refresh_canvas()
+
             return
 
     def on_double_click(self, event, sx, sy):
@@ -3555,6 +3838,7 @@ class CableRouteEditor(QMainWindow):
                 default_y=point["y"],
                 default_name=picked,
                 department_options=self.department_options(),
+                room_type_options=self.store.room_type_options(),
             )
             if dialog.exec() == QDialog.Accepted and dialog.result:
                 self.push_undo_state("Set point position")
@@ -3571,10 +3855,16 @@ class CableRouteEditor(QMainWindow):
                         break
                 for item in self.store.data.get("data_points", []):
                     if item["name"] == dialog.result["name"]:
-                        item["qty"] = dialog.result["qty"]
                         item["extension_distance_m"] = dialog.result[
                             "extension_distance_m"
                         ]
+                        item["room_type_id"] = dialog.result["room_type_id"]
+                        if item["room_type_id"]:
+                            item["qty"] = self.store.room_type_cable_qty(item["room_type_id"])
+                        else:
+                            item["qty"] = dialog.result["qty"]
+
+                        self.store.sync_connection_qty_for_data_point(dialog.result["name"])
                         item["department_ids"] = list(
                             dialog.result.get("department_ids", [])
                         )
@@ -3706,6 +3996,7 @@ class CableRouteEditor(QMainWindow):
             disconnect_selected_dp_connections_action = None
 
             assign_selected_dp_departments_action = None
+            assign_selected_dp_room_type_action = None
 
             if selected_data_points:
                 menu.addSeparator()
@@ -3721,6 +4012,9 @@ class CableRouteEditor(QMainWindow):
                 )
                 assign_selected_dp_departments_action = menu.addAction(
                     f"Assign department(s) for {len(selected_data_points)} selected data point(s)"
+                )
+                assign_selected_dp_room_type_action = menu.addAction(
+                    f"Assign room type for {len(selected_data_points)} selected data point(s)"
                 )
 
             selected_corridor_nodes = self._selected_corridor_node_names()
@@ -3777,6 +4071,11 @@ class CableRouteEditor(QMainWindow):
                 and action == assign_selected_dp_departments_action
             ):
                 self.manage_data_point_departments()
+            elif (
+                assign_selected_dp_room_type_action is not None
+                and action == assign_selected_dp_room_type_action
+            ):
+                self.assign_room_type_to_selected_data_points()
 
     def on_drag(self, event, sx, sy):
         mode = self.mode_combo.currentText()
@@ -3981,16 +4280,17 @@ class CableRouteEditor(QMainWindow):
         existing_ids.add(new_id)
         return new_id, existing_ids
 
-    def _next_comms_room_name(self, used_names, floor, start_number=1):
-        floor = int(floor)
-        n = int(start_number)
+    def _next_comms_room_name(self, used_names, floor, start_number=1, kind="comms_room"):
+            prefix = self._comms_prefix_for_kind(kind)
+            floor = int(floor)
+            n = int(start_number)
 
-        while True:
-            name = f"CR{n}-F{floor}"
-            if name not in used_names:
-                used_names.add(name)
-                return name, n + 1
-            n += 1
+            while True:
+                name = f"{prefix}{n}-F{floor}"
+                if name not in used_names:
+                    used_names.add(name)
+                    return name, n + 1
+                n += 1
 
     def _single_source_distances(self, graph, start):
         if start not in graph:
@@ -4612,12 +4912,12 @@ class CableRouteEditor(QMainWindow):
 
         self.set_status(f"Removed {len(removed_edges)} invalid edge(s)")
 
-    def _highest_comms_room_number(self):
+    def _highest_comms_room_number(self, prefix="CR"):
         highest = 0
-        pattern = re.compile(r"^CR(\d+)-F\d+$", re.IGNORECASE)
+        pattern = re.compile(rf"^{re.escape(prefix)}(\d+)-F\d+$", re.IGNORECASE)
 
         for item in self.store.data.get("locations", []):
-            if str(item.get("kind", "location")) != "comms_room":
+            if str(item.get("kind", "")) not in {"comms_room", "distributed_equipment_room"}:
                 continue
 
             name = str(item.get("name", "")).strip()
@@ -5783,6 +6083,26 @@ class CableRouteEditor(QMainWindow):
 
         nearby.sort(key=lambda x: x[1])
         return [n for n, _ in nearby]
+    
+    def manage_assets(self):
+        AssetsEditorWindow(
+            self,
+            self.store.data.get("assets", []),
+            self._save_assets,
+        )
+
+
+    def _save_assets(self, items):
+        self.push_undo_state("Save assets")
+        self.store.data["assets"] = items
+
+        for point in self.store.data.get("data_points", []):
+            name = str(point.get("name", "")).strip()
+            if name:
+                self.store.sync_connection_qty_for_data_point(name)
+
+        self.set_status("Assets updated and room type quantities recalculated")
+        self.refresh_canvas()
 
 
 def main():
