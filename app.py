@@ -165,6 +165,7 @@ def _batched_combinations(iterable, batch_size):
     if batch:
         yield batch
 
+
 _AUTOROUTE_GRAPH = None
 _AUTOROUTE_POINTS = None
 _AUTOROUTE_COMMS_ROOMS = None
@@ -881,6 +882,8 @@ class CableRouteEditor(QMainWindow):
                 "remaining": count,
                 "qty": qty,
                 "extension_distance_m": extension_distance_m,
+                "department_ids": [],
+                "room_type_id": "",
             }
 
             self.mode_combo.setCurrentText("data_point")
@@ -1877,10 +1880,10 @@ class CableRouteEditor(QMainWindow):
         return sorted(set(result))
 
     def _comms_prefix_for_kind(self, kind):
-            kind = str(kind or "").strip()
-            if kind == "distributed_equipment_room":
-                return "DER"
-            return "CR"
+        kind = str(kind or "").strip()
+        if kind == "distributed_equipment_room":
+            return "DER"
+        return "CR"
 
     def suggest_next_comms_room_name(self, floor, kind="comms_room"):
         prefix = self._comms_prefix_for_kind(kind)
@@ -1889,7 +1892,10 @@ class CableRouteEditor(QMainWindow):
 
         nums = []
         for item in self.store.data.get("locations", []):
-            if str(item.get("kind", "")) not in {"comms_room", "distributed_equipment_room"}:
+            if str(item.get("kind", "")) not in {
+                "comms_room",
+                "distributed_equipment_room",
+            }:
                 continue
 
             name = str(item.get("name", "")).strip()
@@ -2320,7 +2326,10 @@ class CableRouteEditor(QMainWindow):
     def comms_room_names(self):
         result = []
         for item in self.store.data.get("locations", []):
-            if str(item.get("kind", "location")) in {"comms_room", "distributed_equipment_room"}:
+            if str(item.get("kind", "location")) in {
+                "comms_room",
+                "distributed_equipment_room",
+            }:
                 name = str(item.get("name", "")).strip()
                 if name:
                     result.append(name)
@@ -2440,7 +2449,9 @@ class CableRouteEditor(QMainWindow):
             and str(item.get("name", "")).strip() not in existing_targets
         ]
 
-        skipped_existing = len(self.store.data.get("data_points", [])) - len(data_points)
+        skipped_existing = len(self.store.data.get("data_points", [])) - len(
+            data_points
+        )
 
         if not data_points:
             QMessageBox.information(
@@ -3181,9 +3192,7 @@ class CableRouteEditor(QMainWindow):
 
         for room_type_id, room_type_name in room_types:
             labels.append(
-                f"{room_type_id} - {room_type_name}"
-                if room_type_name
-                else room_type_id
+                f"{room_type_id} - {room_type_name}" if room_type_name else room_type_id
             )
             values.append(room_type_id)
 
@@ -3303,6 +3312,7 @@ class CableRouteEditor(QMainWindow):
             self.set_status(
                 f"Mass create active: {count} {kind} item(s) starting at {next_name}. Click to place."
             )
+
     def copy_template_between_floors(self):
         source_floor = self.floor_spin.value()
         point_names = self.template_copy_candidate_names(source_floor)
@@ -3632,6 +3642,7 @@ class CableRouteEditor(QMainWindow):
                     session["next_number"],
                 )
                 self.push_undo_state("Add data point")
+
                 self.store.add_data_point(
                     name,
                     floor,
@@ -3639,7 +3650,8 @@ class CableRouteEditor(QMainWindow):
                     y,
                     session["qty"],
                     session["extension_distance_m"],
-                    dialog.result["room_type_id"],
+                    department_ids=session.get("department_ids", []),
+                    room_type_id=session.get("room_type_id", ""),
                 )
 
                 session["next_number"] = number + 1
@@ -3860,11 +3872,15 @@ class CableRouteEditor(QMainWindow):
                         ]
                         item["room_type_id"] = dialog.result["room_type_id"]
                         if item["room_type_id"]:
-                            item["qty"] = self.store.room_type_cable_qty(item["room_type_id"])
+                            item["qty"] = self.store.room_type_cable_qty(
+                                item["room_type_id"]
+                            )
                         else:
                             item["qty"] = dialog.result["qty"]
 
-                        self.store.sync_connection_qty_for_data_point(dialog.result["name"])
+                        self.store.sync_connection_qty_for_data_point(
+                            dialog.result["name"]
+                        )
                         item["department_ids"] = list(
                             dialog.result.get("department_ids", [])
                         )
@@ -4280,17 +4296,19 @@ class CableRouteEditor(QMainWindow):
         existing_ids.add(new_id)
         return new_id, existing_ids
 
-    def _next_comms_room_name(self, used_names, floor, start_number=1, kind="comms_room"):
-            prefix = self._comms_prefix_for_kind(kind)
-            floor = int(floor)
-            n = int(start_number)
+    def _next_comms_room_name(
+        self, used_names, floor, start_number=1, kind="comms_room"
+    ):
+        prefix = self._comms_prefix_for_kind(kind)
+        floor = int(floor)
+        n = int(start_number)
 
-            while True:
-                name = f"{prefix}{n}-F{floor}"
-                if name not in used_names:
-                    used_names.add(name)
-                    return name, n + 1
-                n += 1
+        while True:
+            name = f"{prefix}{n}-F{floor}"
+            if name not in used_names:
+                used_names.add(name)
+                return name, n + 1
+            n += 1
 
     def _single_source_distances(self, graph, start):
         if start not in graph:
@@ -4917,7 +4935,10 @@ class CableRouteEditor(QMainWindow):
         pattern = re.compile(rf"^{re.escape(prefix)}(\d+)-F\d+$", re.IGNORECASE)
 
         for item in self.store.data.get("locations", []):
-            if str(item.get("kind", "")) not in {"comms_room", "distributed_equipment_room"}:
+            if str(item.get("kind", "")) not in {
+                "comms_room",
+                "distributed_equipment_room",
+            }:
                 continue
 
             name = str(item.get("name", "")).strip()
@@ -6083,14 +6104,13 @@ class CableRouteEditor(QMainWindow):
 
         nearby.sort(key=lambda x: x[1])
         return [n for n, _ in nearby]
-    
+
     def manage_assets(self):
         AssetsEditorWindow(
             self,
             self.store.data.get("assets", []),
             self._save_assets,
         )
-
 
     def _save_assets(self, items):
         self.push_undo_state("Save assets")

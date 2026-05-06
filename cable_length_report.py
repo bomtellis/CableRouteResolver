@@ -9,11 +9,6 @@ from heapq import heappop, heappush
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-SWITCH_PORTS = 48
-SWITCH_U = 1.0
-PATCHING_CABLES_PER_HALF_U = 24
-PATCHING_U_PER_GROUP = 0.5
-CABINET_U = 42.0
 
 @dataclass(frozen=True)
 class Point:
@@ -242,6 +237,8 @@ def connection_rows(data: dict) -> List[dict]:
         )
     return rows
 
+
+
 def comms_room_breakdown_rows(data: dict) -> List[dict]:
     points = build_points(data)
 
@@ -321,13 +318,6 @@ def comms_room_breakdown_rows(data: dict) -> List[dict]:
         ),
     )
 
-def write_csv(rows: Iterable[dict], output_path: Path) -> None:
-    fieldnames = ["start_location", "end_location", "cable_length_m", "qty"]
-    with output_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({key: row[key] for key in fieldnames})
 
 def write_comms_room_breakdown_csv(rows: Iterable[dict], output_path: Path) -> None:
     fieldnames = [
@@ -345,6 +335,175 @@ def write_comms_room_breakdown_csv(rows: Iterable[dict], output_path: Path) -> N
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+def _clean_text(value) -> str:
+    return str(value or "").strip()
+
+
+def _safe_int(value, default: int = 1) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _item_id(item: dict) -> str:
+    return _clean_text(
+        item.get("id")
+        or item.get("asset_id")
+        or item.get("room_type_id")
+        or item.get("name")
+    )
+
+
+def _item_name(item: dict, fallback: str = "") -> str:
+    return _clean_text(item.get("name") or item.get("description") or fallback)
+
+
+def _normalise_room_type_assets(room_type: dict) -> List[dict]:
+    raw_assets = (
+        room_type.get("assets")
+        or room_type.get("asset_items")
+        or room_type.get("room_assets")
+        or []
+    )
+
+    rows: List[dict] = []
+    for entry in raw_assets:
+        if isinstance(entry, dict):
+            asset_id = _clean_text(
+                entry.get("asset_id")
+                or entry.get("id")
+                or entry.get("asset")
+                or entry.get("name")
+            )
+            qty = _safe_int(
+                entry.get("qty", entry.get("quantity", entry.get("count", 1))),
+                default=1,
+            )
+        else:
+            asset_id = _clean_text(entry)
+            qty = 1
+
+        if not asset_id:
+            continue
+
+        rows.append({"asset_id": asset_id, "qty": max(qty, 0)})
+
+    return rows
+
+
+def assets_per_room_rows(data: dict) -> List[dict]:
+    assets = {
+        _item_id(item): item
+        for item in data.get("assets", [])
+        if isinstance(item, dict) and _item_id(item)
+    }
+    room_types = {
+        _item_id(item): item
+        for item in data.get("room_types", [])
+        if isinstance(item, dict) and _item_id(item)
+    }
+    departments = {
+        _clean_text(item.get("id")): _item_name(item, _clean_text(item.get("id")))
+        for item in data.get("departments", [])
+        if isinstance(item, dict) and _clean_text(item.get("id"))
+    }
+
+    candidate_rooms = list(data.get("data_points", [])) + [
+        item
+        for item in data.get("locations", [])
+        if _clean_text(item.get("room_type_id") or item.get("room_type"))
+    ]
+
+    rows: List[dict] = []
+    for room in candidate_rooms:
+        if not isinstance(room, dict):
+            continue
+
+        room_name = _clean_text(room.get("name") or room.get("id"))
+        room_type_id = _clean_text(room.get("room_type_id") or room.get("room_type"))
+        if not room_name or not room_type_id:
+            continue
+
+        room_type = room_types.get(room_type_id, {})
+        room_type_name = _item_name(room_type, room_type_id)
+        room_qty = _safe_int(
+            room.get("room_qty", room.get("room_quantity", room.get("quantity", 1))),
+            default=1,
+        )
+
+        department_ids = room.get("department_ids", [])
+        if not isinstance(department_ids, list):
+            department_ids = [department_ids] if _clean_text(department_ids) else []
+        if not department_ids:
+            department_ids = [""]
+
+        for asset_entry in _normalise_room_type_assets(room_type):
+            asset_id = asset_entry["asset_id"]
+            asset = assets.get(asset_id, {})
+            asset_name = _item_name(asset, asset_id)
+            asset_qty_per_room = int(asset_entry["qty"])
+            total_asset_qty = room_qty * asset_qty_per_room
+
+            for department_id in department_ids:
+                department_id = _clean_text(department_id)
+                rows.append(
+                    {
+                        "room_name": room_name,
+                        "floor": room.get("floor", ""),
+                        "department_id": department_id,
+                        "department_name": departments.get(department_id, "Unassigned"),
+                        "room_type_id": room_type_id,
+                        "room_type_name": room_type_name,
+                        "room_qty": room_qty,
+                        "asset_id": asset_id,
+                        "asset_name": asset_name,
+                        "asset_qty_per_room": asset_qty_per_room,
+                        "total_asset_qty": total_asset_qty,
+                    }
+                )
+
+    return sorted(
+        rows,
+        key=lambda r: (
+            int(r["floor"]) if str(r["floor"]).isdigit() else 9999,
+            str(r["room_name"]),
+            str(r["asset_name"]),
+        ),
+    )
+
+
+def write_assets_per_room_csv(rows: Iterable[dict], output_path: Path) -> None:
+    fieldnames = [
+        "room_name",
+        "floor",
+        "department_id",
+        "department_name",
+        "room_type_id",
+        "room_type_name",
+        "room_qty",
+        "asset_id",
+        "asset_name",
+        "asset_qty_per_room",
+        "total_asset_qty",
+    ]
+
+    with output_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
+def write_csv(rows: Iterable[dict], output_path: Path) -> None:
+    fieldnames = ["start_location", "end_location", "cable_length_m"]
+    with output_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row[key] for key in fieldnames})
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -370,14 +529,22 @@ def main() -> None:
     rows = connection_rows(data)
     write_csv(rows, output_path)
 
+
     breakdown_path = output_path.with_name(
         f"{output_path.stem}_comms_room_breakdown.csv"
     )
     breakdown_rows = comms_room_breakdown_rows(data)
     write_comms_room_breakdown_csv(breakdown_rows, breakdown_path)
 
+    assets_per_room_path = output_path.with_name(
+        f"{output_path.stem}_assets_per_room.csv"
+    )
+    asset_rows = assets_per_room_rows(data)
+    write_assets_per_room_csv(asset_rows, assets_per_room_path)
+
     print(f"Wrote {len(rows)} row(s) to {output_path}")
     print(f"Wrote {len(breakdown_rows)} comms room breakdown row(s) to {breakdown_path}")
+    print(f"Wrote {len(asset_rows)} asset per room row(s) to {assets_per_room_path}")
     if args.verbose:
         for row in rows:
             print(

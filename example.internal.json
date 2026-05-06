@@ -385,8 +385,38 @@
       "y": -79
     }
   ],
-  "room_types": [],
-  "assets": [],
+  "room_types": [
+    {
+      "id": "RT1",
+      "name": "Single Office",
+      "asset_ids": [
+        "A1",
+        "A2"
+      ]
+    },
+    {
+      "id": "RT2",
+      "name": "Double Office",
+      "asset_ids": [
+        "A1",
+        "A2"
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "id": "A1",
+      "name": "Computer",
+      "qty": 1,
+      "data_points": 1
+    },
+    {
+      "id": "A2",
+      "name": "Desk Phone",
+      "qty": 1,
+      "data_points": 1
+    }
+  ],
   "locations": [
     {
       "name": "Bed 1",

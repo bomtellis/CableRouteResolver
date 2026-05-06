@@ -1,0 +1,459 @@
+{
+  "project": {
+    "name": "Cable Routing Project"
+  },
+  "building": {
+    "floor_height_m": 4.0
+  },
+  "departments": [
+    {
+      "id": "1",
+      "name": "Offices",
+      "floor": 0,
+      "x": -21,
+      "y": 28
+    }
+  ],
+  "room_types": [
+    {
+      "id": "RT1",
+      "name": "Single Office",
+      "assets": [
+        {
+          "asset_id": "A1",
+          "qty": 1
+        },
+        {
+          "asset_id": "A2",
+          "qty": 1
+        }
+      ],
+      "asset_ids": [
+        "A1",
+        "A2"
+      ]
+    },
+    {
+      "id": "RT2",
+      "name": "Double Office",
+      "assets": [
+        {
+          "asset_id": "A1",
+          "qty": 2
+        },
+        {
+          "asset_id": "A2",
+          "qty": 2
+        }
+      ],
+      "asset_ids": [
+        "A1",
+        "A2"
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "id": "A1",
+      "name": "Computer",
+      "qty": 1,
+      "data_points": 1
+    },
+    {
+      "id": "A2",
+      "name": "Desk Phone",
+      "qty": 1,
+      "data_points": 1
+    }
+  ],
+  "locations": [
+    {
+      "name": "CF1",
+      "floor": 0,
+      "x": -18,
+      "y": 29,
+      "kind": "comms_room",
+      "department_ids": []
+    }
+  ],
+  "data_points": [
+    {
+      "name": "DP0-1",
+      "floor": 0,
+      "x": -29.0,
+      "y": 35.0,
+      "qty": 2,
+      "room_type_id": "RT1",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-2",
+      "floor": 0,
+      "x": -22,
+      "y": 38,
+      "qty": 2,
+      "room_type_id": "RT1",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-3",
+      "floor": 0,
+      "x": -12.0,
+      "y": 36.0,
+      "qty": 4,
+      "room_type_id": "RT2",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-4",
+      "floor": 0,
+      "x": -9.0,
+      "y": 25.0,
+      "qty": 4,
+      "room_type_id": "RT2",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-5",
+      "floor": 0,
+      "x": -31.0,
+      "y": 30.0,
+      "qty": 2,
+      "room_type_id": "RT1",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-6",
+      "floor": 0,
+      "x": -19.0,
+      "y": 32.0,
+      "qty": 4,
+      "room_type_id": "RT2",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-7",
+      "floor": 0,
+      "x": -32.0,
+      "y": 22.0,
+      "qty": 2,
+      "room_type_id": "RT1",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-8",
+      "floor": 0,
+      "x": -19.0,
+      "y": 21.0,
+      "qty": 4,
+      "room_type_id": "RT2",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    }
+  ],
+  "corridors": {
+    "nodes": [
+      {
+        "name": "C0-1",
+        "floor": 0,
+        "x": -28,
+        "y": 29,
+        "height_affl_m": 0.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-2",
+        "floor": 0,
+        "x": -26,
+        "y": 32,
+        "height_affl_m": 0.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-3",
+        "floor": 0,
+        "x": -22,
+        "y": 35,
+        "height_affl_m": 0.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-4",
+        "floor": 0,
+        "x": -13,
+        "y": 33,
+        "height_affl_m": 0.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-5",
+        "floor": 0,
+        "x": -13,
+        "y": 27,
+        "height_affl_m": 0.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-6",
+        "floor": 0,
+        "x": -20,
+        "y": 24,
+        "height_affl_m": 0.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-7",
+        "floor": 0,
+        "x": -29,
+        "y": 24,
+        "height_affl_m": 0.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-8",
+        "floor": 0,
+        "x": -20,
+        "y": 30,
+        "height_affl_m": 0.0,
+        "cable_limit": 0,
+        "restricted": false
+      }
+    ],
+    "edges": [
+      {
+        "from": "C0-1",
+        "to": "C0-2"
+      },
+      {
+        "from": "C0-2",
+        "to": "C0-1"
+      },
+      {
+        "from": "C0-2",
+        "to": "C0-3"
+      },
+      {
+        "from": "C0-3",
+        "to": "C0-2"
+      },
+      {
+        "from": "C0-3",
+        "to": "C0-4"
+      },
+      {
+        "from": "C0-4",
+        "to": "C0-3"
+      },
+      {
+        "from": "C0-4",
+        "to": "C0-5"
+      },
+      {
+        "from": "C0-5",
+        "to": "C0-4"
+      },
+      {
+        "from": "C0-5",
+        "to": "C0-6"
+      },
+      {
+        "from": "C0-6",
+        "to": "C0-5"
+      },
+      {
+        "from": "C0-6",
+        "to": "C0-7"
+      },
+      {
+        "from": "C0-7",
+        "to": "C0-6"
+      },
+      {
+        "from": "C0-7",
+        "to": "C0-8"
+      },
+      {
+        "from": "C0-8",
+        "to": "C0-7"
+      },
+      {
+        "from": "C0-1",
+        "to": "C0-8"
+      },
+      {
+        "from": "C0-8",
+        "to": "C0-1"
+      },
+      {
+        "from": "C0-3",
+        "to": "DP0-2"
+      },
+      {
+        "from": "DP0-2",
+        "to": "C0-3"
+      },
+      {
+        "from": "C0-4",
+        "to": "DP0-3"
+      },
+      {
+        "from": "DP0-3",
+        "to": "C0-4"
+      },
+      {
+        "from": "C0-5",
+        "to": "DP0-4"
+      },
+      {
+        "from": "DP0-4",
+        "to": "C0-5"
+      },
+      {
+        "from": "C0-6",
+        "to": "DP0-8"
+      },
+      {
+        "from": "DP0-8",
+        "to": "C0-6"
+      },
+      {
+        "from": "C0-8",
+        "to": "DP0-6"
+      },
+      {
+        "from": "DP0-6",
+        "to": "C0-8"
+      },
+      {
+        "from": "C0-2",
+        "to": "DP0-1"
+      },
+      {
+        "from": "DP0-1",
+        "to": "C0-2"
+      },
+      {
+        "from": "C0-1",
+        "to": "DP0-5"
+      },
+      {
+        "from": "DP0-5",
+        "to": "C0-1"
+      },
+      {
+        "from": "C0-7",
+        "to": "DP0-7"
+      },
+      {
+        "from": "DP0-7",
+        "to": "C0-7"
+      },
+      {
+        "from": "CF1",
+        "to": "C0-8"
+      },
+      {
+        "from": "C0-8",
+        "to": "CF1"
+      }
+    ],
+    "auto_connect": false
+  },
+  "transitions": [],
+  "floor_dxf_files": [],
+  "connections": [
+    {
+      "id": "C1",
+      "from": "CF1",
+      "to": "DP0-1",
+      "qty": 2,
+      "route_profile": ""
+    },
+    {
+      "id": "C2",
+      "from": "CF1",
+      "to": "DP0-2",
+      "qty": 2,
+      "route_profile": ""
+    },
+    {
+      "id": "C3",
+      "from": "CF1",
+      "to": "DP0-3",
+      "qty": 4,
+      "route_profile": ""
+    },
+    {
+      "id": "C4",
+      "from": "CF1",
+      "to": "DP0-4",
+      "qty": 4,
+      "route_profile": ""
+    },
+    {
+      "id": "C5",
+      "from": "CF1",
+      "to": "DP0-5",
+      "qty": 2,
+      "route_profile": ""
+    },
+    {
+      "id": "C6",
+      "from": "CF1",
+      "to": "DP0-6",
+      "qty": 4,
+      "route_profile": ""
+    },
+    {
+      "id": "C7",
+      "from": "CF1",
+      "to": "DP0-7",
+      "qty": 2,
+      "route_profile": ""
+    },
+    {
+      "id": "C8",
+      "from": "CF1",
+      "to": "DP0-8",
+      "qty": 4,
+      "route_profile": ""
+    }
+  ],
+  "route_profiles": {
+    "default": {
+      "allowed_transitions": [],
+      "allowed_nodes": [],
+      "allowed_edges": []
+    }
+  }
+}

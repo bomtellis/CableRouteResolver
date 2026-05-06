@@ -107,16 +107,36 @@ class JsonStore:
         for room_type in self.data.get("room_types", []):
             room_type.setdefault("id", "")
             room_type.setdefault("name", room_type.get("id", ""))
-            if "asset_ids" not in room_type:
-                room_type["asset_ids"] = [
-                    str(asset.get("id", "")).strip()
-                    for asset in room_type.get("assets", [])
-                    if isinstance(asset, dict) and str(asset.get("id", "")).strip()
+            if "assets" not in room_type:
+                room_type["assets"] = [
+                    {
+                        "asset_id": str(asset_id).strip(),
+                        "qty": 1,
+                    }
+                    for asset_id in room_type.get("asset_ids", [])
+                    if str(asset_id).strip()
                 ]
+            else:
+                cleaned_assets = []
+                for row in room_type.get("assets", []) or []:
+                    if not isinstance(row, dict):
+                        continue
+                    asset_id = str(row.get("asset_id", row.get("id", ""))).strip()
+                    if not asset_id:
+                        continue
+                    cleaned_assets.append(
+                        {
+                            "asset_id": asset_id,
+                            "qty": int(row.get("qty", 1) or 1),
+                        }
+                    )
+                room_type["assets"] = cleaned_assets
+
             room_type["asset_ids"] = [
-                str(x).strip() for x in room_type.get("asset_ids", []) if str(x).strip()
+                row["asset_id"]
+                for row in room_type.get("assets", [])
+                if str(row.get("asset_id", "")).strip()
             ]
-            room_type.pop("assets", None)
 
             for location in self.data.get("locations", []):
                 if "department_ids" not in location:
@@ -357,7 +377,9 @@ class JsonStore:
         room_type_id: str = "",
     ) -> None:
         room_type_id = str(room_type_id or "").strip()
-        resolved_qty = self.room_type_cable_qty(room_type_id) if room_type_id else int(qty)
+        resolved_qty = (
+            self.room_type_cable_qty(room_type_id) if room_type_id else int(qty)
+        )
 
         self.data["data_points"].append(
             {
@@ -811,7 +833,7 @@ class JsonStore:
         for item in self.data.get("corridors", {}).get("nodes", []):
             if str(item.get("name", "")).strip() == name:
                 return "corridor_node", item
-    
+
         for item in self.data.get("locations", []):
             if str(item.get("name", "")).strip() == name:
                 kind = str(item.get("kind", "location") or "location").strip()
@@ -989,7 +1011,7 @@ class JsonStore:
             "created_edges": created_edges,
             "skipped": skipped,
         }
-    
+
     def room_type_options(self) -> List[Tuple[str, str]]:
         return [
             (
@@ -1022,12 +1044,36 @@ class JsonStore:
             if str(asset.get("id", "")).strip()
         }
 
+        room_asset_rows = []
+        for row in room_type.get("assets", []) or []:
+            if not isinstance(row, dict):
+                continue
+            asset_id = str(row.get("asset_id", row.get("id", ""))).strip()
+            if asset_id:
+                room_asset_rows.append(
+                    {
+                        "asset_id": asset_id,
+                        "qty": int(row.get("qty", 1) or 1),
+                    }
+                )
+
+        if not room_asset_rows:
+            room_asset_rows = [
+                {
+                    "asset_id": str(asset_id).strip(),
+                    "qty": 1,
+                }
+                for asset_id in room_type.get("asset_ids", []) or []
+                if str(asset_id).strip()
+            ]
+
         total = 0
-        for asset_id in room_type.get("asset_ids", []) or []:
-            asset = assets_by_id.get(str(asset_id).strip())
+        for row in room_asset_rows:
+            asset = assets_by_id.get(row["asset_id"])
             if not asset:
                 continue
-            asset_qty = int(asset.get("qty", asset.get("quantity", 1)) or 1)
+
+            room_asset_qty = int(row.get("qty", 1) or 1)
             data_points = int(
                 asset.get(
                     "data_points",
@@ -1035,7 +1081,7 @@ class JsonStore:
                 )
                 or 1
             )
-            total += asset_qty * data_points
+            total += room_asset_qty * data_points
 
         return max(1, int(total))
 
@@ -1061,7 +1107,6 @@ class JsonStore:
             return int(point.get("qty", 1) or 1)
 
         return 1
-
 
     def sync_connection_qty_for_data_point(self, data_point_name: str) -> int:
         qty = self.sync_data_point_qty_from_room_type(data_point_name)

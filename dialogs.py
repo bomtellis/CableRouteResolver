@@ -1,6 +1,7 @@
 import json
 from typing import Any
 import time
+from copy import deepcopy
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -29,6 +30,20 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QSpinBox,
 )
+
+
+def suggest_next_id(items, prefix):
+    used = {
+        str(item.get("id", "")).strip()
+        for item in items
+        if str(item.get("id", "")).strip()
+    }
+
+    number = 1
+    while f"{prefix}{number}" in used:
+        number += 1
+
+    return f"{prefix}{number}"
 
 
 class PointEditorDialog(QDialog):
@@ -181,7 +196,9 @@ class BulkLocationPlacementDialog(QDialog):
         self.count_edit = QLineEdit("1")
 
         self.kind_combo = QComboBox()
-        self.kind_combo.addItems(["location", "comms_room", "distributed_equipment_room"])
+        self.kind_combo.addItems(
+            ["location", "comms_room", "distributed_equipment_room"]
+        )
 
         self.departments_list = QListWidget()
         self.departments_list.setSelectionMode(QAbstractItemView.NoSelection)
@@ -193,11 +210,15 @@ class BulkLocationPlacementDialog(QDialog):
             text = (
                 f"{department_id} - {department_name} - Floor {department_floor}"
                 if department_floor is not None and department_name
-                else f"{department_id} - Floor {department_floor}"
-                if department_floor is not None
-                else f"{department_id} - {department_name}"
-                if department_name
-                else department_id
+                else (
+                    f"{department_id} - Floor {department_floor}"
+                    if department_floor is not None
+                    else (
+                        f"{department_id} - {department_name}"
+                        if department_name
+                        else department_id
+                    )
+                )
             )
 
             item = QListWidgetItem(text)
@@ -389,7 +410,9 @@ class DataPointEditorDialog(QDialog):
         self.room_type_combo = QComboBox()
         self.room_type_combo.addItem("Manual / no room type", "")
         for room_type_id, room_type_name in self.room_type_options:
-            label = f"{room_type_id} - {room_type_name}" if room_type_name else room_type_id
+            label = (
+                f"{room_type_id} - {room_type_name}" if room_type_name else room_type_id
+            )
             self.room_type_combo.addItem(label, room_type_id)
 
         current_room_type = str(self.seed.get("room_type_id", "") or "").strip()
@@ -875,6 +898,7 @@ class TransitionEditorDialog(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "Invalid transition", str(exc))
 
+
 class RoomItemDialog(QDialog):
     def __init__(self, parent, seed=None):
         super().__init__(parent)
@@ -927,18 +951,20 @@ class RoomItemDialog(QDialog):
             super().accept()
         except Exception as exc:
             QMessageBox.critical(self, "Invalid room item", str(exc))
+
+
 class AssetEditorDialog(QDialog):
-    def __init__(self, parent, seed=None):
+    def __init__(self, parent, seed=None, default_id="A1"):
         super().__init__(parent)
         self.setWindowTitle("Asset")
         self.seed = seed or {}
+        self.default_id = default_id
         self.result = None
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
         layout.addLayout(form)
 
-        self.id_edit = QLineEdit(str(self.seed.get("id", "")))
         self.name_edit = QLineEdit(str(self.seed.get("name", "")))
 
         self.qty_spin = QSpinBox()
@@ -957,7 +983,6 @@ class AssetEditorDialog(QDialog):
             )
         )
 
-        form.addRow("Asset ID", self.id_edit)
         form.addRow("Asset name", self.name_edit)
         form.addRow("Quantity", self.qty_spin)
         form.addRow("Data points per item", self.data_points_spin)
@@ -969,10 +994,11 @@ class AssetEditorDialog(QDialog):
 
     def accept(self):
         try:
-            asset_id = self.id_edit.text().strip()
+            asset_id = str(self.seed.get("id", "") or self.default_id).strip()
             name = self.name_edit.text().strip()
+
             if not asset_id:
-                raise ValueError("Asset ID is required")
+                raise ValueError("Asset ID could not be generated")
             if not name:
                 raise ValueError("Asset name is required")
 
@@ -999,9 +1025,9 @@ class AssetsEditorWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(
-            ["ID", "Name", "Qty", "Data points each", "Total"]
+            ["Name", "Qty", "Data points each", "Total"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -1035,7 +1061,7 @@ class AssetsEditorWindow(QMainWindow):
         for asset in self.items:
             qty = int(asset.get("qty", 1) or 1)
             dp = int(asset.get("data_points", 1) or 1)
-            values = [asset.get("id", ""), asset.get("name", ""), qty, dp, qty * dp]
+            values = [asset.get("name", ""), qty, dp, qty * dp]
 
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -1043,11 +1069,11 @@ class AssetsEditorWindow(QMainWindow):
                 self.table.setItem(row, col, QTableWidgetItem(str(value)))
 
     def add_asset(self):
-        dialog = AssetEditorDialog(self)
+        dialog = AssetEditorDialog(
+            self,
+            default_id=suggest_next_id(self.items, "A"),
+        )
         if dialog.exec() == QDialog.Accepted and dialog.result:
-            if any(x.get("id") == dialog.result["id"] for x in self.items):
-                QMessageBox.critical(self, "Duplicate", "Asset ID already exists.")
-                return
             self.items.append(dialog.result)
             self._refresh_table()
 
@@ -1074,9 +1100,12 @@ class AssetsEditorWindow(QMainWindow):
         )
         if not rows:
             return
-        if QMessageBox.question(
-            self, "Delete assets", f"Delete {len(rows)} selected asset(s)?"
-        ) != QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self, "Delete assets", f"Delete {len(rows)} selected asset(s)?"
+            )
+            != QMessageBox.Yes
+        ):
             return
         for row in rows:
             del self.items[row]
@@ -1086,55 +1115,84 @@ class AssetsEditorWindow(QMainWindow):
         self.on_save(self.items)
         self.close()
 
+
 class RoomTypeEditorDialog(QDialog):
-    def __init__(self, parent, seed=None, asset_options=None, assets_by_id=None):
+    def __init__(
+        self,
+        parent,
+        seed=None,
+        asset_options=None,
+        assets_by_id=None,
+        default_id="RT1",
+    ):
         super().__init__(parent)
         self.setWindowTitle("Room Type")
-        self.resize(680, 520)
+        self.resize(780, 560)
         self.seed = seed or {}
+        self.default_id = default_id
         self.asset_options = list(asset_options or [])
         self.assets_by_id = dict(assets_by_id or {})
-        self.selected_asset_ids = {
-            str(x).strip()
-            for x in self.seed.get("asset_ids", [])
-            if str(x).strip()
-        }
         self.result = None
+
+        self.asset_rows_by_id = self._seed_asset_rows_by_id()
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
         layout.addLayout(form)
 
-        self.id_edit = QLineEdit(str(self.seed.get("id", "")))
         self.name_edit = QLineEdit(str(self.seed.get("name", "")))
-
-        form.addRow("Room type ID", self.id_edit)
         form.addRow("Room type name", self.name_edit)
 
         self.total_label = QLabel()
         layout.addWidget(self.total_label)
 
-        self.assets_list = QListWidget()
-        self.assets_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.assets_table = QTableWidget(0, 5)
+        self.assets_table.setHorizontalHeaderLabels(
+            ["Use", "Asset", "Data points each", "Qty in room", "Total"]
+        )
+        self.assets_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.assets_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.assets_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Interactive
+        )
+        self.assets_table.setColumnWidth(0, 55)
+        self.assets_table.setColumnWidth(1, 280)
+        self.assets_table.setColumnWidth(2, 120)
+        self.assets_table.setColumnWidth(3, 110)
+        self.assets_table.setColumnWidth(4, 100)
 
         for asset_id, asset_name in self.asset_options:
             asset = self.assets_by_id.get(asset_id, {})
-            qty = int(asset.get("qty", 1) or 1)
             dp = int(asset.get("data_points", 1) or 1)
-            label = f"{asset_id} - {asset_name} | Qty {qty} | DP each {dp} | Total {qty * dp}"
+            room_qty = int(self.asset_rows_by_id.get(asset_id, {}).get("qty", 1) or 1)
+            checked = asset_id in self.asset_rows_by_id
 
-            item = QListWidgetItem(label)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setData(Qt.UserRole, asset_id)
-            item.setCheckState(
-                Qt.Checked if asset_id in self.selected_asset_ids else Qt.Unchecked
+            row = self.assets_table.rowCount()
+            self.assets_table.insertRow(row)
+
+            use_item = QTableWidgetItem("")
+            use_item.setFlags(
+                Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable
             )
-            self.assets_list.addItem(item)
+            use_item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            use_item.setData(Qt.UserRole, asset_id)
+            self.assets_table.setItem(row, 0, use_item)
 
-        self.assets_list.itemChanged.connect(self._refresh_total)
+            self.assets_table.setItem(row, 1, QTableWidgetItem(str(asset_name)))
+            self.assets_table.setItem(row, 2, QTableWidgetItem(str(dp)))
+
+            qty_spin = QSpinBox()
+            qty_spin.setRange(1, 100000)
+            qty_spin.setValue(room_qty)
+            qty_spin.valueChanged.connect(self._refresh_total)
+            self.assets_table.setCellWidget(row, 3, qty_spin)
+
+            self.assets_table.setItem(row, 4, QTableWidgetItem("0"))
+
+        self.assets_table.itemChanged.connect(self._refresh_total)
 
         layout.addWidget(QLabel("Select assets required in this room type"))
-        layout.addWidget(self.assets_list, 1)
+        layout.addWidget(self.assets_table, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -1143,40 +1201,100 @@ class RoomTypeEditorDialog(QDialog):
 
         self._refresh_total()
 
-    def _checked_asset_ids(self):
-        result = []
-        for i in range(self.assets_list.count()):
-            item = self.assets_list.item(i)
-            if item.checkState() == Qt.Checked:
-                result.append(str(item.data(Qt.UserRole)).strip())
+    def _seed_asset_rows_by_id(self):
+        result = {}
+
+        for row in self.seed.get("assets", []) or []:
+            if not isinstance(row, dict):
+                continue
+            asset_id = str(row.get("asset_id", row.get("id", ""))).strip()
+            if asset_id:
+                result[asset_id] = {
+                    "asset_id": asset_id,
+                    "qty": int(row.get("qty", 1) or 1),
+                }
+
+        for asset_id in self.seed.get("asset_ids", []) or []:
+            asset_id = str(asset_id).strip()
+            if asset_id and asset_id not in result:
+                result[asset_id] = {
+                    "asset_id": asset_id,
+                    "qty": 1,
+                }
+
         return result
 
-    def _refresh_total(self):
+    def _checked_asset_rows(self):
+        result = []
+
+        for row in range(self.assets_table.rowCount()):
+            use_item = self.assets_table.item(row, 0)
+            if use_item is None or use_item.checkState() != Qt.Checked:
+                continue
+
+            asset_id = str(use_item.data(Qt.UserRole)).strip()
+            if not asset_id:
+                continue
+
+            qty_spin = self.assets_table.cellWidget(row, 3)
+            qty = int(qty_spin.value()) if qty_spin is not None else 1
+
+            result.append(
+                {
+                    "asset_id": asset_id,
+                    "qty": qty,
+                }
+            )
+
+        return result
+
+    def _refresh_total(self, *_):
         total = 0
-        for asset_id in self._checked_asset_ids():
+
+        for row in range(self.assets_table.rowCount()):
+            use_item = self.assets_table.item(row, 0)
+            asset_id = str(use_item.data(Qt.UserRole)).strip() if use_item else ""
             asset = self.assets_by_id.get(asset_id, {})
-            qty = int(asset.get("qty", 1) or 1)
             dp = int(asset.get("data_points", 1) or 1)
-            total += qty * dp
+
+            qty_spin = self.assets_table.cellWidget(row, 3)
+            room_qty = int(qty_spin.value()) if qty_spin is not None else 1
+
+            row_total = (
+                room_qty * dp if use_item and use_item.checkState() == Qt.Checked else 0
+            )
+
+            total_item = self.assets_table.item(row, 4)
+            if total_item is None:
+                total_item = QTableWidgetItem("0")
+                self.assets_table.setItem(row, 4, total_item)
+            total_item.setText(str(row_total))
+
+            total += row_total
+
         self.total_label.setText(f"Total data points / cables: {total}")
 
     def accept(self):
         try:
-            room_type_id = self.id_edit.text().strip()
+            room_type_id = str(self.seed.get("id", "") or self.default_id).strip()
             name = self.name_edit.text().strip()
             if not room_type_id:
                 raise ValueError("Room type ID is required")
             if not name:
                 raise ValueError("Room type name is required")
 
+            asset_rows = self._checked_asset_rows()
+
             self.result = {
                 "id": room_type_id,
                 "name": name,
-                "asset_ids": self._checked_asset_ids(),
+                "assets": asset_rows,
+                "asset_ids": [row["asset_id"] for row in asset_rows],
             }
             super().accept()
         except Exception as exc:
             QMessageBox.critical(self, "Invalid room type", str(exc))
+
 
 class RoomTypesEditorWindow(QMainWindow):
     def __init__(self, master, items, on_save, asset_options=None, assets_by_id=None):
@@ -1193,10 +1311,8 @@ class RoomTypesEditorWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(
-            ["ID", "Name", "Items", "Total data points"]
-        )
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Name", "Items", "Total data points"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -1230,15 +1346,42 @@ class RoomTypesEditorWindow(QMainWindow):
         self._refresh_table()
         self.show()
 
+    def _room_asset_rows(self, room_type):
+        rows = []
+
+        for row in room_type.get("assets", []) or []:
+            if not isinstance(row, dict):
+                continue
+            asset_id = str(row.get("asset_id", row.get("id", ""))).strip()
+            if asset_id:
+                rows.append(
+                    {
+                        "asset_id": asset_id,
+                        "qty": int(row.get("qty", 1) or 1),
+                    }
+                )
+
+        if rows:
+            return rows
+
+        return [
+            {
+                "asset_id": str(asset_id).strip(),
+                "qty": 1,
+            }
+            for asset_id in room_type.get("asset_ids", []) or []
+            if str(asset_id).strip()
+        ]
+
     def _room_total(self, room_type):
         total = 0
-        for asset_id in room_type.get("asset_ids", []) or []:
-            asset = self.assets_by_id.get(str(asset_id).strip())
+        for row in self._room_asset_rows(room_type):
+            asset = self.assets_by_id.get(row["asset_id"])
             if not asset:
                 continue
-            qty = int(asset.get("qty", 1) or 1)
+            room_qty = int(row.get("qty", 1) or 1)
             dp = int(asset.get("data_points", 1) or 1)
-            total += qty * dp
+            total += room_qty * dp
         return total
 
     def _refresh_table(self):
@@ -1248,9 +1391,8 @@ class RoomTypesEditorWindow(QMainWindow):
             row = self.table.rowCount()
             self.table.insertRow(row)
 
-            assets = room_type.get("asset_ids", []) or []
+            assets = self._room_asset_rows(room_type)
             values = [
-                room_type.get("id", ""),
                 room_type.get("name", ""),
                 len(assets),
                 self._room_total(room_type),
@@ -1264,12 +1406,9 @@ class RoomTypesEditorWindow(QMainWindow):
             self,
             asset_options=self.asset_options,
             assets_by_id=self.assets_by_id,
+            default_id=suggest_next_id(self.items, "RT"),
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
-            new_id = dialog.result["id"]
-            if any(str(item.get("id", "")).strip() == new_id for item in self.items):
-                QMessageBox.critical(self, "Duplicate", "Room type ID already exists.")
-                return
             self.items.append(dialog.result)
             self._refresh_table()
 
@@ -1284,6 +1423,7 @@ class RoomTypesEditorWindow(QMainWindow):
         old_id = str(self.items[row].get("id", "")).strip()
         dialog = RoomTypeEditorDialog(
             self,
+            seed=deepcopy(self.items[row]),
             asset_options=self.asset_options,
             assets_by_id=self.assets_by_id,
         )
@@ -1337,6 +1477,7 @@ class RoomTypesEditorWindow(QMainWindow):
     def save(self):
         self.on_save(self.items)
         self.close()
+
 
 class TableListEditor(QMainWindow):
     def __init__(self, master, title, columns, items, on_save):
