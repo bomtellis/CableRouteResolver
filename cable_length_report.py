@@ -359,7 +359,6 @@ def _item_id(item: dict) -> str:
 def _item_name(item: dict, fallback: str = "") -> str:
     return _clean_text(item.get("name") or item.get("description") or fallback)
 
-
 def _normalise_room_type_assets(room_type: dict) -> List[dict]:
     raw_assets = (
         room_type.get("assets")
@@ -370,6 +369,8 @@ def _normalise_room_type_assets(room_type: dict) -> List[dict]:
 
     rows: List[dict] = []
     for entry in raw_assets:
+        connection_type = ""
+
         if isinstance(entry, dict):
             asset_id = _clean_text(
                 entry.get("asset_id")
@@ -381,6 +382,7 @@ def _normalise_room_type_assets(room_type: dict) -> List[dict]:
                 entry.get("qty", entry.get("quantity", entry.get("count", 1))),
                 default=1,
             )
+            connection_type = _item_connection_type(entry)
         else:
             asset_id = _clean_text(entry)
             qty = 1
@@ -388,10 +390,27 @@ def _normalise_room_type_assets(room_type: dict) -> List[dict]:
         if not asset_id:
             continue
 
-        rows.append({"asset_id": asset_id, "qty": max(qty, 0)})
+        rows.append(
+            {
+                "asset_id": asset_id,
+                "qty": max(qty, 0),
+                "connection_type": connection_type,
+            }
+        )
 
     return rows
 
+def _item_connection_type(item: dict) -> str:
+    value = (
+        item.get("connection_type")
+        or item.get("connection_types")
+        or item.get("connection")
+        or item.get("type")
+        or ""
+    )
+    if isinstance(value, list):
+        return ", ".join(_clean_text(x) for x in value if _clean_text(x))
+    return _clean_text(value)
 
 def assets_per_room_rows(data: dict) -> List[dict]:
     assets = {
@@ -443,6 +462,7 @@ def assets_per_room_rows(data: dict) -> List[dict]:
             asset_id = asset_entry["asset_id"]
             asset = assets.get(asset_id, {})
             asset_name = _item_name(asset, asset_id)
+            connection_type = asset_entry.get("connection_type") or _item_connection_type(asset)
             asset_qty_per_room = int(asset_entry["qty"])
             total_asset_qty = room_qty * asset_qty_per_room
 
@@ -461,6 +481,7 @@ def assets_per_room_rows(data: dict) -> List[dict]:
                         "asset_name": asset_name,
                         "asset_qty_per_room": asset_qty_per_room,
                         "total_asset_qty": total_asset_qty,
+                        "connection_type": connection_type,
                     }
                 )
 
@@ -487,6 +508,7 @@ def write_assets_per_room_csv(rows: Iterable[dict], output_path: Path) -> None:
         "asset_name",
         "asset_qty_per_room",
         "total_asset_qty",
+        "connection_type",
     ]
 
     with output_path.open("w", encoding="utf-8", newline="") as f:

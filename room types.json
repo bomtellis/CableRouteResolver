@@ -1,0 +1,370 @@
+  {
+  "room_types": [
+    {
+      "id": "RT1",
+      "name": "Single Office",
+      "asset_ids": [
+        "A1",
+        "A2"
+      ],
+      "assets": [
+        {
+          "asset_id": "A1",
+          "qty": 1
+        },
+        {
+          "asset_id": "A2",
+          "qty": 1
+        }
+      ]
+    },
+    {
+      "id": "RT2",
+      "name": "Double Office",
+      "assets": [
+        {
+          "asset_id": "A1",
+          "qty": 2
+        },
+        {
+          "asset_id": "A2",
+          "qty": 2
+        }
+      ],
+      "asset_ids": [
+        "A1",
+        "A2"
+      ]
+    },
+    {
+      "id": "RT3",
+      "name": "Frailty Inpatient",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT4",
+      "name": "Generic - Touchdown Base",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT5",
+      "name": "Generic - Staff Base",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT6",
+      "name": "MDT",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT7",
+      "name": "Generic - Dirty Utility",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT8",
+      "name": "Generic - Clean Utility",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT9",
+      "name": "Generic - Assessment / Treat",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT10",
+      "name": "Generic - Recliner Space",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT11",
+      "name": "Generic - Treatment Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT12",
+      "name": "Generic - Triage",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT13",
+      "name": "Generic - Interview Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT14",
+      "name": "Generic - Resus Bay",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT15",
+      "name": "Generic - Consult / Exam",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT16",
+      "name": "CT Scanning Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT17",
+      "name": "MRI Scanning Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT18",
+      "name": "MRI Control Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT19",
+      "name": "CT Control Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT20",
+      "name": "Ultrasound Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT21",
+      "name": "MRI Technical Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT22",
+      "name": "Workstations - 10 person",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT23",
+      "name": "Workstations - 5 person",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT24",
+      "name": "Audio Booth Control Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT25",
+      "name": "Audio Booth",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT26",
+      "name": "Reporting Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT27",
+      "name": "Triage Bay",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT28",
+      "name": "Cannulation Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT29",
+      "name": "Anaesthetic Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT30",
+      "name": "Disposal Hold",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT31",
+      "name": "Delivery Hub",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT32",
+      "name": "General Theatre",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT33",
+      "name": "Obstetric Theatre",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT34",
+      "name": "Orthopedic Theatre",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT35",
+      "name": "Recovery Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT36",
+      "name": "Prep / Stage Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT37",
+      "name": "Critical Care - ICU Bed Space",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT38",
+      "name": "Maternity - Birthing Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT39",
+      "name": "Maternity - Bereavement Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT40",
+      "name": "Maternity - Birthing Room Pool",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT41",
+      "name": "Generic - Seminar (30 person)",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT42",
+      "name": "Endoscopy - Procedure Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT43",
+      "name": "Endoscopy - Prep / Stage 2 Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT44",
+      "name": "Endoscopy - Washer Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT45",
+      "name": "Generic - Minor Procedure Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT46",
+      "name": "Technical - Bed Workshop",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT47",
+      "name": "Catering - Ward Trolley Parking",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT48",
+      "name": "Catering - Trolley Wash",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT49",
+      "name": "Catering - Freezer Store",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT50",
+      "name": "Catering - Refrigerated Store",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT51",
+      "name": "Catering - Dry Goods Store",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT52",
+      "name": "Generic - Fluids Store",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT53",
+      "name": "Generic - Medical Prep",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT54",
+      "name": "Generic - Locker Room",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT55",
+      "name": "Generic - Staff Change",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT56",
+      "name": "Generic - Male WC",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT57",
+      "name": "Generic - Female WC",
+      "assets": [],
+      "asset_ids": []
+    }
+  ]
+}

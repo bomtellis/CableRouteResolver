@@ -58,6 +58,8 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QListWidget,
     QLineEdit,
+    QDialogButtonBox,
+    QCompleter,
 )
 
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -77,6 +79,7 @@ from dialogs import (
     CommsRoomOptimisationProgressDialog,
     RoomTypesEditorWindow,
     AssetsEditorWindow,
+    AssetCategoriesEditorWindow,
 )
 from advanced_dialogs import (
     ConnectionEditorWindow,
@@ -557,8 +560,13 @@ class CableRouteEditor(QMainWindow):
         self.selected_for_edge = None
         self.selected_point_name = None
         self.selected_template_names = set()
+        self.selection_clipboard = None
         self.dragging_point_name = None
         self.drag_mode_active = False
+        self.multi_drag_names = []
+        self.multi_drag_start_positions = {}
+        self.multi_drag_anchor_name = None
+        self.multi_drag_anchor_start = None
         self.alt_move_locked = False
         self.selection_rect_active = False
         self.selection_rect_origin = None
@@ -582,6 +590,67 @@ class CableRouteEditor(QMainWindow):
 
         self._build_ui()
         self.refresh_canvas()
+
+    def _selected_visible_drag_names(self):
+        floor = self.floor_spin.value()
+        points = self.store.points_for_floor(floor)
+        result = []
+
+        for name in sorted(self.selected_template_names):
+            point = points.get(name)
+            if not point:
+                continue
+
+            point = {**point, "name": name}
+            if not self._is_point_kind_visible(point):
+                continue
+
+            if str(point.get("kind", "")).strip() not in {"corridor_node", "data_point"}:
+                continue
+
+            result.append(name)
+
+        return result
+
+    def _begin_multi_drag(self, picked):
+        points = self.store.all_points()
+
+        if picked in self.selected_template_names:
+            names = self._selected_visible_drag_names()
+        else:
+            names = [picked]
+
+        if picked not in names:
+            names = [picked]
+
+        self.multi_drag_names = names
+        self.multi_drag_anchor_name = picked
+
+        anchor = points.get(picked)
+        if not anchor:
+            self.multi_drag_anchor_start = None
+            self.multi_drag_start_positions = {}
+            return
+
+        self.multi_drag_anchor_start = (
+            float(anchor.get("x", 0.0)),
+            float(anchor.get("y", 0.0)),
+        )
+
+        self.multi_drag_start_positions = {
+            name: (
+                float(points[name].get("x", 0.0)),
+                float(points[name].get("y", 0.0)),
+            )
+            for name in names
+            if name in points
+        }
+
+    def _clear_multi_drag(self):
+        self.multi_drag_names = []
+        self.multi_drag_start_positions = {}
+        self.multi_drag_anchor_name = None
+        self.multi_drag_anchor_start = None
 
     def push_undo_state(self, label="Change"):
         self.undo_stack.append(
@@ -790,6 +859,7 @@ class CableRouteEditor(QMainWindow):
             ("Fit View", self.fit_view),
             ("Validate", self.validate_json),
             ("Departments", self.manage_departments),
+            ("Asset Categories", self.manage_asset_categories),
             ("Assets", self.manage_assets),
             ("Room Types", self.manage_room_types),
             ("Locations", self.manage_locations),
@@ -838,6 +908,242 @@ class CableRouteEditor(QMainWindow):
 
         QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.undo)
         QShortcut(QKeySequence("Ctrl+Y"), self, activated=self.redo)
+
+        QShortcut(QKeySequence("Ctrl+C"), self, activated=self.copy_selected_template_items)
+        QShortcut(QKeySequence("Ctrl+V"), self, activated=self.paste_selected_template_items_at_view_centre)
+
+    def delete_right_clicked_items(self, picked):
+        if not picked:
+            return
+
+        names_to_delete = []
+
+        if picked in self.selected_template_names:
+            names_to_delete = sorted(self.selected_template_names)
+        else:
+            names_to_delete = [picked]
+
+        names_to_delete = [
+            name for name in names_to_delete
+            if name in self.store.names_in_use()
+        ]
+
+        if not names_to_delete:
+            return
+
+        if len(names_to_delete) == 1:
+            message = f"Delete {names_to_delete[0]}?"
+        else:
+            message = f"Delete {len(names_to_delete)} selected item(s)?"
+
+        if QMessageBox.question(self, "Delete", message) != QMessageBox.Yes:
+            return
+
+        self.push_undo_state("Delete selected item(s)")
+
+        transition_ids = {
+            str(t.get("id", "")).strip()
+            for t in self.store.data.get("transitions", [])
+            if str(t.get("id", "")).strip()
+        }
+
+        deleted = 0
+
+        for name in names_to_delete:
+            if "-F" in name and name.rsplit("-F", 1)[0] in transition_ids:
+                self.store.delete_transition(name.rsplit("-F", 1)[0])
+            else:
+                self.store.delete_point(name)
+            deleted += 1
+
+        self.selected_point_name = None
+        self._clear_canvas_multi_selection()
+        self.refresh_canvas()
+        self.set_status(f"Deleted {deleted} item(s)")
+
+    def _selected_copyable_names(self):
+        floor = self.floor_spin.value()
+        eligible = self._eligible_template_name_set(floor)
+        return sorted(
+            name for name in self.selected_template_names
+            if name in eligible
+        )
+
+
+    def copy_selected_template_items(self):
+        selected = self._selected_copyable_names()
+        if not selected:
+            self.set_status("No selected items to copy")
+            return
+
+        points = self.store.all_points()
+        valid = [name for name in selected if name in points]
+        if not valid:
+            self.set_status("No valid selected items to copy")
+            return
+
+        base_x = min(float(points[name]["x"]) for name in valid)
+        base_y = min(float(points[name]["y"]) for name in valid)
+        source_floor = int(self.floor_spin.value())
+
+        items = []
+        for name in valid:
+            point = points[name]
+            kind = str(point.get("kind", "")).strip()
+
+            if kind not in {
+                "corridor_node",
+                "data_point",
+                "location",
+                "comms_room",
+                "distributed_equipment_room",
+            }:
+                continue
+
+            items.append(
+                {
+                    "name": name,
+                    "kind": kind,
+                    "offset_x": float(point["x"]) - base_x,
+                    "offset_y": float(point["y"]) - base_y,
+                }
+            )
+
+        if not items:
+            self.set_status("No copyable items selected")
+            return
+
+        selected_set = {item["name"] for item in items}
+        internal_edges = []
+        for edge in self.store.data.get("corridors", {}).get("edges", []):
+            start = str(edge.get("from", "")).strip()
+            end = str(edge.get("to", "")).strip()
+            if start in selected_set and end in selected_set:
+                internal_edges.append({"from": start, "to": end})
+
+        self.selection_clipboard = {
+            "source_floor": source_floor,
+            "base_x": base_x,
+            "base_y": base_y,
+            "items": items,
+            "internal_edges": internal_edges,
+        }
+
+        self.set_status(
+            f"Copied {len(items)} item(s) with offsets from base point ({base_x:.3f}, {base_y:.3f})"
+        )
+
+
+    def paste_selected_template_items_at_view_centre(self):
+        centre = self.canvas.mapToScene(self.canvas.viewport().rect().center())
+        x, y = self.scene_to_world(centre.x(), centre.y())
+        x, y = self.snap(x, y)
+        self.paste_selected_template_items_at(x, y, self.floor_spin.value())
+
+
+    def paste_selected_template_items_at(self, base_x, base_y, target_floor):
+        if not self.selection_clipboard:
+            self.set_status("Nothing copied")
+            return
+
+        items = list(self.selection_clipboard.get("items", []))
+        if not items:
+            self.set_status("Copied selection is empty")
+            return
+
+        self.push_undo_state("Paste selected items")
+
+        used_names = set(self.store.names_in_use())
+        id_map = {}
+        created_names = []
+
+        for copied in items:
+            old_name = str(copied.get("name", "")).strip()
+            kind, record = self.store._point_record_by_name(old_name)
+
+            if kind is None or record is None:
+                continue
+
+            x = round(float(base_x) + float(copied.get("offset_x", 0.0)), 3)
+            y = round(float(base_y) + float(copied.get("offset_y", 0.0)), 3)
+
+            if kind == "corridor_node":
+                new_name = self.store._suggest_next_corridor_name_for_floor(
+                    target_floor,
+                    used_names,
+                )
+                used_names.add(new_name)
+
+                new_record = deepcopy(record)
+                new_record["name"] = new_name
+                new_record["floor"] = int(target_floor)
+                new_record["x"] = x
+                new_record["y"] = y
+
+                self.store.data.setdefault("corridors", {}).setdefault("nodes", []).append(new_record)
+
+            elif kind == "data_point":
+                new_name = self.store._suggest_next_data_point_name_for_floor(
+                    target_floor,
+                    used_names,
+                )
+                used_names.add(new_name)
+
+                new_record = deepcopy(record)
+                new_record["name"] = new_name
+                new_record["floor"] = int(target_floor)
+                new_record["x"] = x
+                new_record["y"] = y
+
+                self.store.data.setdefault("data_points", []).append(new_record)
+
+            elif kind in {"location", "comms_room", "distributed_equipment_room"}:
+                if kind in {"comms_room", "distributed_equipment_room"}:
+                    new_name = self.store._suggest_next_comms_room_name_for_floor(
+                        target_floor,
+                        used_names,
+                        kind,
+                    )
+                else:
+                    new_name = self._next_available_bulk_location_name("LOC", 1)[0]
+
+                while new_name in used_names:
+                    new_name = f"{new_name}_copy"
+
+                used_names.add(new_name)
+
+                new_record = deepcopy(record)
+                new_record["name"] = new_name
+                new_record["floor"] = int(target_floor)
+                new_record["x"] = x
+                new_record["y"] = y
+
+                self.store.data.setdefault("locations", []).append(new_record)
+
+            else:
+                continue
+
+            id_map[old_name] = new_name
+            created_names.append(new_name)
+
+        created_edges = 0
+        for edge in self.selection_clipboard.get("internal_edges", []):
+            old_start = str(edge.get("from", "")).strip()
+            old_end = str(edge.get("to", "")).strip()
+
+            if old_start not in id_map or old_end not in id_map:
+                continue
+
+            self.store.add_edge(id_map[old_start], id_map[old_end])
+            created_edges += 1
+
+        self.selected_point_name = None
+        self._set_canvas_multi_selection(created_names, append=False)
+        self.refresh_canvas()
+
+        self.set_status(
+            f"Pasted {len(created_names)} item(s) at cursor position; recreated {created_edges} internal edge(s)"
+        )
 
     def cancel_bulk_location_placement(self):
         if self.bulk_location_session:
@@ -1378,7 +1684,17 @@ class CableRouteEditor(QMainWindow):
         self.selected_template_names.clear()
 
     def _eligible_template_name_set(self, floor):
-        return set(self.template_copy_candidate_names(floor))
+        result = set()
+
+        for name, point in self.store.points_for_floor(floor).items():
+            if point.get("kind") not in {"corridor_node", "data_point"}:
+                continue
+            point = {**point, "name": name}
+            if not self._is_point_kind_visible(point):
+                continue
+            result.add(name)
+
+        return result
 
     def _set_canvas_multi_selection(self, names, append=False, toggle=False):
         floor = self.floor_spin.value()
@@ -1773,12 +2089,20 @@ class CableRouteEditor(QMainWindow):
             return False
 
         kind = str(point.get("kind", "")).strip()
+        name = str(point.get("name", "")).strip()
 
         if kind == "corridor_node":
             return self.show_nodes_check.isChecked()
 
         if kind == "data_point":
-            return self.show_data_points_check.isChecked()
+            if not self.show_data_points_check.isChecked():
+                return False
+            if (
+                self.hide_connected_data_points_check.isChecked()
+                and name in self._connected_data_point_names()
+            ):
+                return False
+            return True
 
         if kind == "location":
             return self.show_locations_check.isChecked()
@@ -1786,7 +2110,6 @@ class CableRouteEditor(QMainWindow):
         if kind == "comms_room":
             return self.show_comms_rooms_check.isChecked()
 
-        # Keep transitions visible/selectable unless you add a transition checkbox.
         if kind == "transition_node":
             return True
 
@@ -1814,27 +2137,34 @@ class CableRouteEditor(QMainWindow):
             return 0.35
         return 3.0
 
-    def find_nearest_selectable_name(self, x, y, floor, radius_world=3.0):
-        best = None
-        best_dist = radius_world
+    def find_nearest_selectable_name(
+        self,
+        x,
+        y,
+        floor,
+        radius_world=1.0,
+    ):
+        best_name = None
+        best_dist = None
 
         for name, point in self.store.points_for_floor(floor).items():
+            point = {**point, "name": name}
+
             if not self._is_point_kind_visible(point):
                 continue
 
-            d = math.hypot(point["x"] - x, point["y"] - y)
-            if d <= best_dist:
-                best = name
-                best_dist = d
+            dist = math.hypot(
+                float(point["x"]) - float(x),
+                float(point["y"]) - float(y),
+            )
 
-        if self._is_department_visible():
-            for department_id, dept in self.store.departments_for_floor(floor).items():
-                d = math.hypot(dept["x"] - x, dept["y"] - y)
-                if d <= best_dist:
-                    best = department_id
-                    best_dist = d
+            if dist <= float(radius_world) and (
+                best_dist is None or dist < best_dist
+            ):
+                best_name = name
+                best_dist = dist
 
-        return best
+        return best_name
 
     def build_floor_map(self, store):
         floor_map = {}
@@ -2975,12 +3305,19 @@ class CableRouteEditor(QMainWindow):
             if str(asset.get("id", "")).strip()
         }
 
+        asset_categories_by_id = {
+            str(category.get("id", "")).strip(): str(category.get("name", category.get("id", ""))).strip()
+            for category in self.store.data.get("asset_categories", [])
+            if str(category.get("id", "")).strip()
+        }
+
         RoomTypesEditorWindow(
             self,
             self.store.data.get("room_types", []),
             self._save_room_types,
             asset_options=self.store.asset_options(),
             assets_by_id=assets_by_id,
+            asset_categories_by_id=asset_categories_by_id,
         )
 
     def _save_room_types(self, items):
@@ -3187,28 +3524,72 @@ class CableRouteEditor(QMainWindow):
             )
             return
 
-        labels = ["Manual / no room type"]
-        values = [""]
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Assign Room Type")
+
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        room_type_combo = QComboBox()
+        room_type_combo.setEditable(True)
+        room_type_combo.setInsertPolicy(QComboBox.NoInsert)
+        room_type_combo.setMaxVisibleItems(20)
+
+        room_type_combo.addItem("Manual / no room type", "")
 
         for room_type_id, room_type_name in room_types:
-            labels.append(
-                f"{room_type_id} - {room_type_name}" if room_type_name else room_type_id
-            )
-            values.append(room_type_id)
+            room_type_id = str(room_type_id).strip()
+            room_type_name = str(room_type_name).strip()
+            label = f"{room_type_id} - {room_type_name}" if room_type_name else room_type_id
+            room_type_combo.addItem(label, room_type_id)
 
-        label, ok = QInputDialog.getItem(
-            self,
-            "Assign Room Type",
-            f"Room type for {len(selected)} selected data point(s):",
-            labels,
-            0,
-            False,
+        completer = QCompleter(room_type_combo)
+        completer.setModel(room_type_combo.model())
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        room_type_combo.setCompleter(completer)
+
+        form.addRow(
+            f"Room type for {len(selected)} selected data point(s)",
+            room_type_combo,
         )
 
-        if not ok:
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def selected_room_type_id():
+            text = room_type_combo.currentText().strip()
+
+            if not text or text == "Manual / no room type":
+                return ""
+
+            current_data = room_type_combo.currentData()
+            if current_data is not None:
+                return str(current_data).strip()
+
+            for idx in range(room_type_combo.count()):
+                label = room_type_combo.itemText(idx).strip()
+                room_type_id = str(room_type_combo.itemData(idx) or "").strip()
+
+                if text == label:
+                    return room_type_id
+
+                if room_type_id and text.lower() == room_type_id.lower():
+                    return room_type_id
+
+                if room_type_id and text.lower().startswith(room_type_id.lower() + " -"):
+                    return room_type_id
+
+            return ""
+
+        if dialog.exec() != QDialog.Accepted:
             return
 
-        room_type_id = values[labels.index(label)]
+        room_type_id = selected_room_type_id()
         selected_set = set(selected)
 
         self.push_undo_state("Assign room type to data points")
@@ -3431,7 +3812,8 @@ class CableRouteEditor(QMainWindow):
                     elif modifiers & Qt.ShiftModifier:
                         self._set_canvas_multi_selection([picked], append=True)
                     else:
-                        self._set_canvas_multi_selection([picked], append=False)
+                        if picked not in self.selected_template_names:
+                            self._set_canvas_multi_selection([picked], append=False)
                 else:
                     if not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier)):
                         self._clear_canvas_multi_selection()
@@ -3439,6 +3821,8 @@ class CableRouteEditor(QMainWindow):
                 self.dragging_point_name = picked
                 self.alt_move_locked = self._is_alt_pressed()
                 self.drag_mode_active = True
+
+                self._begin_multi_drag(picked)
 
                 if self.alt_move_locked:
                     self.set_status(
@@ -3952,12 +4336,15 @@ class CableRouteEditor(QMainWindow):
         self.drag_mode_active = False
         self.alt_move_locked = False
         self.last_pan = None
+        self._clear_multi_drag()
 
     def on_right_click(self, event, sx, sy):
         mode = self.mode_combo.currentText()
         floor = self.floor_spin.value()
         x, y = self.scene_to_world(sx, sy)
         picked = self.find_nearest_selectable_name(x, y, floor)
+
+        x, y = self.snap(x, y)
 
         # In edge mode, right click is ONLY for deleting edges.
         # Never fall through to the normal context menu.
@@ -4004,6 +4391,16 @@ class CableRouteEditor(QMainWindow):
             menu = QMenu(self)
             show_edges_action = menu.addAction("Show all edge connections")
             estimate_cables_action = menu.addAction("Show estimated cables passing")
+
+            menu.addSeparator()
+            copy_selected_action = menu.addAction(
+                f"Copy selected ({len(self._selected_copyable_names())})"
+            )
+            paste_here_action = menu.addAction("Paste copied selection here")
+            paste_here_action.setEnabled(bool(self.selection_clipboard))
+
+            rotate_90_action = menu.addAction("Rotate selected 90° clockwise")
+            delete_action = menu.addAction("Delete")
 
             selected_data_points = self._selected_data_point_names()
             update_selected_dp_qty_action = None
@@ -4060,6 +4457,14 @@ class CableRouteEditor(QMainWindow):
                 self._show_edge_connections_dialog(picked)
             elif action == estimate_cables_action:
                 self.show_cable_count_for_node(picked)
+            elif action == copy_selected_action:
+                self.copy_selected_template_items()
+            elif action == paste_here_action:
+                self.paste_selected_template_items_at(x, y, floor)
+            elif action == rotate_90_action:
+                self.rotate_right_clicked_selection_90(picked)
+            elif action == delete_action:
+                self.delete_right_clicked_items(picked)
             elif (
                 update_selected_dp_qty_action is not None
                 and action == update_selected_dp_qty_action
@@ -4093,6 +4498,14 @@ class CableRouteEditor(QMainWindow):
             ):
                 self.assign_room_type_to_selected_data_points()
 
+        elif self.selection_clipboard:
+            menu = QMenu(self)
+            paste_here_action = menu.addAction("Paste copied selection here")
+            action = menu.exec(event.globalPosition().toPoint())
+
+            if action == paste_here_action:
+                self.paste_selected_template_items_at(x, y, floor)
+
     def on_drag(self, event, sx, sy):
         mode = self.mode_combo.currentText()
         if mode == "pan":
@@ -4121,14 +4534,36 @@ class CableRouteEditor(QMainWindow):
 
             if self.drag_mode_active and self.dragging_point_name:
                 point = self.store.all_points().get(self.dragging_point_name)
-                if point and not self._is_point_kind_visible(point):
+                if point and not self._is_point_kind_visible({**point, "name": self.dragging_point_name}):
                     self.dragging_point_name = None
                     self.drag_mode_active = False
+                    self._clear_multi_drag()
                     return
 
                 x, y = self.scene_to_world(sx, sy)
                 x, y = self.snap(x, y)
-                self._move_point_or_transition(self.dragging_point_name, x, y)
+
+                if (
+                    self.multi_drag_anchor_start is not None
+                    and self.multi_drag_start_positions
+                    and self.multi_drag_names
+                ):
+                    start_x, start_y = self.multi_drag_anchor_start
+                    dx = float(x) - float(start_x)
+                    dy = float(y) - float(start_y)
+
+                    for name in self.multi_drag_names:
+                        if name not in self.multi_drag_start_positions:
+                            continue
+                        original_x, original_y = self.multi_drag_start_positions[name]
+                        self._move_point_or_transition(
+                            name,
+                            round(original_x + dx, 3),
+                            round(original_y + dy, 3),
+                        )
+                else:
+                    self._move_point_or_transition(self.dragging_point_name, x, y)
+
                 self.refresh_canvas()
 
     def on_middle_click(self, event):
@@ -6110,7 +6545,20 @@ class CableRouteEditor(QMainWindow):
             self,
             self.store.data.get("assets", []),
             self._save_assets,
+            category_options=self.store.asset_category_options(),
         )
+
+    def manage_asset_categories(self):
+        AssetCategoriesEditorWindow(
+            self,
+            self.store.data.get("asset_categories", []),
+            self._save_asset_categories,
+        )
+
+    def _save_asset_categories(self, items):
+        self.push_undo_state("Save asset categories")
+        self.store.data["asset_categories"] = items
+        self.set_status("Asset categories updated")
 
     def _save_assets(self, items):
         self.push_undo_state("Save assets")
@@ -6123,6 +6571,64 @@ class CableRouteEditor(QMainWindow):
 
         self.set_status("Assets updated and room type quantities recalculated")
         self.refresh_canvas()
+
+    def rotate_right_clicked_selection_90(self, picked):
+        if not picked:
+            return
+
+        points = self.store.all_points()
+        pivot = points.get(picked)
+
+        if not pivot:
+            return
+
+        if picked in self.selected_template_names:
+            names = sorted(self.selected_template_names)
+        else:
+            names = [picked]
+
+        names = [
+            name for name in names
+            if name in points
+            and str(points[name].get("kind", "")).strip()
+            in {
+                "corridor_node",
+                "data_point",
+                "location",
+                "comms_room",
+                "distributed_equipment_room",
+            }
+        ]
+
+        if not names:
+            self.set_status("No rotatable selected items")
+            return
+
+        pivot_x = float(pivot["x"])
+        pivot_y = float(pivot["y"])
+
+        self.push_undo_state("Rotate selected items 90 degrees")
+
+        for name in names:
+            point = points[name]
+
+            rel_x = float(point["x"]) - pivot_x
+            rel_y = float(point["y"]) - pivot_y
+
+            # 90 degrees clockwise in world coordinates
+            new_x = pivot_x + rel_y
+            new_y = pivot_y - rel_x
+
+            self._move_point_or_transition(
+                name,
+                round(new_x, 3),
+                round(new_y, 3),
+            )
+
+        self.refresh_canvas()
+        self.set_status(
+            f"Rotated {len(names)} item(s) 90° clockwise around {picked}"
+        )
 
 
 def main():

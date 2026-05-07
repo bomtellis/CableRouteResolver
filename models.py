@@ -14,6 +14,7 @@ DEFAULT_JSON = {
     },
     "departments": [],
     "room_types": [],
+    "asset_categories": [],
     "assets": [],
     "locations": [],
     "data_points": [],
@@ -81,6 +82,7 @@ class JsonStore:
 
         self.data.setdefault("departments", [])
         self.data.setdefault("room_types", [])
+        self.data.setdefault("asset_categories", [])
         self.data.setdefault("assets", [])
         self.data.setdefault("locations", [])
         self.data.setdefault("data_points", [])
@@ -98,11 +100,19 @@ class JsonStore:
             dept.setdefault("x", 0.0)
             dept.setdefault("y", 0.0)
 
+        # in _load_from_payload(), before asset normalisation
+        for category in self.data.get("asset_categories", []):
+            category.setdefault("id", "")
+            category.setdefault("name", category.get("id", ""))
+
+        # replace the existing asset normalisation block
         for asset in self.data.get("assets", []):
             asset.setdefault("id", "")
             asset.setdefault("name", asset.get("id", ""))
             asset.setdefault("qty", 1)
             asset.setdefault("data_points", 1)
+            asset.setdefault("connection_type", asset.get("type_of_connection", "wired"))
+            asset.setdefault("category_id", asset.get("category", ""))
 
         for room_type in self.data.get("room_types", []):
             room_type.setdefault("id", "")
@@ -1084,6 +1094,13 @@ class JsonStore:
             total += room_asset_qty * data_points
 
         return max(1, int(total))
+        
+    def asset_category_options(self) -> List[Tuple[str, str]]:
+        return [
+            (str(item.get("id", "")).strip(), str(item.get("name", "")).strip())
+            for item in self.data.get("asset_categories", [])
+            if str(item.get("id", "")).strip()
+        ]
 
     def asset_options(self) -> List[Tuple[str, str]]:
         return [
