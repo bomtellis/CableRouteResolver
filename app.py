@@ -1896,6 +1896,81 @@ class CableRouteEditor(QMainWindow):
                 label.setPos(lx, ly)
                 self._item_lookup[label] = ("department_label", department_id)
 
+    def _draw_data_point_assignment_marks(self, pos, point):
+        green = QColor("#00ff66")
+        pen = QPen(QColor("#003d1f"), 0.05)
+        brush = QBrush(green)
+
+        has_location = bool(
+            [
+                str(x).strip()
+                for x in point.get("department_ids", [])
+                if str(x).strip()
+            ]
+        )
+        has_room_type = bool(str(point.get("room_type_id", "") or "").strip())
+
+        if has_location:
+            r = 0.12
+            self.scene.addEllipse(
+                pos.x() + 0.55,
+                pos.y() - 0.36,
+                r * 2,
+                r * 2,
+                pen,
+                brush,
+            )
+
+        if has_room_type:
+            s = 0.16
+            triangle = QPolygonF(
+                [
+                    QPointF(pos.x() + 0.67, pos.y() + 0.18 - s),
+                    QPointF(pos.x() + 0.67 + s, pos.y() + 0.18 + s),
+                    QPointF(pos.x() + 0.67 - s, pos.y() + 0.18 + s),
+                ]
+            )
+            marker = QGraphicsPolygonItem(triangle)
+            marker.setBrush(brush)
+            marker.setPen(pen)
+            self.scene.addItem(marker)
+
+    def _data_point_tooltip(self, name, point):
+        department_lookup = {
+            str(item.get("id", "")).strip(): str(item.get("name", "")).strip()
+            for item in self.store.data.get("departments", [])
+            if str(item.get("id", "")).strip()
+        }
+
+        room_type_lookup = {
+            str(item.get("id", "")).strip(): str(item.get("name", "")).strip()
+            for item in self.store.data.get("room_types", [])
+            if str(item.get("id", "")).strip()
+        }
+
+        department_ids = [
+            str(x).strip()
+            for x in point.get("department_ids", [])
+            if str(x).strip()
+        ]
+
+        departments = [
+            f"{dept_id} - {department_lookup.get(dept_id, '')}".strip(" -")
+            for dept_id in department_ids
+        ]
+
+        room_type_id = str(point.get("room_type_id", "") or "").strip()
+        room_type_name = room_type_lookup.get(room_type_id, "")
+
+        return "\n".join(
+            [
+                f"Data point: {name}",
+                f"Department: {', '.join(departments) if departments else 'Unassigned'}",
+                f"Room type: {(room_type_id + ' - ' + room_type_name).strip(' -') if room_type_id else 'Manual / no room type'}",
+                f"Qty: {int(point.get('qty', 1) or 1)}",
+            ]
+        )
+
     def draw_points(self, floor):
         connected_data_points = self._connected_data_point_names()
         hide_connected = self.hide_connected_data_points_check.isChecked()
@@ -1979,6 +2054,8 @@ class CableRouteEditor(QMainWindow):
                 )
                 self.scene.addItem(item)
                 label_color = QColor("#eadcff")
+
+                self._draw_data_point_assignment_marks(pos, point)
             else:
                 poly = QPolygonF(
                     [
@@ -1999,6 +2076,10 @@ class CableRouteEditor(QMainWindow):
             item.setFlag(QGraphicsItem.ItemIgnoresTransformations, False)
             self._item_lookup[item] = ("point", name)
             self._point_item_lookup[name] = item
+
+            if kind == "data_point":
+                item.setAcceptHoverEvents(True)
+                item.setToolTip(self._data_point_tooltip(name, point))
 
             if self.show_labels_check.isChecked():
                 label = self.scene.addText(name)
@@ -2058,6 +2139,8 @@ class CableRouteEditor(QMainWindow):
             "Teal diamond = department",
             "Purple diamond = data point",
             "Red diamond = transition",
+            "Green dot by data point = location / department assigned",
+            "Green triangle by data point = room type assigned",
             f"Mode: {self.mode_combo.currentText()} | Floor: {floor}",
             f"DXF: {dxf_name}",
             f"Edge chain start: {active_edge_start}",
