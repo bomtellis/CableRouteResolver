@@ -1669,6 +1669,12 @@
       "name": "Maternity - Histopath",
       "assets": [],
       "asset_ids": []
+    },
+    {
+      "id": "RT96",
+      "name": "Theatres - Prep / Receiving",
+      "assets": [],
+      "asset_ids": []
     }
   ],
   "asset_categories": [
@@ -3859,726 +3865,792 @@
       "floor": 0,
       "x": 10,
       "y": -49,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT9"
     },
     {
       "name": "DP0-66",
       "floor": 0,
       "x": 10,
       "y": -52,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT9"
     },
     {
       "name": "DP0-67",
       "floor": 0,
       "x": 10,
       "y": -55,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT9"
     },
     {
       "name": "DP0-68",
       "floor": 0,
       "x": 19,
       "y": -53,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-69",
       "floor": 0,
       "x": 24,
       "y": -53,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-70",
       "floor": 0,
       "x": 20,
       "y": -48,
-      "qty": 8,
+      "qty": 7,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT65"
     },
     {
       "name": "DP0-71",
       "floor": 0,
       "x": 23,
       "y": -48,
-      "qty": 8,
+      "qty": 7,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT65"
     },
     {
       "name": "DP0-72",
       "floor": 0,
-      "x": 31,
-      "y": -49,
-      "qty": 8,
+      "x": 30.976,
+      "y": -49.101,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-73",
       "floor": 0,
       "x": 31,
       "y": -52,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT9"
     },
     {
       "name": "DP0-74",
       "floor": 0,
-      "x": 32,
-      "y": -55,
-      "qty": 8,
+      "x": 31.96,
+      "y": -55.048,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT12"
     },
     {
       "name": "DP0-75",
       "floor": 0,
-      "x": 44,
-      "y": -49,
-      "qty": 8,
+      "x": 44.18,
+      "y": -49.004,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT9"
     },
     {
       "name": "DP0-76",
       "floor": 0,
-      "x": 44,
-      "y": -52,
-      "qty": 8,
+      "x": 44.18,
+      "y": -52.004,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT9"
     },
     {
       "name": "DP0-77",
       "floor": 0,
-      "x": 44,
-      "y": -55,
-      "qty": 8,
+      "x": 43.96,
+      "y": -55.048,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT12"
     },
     {
       "name": "DP0-78",
       "floor": 0,
       "x": 53,
       "y": -53,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-79",
       "floor": 0,
       "x": 57,
       "y": -53,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-80",
       "floor": 0,
       "x": 54,
       "y": -48,
-      "qty": 8,
+      "qty": 7,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT65"
     },
     {
       "name": "DP0-81",
       "floor": 0,
       "x": 57,
       "y": -48,
-      "qty": 8,
+      "qty": 7,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT65"
     },
     {
       "name": "DP0-82",
       "floor": 0,
-      "x": 65,
-      "y": -49,
-      "qty": 8,
+      "x": 65.184,
+      "y": -49.166,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-83",
       "floor": 0,
       "x": 65,
       "y": -52,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT9"
     },
     {
       "name": "DP0-84",
       "floor": 0,
-      "x": 65,
-      "y": -55,
-      "qty": 8,
+      "x": 64.96,
+      "y": -55.048,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT9"
     },
     {
       "name": "DP0-85",
       "floor": 0,
       "x": 1,
       "y": -40,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-86",
       "floor": 0,
       "x": 1,
       "y": -42,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-87",
       "floor": 0,
       "x": 1,
       "y": -44,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-88",
       "floor": 0,
       "x": 6,
       "y": -40,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-89",
       "floor": 0,
       "x": 6,
       "y": -42,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-90",
       "floor": 0,
       "x": 6,
       "y": -44,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-91",
       "floor": 0,
       "x": 10,
       "y": -40,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-92",
       "floor": 0,
       "x": 10,
       "y": -42,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-93",
       "floor": 0,
       "x": 10,
       "y": -44,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-94",
       "floor": 0,
       "x": 15,
       "y": -40,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-95",
       "floor": 0,
       "x": 14,
       "y": -42,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-96",
       "floor": 0,
       "x": 15,
       "y": -44,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-97",
       "floor": 0,
       "x": 18.671,
       "y": -39.533,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-98",
       "floor": 0,
       "x": 18.65,
       "y": -41.704,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-99",
       "floor": 0,
       "x": 18.671,
       "y": -43.677,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-100",
       "floor": 0,
       "x": 23.282,
       "y": -39.419,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-101",
       "floor": 0,
       "x": 23.188,
       "y": -41.652,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-102",
       "floor": 0,
       "x": 23.251,
       "y": -43.843,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-103",
       "floor": 0,
       "x": 27.228,
       "y": -39.482,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-104",
       "floor": 0,
       "x": 27.301,
       "y": -41.641,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-105",
       "floor": 0,
       "x": 27.259,
       "y": -43.729,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-106",
       "floor": 0,
       "x": 31.797,
       "y": -39.72,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-107",
       "floor": 0,
       "x": 31.942,
       "y": -41.808,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-108",
       "floor": 0,
       "x": 32.005,
       "y": -43.521,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-109",
       "floor": 0,
       "x": 43.755,
       "y": -39.56,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-110",
       "floor": 0,
       "x": 43.677,
       "y": -41.603,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-111",
       "floor": 0,
       "x": 43.755,
       "y": -43.661,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-112",
       "floor": 0,
       "x": 48.074,
       "y": -39.545,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-113",
       "floor": 0,
       "x": 48.214,
       "y": -41.65,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-114",
       "floor": 0,
       "x": 48.199,
       "y": -43.661,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-115",
       "floor": 0,
       "x": 52.487,
       "y": -39.545,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-116",
       "floor": 0,
       "x": 52.425,
       "y": -41.447,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-117",
       "floor": 0,
       "x": 52.378,
       "y": -43.77,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-118",
       "floor": 0,
       "x": 56.791,
       "y": -39.545,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-119",
       "floor": 0,
       "x": 56.869,
       "y": -41.587,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-120",
       "floor": 0,
       "x": 56.869,
       "y": -43.63,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-121",
       "floor": 0,
       "x": 61.063,
       "y": -39.56,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-122",
       "floor": 0,
       "x": 61.095,
       "y": -41.618,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-123",
       "floor": 0,
       "x": 61.157,
       "y": -43.474,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-124",
       "floor": 0,
       "x": 65.461,
       "y": -39.42,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-125",
       "floor": 0,
       "x": 65.429,
       "y": -41.618,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-126",
       "floor": 0,
       "x": 65.507,
       "y": -43.661,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-127",
       "floor": 0,
-      "x": 35.782,
-      "y": -54.769,
-      "qty": 8,
+      "x": 35.742,
+      "y": -54.817,
+      "qty": 1,
       "extension_distance_m": 3.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT12"
     },
     {
       "name": "DP0-128",
       "floor": 0,
-      "x": 40.113,
-      "y": -54.901,
-      "qty": 8,
+      "x": 40.073,
+      "y": -54.949,
+      "qty": 1,
       "extension_distance_m": 3.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT12"
     },
     {
       "name": "DP0-129",
       "floor": 0,
-      "x": 69.583,
-      "y": -54.769,
-      "qty": 8,
+      "x": 68.186,
+      "y": -55.704,
+      "qty": 9,
       "extension_distance_m": 3.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT59"
     },
     {
       "name": "DP0-130",
       "floor": 0,
-      "x": 73.888,
-      "y": -54.69,
-      "qty": 8,
+      "x": 72.491,
+      "y": -55.625,
+      "qty": 9,
       "extension_distance_m": 3.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT59"
     },
     {
       "name": "DP1-2",
@@ -6940,176 +7012,192 @@
       "floor": 0,
       "x": 128.29,
       "y": -196.159,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-315",
       "floor": 0,
       "x": 128.065,
       "y": -200.355,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-316",
       "floor": 0,
       "x": 128.336,
       "y": -204.146,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-317",
       "floor": 0,
       "x": 128.426,
       "y": -208.568,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-318",
       "floor": 0,
       "x": 128.245,
       "y": -212.945,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-319",
       "floor": 0,
       "x": 128.336,
       "y": -216.826,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT13"
     },
     {
       "name": "DP0-320",
       "floor": 0,
       "x": 128.245,
       "y": -222.241,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT25"
     },
     {
       "name": "DP0-321",
       "floor": 0,
       "x": 128.742,
       "y": -226.708,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT24"
     },
     {
       "name": "DP0-322",
       "floor": 0,
       "x": 148.01,
       "y": -225.715,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-323",
       "floor": 0,
       "x": 148.055,
       "y": -220.887,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-324",
       "floor": 0,
       "x": 148.145,
       "y": -216.239,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-325",
       "floor": 0,
       "x": 147.92,
       "y": -212.404,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-326",
       "floor": 0,
       "x": 148.1,
       "y": -208.342,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-327",
       "floor": 0,
       "x": 148.055,
       "y": -204.236,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-328",
       "floor": 0,
       "x": 147.739,
       "y": -200.084,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-329",
       "floor": 0,
       "x": 148.01,
       "y": -194.85,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-330",
@@ -7127,22 +7215,24 @@
       "floor": 0,
       "x": 142.294,
       "y": -215.886,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-332",
       "floor": 0,
-      "x": 134.518,
-      "y": -215.968,
-      "qty": 8,
+      "x": 134.436,
+      "y": -216.203,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-333",
@@ -7270,11 +7360,12 @@
       "floor": 0,
       "x": 147.883,
       "y": -188.331,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-345",
@@ -7303,66 +7394,72 @@
       "floor": 0,
       "x": 147.795,
       "y": -174.423,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-348",
       "floor": 0,
       "x": 147.927,
       "y": -170.681,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-349",
       "floor": 0,
       "x": 147.971,
       "y": -166.104,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-350",
       "floor": 0,
       "x": 147.927,
       "y": -162.187,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-351",
       "floor": 0,
       "x": 148.059,
       "y": -157.83,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-352",
       "floor": 0,
       "x": 148.103,
       "y": -153.12,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-353",
@@ -7378,129 +7475,140 @@
     {
       "name": "DP0-354",
       "floor": 0,
-      "x": 167.276,
-      "y": -153.78,
-      "qty": 8,
+      "x": 167.881,
+      "y": -154.283,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-355",
       "floor": 0,
-      "x": 167,
-      "y": -158,
-      "qty": 8,
+      "x": 167.605,
+      "y": -158.503,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-356",
       "floor": 0,
-      "x": 167.447,
-      "y": -162.354,
-      "qty": 8,
+      "x": 168.052,
+      "y": -162.857,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-357",
       "floor": 0,
-      "x": 167.492,
-      "y": -166.694,
-      "qty": 8,
+      "x": 168.097,
+      "y": -167.197,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-358",
       "floor": 0,
-      "x": 167.27,
-      "y": -170.902,
-      "qty": 8,
+      "x": 167.875,
+      "y": -171.405,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-359",
       "floor": 0,
-      "x": 167.802,
-      "y": -175.153,
-      "qty": 8,
+      "x": 168.004,
+      "y": -175.447,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-360",
       "floor": 0,
-      "x": 167.492,
-      "y": -179.006,
-      "qty": 8,
+      "x": 167.522,
+      "y": -179.119,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-361",
       "floor": 0,
-      "x": 167.182,
-      "y": -183.789,
-      "qty": 8,
+      "x": 166.909,
+      "y": -183.738,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-362",
       "floor": 0,
-      "x": 173.559,
-      "y": -180.778,
-      "qty": 8,
+      "x": 172.981,
+      "y": -180.903,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT24"
     },
     {
       "name": "DP0-363",
       "floor": 0,
-      "x": 176.925,
-      "y": -180.512,
-      "qty": 8,
+      "x": 177.289,
+      "y": -180.767,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT24"
     },
     {
       "name": "DP0-364",
       "floor": 0,
-      "x": 181.619,
-      "y": -181.708,
-      "qty": 8,
+      "x": 181.285,
+      "y": -181.446,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT24"
     },
     {
       "name": "DP0-365",
       "floor": 0,
-      "x": 186.402,
-      "y": -182.815,
+      "x": 187.297,
+      "y": -182.713,
       "qty": 8,
       "extension_distance_m": 0.0,
       "department_ids": [
@@ -7512,99 +7620,108 @@
       "floor": 0,
       "x": 187.332,
       "y": -179.183,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT24"
     },
     {
       "name": "DP0-367",
       "floor": 0,
-      "x": 186.491,
-      "y": -174.843,
-      "qty": 8,
+      "x": 186.521,
+      "y": -174.956,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-368",
       "floor": 0,
-      "x": 187.066,
-      "y": -170.415,
-      "qty": 8,
+      "x": 187.096,
+      "y": -170.528,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-369",
       "floor": 0,
       "x": 186.933,
       "y": -166.207,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-370",
       "floor": 0,
       "x": 186.623,
       "y": -162.222,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-371",
       "floor": 0,
       "x": 187.243,
       "y": -157.837,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-372",
       "floor": 0,
       "x": 187.155,
       "y": -153.807,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-373",
       "floor": 0,
       "x": 181.353,
       "y": -153.497,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT13"
     },
     {
       "name": "DP0-374",
       "floor": 0,
       "x": 173.116,
       "y": -153.497,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "25"
-      ]
+      ],
+      "room_type_id": "RT13"
     },
     {
       "name": "DP0-375",
@@ -7642,211 +7759,230 @@
     {
       "name": "DP0-378",
       "floor": 0,
-      "x": 167.608,
-      "y": -195.736,
-      "qty": 8,
+      "x": 167.503,
+      "y": -195.58,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-379",
       "floor": 0,
-      "x": 167.487,
-      "y": -199.988,
-      "qty": 8,
+      "x": 167.382,
+      "y": -199.832,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-380",
       "floor": 0,
-      "x": 167.548,
-      "y": -203.937,
-      "qty": 8,
+      "x": 167.509,
+      "y": -203.805,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-381",
       "floor": 0,
-      "x": 167.244,
-      "y": -208.432,
-      "qty": 8,
+      "x": 167.205,
+      "y": -208.3,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-382",
       "floor": 0,
-      "x": 167.608,
-      "y": -212.563,
-      "qty": 8,
+      "x": 167.575,
+      "y": -212.345,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-383",
       "floor": 0,
       "x": 167.426,
       "y": -216.755,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT13"
     },
     {
       "name": "DP0-384",
       "floor": 0,
       "x": 167.851,
       "y": -220.825,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-385",
       "floor": 0,
-      "x": 167.305,
-      "y": -224.895,
-      "qty": 8,
+      "x": 167.297,
+      "y": -224.76,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-386",
       "floor": 0,
       "x": 187.231,
       "y": -225.138,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-387",
       "floor": 0,
       "x": 187.231,
       "y": -221.311,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT11"
     },
     {
       "name": "DP0-388",
       "floor": 0,
       "x": 186.745,
       "y": -216.633,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT13"
     },
     {
       "name": "DP0-389",
       "floor": 0,
       "x": 186.745,
       "y": -212.381,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-390",
       "floor": 0,
-      "x": 186.866,
-      "y": -207.642,
-      "qty": 8,
+      "x": 186.761,
+      "y": -207.486,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-391",
       "floor": 0,
-      "x": 187.109,
-      "y": -203.208,
-      "qty": 8,
+      "x": 187.004,
+      "y": -203.052,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-392",
       "floor": 0,
-      "x": 187.17,
-      "y": -200.17,
-      "qty": 8,
+      "x": 187.065,
+      "y": -200.014,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-393",
       "floor": 0,
-      "x": 187.474,
-      "y": -195.067,
-      "qty": 8,
+      "x": 187.369,
+      "y": -194.911,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT15"
     },
     {
       "name": "DP0-394",
       "floor": 0,
       "x": 181.339,
       "y": -200.687,
-      "qty": 8,
+      "qty": 7,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT65"
     },
     {
       "name": "DP0-395",
       "floor": 0,
       "x": 173.258,
       "y": -200.474,
-      "qty": 8,
+      "qty": 7,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT65"
     },
     {
       "name": "DP0-396",
       "floor": 0,
       "x": 180.946,
       "y": -206.671,
-      "qty": 8,
+      "qty": 10,
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
-      ]
+      ],
+      "room_type_id": "RT6"
     },
     {
       "name": "DP0-397",
@@ -10070,8 +10206,8 @@
     {
       "name": "DP1-222",
       "floor": 1,
-      "x": 85.654,
-      "y": -0.423,
+      "x": 85.84,
+      "y": -0.32,
       "qty": 8,
       "extension_distance_m": 0.0,
       "department_ids": [
@@ -10391,132 +10527,144 @@
       "floor": 1,
       "x": 178.848,
       "y": -0.098,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-252",
       "floor": 1,
       "x": 176.614,
       "y": -2.351,
-      "qty": 8,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-253",
       "floor": 1,
       "x": 178.633,
       "y": -4.546,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-254",
       "floor": 1,
       "x": 178.672,
       "y": -8.896,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-255",
       "floor": 1,
       "x": 176.693,
       "y": -10.738,
-      "qty": 8,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-256",
       "floor": 1,
       "x": 178.319,
       "y": -12.541,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-257",
       "floor": 1,
       "x": 178.437,
       "y": -17.42,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-258",
       "floor": 1,
       "x": 176.791,
       "y": -19.223,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-259",
       "floor": 1,
       "x": 179.025,
       "y": -20.948,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-260",
       "floor": 1,
       "x": 178.691,
       "y": -25.474,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-261",
       "floor": 1,
       "x": 176.673,
       "y": -27.551,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-262",
       "floor": 1,
       "x": 178.554,
       "y": -29.374,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-263",
@@ -10545,44 +10693,48 @@
       "floor": 1,
       "x": 178.613,
       "y": -42.385,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-266",
       "floor": 1,
       "x": 176.693,
       "y": -44.364,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-267",
       "floor": 1,
       "x": 178.476,
       "y": -46.363,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-268",
       "floor": 1,
       "x": 178.515,
       "y": -50.458,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-269",
@@ -10677,11 +10829,12 @@
       "floor": 1,
       "x": 159.155,
       "y": -61.491,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT23"
     },
     {
       "name": "DP1-278",
@@ -10710,319 +10863,348 @@
       "floor": 1,
       "x": 159.586,
       "y": -50.713,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-281",
       "floor": 1,
-      "x": 165.347,
-      "y": -52.79,
-      "qty": 4,
+      "x": 165.379,
+      "y": -52.745,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-282",
       "floor": 1,
       "x": 167.62,
       "y": -50.89,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-283",
       "floor": 1,
       "x": 171.539,
       "y": -50.85,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-284",
       "floor": 1,
       "x": 167.796,
       "y": -46.5,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-285",
       "floor": 1,
       "x": 171.441,
       "y": -46.657,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-286",
       "floor": 1,
       "x": 173.185,
       "y": -44.109,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-287",
       "floor": 1,
       "x": 165.21,
       "y": -44.403,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-288",
       "floor": 1,
       "x": 167.11,
       "y": -42.346,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-289",
       "floor": 1,
       "x": 171.108,
       "y": -42.64,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-290",
       "floor": 1,
       "x": 159.468,
       "y": -46.481,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-291",
       "floor": 1,
       "x": 159.958,
       "y": -42.424,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-292",
       "floor": 1,
       "x": 161.761,
       "y": -44.188,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-293",
       "floor": 1,
       "x": 159.272,
       "y": -29.864,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-294",
       "floor": 1,
       "x": 161.251,
       "y": -27.375,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-295",
       "floor": 1,
       "x": 164.994,
       "y": -27.571,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-296",
       "floor": 1,
-      "x": 167.894,
-      "y": -25.67,
-      "qty": 8,
+      "x": 168.048,
+      "y": -25.635,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-297",
       "floor": 1,
-      "x": 171.5,
-      "y": -25.788,
-      "qty": 8,
+      "x": 171.654,
+      "y": -25.753,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-298",
       "floor": 1,
       "x": 173.126,
       "y": -27.59,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-299",
       "floor": 1,
       "x": 159.213,
       "y": -25.219,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-300",
       "floor": 1,
       "x": 159.507,
       "y": -21.575,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-301",
       "floor": 1,
       "x": 161.408,
       "y": -19.066,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-302",
       "floor": 1,
       "x": 165.151,
       "y": -19.184,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-303",
       "floor": 1,
-      "x": 167.777,
-      "y": -20.928,
-      "qty": 8,
+      "x": 167.931,
+      "y": -20.893,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-304",
       "floor": 1,
-      "x": 172.284,
-      "y": -21.418,
-      "qty": 8,
+      "x": 172.438,
+      "y": -21.383,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-305",
       "floor": 1,
       "x": 173.205,
       "y": -19.341,
-      "qty": 4,
+      "qty": 5,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT4"
     },
     {
       "name": "DP1-306",
       "floor": 1,
-      "x": 171.519,
-      "y": -16.735,
-      "qty": 8,
+      "x": 171.596,
+      "y": -16.438,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-307",
       "floor": 1,
-      "x": 167.542,
-      "y": -16.833,
-      "qty": 8,
+      "x": 167.619,
+      "y": -16.536,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-308",
       "floor": 1,
       "x": 160.134,
       "y": -16.735,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
-      ]
+      ],
+      "room_type_id": "RT36"
     },
     {
       "name": "DP1-309",
@@ -14796,33 +14978,36 @@
       "floor": 0,
       "x": 139.25,
       "y": -180.184,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 3.0,
       "department_ids": [
         "23"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-455",
       "floor": 0,
       "x": 141.074,
       "y": -180.184,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 3.0,
       "department_ids": [
         "23"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-456",
       "floor": 0,
       "x": 142.582,
       "y": -180.263,
-      "qty": 8,
+      "qty": 1,
       "extension_distance_m": 3.0,
       "department_ids": [
         "23"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-457",
@@ -14832,7 +15017,7 @@
       "qty": 8,
       "extension_distance_m": 3.0,
       "department_ids": [
-        "23"
+        "24"
       ]
     },
     {
@@ -15093,66 +15278,72 @@
       "floor": 0,
       "x": 74.032,
       "y": -39.541,
-      "qty": 6,
+      "qty": 1,
       "extension_distance_m": 3.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-476",
       "floor": 0,
       "x": 69.457,
       "y": -39.522,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 3.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-477",
       "floor": 0,
       "x": 69.533,
       "y": -41.667,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 3.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-478",
       "floor": 0,
       "x": 69.647,
       "y": -43.603,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 3.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-479",
       "floor": 0,
       "x": 74.222,
       "y": -41.762,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 3.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-480",
       "floor": 0,
       "x": 74.108,
       "y": -43.736,
-      "qty": 4,
+      "qty": 1,
       "extension_distance_m": 3.0,
       "department_ids": [
         "2"
-      ]
+      ],
+      "room_type_id": "RT10"
     },
     {
       "name": "DP0-481",
@@ -31220,7 +31411,9 @@
       "qty": 8,
       "room_type_id": "RT61",
       "extension_distance_m": 0.0,
-      "department_ids": []
+      "department_ids": [
+        "14"
+      ]
     },
     {
       "name": "DP1-506",
@@ -31585,8 +31778,8 @@
     {
       "name": "DP1-536",
       "floor": 1,
-      "x": 177.948,
-      "y": -205.699,
+      "x": 178.035,
+      "y": -205.617,
       "qty": 1,
       "room_type_id": "",
       "extension_distance_m": 0.0,
@@ -33378,6 +33571,1062 @@
       "extension_distance_m": 0.0,
       "department_ids": [
         "7"
+      ]
+    },
+    {
+      "name": "DP1-686",
+      "floor": 1,
+      "x": 164.655,
+      "y": -62.32,
+      "qty": 9,
+      "room_type_id": "RT59",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "51"
+      ]
+    },
+    {
+      "name": "DP1-687",
+      "floor": 1,
+      "x": 81.36,
+      "y": -5.395,
+      "qty": 1,
+      "room_type_id": "",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "29"
+      ]
+    },
+    {
+      "name": "DP1-688",
+      "floor": 1,
+      "x": 81.314,
+      "y": -7.01,
+      "qty": 1,
+      "room_type_id": "",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "29"
+      ]
+    },
+    {
+      "name": "DP1-689",
+      "floor": 0,
+      "x": 39.69,
+      "y": -39.594,
+      "qty": 7,
+      "room_type_id": "RT64",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-690",
+      "floor": 0,
+      "x": 38.181,
+      "y": -43.083,
+      "qty": 9,
+      "room_type_id": "RT7",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-691",
+      "floor": 0,
+      "x": 35.521,
+      "y": -48.996,
+      "qty": 1,
+      "room_type_id": "RT53",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-692",
+      "floor": 0,
+      "x": 52.491,
+      "y": -55.656,
+      "qty": 10,
+      "room_type_id": "RT63",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-693",
+      "floor": 0,
+      "x": 73.988,
+      "y": -51.018,
+      "qty": 1,
+      "room_type_id": "RT30",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-694",
+      "floor": 0,
+      "x": 73.461,
+      "y": -48.27,
+      "qty": 9,
+      "room_type_id": "RT7",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-695",
+      "floor": 0,
+      "x": 69.419,
+      "y": -50.234,
+      "qty": 9,
+      "room_type_id": "RT59",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-696",
+      "floor": 0,
+      "x": 70.625,
+      "y": -60.47,
+      "qty": 7,
+      "room_type_id": "RT71",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-697",
+      "floor": 0,
+      "x": 60.58,
+      "y": -60.272,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-698",
+      "floor": 0,
+      "x": 43.685,
+      "y": -60.096,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-699",
+      "floor": 0,
+      "x": 22.487,
+      "y": -60.103,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-700",
+      "floor": 0,
+      "x": 14.229,
+      "y": -59.903,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-701",
+      "floor": 0,
+      "x": 2.202,
+      "y": -58.702,
+      "qty": 1,
+      "room_type_id": "RT23",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-702",
+      "floor": 0,
+      "x": 18.825,
+      "y": -55.756,
+      "qty": 10,
+      "room_type_id": "RT63",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "2"
+      ]
+    },
+    {
+      "name": "DP1-703",
+      "floor": 0,
+      "x": 73.551,
+      "y": -87.238,
+      "qty": 1,
+      "room_type_id": "RT31",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP1-704",
+      "floor": 1,
+      "x": 134.378,
+      "y": -199.042,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "10"
+      ]
+    },
+    {
+      "name": "DP1-705",
+      "floor": 0,
+      "x": 137.112,
+      "y": -152.567,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-706",
+      "floor": 0,
+      "x": 140.129,
+      "y": -153.787,
+      "qty": 1,
+      "room_type_id": "RT30",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-707",
+      "floor": 0,
+      "x": 137.164,
+      "y": -154.902,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-708",
+      "floor": 0,
+      "x": 136.128,
+      "y": -159.546,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-709",
+      "floor": 0,
+      "x": 137.755,
+      "y": -159.677,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-710",
+      "floor": 0,
+      "x": 138.962,
+      "y": -159.586,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-711",
+      "floor": 0,
+      "x": 140.457,
+      "y": -159.454,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-712",
+      "floor": 0,
+      "x": 141.599,
+      "y": -161.829,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-713",
+      "floor": 0,
+      "x": 142.989,
+      "y": -158.287,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-714",
+      "floor": 0,
+      "x": 142.74,
+      "y": -156.634,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-715",
+      "floor": 0,
+      "x": 142.504,
+      "y": -177.651,
+      "qty": 9,
+      "room_type_id": "RT7",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-716",
+      "floor": 0,
+      "x": 139.448,
+      "y": -195.29,
+      "qty": 1,
+      "room_type_id": "RT30",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-717",
+      "floor": 0,
+      "x": 134.177,
+      "y": -197.556,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-718",
+      "floor": 0,
+      "x": 143.038,
+      "y": -197.985,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-719",
+      "floor": 0,
+      "x": 136.99,
+      "y": -200.951,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-720",
+      "floor": 0,
+      "x": 139.363,
+      "y": -200.438,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-721",
+      "floor": 0,
+      "x": 135.894,
+      "y": -195.039,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-722",
+      "floor": 0,
+      "x": 135.409,
+      "y": -208.436,
+      "qty": 10,
+      "room_type_id": "RT63",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-723",
+      "floor": 0,
+      "x": 133.926,
+      "y": -210.437,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-724",
+      "floor": 0,
+      "x": 138.327,
+      "y": -210.389,
+      "qty": 9,
+      "room_type_id": "RT7",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-725",
+      "floor": 0,
+      "x": 138.633,
+      "y": -216.408,
+      "qty": 1,
+      "room_type_id": "RT53",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-726",
+      "floor": 0,
+      "x": 134.117,
+      "y": -219.286,
+      "qty": 1,
+      "room_type_id": "RT54",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-727",
+      "floor": 0,
+      "x": 142.561,
+      "y": -219.263,
+      "qty": 1,
+      "room_type_id": "RT54",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-728",
+      "floor": 0,
+      "x": 134.224,
+      "y": -223.091,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-729",
+      "floor": 0,
+      "x": 142.764,
+      "y": -223.21,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-730",
+      "floor": 0,
+      "x": 142.585,
+      "y": -226.037,
+      "qty": 9,
+      "room_type_id": "RT59",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-731",
+      "floor": 0,
+      "x": 134.045,
+      "y": -225.973,
+      "qty": 1,
+      "room_type_id": "",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP1-732",
+      "floor": 0,
+      "x": 132.097,
+      "y": -188.899,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-733",
+      "floor": 0,
+      "x": 142.587,
+      "y": -187.322,
+      "qty": 9,
+      "room_type_id": "RT59",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-734",
+      "floor": 0,
+      "x": 136.741,
+      "y": -175.993,
+      "qty": 9,
+      "room_type_id": "RT59",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-735",
+      "floor": 0,
+      "x": 142.163,
+      "y": -171.622,
+      "qty": 1,
+      "room_type_id": "RT53",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-736",
+      "floor": 0,
+      "x": 143.269,
+      "y": -160.71,
+      "qty": 1,
+      "room_type_id": "RT60",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-737",
+      "floor": 0,
+      "x": 127.667,
+      "y": -181.359,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP0-562",
+      "floor": 0,
+      "x": 127.347,
+      "y": -173.055,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "23"
+      ]
+    },
+    {
+      "name": "DP1-738",
+      "floor": 0,
+      "x": 173.162,
+      "y": -156.453,
+      "qty": 1,
+      "room_type_id": "RT54",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-739",
+      "floor": 0,
+      "x": 181.362,
+      "y": -157.381,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-740",
+      "floor": 0,
+      "x": 173.298,
+      "y": -159.553,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-741",
+      "floor": 0,
+      "x": 174.092,
+      "y": -162.147,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-742",
+      "floor": 0,
+      "x": 181.573,
+      "y": -161.882,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-743",
+      "floor": 0,
+      "x": 181.848,
+      "y": -159.389,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-744",
+      "floor": 0,
+      "x": 175.818,
+      "y": -161.551,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-745",
+      "floor": 0,
+      "x": 178.43,
+      "y": -162.204,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-746",
+      "floor": 0,
+      "x": 175.491,
+      "y": -154.318,
+      "qty": 1,
+      "room_type_id": "",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-747",
+      "floor": 0,
+      "x": 178.684,
+      "y": -154.124,
+      "qty": 1,
+      "room_type_id": "RT30",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-748",
+      "floor": 0,
+      "x": 173.048,
+      "y": -167.832,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-749",
+      "floor": 0,
+      "x": 177.608,
+      "y": -168.557,
+      "qty": 9,
+      "room_type_id": "RT7",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-750",
+      "floor": 0,
+      "x": 174.803,
+      "y": -170.303,
+      "qty": 9,
+      "room_type_id": "RT59",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-751",
+      "floor": 0,
+      "x": 174.65,
+      "y": -172.519,
+      "qty": 10,
+      "room_type_id": "RT63",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-752",
+      "floor": 0,
+      "x": 180.202,
+      "y": -167.551,
+      "qty": 1,
+      "room_type_id": "RT60",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-753",
+      "floor": 0,
+      "x": 173.356,
+      "y": -188.706,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-754",
+      "floor": 0,
+      "x": 178.902,
+      "y": -194.689,
+      "qty": 1,
+      "room_type_id": "RT30",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-755",
+      "floor": 0,
+      "x": 174.962,
+      "y": -195.006,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-756",
+      "floor": 0,
+      "x": 176.038,
+      "y": -199.893,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-757",
+      "floor": 0,
+      "x": 178.332,
+      "y": -199.893,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-758",
+      "floor": 0,
+      "x": 181.049,
+      "y": -197.458,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-759",
+      "floor": 0,
+      "x": 173.662,
+      "y": -197.88,
+      "qty": 1,
+      "room_type_id": "RT76",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-760",
+      "floor": 0,
+      "x": 174.397,
+      "y": -206.069,
+      "qty": 10,
+      "room_type_id": "RT63",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-761",
+      "floor": 0,
+      "x": 174.45,
+      "y": -208.186,
+      "qty": 9,
+      "room_type_id": "RT59",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-762",
+      "floor": 0,
+      "x": 177.802,
+      "y": -210.691,
+      "qty": 9,
+      "room_type_id": "RT7",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-763",
+      "floor": 0,
+      "x": 172.985,
+      "y": -210.374,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-764",
+      "floor": 0,
+      "x": 173.179,
+      "y": -223.413,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-765",
+      "floor": 0,
+      "x": 181.825,
+      "y": -223.431,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-766",
+      "floor": 0,
+      "x": 172.898,
+      "y": -226.059,
+      "qty": 9,
+      "room_type_id": "RT59",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-767",
+      "floor": 0,
+      "x": 181.332,
+      "y": -226.165,
+      "qty": 9,
+      "room_type_id": "RT59",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-768",
+      "floor": 0,
+      "x": 181.666,
+      "y": -219.514,
+      "qty": 1,
+      "room_type_id": "RT54",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-769",
+      "floor": 0,
+      "x": 172.932,
+      "y": -219.39,
+      "qty": 9,
+      "room_type_id": "RT59",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "26"
+      ]
+    },
+    {
+      "name": "DP1-770",
+      "floor": 0,
+      "x": 186.533,
+      "y": -188.866,
+      "qty": 1,
+      "room_type_id": "RT70",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-771",
+      "floor": 0,
+      "x": 181.466,
+      "y": -187.458,
+      "qty": 1,
+      "room_type_id": "",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
+      ]
+    },
+    {
+      "name": "DP1-773",
+      "floor": 0,
+      "x": 177.37,
+      "y": -157.772,
+      "qty": 1,
+      "room_type_id": "RT23",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "25"
       ]
     }
   ],
@@ -37784,8 +39033,8 @@
       {
         "name": "C0-445",
         "floor": 0,
-        "x": 183.264,
-        "y": -149.852,
+        "x": 183.839,
+        "y": -150.24,
         "height_affl_m": 3.0,
         "cable_limit": 0
       },
@@ -37960,8 +39209,8 @@
       {
         "name": "C0-465",
         "floor": 0,
-        "x": 129.428,
-        "y": -174.277,
+        "x": 129.42,
+        "y": -172.876,
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": true
@@ -53546,6 +54795,231 @@
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": false
+      },
+      {
+        "name": "C0-675",
+        "floor": 0,
+        "x": 22.395,
+        "y": -57.81,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-676",
+        "floor": 0,
+        "x": 43.634,
+        "y": -58.041,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-677",
+        "floor": 0,
+        "x": 136.071,
+        "y": -156.79,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-678",
+        "floor": 0,
+        "x": 137.683,
+        "y": -156.899,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-679",
+        "floor": 0,
+        "x": 138.98,
+        "y": -156.94,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-680",
+        "floor": 0,
+        "x": 140.346,
+        "y": -156.804,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-681",
+        "floor": 0,
+        "x": 133.517,
+        "y": -154.81,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-682",
+        "floor": 0,
+        "x": 133.463,
+        "y": -153.225,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-683",
+        "floor": 0,
+        "x": 139.54,
+        "y": -149.975,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-684",
+        "floor": 0,
+        "x": 142.327,
+        "y": -174.641,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-685",
+        "floor": 0,
+        "x": 137.041,
+        "y": -203.718,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-686",
+        "floor": 0,
+        "x": 139.595,
+        "y": -203.69,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-687",
+        "floor": 0,
+        "x": 136.099,
+        "y": -191.808,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-688",
+        "floor": 0,
+        "x": 138.27,
+        "y": -212.759,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-689",
+        "floor": 0,
+        "x": 175.898,
+        "y": -203.456,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-690",
+        "floor": 0,
+        "x": 178.481,
+        "y": -203.407,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-691",
+        "floor": 0,
+        "x": 174.936,
+        "y": -191.666,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-692",
+        "floor": 0,
+        "x": 183.859,
+        "y": -186.372,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-693",
+        "floor": 0,
+        "x": 176.098,
+        "y": -165.702,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-694",
+        "floor": 0,
+        "x": 178.35,
+        "y": -165.662,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-695",
+        "floor": 0,
+        "x": 175.897,
+        "y": -150.159,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-696",
+        "floor": 0,
+        "x": 178.852,
+        "y": -150.28,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-697",
+        "floor": 0,
+        "x": 183.035,
+        "y": -148.229,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-698",
+        "floor": 0,
+        "x": 170.598,
+        "y": -157.469,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-699",
+        "floor": 0,
+        "x": 173.095,
+        "y": -157.583,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
       }
     ],
     "edges": [
@@ -54412,14 +55886,6 @@
       {
         "from": "C0-47",
         "to": "C0-43"
-      },
-      {
-        "from": "C0-47",
-        "to": "C0-48"
-      },
-      {
-        "from": "C0-48",
-        "to": "C0-47"
       },
       {
         "from": "C0-48",
@@ -56352,14 +57818,6 @@
       {
         "from": "DP0-128",
         "to": "C0-152"
-      },
-      {
-        "from": "C0-44",
-        "to": "C0-152"
-      },
-      {
-        "from": "C0-152",
-        "to": "C0-44"
       },
       {
         "from": "Bed 1",
@@ -60954,14 +62412,6 @@
         "to": "C0-444"
       },
       {
-        "from": "C0-445",
-        "to": "C0-446"
-      },
-      {
-        "from": "C0-446",
-        "to": "C0-445"
-      },
-      {
         "from": "C0-446",
         "to": "C0-400"
       },
@@ -61016,22 +62466,6 @@
       {
         "from": "C0-447",
         "to": "C0-443"
-      },
-      {
-        "from": "C0-442",
-        "to": "C0-448"
-      },
-      {
-        "from": "C0-448",
-        "to": "C0-442"
-      },
-      {
-        "from": "C0-448",
-        "to": "C0-449"
-      },
-      {
-        "from": "C0-449",
-        "to": "C0-448"
       },
       {
         "from": "C0-449",
@@ -61226,14 +62660,6 @@
         "to": "C0-468"
       },
       {
-        "from": "C0-469",
-        "to": "C0-460"
-      },
-      {
-        "from": "C0-460",
-        "to": "C0-469"
-      },
-      {
         "from": "C0-473",
         "to": "C0-474"
       },
@@ -61402,28 +62828,12 @@
         "to": "C0-477"
       },
       {
-        "from": "C0-481",
-        "to": "C0-476"
-      },
-      {
-        "from": "C0-476",
-        "to": "C0-481"
-      },
-      {
         "from": "C0-483",
         "to": "C0-496"
       },
       {
         "from": "C0-496",
         "to": "C0-483"
-      },
-      {
-        "from": "C0-496",
-        "to": "C0-495"
-      },
-      {
-        "from": "C0-495",
-        "to": "C0-496"
       },
       {
         "from": "C0-495",
@@ -61810,14 +63220,6 @@
         "to": "C0-526"
       },
       {
-        "from": "C0-525",
-        "to": "C0-524"
-      },
-      {
-        "from": "C0-524",
-        "to": "C0-525"
-      },
-      {
         "from": "C0-524",
         "to": "C0-520"
       },
@@ -62034,14 +63436,6 @@
         "to": "C0-544"
       },
       {
-        "from": "C0-545",
-        "to": "C0-546"
-      },
-      {
-        "from": "C0-546",
-        "to": "C0-545"
-      },
-      {
         "from": "C0-546",
         "to": "C0-548"
       },
@@ -62056,14 +63450,6 @@
       {
         "from": "C0-534",
         "to": "C0-536"
-      },
-      {
-        "from": "C0-534",
-        "to": "C0-533"
-      },
-      {
-        "from": "C0-533",
-        "to": "C0-534"
       },
       {
         "from": "C0-533",
@@ -62120,14 +63506,6 @@
       {
         "from": "C0-518",
         "to": "C0-515"
-      },
-      {
-        "from": "C0-518",
-        "to": "C0-517"
-      },
-      {
-        "from": "C0-517",
-        "to": "C0-518"
       },
       {
         "from": "C0-517",
@@ -72722,14 +74100,6 @@
         "to": "C0-617"
       },
       {
-        "from": "C0-523",
-        "to": "C0-618"
-      },
-      {
-        "from": "C0-618",
-        "to": "C0-523"
-      },
-      {
         "from": "C0-618",
         "to": "C0-524"
       },
@@ -72800,14 +74170,6 @@
       {
         "from": "C0-621",
         "to": "C0-464"
-      },
-      {
-        "from": "C0-621",
-        "to": "C0-473"
-      },
-      {
-        "from": "C0-473",
-        "to": "C0-621"
       },
       {
         "from": "C0-621",
@@ -96228,6 +97590,1006 @@
       {
         "from": "DP1-685",
         "to": "C1-219"
+      },
+      {
+        "from": "C1-381",
+        "to": "DP1-686"
+      },
+      {
+        "from": "DP1-686",
+        "to": "C1-381"
+      },
+      {
+        "from": "C1-309",
+        "to": "DP1-688"
+      },
+      {
+        "from": "DP1-688",
+        "to": "C1-309"
+      },
+      {
+        "from": "C1-309",
+        "to": "DP1-687"
+      },
+      {
+        "from": "DP1-687",
+        "to": "C1-309"
+      },
+      {
+        "from": "C0-90",
+        "to": "DP1-701"
+      },
+      {
+        "from": "DP1-701",
+        "to": "C0-90"
+      },
+      {
+        "from": "C0-48",
+        "to": "DP1-700"
+      },
+      {
+        "from": "DP1-700",
+        "to": "C0-48"
+      },
+      {
+        "from": "C0-58",
+        "to": "DP1-691"
+      },
+      {
+        "from": "DP1-691",
+        "to": "C0-58"
+      },
+      {
+        "from": "C0-59",
+        "to": "DP1-689"
+      },
+      {
+        "from": "DP1-689",
+        "to": "C0-59"
+      },
+      {
+        "from": "C0-58",
+        "to": "DP1-690"
+      },
+      {
+        "from": "DP1-690",
+        "to": "C0-58"
+      },
+      {
+        "from": "C0-45",
+        "to": "DP1-697"
+      },
+      {
+        "from": "DP1-697",
+        "to": "C0-45"
+      },
+      {
+        "from": "C0-84",
+        "to": "DP1-696"
+      },
+      {
+        "from": "DP1-696",
+        "to": "C0-84"
+      },
+      {
+        "from": "C0-86",
+        "to": "DP1-692"
+      },
+      {
+        "from": "DP1-692",
+        "to": "C0-86"
+      },
+      {
+        "from": "C0-78",
+        "to": "DP1-695"
+      },
+      {
+        "from": "DP1-695",
+        "to": "C0-78"
+      },
+      {
+        "from": "C0-671",
+        "to": "DP1-694"
+      },
+      {
+        "from": "DP1-694",
+        "to": "C0-671"
+      },
+      {
+        "from": "C0-255",
+        "to": "DP1-693"
+      },
+      {
+        "from": "DP1-693",
+        "to": "C0-255"
+      },
+      {
+        "from": "C0-48",
+        "to": "C0-675"
+      },
+      {
+        "from": "C0-675",
+        "to": "C0-48"
+      },
+      {
+        "from": "C0-675",
+        "to": "C0-47"
+      },
+      {
+        "from": "C0-47",
+        "to": "C0-675"
+      },
+      {
+        "from": "C0-675",
+        "to": "DP1-699"
+      },
+      {
+        "from": "DP1-699",
+        "to": "C0-675"
+      },
+      {
+        "from": "C0-44",
+        "to": "C0-676"
+      },
+      {
+        "from": "C0-676",
+        "to": "C0-44"
+      },
+      {
+        "from": "C0-676",
+        "to": "C0-152"
+      },
+      {
+        "from": "C0-152",
+        "to": "C0-676"
+      },
+      {
+        "from": "C0-676",
+        "to": "DP1-698"
+      },
+      {
+        "from": "DP1-698",
+        "to": "C0-676"
+      },
+      {
+        "from": "C0-50",
+        "to": "DP1-702"
+      },
+      {
+        "from": "DP1-702",
+        "to": "C0-50"
+      },
+      {
+        "from": "C0-40",
+        "to": "DP1-703"
+      },
+      {
+        "from": "DP1-703",
+        "to": "C0-40"
+      },
+      {
+        "from": "C1-79",
+        "to": "DP1-704"
+      },
+      {
+        "from": "DP1-704",
+        "to": "C1-79"
+      },
+      {
+        "from": "C0-677",
+        "to": "C0-678"
+      },
+      {
+        "from": "C0-678",
+        "to": "C0-677"
+      },
+      {
+        "from": "C0-679",
+        "to": "C0-680"
+      },
+      {
+        "from": "C0-680",
+        "to": "C0-679"
+      },
+      {
+        "from": "C0-680",
+        "to": "DP1-711"
+      },
+      {
+        "from": "DP1-711",
+        "to": "C0-680"
+      },
+      {
+        "from": "DP1-710",
+        "to": "C0-679"
+      },
+      {
+        "from": "C0-679",
+        "to": "DP1-710"
+      },
+      {
+        "from": "DP1-709",
+        "to": "C0-678"
+      },
+      {
+        "from": "C0-678",
+        "to": "DP1-709"
+      },
+      {
+        "from": "DP1-708",
+        "to": "C0-677"
+      },
+      {
+        "from": "C0-677",
+        "to": "DP1-708"
+      },
+      {
+        "from": "C0-677",
+        "to": "C0-449"
+      },
+      {
+        "from": "C0-449",
+        "to": "C0-677"
+      },
+      {
+        "from": "C0-449",
+        "to": "C0-681"
+      },
+      {
+        "from": "C0-681",
+        "to": "C0-449"
+      },
+      {
+        "from": "C0-681",
+        "to": "C0-682"
+      },
+      {
+        "from": "C0-682",
+        "to": "C0-681"
+      },
+      {
+        "from": "C0-682",
+        "to": "C0-448"
+      },
+      {
+        "from": "C0-448",
+        "to": "C0-682"
+      },
+      {
+        "from": "C0-681",
+        "to": "DP1-707"
+      },
+      {
+        "from": "DP1-707",
+        "to": "C0-681"
+      },
+      {
+        "from": "C0-682",
+        "to": "DP1-705"
+      },
+      {
+        "from": "DP1-705",
+        "to": "C0-682"
+      },
+      {
+        "from": "C0-457",
+        "to": "DP1-713"
+      },
+      {
+        "from": "DP1-713",
+        "to": "C0-457"
+      },
+      {
+        "from": "C0-457",
+        "to": "DP1-714"
+      },
+      {
+        "from": "DP1-714",
+        "to": "C0-457"
+      },
+      {
+        "from": "C0-456",
+        "to": "DP1-712"
+      },
+      {
+        "from": "DP1-712",
+        "to": "C0-456"
+      },
+      {
+        "from": "C0-456",
+        "to": "DP1-736"
+      },
+      {
+        "from": "DP1-736",
+        "to": "C0-456"
+      },
+      {
+        "from": "C0-448",
+        "to": "C0-683"
+      },
+      {
+        "from": "C0-683",
+        "to": "C0-448"
+      },
+      {
+        "from": "C0-683",
+        "to": "C0-442"
+      },
+      {
+        "from": "C0-442",
+        "to": "C0-683"
+      },
+      {
+        "from": "C0-683",
+        "to": "DP1-706"
+      },
+      {
+        "from": "DP1-706",
+        "to": "C0-683"
+      },
+      {
+        "from": "C0-678",
+        "to": "C0-679"
+      },
+      {
+        "from": "C0-679",
+        "to": "C0-678"
+      },
+      {
+        "from": "C0-459",
+        "to": "DP1-735"
+      },
+      {
+        "from": "DP1-735",
+        "to": "C0-459"
+      },
+      {
+        "from": "C0-468",
+        "to": "DP1-734"
+      },
+      {
+        "from": "DP1-734",
+        "to": "C0-468"
+      },
+      {
+        "from": "C0-469",
+        "to": "C0-684"
+      },
+      {
+        "from": "C0-684",
+        "to": "C0-469"
+      },
+      {
+        "from": "C0-684",
+        "to": "C0-460"
+      },
+      {
+        "from": "C0-460",
+        "to": "C0-684"
+      },
+      {
+        "from": "C0-684",
+        "to": "DP1-715"
+      },
+      {
+        "from": "DP1-715",
+        "to": "C0-684"
+      },
+      {
+        "from": "C0-473",
+        "to": "DP1-732"
+      },
+      {
+        "from": "DP1-732",
+        "to": "C0-473"
+      },
+      {
+        "from": "C0-474",
+        "to": "DP1-717"
+      },
+      {
+        "from": "DP1-717",
+        "to": "C0-474"
+      },
+      {
+        "from": "C0-473",
+        "to": "C0-687"
+      },
+      {
+        "from": "C0-687",
+        "to": "C0-473"
+      },
+      {
+        "from": "C0-687",
+        "to": "C0-621"
+      },
+      {
+        "from": "C0-621",
+        "to": "C0-687"
+      },
+      {
+        "from": "C0-687",
+        "to": "DP1-721"
+      },
+      {
+        "from": "DP1-721",
+        "to": "C0-687"
+      },
+      {
+        "from": "C0-621",
+        "to": "DP1-716"
+      },
+      {
+        "from": "DP1-716",
+        "to": "C0-621"
+      },
+      {
+        "from": "C0-476",
+        "to": "C0-685"
+      },
+      {
+        "from": "C0-685",
+        "to": "C0-476"
+      },
+      {
+        "from": "C0-685",
+        "to": "C0-686"
+      },
+      {
+        "from": "C0-686",
+        "to": "C0-685"
+      },
+      {
+        "from": "C0-686",
+        "to": "C0-481"
+      },
+      {
+        "from": "C0-481",
+        "to": "C0-686"
+      },
+      {
+        "from": "C0-686",
+        "to": "DP1-720"
+      },
+      {
+        "from": "DP1-720",
+        "to": "C0-686"
+      },
+      {
+        "from": "C0-685",
+        "to": "DP1-719"
+      },
+      {
+        "from": "DP1-719",
+        "to": "C0-685"
+      },
+      {
+        "from": "C0-479",
+        "to": "DP1-718"
+      },
+      {
+        "from": "DP1-718",
+        "to": "C0-479"
+      },
+      {
+        "from": "C0-482",
+        "to": "DP1-722"
+      },
+      {
+        "from": "DP1-722",
+        "to": "C0-482"
+      },
+      {
+        "from": "C0-483",
+        "to": "DP1-723"
+      },
+      {
+        "from": "DP1-723",
+        "to": "C0-483"
+      },
+      {
+        "from": "C0-496",
+        "to": "C0-688"
+      },
+      {
+        "from": "C0-688",
+        "to": "C0-496"
+      },
+      {
+        "from": "C0-688",
+        "to": "C0-495"
+      },
+      {
+        "from": "C0-495",
+        "to": "C0-688"
+      },
+      {
+        "from": "C0-688",
+        "to": "DP1-724"
+      },
+      {
+        "from": "DP1-724",
+        "to": "C0-688"
+      },
+      {
+        "from": "C0-688",
+        "to": "DP1-725"
+      },
+      {
+        "from": "DP1-725",
+        "to": "C0-688"
+      },
+      {
+        "from": "C0-487",
+        "to": "DP1-726"
+      },
+      {
+        "from": "DP1-726",
+        "to": "C0-487"
+      },
+      {
+        "from": "C0-488",
+        "to": "DP1-727"
+      },
+      {
+        "from": "DP1-727",
+        "to": "C0-488"
+      },
+      {
+        "from": "C0-486",
+        "to": "DP1-731"
+      },
+      {
+        "from": "DP1-731",
+        "to": "C0-486"
+      },
+      {
+        "from": "C0-487",
+        "to": "DP1-728"
+      },
+      {
+        "from": "DP1-728",
+        "to": "C0-487"
+      },
+      {
+        "from": "C0-491",
+        "to": "DP1-730"
+      },
+      {
+        "from": "DP1-730",
+        "to": "C0-491"
+      },
+      {
+        "from": "C0-491",
+        "to": "DP1-729"
+      },
+      {
+        "from": "DP1-729",
+        "to": "C0-491"
+      },
+      {
+        "from": "C0-463",
+        "to": "DP1-733"
+      },
+      {
+        "from": "DP1-733",
+        "to": "C0-463"
+      },
+      {
+        "from": "C0-470",
+        "to": "DP1-737"
+      },
+      {
+        "from": "DP1-737",
+        "to": "C0-470"
+      },
+      {
+        "from": "C0-465",
+        "to": "DP0-562"
+      },
+      {
+        "from": "DP0-562",
+        "to": "C0-465"
+      },
+      {
+        "from": "C0-500",
+        "to": "DP1-769"
+      },
+      {
+        "from": "DP1-769",
+        "to": "C0-500"
+      },
+      {
+        "from": "C0-501",
+        "to": "DP1-768"
+      },
+      {
+        "from": "DP1-768",
+        "to": "C0-501"
+      },
+      {
+        "from": "C0-503",
+        "to": "DP1-765"
+      },
+      {
+        "from": "DP1-765",
+        "to": "C0-503"
+      },
+      {
+        "from": "C0-503",
+        "to": "DP1-767"
+      },
+      {
+        "from": "DP1-767",
+        "to": "C0-503"
+      },
+      {
+        "from": "C0-497",
+        "to": "DP1-764"
+      },
+      {
+        "from": "DP1-764",
+        "to": "C0-497"
+      },
+      {
+        "from": "C0-497",
+        "to": "DP1-766"
+      },
+      {
+        "from": "DP1-766",
+        "to": "C0-497"
+      },
+      {
+        "from": "C0-511",
+        "to": "DP1-763"
+      },
+      {
+        "from": "DP1-763",
+        "to": "C0-511"
+      },
+      {
+        "from": "C0-508",
+        "to": "DP1-762"
+      },
+      {
+        "from": "DP1-762",
+        "to": "C0-508"
+      },
+      {
+        "from": "C0-512",
+        "to": "DP1-761"
+      },
+      {
+        "from": "DP1-761",
+        "to": "C0-512"
+      },
+      {
+        "from": "C0-518",
+        "to": "DP1-760"
+      },
+      {
+        "from": "DP1-760",
+        "to": "C0-518"
+      },
+      {
+        "from": "C0-518",
+        "to": "C0-689"
+      },
+      {
+        "from": "C0-689",
+        "to": "C0-518"
+      },
+      {
+        "from": "C0-689",
+        "to": "C0-690"
+      },
+      {
+        "from": "C0-690",
+        "to": "C0-689"
+      },
+      {
+        "from": "C0-690",
+        "to": "C0-517"
+      },
+      {
+        "from": "C0-517",
+        "to": "C0-690"
+      },
+      {
+        "from": "C0-689",
+        "to": "DP1-756"
+      },
+      {
+        "from": "DP1-756",
+        "to": "C0-689"
+      },
+      {
+        "from": "C0-690",
+        "to": "DP1-757"
+      },
+      {
+        "from": "DP1-757",
+        "to": "C0-690"
+      },
+      {
+        "from": "C0-520",
+        "to": "DP1-758"
+      },
+      {
+        "from": "DP1-758",
+        "to": "C0-520"
+      },
+      {
+        "from": "C0-521",
+        "to": "DP1-759"
+      },
+      {
+        "from": "DP1-759",
+        "to": "C0-521"
+      },
+      {
+        "from": "C0-523",
+        "to": "C0-691"
+      },
+      {
+        "from": "C0-691",
+        "to": "C0-523"
+      },
+      {
+        "from": "C0-691",
+        "to": "C0-618"
+      },
+      {
+        "from": "C0-618",
+        "to": "C0-691"
+      },
+      {
+        "from": "C0-691",
+        "to": "DP1-755"
+      },
+      {
+        "from": "DP1-755",
+        "to": "C0-691"
+      },
+      {
+        "from": "C0-618",
+        "to": "DP1-754"
+      },
+      {
+        "from": "DP1-754",
+        "to": "C0-618"
+      },
+      {
+        "from": "C0-691",
+        "to": "DP1-753"
+      },
+      {
+        "from": "DP1-753",
+        "to": "C0-691"
+      },
+      {
+        "from": "C0-525",
+        "to": "C0-692"
+      },
+      {
+        "from": "C0-692",
+        "to": "C0-525"
+      },
+      {
+        "from": "C0-692",
+        "to": "C0-524"
+      },
+      {
+        "from": "C0-524",
+        "to": "C0-692"
+      },
+      {
+        "from": "C0-692",
+        "to": "DP1-771"
+      },
+      {
+        "from": "DP1-771",
+        "to": "C0-692"
+      },
+      {
+        "from": "C0-692",
+        "to": "DP1-770"
+      },
+      {
+        "from": "DP1-770",
+        "to": "C0-692"
+      },
+      {
+        "from": "C0-545",
+        "to": "DP1-740"
+      },
+      {
+        "from": "DP1-740",
+        "to": "C0-545"
+      },
+      {
+        "from": "C0-544",
+        "to": "DP1-741"
+      },
+      {
+        "from": "DP1-741",
+        "to": "C0-544"
+      },
+      {
+        "from": "C0-534",
+        "to": "C0-693"
+      },
+      {
+        "from": "C0-693",
+        "to": "C0-534"
+      },
+      {
+        "from": "C0-693",
+        "to": "C0-694"
+      },
+      {
+        "from": "C0-694",
+        "to": "C0-693"
+      },
+      {
+        "from": "C0-694",
+        "to": "C0-533"
+      },
+      {
+        "from": "C0-533",
+        "to": "C0-694"
+      },
+      {
+        "from": "C0-694",
+        "to": "DP1-745"
+      },
+      {
+        "from": "DP1-745",
+        "to": "C0-694"
+      },
+      {
+        "from": "C0-693",
+        "to": "DP1-744"
+      },
+      {
+        "from": "DP1-744",
+        "to": "C0-693"
+      },
+      {
+        "from": "C0-531",
+        "to": "DP1-742"
+      },
+      {
+        "from": "DP1-742",
+        "to": "C0-531"
+      },
+      {
+        "from": "C0-532",
+        "to": "DP1-739"
+      },
+      {
+        "from": "DP1-739",
+        "to": "C0-532"
+      },
+      {
+        "from": "C0-532",
+        "to": "DP1-743"
+      },
+      {
+        "from": "DP1-743",
+        "to": "C0-532"
+      },
+      {
+        "from": "C0-546",
+        "to": "DP1-738"
+      },
+      {
+        "from": "DP1-738",
+        "to": "C0-546"
+      },
+      {
+        "from": "C0-694",
+        "to": "DP1-749"
+      },
+      {
+        "from": "DP1-749",
+        "to": "C0-694"
+      },
+      {
+        "from": "C0-533",
+        "to": "DP1-752"
+      },
+      {
+        "from": "DP1-752",
+        "to": "C0-533"
+      },
+      {
+        "from": "C0-535",
+        "to": "DP1-748"
+      },
+      {
+        "from": "DP1-748",
+        "to": "C0-535"
+      },
+      {
+        "from": "C0-537",
+        "to": "DP1-750"
+      },
+      {
+        "from": "DP1-750",
+        "to": "C0-537"
+      },
+      {
+        "from": "C0-541",
+        "to": "DP1-751"
+      },
+      {
+        "from": "DP1-751",
+        "to": "C0-541"
+      },
+      {
+        "from": "C0-445",
+        "to": "C0-697"
+      },
+      {
+        "from": "C0-697",
+        "to": "C0-445"
+      },
+      {
+        "from": "C0-697",
+        "to": "C0-446"
+      },
+      {
+        "from": "C0-446",
+        "to": "C0-697"
+      },
+      {
+        "from": "C0-695",
+        "to": "DP1-746"
+      },
+      {
+        "from": "DP1-746",
+        "to": "C0-695"
+      },
+      {
+        "from": "C0-696",
+        "to": "DP1-747"
+      },
+      {
+        "from": "DP1-747",
+        "to": "C0-696"
+      },
+      {
+        "from": "C0-546",
+        "to": "C0-698"
+      },
+      {
+        "from": "C0-698",
+        "to": "C0-546"
+      },
+      {
+        "from": "C0-698",
+        "to": "C0-545"
+      },
+      {
+        "from": "C0-545",
+        "to": "C0-698"
+      },
+      {
+        "from": "C0-698",
+        "to": "C0-699"
+      },
+      {
+        "from": "C0-699",
+        "to": "C0-698"
+      },
+      {
+        "from": "C0-699",
+        "to": "DP1-773"
+      },
+      {
+        "from": "DP1-773",
+        "to": "C0-699"
       }
     ],
     "auto_connect": false
@@ -97204,14 +99566,14 @@
       "id": "C18",
       "from": "DER3-F0",
       "to": "DP0-73",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C19",
       "from": "DER3-F0",
       "to": "DP0-76",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -97225,28 +99587,28 @@
       "id": "C21",
       "from": "DER3-F0",
       "to": "DP0-75",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C22",
       "from": "DER3-F0",
       "to": "DP0-74",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C23",
       "from": "DER3-F0",
       "to": "DP0-72",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C24",
       "from": "DER3-F0",
       "to": "DP0-71",
-      "qty": 8,
+      "qty": 7,
       "route_profile": ""
     },
     {
@@ -97260,14 +99622,14 @@
       "id": "C26",
       "from": "DER3-F0",
       "to": "DP0-70",
-      "qty": 8,
+      "qty": 7,
       "route_profile": ""
     },
     {
       "id": "C27",
       "from": "DER3-F0",
       "to": "DP0-69",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -97288,7 +99650,7 @@
       "id": "C30",
       "from": "DER3-F0",
       "to": "DP0-68",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -97330,7 +99692,7 @@
       "id": "C36",
       "from": "DER3-F0",
       "to": "DP0-67",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -97351,7 +99713,7 @@
       "id": "C39",
       "from": "DER3-F0",
       "to": "DP0-66",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -97365,7 +99727,7 @@
       "id": "C41",
       "from": "DER3-F0",
       "to": "DP0-65",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -97624,378 +99986,378 @@
       "id": "C78",
       "from": "DER3-F0",
       "to": "DP0-78",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C79",
       "from": "DER3-F0",
       "to": "DP0-79",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C80",
       "from": "CR1-F1",
       "to": "DP0-85",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C81",
       "from": "DER3-F0",
       "to": "DP0-80",
-      "qty": 8,
+      "qty": 7,
       "route_profile": ""
     },
     {
       "id": "C82",
       "from": "CR1-F1",
       "to": "DP0-87",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C83",
       "from": "CR1-F1",
       "to": "DP0-86",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C84",
       "from": "DER3-F0",
       "to": "DP0-81",
-      "qty": 8,
+      "qty": 7,
       "route_profile": ""
     },
     {
       "id": "C85",
       "from": "DER3-F0",
       "to": "DP0-82",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C86",
       "from": "DER3-F0",
       "to": "DP0-77",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C87",
       "from": "CR1-F1",
       "to": "DP0-88",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C88",
       "from": "DER3-F0",
       "to": "DP0-83",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C89",
       "from": "DER3-F0",
       "to": "DP0-84",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C90",
       "from": "CR1-F1",
       "to": "DP0-89",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C91",
       "from": "DER3-F0",
       "to": "DP0-91",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C92",
       "from": "DER3-F0",
       "to": "DP0-92",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C93",
       "from": "DER3-F0",
       "to": "DP0-96",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C94",
       "from": "DER3-F0",
       "to": "DP0-94",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C95",
       "from": "DER3-F0",
       "to": "DP0-95",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C96",
       "from": "DER3-F0",
       "to": "DP0-93",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C97",
       "from": "CR1-F1",
       "to": "DP0-90",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C98",
       "from": "DER3-F0",
       "to": "DP0-97",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C99",
       "from": "DER3-F0",
       "to": "DP0-98",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C100",
       "from": "DER3-F0",
       "to": "DP0-99",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C101",
       "from": "DER3-F0",
       "to": "DP0-100",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C102",
       "from": "DER3-F0",
       "to": "DP0-103",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C103",
       "from": "DER3-F0",
       "to": "DP0-104",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C104",
       "from": "DER3-F0",
       "to": "DP0-101",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C105",
       "from": "DER3-F0",
       "to": "DP0-102",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C106",
       "from": "DER3-F0",
       "to": "DP0-105",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C107",
       "from": "DER3-F0",
       "to": "DP0-107",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C108",
       "from": "DER3-F0",
       "to": "DP0-109",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C109",
       "from": "DER3-F0",
       "to": "DP0-110",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C110",
       "from": "DER3-F0",
       "to": "DP0-106",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C111",
       "from": "DER3-F0",
       "to": "DP0-108",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C112",
       "from": "DER3-F0",
       "to": "DP0-111",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C113",
       "from": "DER3-F0",
       "to": "DP0-112",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C114",
       "from": "DER3-F0",
       "to": "DP0-113",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C115",
       "from": "DER3-F0",
       "to": "DP0-116",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C116",
       "from": "DER3-F0",
       "to": "DP0-115",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C117",
       "from": "DER3-F0",
       "to": "DP0-114",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C118",
       "from": "DER3-F0",
       "to": "DP0-117",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C119",
       "from": "DER3-F0",
       "to": "DP0-118",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C120",
       "from": "DER3-F0",
       "to": "DP0-119",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C121",
       "from": "DER3-F0",
       "to": "DP0-121",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C122",
       "from": "DER3-F0",
       "to": "DP0-120",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C123",
       "from": "DER3-F0",
       "to": "DP0-122",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C124",
       "from": "DER3-F0",
       "to": "DP0-123",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C125",
       "from": "DER3-F0",
       "to": "DP0-124",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C126",
       "from": "DER3-F0",
       "to": "DP0-125",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C127",
       "from": "DER3-F0",
       "to": "DP0-127",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C128",
       "from": "DER3-F0",
       "to": "DP0-128",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C129",
       "from": "DER3-F0",
       "to": "DP0-126",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C130",
       "from": "DER3-F0",
       "to": "DP0-129",
-      "qty": 8,
+      "qty": 9,
       "route_profile": ""
     },
     {
       "id": "C131",
       "from": "DER3-F0",
       "to": "DP0-130",
-      "qty": 8,
+      "qty": 9,
       "route_profile": ""
     },
     {
@@ -99472,112 +101834,112 @@
       "id": "C342",
       "from": "DER1-F0",
       "to": "DP0-314",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C343",
       "from": "DER1-F0",
       "to": "DP0-315",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C344",
       "from": "DER1-F0",
       "to": "DP0-316",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C345",
       "from": "DER1-F0",
       "to": "DP0-318",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C346",
       "from": "DER1-F0",
       "to": "DP0-317",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C347",
       "from": "DER1-F0",
       "to": "DP0-319",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C348",
       "from": "DER1-F0",
       "to": "DP0-320",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C349",
       "from": "DER1-F0",
       "to": "DP0-322",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C350",
       "from": "DER1-F0",
       "to": "DP0-321",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C351",
       "from": "DER1-F0",
       "to": "DP0-324",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C352",
       "from": "DER1-F0",
       "to": "DP0-323",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C353",
       "from": "DER1-F0",
       "to": "DP0-326",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C354",
       "from": "DER1-F0",
       "to": "DP0-325",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C355",
       "from": "DER1-F0",
       "to": "DP0-327",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C356",
       "from": "DER1-F0",
       "to": "DP0-328",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C357",
       "from": "DER1-F0",
       "to": "DP0-329",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -99591,14 +101953,14 @@
       "id": "C359",
       "from": "DER1-F0",
       "to": "DP0-332",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C360",
       "from": "DER1-F0",
       "to": "DP0-331",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -99682,7 +102044,7 @@
       "id": "C372",
       "from": "DER1-F0",
       "to": "DP0-344",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -99703,42 +102065,42 @@
       "id": "C375",
       "from": "DER1-F0",
       "to": "DP0-347",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C376",
       "from": "DER1-F0",
       "to": "DP0-349",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C377",
       "from": "DER1-F0",
       "to": "DP0-348",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C378",
       "from": "CR4-F0",
       "to": "DP0-351",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C379",
       "from": "DER1-F0",
       "to": "DP0-350",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C380",
       "from": "CR4-F0",
       "to": "DP0-352",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -99752,70 +102114,70 @@
       "id": "C382",
       "from": "DER2-F0",
       "to": "DP0-354",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C383",
       "from": "DER2-F0",
       "to": "DP0-355",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C384",
       "from": "DER2-F0",
       "to": "DP0-357",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C385",
       "from": "DER2-F0",
       "to": "DP0-356",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C386",
       "from": "DER2-F0",
       "to": "DP0-358",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C387",
       "from": "DER2-F0",
       "to": "DP0-360",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C388",
       "from": "DER2-F0",
       "to": "DP0-359",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C389",
       "from": "DER2-F0",
       "to": "DP0-361",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C390",
       "from": "DER2-F0",
       "to": "DP0-362",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C391",
       "from": "DER2-F0",
       "to": "DP0-363",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -99829,70 +102191,70 @@
       "id": "C393",
       "from": "DER2-F0",
       "to": "DP0-364",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C394",
       "from": "DER2-F0",
       "to": "DP0-367",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C395",
       "from": "DER2-F0",
       "to": "DP0-366",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C396",
       "from": "DER2-F0",
       "to": "DP0-368",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C397",
       "from": "DER2-F0",
       "to": "DP0-370",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C398",
       "from": "DER2-F0",
       "to": "DP0-369",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C399",
       "from": "CR4-F0",
       "to": "DP0-371",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C400",
       "from": "CR4-F0",
       "to": "DP0-372",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C401",
       "from": "DER2-F0",
       "to": "DP0-374",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C402",
       "from": "CR4-F0",
       "to": "DP0-373",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -99920,133 +102282,133 @@
       "id": "C406",
       "from": "DER2-F0",
       "to": "DP0-378",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C407",
       "from": "DER2-F0",
       "to": "DP0-379",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C408",
       "from": "DER2-F0",
       "to": "DP0-380",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C409",
       "from": "DER2-F0",
       "to": "DP0-381",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C410",
       "from": "DER2-F0",
       "to": "DP0-382",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C411",
       "from": "DER2-F0",
       "to": "DP0-383",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C412",
       "from": "DER2-F0",
       "to": "DP0-385",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C413",
       "from": "DER2-F0",
       "to": "DP0-384",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C414",
       "from": "DER2-F0",
       "to": "DP0-387",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C415",
       "from": "DER2-F0",
       "to": "DP0-388",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C416",
       "from": "DER2-F0",
       "to": "DP0-386",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C417",
       "from": "DER2-F0",
       "to": "DP0-390",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C418",
       "from": "DER2-F0",
       "to": "DP0-389",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C419",
       "from": "DER2-F0",
       "to": "DP0-391",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C420",
       "from": "DER2-F0",
       "to": "DP0-392",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C421",
       "from": "DER2-F0",
       "to": "DP0-393",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C422",
       "from": "DER2-F0",
       "to": "DP0-395",
-      "qty": 8,
+      "qty": 7,
       "route_profile": ""
     },
     {
       "id": "C423",
       "from": "DER2-F0",
       "to": "DP0-394",
-      "qty": 8,
+      "qty": 7,
       "route_profile": ""
     },
     {
       "id": "C424",
       "from": "DER2-F0",
       "to": "DP0-396",
-      "qty": 8,
+      "qty": 10,
       "route_profile": ""
     },
     {
@@ -101586,84 +103948,84 @@
       "id": "C648",
       "from": "DER5-F0",
       "to": "DP1-253",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C649",
       "from": "DER5-F0",
       "to": "DP1-251",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C650",
       "from": "DER5-F0",
       "to": "DP1-254",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C651",
       "from": "DER5-F0",
       "to": "DP1-255",
-      "qty": 8,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C652",
       "from": "DER5-F0",
       "to": "DP1-252",
-      "qty": 8,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C653",
       "from": "CR3-F1",
       "to": "DP1-257",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C654",
       "from": "DER5-F0",
       "to": "DP1-256",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C655",
       "from": "CR3-F1",
       "to": "DP1-258",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C656",
       "from": "CR3-F1",
       "to": "DP1-260",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C657",
       "from": "CR3-F1",
       "to": "DP1-259",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C658",
       "from": "CR3-F1",
       "to": "DP1-261",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C659",
       "from": "CR3-F1",
       "to": "DP1-262",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -101684,14 +104046,14 @@
       "id": "C662",
       "from": "CR3-F1",
       "to": "DP1-265",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C663",
       "from": "CR3-F1",
       "to": "DP1-266",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
@@ -101705,14 +104067,14 @@
       "id": "C665",
       "from": "CR3-F1",
       "to": "DP1-268",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C666",
       "from": "CR3-F1",
       "to": "DP1-267",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -101768,7 +104130,7 @@
       "id": "C674",
       "from": "CR3-F1",
       "to": "DP1-277",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -101789,203 +104151,203 @@
       "id": "C677",
       "from": "DER5-F0",
       "to": "DP1-280",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C678",
       "from": "DER5-F0",
       "to": "DP1-281",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C679",
       "from": "DER5-F0",
       "to": "DP1-282",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C680",
       "from": "CR3-F1",
       "to": "DP1-285",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C681",
       "from": "CR3-F1",
       "to": "DP1-283",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C682",
       "from": "CR3-F1",
       "to": "DP1-286",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C683",
       "from": "DER5-F0",
       "to": "DP1-284",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C684",
       "from": "CR3-F1",
       "to": "DP1-289",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C685",
       "from": "DER5-F0",
       "to": "DP1-287",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C686",
       "from": "DER5-F0",
       "to": "DP1-288",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C687",
       "from": "DER5-F0",
       "to": "DP1-290",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C688",
       "from": "DER5-F0",
       "to": "DP1-291",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C689",
       "from": "DER5-F0",
       "to": "DP1-292",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C690",
       "from": "DER5-F0",
       "to": "DP1-296",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C691",
       "from": "CR3-F1",
       "to": "DP1-297",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C692",
       "from": "DER5-F0",
       "to": "DP1-295",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C693",
       "from": "DER5-F0",
       "to": "DP1-294",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C694",
       "from": "DER5-F0",
       "to": "DP1-293",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C695",
       "from": "DER5-F0",
       "to": "DP1-299",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C696",
       "from": "CR3-F1",
       "to": "DP1-298",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C697",
       "from": "DER5-F0",
       "to": "DP1-300",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C698",
       "from": "DER5-F0",
       "to": "DP1-301",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C699",
       "from": "DER5-F0",
       "to": "DP1-302",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C700",
       "from": "DER5-F0",
       "to": "DP1-303",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C701",
       "from": "CR3-F1",
       "to": "DP1-304",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C702",
       "from": "CR3-F1",
       "to": "DP1-306",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C703",
       "from": "CR3-F1",
       "to": "DP1-305",
-      "qty": 4,
+      "qty": 5,
       "route_profile": ""
     },
     {
       "id": "C704",
       "from": "DER5-F0",
       "to": "DP1-307",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C705",
       "from": "DER5-F0",
       "to": "DP1-308",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -104225,21 +106587,21 @@
       "id": "C1335",
       "from": "DER1-F0",
       "to": "DP0-454",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C1336",
       "from": "DER1-F0",
       "to": "DP0-456",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C1337",
       "from": "DER1-F0",
       "to": "DP0-455",
-      "qty": 8,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -104414,28 +106776,28 @@
       "id": "C1362",
       "from": "CR1-F0",
       "to": "DP0-475",
-      "qty": 6,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C1363",
       "from": "CR1-F0",
       "to": "DP0-476",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C1364",
       "from": "CR1-F0",
       "to": "DP0-477",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C1365",
       "from": "CR1-F0",
       "to": "DP0-478",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -104456,14 +106818,14 @@
       "id": "C1368",
       "from": "CR1-F0",
       "to": "DP0-480",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C1369",
       "from": "CR1-F0",
       "to": "DP0-479",
-      "qty": 4,
+      "qty": 1,
       "route_profile": ""
     },
     {
