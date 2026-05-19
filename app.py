@@ -605,7 +605,10 @@ class CableRouteEditor(QMainWindow):
             if not self._is_point_kind_visible(point):
                 continue
 
-            if str(point.get("kind", "")).strip() not in {"corridor_node", "data_point"}:
+            if str(point.get("kind", "")).strip() not in {
+                "corridor_node",
+                "data_point",
+            }:
                 continue
 
             result.append(name)
@@ -785,6 +788,12 @@ class CableRouteEditor(QMainWindow):
         self.hide_connected_data_points_check = QCheckBox("Hide connected data points")
         self.hide_connected_data_points_check.setChecked(False)
 
+        self.show_unassigned_room_types_only_check = QCheckBox(
+            "Only show unassigned data points"
+        )
+        self.show_unassigned_room_types_only_check.setChecked(False)
+        self.show_unassigned_room_types_only_check.toggled.connect(self.refresh_canvas)
+
         self.show_locations_check = QCheckBox("Show locations")
         self.show_locations_check.setChecked(True)
 
@@ -835,6 +844,7 @@ class CableRouteEditor(QMainWindow):
         sidebar_layout.addWidget(self.show_edges_check)
         sidebar_layout.addWidget(self.show_nodes_check)
         sidebar_layout.addWidget(self.show_data_points_check)
+        sidebar_layout.addWidget(self.show_unassigned_room_types_only_check)
         sidebar_layout.addWidget(self.hide_connected_data_points_check)
         sidebar_layout.addWidget(self.show_locations_check)
         sidebar_layout.addWidget(self.show_comms_rooms_check)
@@ -909,8 +919,14 @@ class CableRouteEditor(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.undo)
         QShortcut(QKeySequence("Ctrl+Y"), self, activated=self.redo)
 
-        QShortcut(QKeySequence("Ctrl+C"), self, activated=self.copy_selected_template_items)
-        QShortcut(QKeySequence("Ctrl+V"), self, activated=self.paste_selected_template_items_at_view_centre)
+        QShortcut(
+            QKeySequence("Ctrl+C"), self, activated=self.copy_selected_template_items
+        )
+        QShortcut(
+            QKeySequence("Ctrl+V"),
+            self,
+            activated=self.paste_selected_template_items_at_view_centre,
+        )
 
     def delete_right_clicked_items(self, picked):
         if not picked:
@@ -924,8 +940,7 @@ class CableRouteEditor(QMainWindow):
             names_to_delete = [picked]
 
         names_to_delete = [
-            name for name in names_to_delete
-            if name in self.store.names_in_use()
+            name for name in names_to_delete if name in self.store.names_in_use()
         ]
 
         if not names_to_delete:
@@ -964,11 +979,7 @@ class CableRouteEditor(QMainWindow):
     def _selected_copyable_names(self):
         floor = self.floor_spin.value()
         eligible = self._eligible_template_name_set(floor)
-        return sorted(
-            name for name in self.selected_template_names
-            if name in eligible
-        )
-
+        return sorted(name for name in self.selected_template_names if name in eligible)
 
     def copy_selected_template_items(self):
         selected = self._selected_copyable_names()
@@ -1033,13 +1044,11 @@ class CableRouteEditor(QMainWindow):
             f"Copied {len(items)} item(s) with offsets from base point ({base_x:.3f}, {base_y:.3f})"
         )
 
-
     def paste_selected_template_items_at_view_centre(self):
         centre = self.canvas.mapToScene(self.canvas.viewport().rect().center())
         x, y = self.scene_to_world(centre.x(), centre.y())
         x, y = self.snap(x, y)
         self.paste_selected_template_items_at(x, y, self.floor_spin.value())
-
 
     def paste_selected_template_items_at(self, base_x, base_y, target_floor):
         if not self.selection_clipboard:
@@ -1080,7 +1089,9 @@ class CableRouteEditor(QMainWindow):
                 new_record["x"] = x
                 new_record["y"] = y
 
-                self.store.data.setdefault("corridors", {}).setdefault("nodes", []).append(new_record)
+                self.store.data.setdefault("corridors", {}).setdefault(
+                    "nodes", []
+                ).append(new_record)
 
             elif kind == "data_point":
                 new_name = self.store._suggest_next_data_point_name_for_floor(
@@ -1902,11 +1913,7 @@ class CableRouteEditor(QMainWindow):
         brush = QBrush(green)
 
         has_location = bool(
-            [
-                str(x).strip()
-                for x in point.get("department_ids", [])
-                if str(x).strip()
-            ]
+            [str(x).strip() for x in point.get("department_ids", []) if str(x).strip()]
         )
         has_room_type = bool(str(point.get("room_type_id", "") or "").strip())
 
@@ -1949,9 +1956,7 @@ class CableRouteEditor(QMainWindow):
         }
 
         department_ids = [
-            str(x).strip()
-            for x in point.get("department_ids", [])
-            if str(x).strip()
+            str(x).strip() for x in point.get("department_ids", []) if str(x).strip()
         ]
 
         departments = [
@@ -1985,6 +1990,20 @@ class CableRouteEditor(QMainWindow):
                 continue
 
             if kind == "data_point" and not self.show_data_points_check.isChecked():
+                continue
+
+            if (
+                self.show_unassigned_room_types_only_check.isChecked()
+                and point.get("kind") == "data_point"
+                and str(point.get("room_type_id", "")).strip()
+            ):
+                continue
+
+            if (
+                point.get("kind") == "data_point"
+                and self.show_unassigned_room_types_only_check.isChecked()
+                and str(point.get("room_type_id", "") or "").strip()
+            ):
                 continue
 
             if (
@@ -2185,6 +2204,14 @@ class CableRouteEditor(QMainWindow):
                 and name in self._connected_data_point_names()
             ):
                 return False
+
+            if (
+                point.get("kind") == "data_point"
+                and self.show_unassigned_room_types_only_check.isChecked()
+                and str(point.get("room_type_id", "") or "").strip()
+            ):
+                return False
+
             return True
 
         if kind == "location":
@@ -2241,9 +2268,7 @@ class CableRouteEditor(QMainWindow):
                 float(point["y"]) - float(y),
             )
 
-            if dist <= float(radius_world) and (
-                best_dist is None or dist < best_dist
-            ):
+            if dist <= float(radius_world) and (best_dist is None or dist < best_dist):
                 best_name = name
                 best_dist = dist
 
@@ -3389,7 +3414,9 @@ class CableRouteEditor(QMainWindow):
         }
 
         asset_categories_by_id = {
-            str(category.get("id", "")).strip(): str(category.get("name", category.get("id", ""))).strip()
+            str(category.get("id", ""))
+            .strip(): str(category.get("name", category.get("id", "")))
+            .strip()
             for category in self.store.data.get("asset_categories", [])
             if str(category.get("id", "")).strip()
         }
@@ -3624,7 +3651,9 @@ class CableRouteEditor(QMainWindow):
         for room_type_id, room_type_name in room_types:
             room_type_id = str(room_type_id).strip()
             room_type_name = str(room_type_name).strip()
-            label = f"{room_type_id} - {room_type_name}" if room_type_name else room_type_id
+            label = (
+                f"{room_type_id} - {room_type_name}" if room_type_name else room_type_id
+            )
             room_type_combo.addItem(label, room_type_id)
 
         completer = QCompleter(room_type_combo)
@@ -3664,7 +3693,9 @@ class CableRouteEditor(QMainWindow):
                 if room_type_id and text.lower() == room_type_id.lower():
                     return room_type_id
 
-                if room_type_id and text.lower().startswith(room_type_id.lower() + " -"):
+                if room_type_id and text.lower().startswith(
+                    room_type_id.lower() + " -"
+                ):
                     return room_type_id
 
             return ""
@@ -4617,7 +4648,9 @@ class CableRouteEditor(QMainWindow):
 
             if self.drag_mode_active and self.dragging_point_name:
                 point = self.store.all_points().get(self.dragging_point_name)
-                if point and not self._is_point_kind_visible({**point, "name": self.dragging_point_name}):
+                if point and not self._is_point_kind_visible(
+                    {**point, "name": self.dragging_point_name}
+                ):
                     self.dragging_point_name = None
                     self.drag_mode_active = False
                     self._clear_multi_drag()
@@ -6671,7 +6704,8 @@ class CableRouteEditor(QMainWindow):
             names = [picked]
 
         names = [
-            name for name in names
+            name
+            for name in names
             if name in points
             and str(points[name].get("kind", "")).strip()
             in {
@@ -6709,9 +6743,7 @@ class CableRouteEditor(QMainWindow):
             )
 
         self.refresh_canvas()
-        self.set_status(
-            f"Rotated {len(names)} item(s) 90° clockwise around {picked}"
-        )
+        self.set_status(f"Rotated {len(names)} item(s) 90° clockwise around {picked}")
 
 
 def main():

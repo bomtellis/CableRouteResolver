@@ -85,7 +85,9 @@ def point_distance(a: Point, b: Point, floor_height_m: float) -> float:
     return math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
 
 
-def build_graph(data: dict, points: Dict[str, Point]) -> Dict[str, List[Tuple[str, float]]]:
+def build_graph(
+    data: dict, points: Dict[str, Point]
+) -> Dict[str, List[Tuple[str, float]]]:
     floor_height_m = float(data.get("building", {}).get("floor_height_m", 4.0) or 4.0)
     graph: Dict[str, List[Tuple[str, float]]] = {name: [] for name in points}
 
@@ -101,7 +103,9 @@ def build_graph(data: dict, points: Dict[str, Point]) -> Dict[str, List[Tuple[st
         transition_id = str(transition["id"])
         floors = sorted(int(f) for f in (transition.get("floors") or []))
         if not floors:
-            floors = sorted(int(f) for f in (transition.get("floor_locations") or {}).keys())
+            floors = sorted(
+                int(f) for f in (transition.get("floor_locations") or {}).keys()
+            )
         # connect adjacent floors in both directions
         for low, high in zip(floors, floors[1:]):
             a = f"{transition_id}-F{low}"
@@ -129,7 +133,11 @@ def allowed_graph_for_profile(
         raise ValueError(f"Route profile not found: {profile_name}")
 
     allowed_nodes = set(profile.get("allowed_nodes") or [])
-    allowed_edges = {tuple(edge) for edge in (profile.get("allowed_edges") or []) if isinstance(edge, list) and len(edge) == 2}
+    allowed_edges = {
+        tuple(edge)
+        for edge in (profile.get("allowed_edges") or [])
+        if isinstance(edge, list) and len(edge) == 2
+    }
     allowed_transitions = set(profile.get("allowed_transitions") or [])
 
     # Empty rules means unrestricted for that dimension.
@@ -140,18 +148,42 @@ def allowed_graph_for_profile(
     filtered: Dict[str, List[Tuple[str, float]]] = {name: [] for name in graph}
     for start, neighbours in graph.items():
         start_point = points[start]
-        start_transition_id = start.split("-F", 1)[0] if start_point.kind == "transition_node" and "-F" in start else None
-        if restrict_nodes and start not in allowed_nodes and start_point.kind != "transition_node":
+        start_transition_id = (
+            start.split("-F", 1)[0]
+            if start_point.kind == "transition_node" and "-F" in start
+            else None
+        )
+        if (
+            restrict_nodes
+            and start not in allowed_nodes
+            and start_point.kind != "transition_node"
+        ):
             continue
-        if restrict_transitions and start_transition_id and start_transition_id not in allowed_transitions:
+        if (
+            restrict_transitions
+            and start_transition_id
+            and start_transition_id not in allowed_transitions
+        ):
             continue
 
         for end, weight in neighbours:
             end_point = points[end]
-            end_transition_id = end.split("-F", 1)[0] if end_point.kind == "transition_node" and "-F" in end else None
-            if restrict_nodes and end not in allowed_nodes and end_point.kind != "transition_node":
+            end_transition_id = (
+                end.split("-F", 1)[0]
+                if end_point.kind == "transition_node" and "-F" in end
+                else None
+            )
+            if (
+                restrict_nodes
+                and end not in allowed_nodes
+                and end_point.kind != "transition_node"
+            ):
                 continue
-            if restrict_transitions and end_transition_id and end_transition_id not in allowed_transitions:
+            if (
+                restrict_transitions
+                and end_transition_id
+                and end_transition_id not in allowed_transitions
+            ):
                 continue
             if restrict_edges and (start, end) not in allowed_edges:
                 # allow internal transition travel even when explicit allowed_edges are used
@@ -221,7 +253,9 @@ def connection_rows(data: dict) -> List[dict]:
         working_graph = allowed_graph_for_profile(data, graph, points, profile_name)
         route_length_m, path = shortest_path_length(working_graph, start, end)
 
-        endpoint_extension_m = points[start].extension_distance_m + points[end].extension_distance_m
+        endpoint_extension_m = (
+            points[start].extension_distance_m + points[end].extension_distance_m
+        )
         total_length_m = route_length_m + endpoint_extension_m
 
         rows.append(
@@ -236,7 +270,6 @@ def connection_rows(data: dict) -> List[dict]:
             }
         )
     return rows
-
 
 
 def comms_room_breakdown_rows(data: dict) -> List[dict]:
@@ -255,7 +288,9 @@ def comms_room_breakdown_rows(data: dict) -> List[dict]:
     }
 
     departments = {
-        str(item.get("id", "")).strip(): str(item.get("name", item.get("id", ""))).strip()
+        str(item.get("id", ""))
+        .strip(): str(item.get("name", item.get("id", "")))
+        .strip()
         for item in data.get("departments", [])
         if str(item.get("id", "")).strip()
     }
@@ -277,7 +312,9 @@ def comms_room_breakdown_rows(data: dict) -> List[dict]:
             continue
 
         data_point = data_points.get(data_point_name, {})
-        floor = data_point.get("floor", points[data_point_name].floor if data_point_name in points else "")
+        floor = data_point.get(
+            "floor", points[data_point_name].floor if data_point_name in points else ""
+        )
 
         department_ids = data_point.get("department_ids", [])
         if not department_ids:
@@ -336,6 +373,7 @@ def write_comms_room_breakdown_csv(rows: Iterable[dict], output_path: Path) -> N
         for row in rows:
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
+
 def _clean_text(value) -> str:
     return str(value or "").strip()
 
@@ -358,6 +396,7 @@ def _item_id(item: dict) -> str:
 
 def _item_name(item: dict, fallback: str = "") -> str:
     return _clean_text(item.get("name") or item.get("description") or fallback)
+
 
 def _normalise_room_type_assets(room_type: dict) -> List[dict]:
     raw_assets = (
@@ -400,6 +439,7 @@ def _normalise_room_type_assets(room_type: dict) -> List[dict]:
 
     return rows
 
+
 def _item_connection_type(item: dict) -> str:
     value = (
         item.get("connection_type")
@@ -411,6 +451,7 @@ def _item_connection_type(item: dict) -> str:
     if isinstance(value, list):
         return ", ".join(_clean_text(x) for x in value if _clean_text(x))
     return _clean_text(value)
+
 
 def assets_per_room_rows(data: dict) -> List[dict]:
     assets = {
@@ -462,7 +503,9 @@ def assets_per_room_rows(data: dict) -> List[dict]:
             asset_id = asset_entry["asset_id"]
             asset = assets.get(asset_id, {})
             asset_name = _item_name(asset, asset_id)
-            connection_type = asset_entry.get("connection_type") or _item_connection_type(asset)
+            connection_type = asset_entry.get(
+                "connection_type"
+            ) or _item_connection_type(asset)
             asset_qty_per_room = int(asset_entry["qty"])
             total_asset_qty = room_qty * asset_qty_per_room
 
@@ -518,6 +561,107 @@ def write_assets_per_room_csv(rows: Iterable[dict], output_path: Path) -> None:
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
+def room_type_totals_rows(data: dict) -> List[dict]:
+    room_types = {
+        _item_id(item): item
+        for item in data.get("room_types", [])
+        if isinstance(item, dict) and _item_id(item)
+    }
+
+    departments = {
+        _clean_text(item.get("id")): _item_name(item, _clean_text(item.get("id")))
+        for item in data.get("departments", [])
+        if isinstance(item, dict) and _clean_text(item.get("id"))
+    }
+
+    grouped = {}
+
+    candidate_rooms = list(data.get("data_points", [])) + [
+        item
+        for item in data.get("locations", [])
+        if _clean_text(item.get("room_type_id") or item.get("room_type"))
+    ]
+
+    for room in candidate_rooms:
+        if not isinstance(room, dict):
+            continue
+
+        room_type_id = _clean_text(room.get("room_type_id") or room.get("room_type"))
+
+        if not room_type_id:
+            continue
+
+        room_type = room_types.get(room_type_id, {})
+        room_type_name = _item_name(room_type, room_type_id)
+
+        room_qty = _safe_int(
+            room.get(
+                "room_qty",
+                room.get("room_quantity", room.get("quantity", 1)),
+            ),
+            default=1,
+        )
+
+        department_ids = room.get("department_ids", [])
+        if not isinstance(department_ids, list):
+            department_ids = [department_ids] if _clean_text(department_ids) else []
+
+        if not department_ids:
+            department_ids = [""]
+
+        for department_id in department_ids:
+            department_id = _clean_text(department_id)
+            department_name = departments.get(department_id, "Unassigned")
+
+            key = (
+                room.get("floor", ""),
+                department_id,
+                room_type_id,
+            )
+
+            if key not in grouped:
+                grouped[key] = {
+                    "floor": room.get("floor", ""),
+                    "department_id": department_id,
+                    "department_name": department_name,
+                    "room_type_id": room_type_id,
+                    "room_type_name": room_type_name,
+                    "data_point_count": 0,
+                    "room_qty_total": 0,
+                }
+
+            grouped[key]["data_point_count"] += 1
+            grouped[key]["room_qty_total"] += room_qty
+
+    return sorted(
+        grouped.values(),
+        key=lambda r: (
+            int(r["floor"]) if str(r["floor"]).isdigit() else 9999,
+            str(r["department_name"]),
+            str(r["room_type_name"]),
+        ),
+    )
+
+
+def write_room_type_totals_csv(rows: Iterable[dict], output_path: Path) -> None:
+    fieldnames = [
+        "floor",
+        "department_id",
+        "department_name",
+        "room_type_id",
+        "room_type_name",
+        "data_point_count",
+        "room_qty_total",
+    ]
+
+    with output_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
 def write_csv(rows: Iterable[dict], output_path: Path) -> None:
     fieldnames = ["start_location", "end_location", "cable_length_m"]
     with output_path.open("w", encoding="utf-8", newline="") as f:
@@ -545,12 +689,15 @@ def main() -> None:
     args = parser.parse_args()
 
     json_path = Path(args.json_file)
-    output_path = Path(args.output) if args.output else json_path.with_name(f"{json_path.stem}_cable_lengths.csv")
+    output_path = (
+        Path(args.output)
+        if args.output
+        else json_path.with_name(f"{json_path.stem}_cable_lengths.csv")
+    )
 
     data = load_project(json_path)
     rows = connection_rows(data)
     write_csv(rows, output_path)
-
 
     breakdown_path = output_path.with_name(
         f"{output_path.stem}_comms_room_breakdown.csv"
@@ -564,9 +711,26 @@ def main() -> None:
     asset_rows = assets_per_room_rows(data)
     write_assets_per_room_csv(asset_rows, assets_per_room_path)
 
+    room_type_totals_path = output_path.with_name(
+        f"{output_path.stem}_room_type_totals.csv"
+    )
+
+    room_type_total_rows = room_type_totals_rows(data)
+
+    write_room_type_totals_csv(
+        room_type_total_rows,
+        room_type_totals_path,
+    )
+
     print(f"Wrote {len(rows)} row(s) to {output_path}")
-    print(f"Wrote {len(breakdown_rows)} comms room breakdown row(s) to {breakdown_path}")
+    print(
+        f"Wrote {len(breakdown_rows)} comms room breakdown row(s) to {breakdown_path}"
+    )
     print(f"Wrote {len(asset_rows)} asset per room row(s) to {assets_per_room_path}")
+    print(
+        f"Wrote {len(room_type_total_rows)} room type total row(s) to "
+        f"{room_type_totals_path}"
+    )
     if args.verbose:
         for row in rows:
             print(
