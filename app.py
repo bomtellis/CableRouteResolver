@@ -3,6 +3,7 @@ from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED, as_co
 from itertools import combinations
 from copy import deepcopy
 import re
+import subprocess
 
 import heapq
 import math
@@ -20,8 +21,10 @@ from PySide6.QtCore import (
     QRectF,
     QThread,
     Slot,
+    QSize,
 )
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QBrush,
     QPainter,
@@ -30,6 +33,9 @@ from PySide6.QtGui import (
     QPolygonF,
     QShortcut,
     QKeySequence,
+    QIcon,
+    QPixmap,
+    QPainterPath,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -60,6 +66,17 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QDialogButtonBox,
     QCompleter,
+    QFrame,
+    QTabWidget,
+    QGridLayout,
+    QSizePolicy,
+    QToolButton,
+    QStyle,
+    QButtonGroup,
+    QGraphicsPathItem,
+    QDockWidget,
+    QTabWidget,
+    QListWidgetItem,
 )
 
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -710,31 +727,173 @@ class CableRouteEditor(QMainWindow):
         self.refresh_canvas()
         self.set_status("Redid change")
 
+    def _mode_definitions(self):
+        return [
+            ("select_move", "Select", "select"),
+            ("corridor_node", "Node", "corridor_node"),
+            ("location", "Location", "location"),
+            ("department", "Dept", "department"),
+            ("data_point", "Data Point", "data_point"),
+            ("transition", "Transition", "transition_node"),
+            ("edge", "Edge", "edge"),
+            ("pan", "Pan", "pan"),
+            ("delete", "Delete", "delete"),
+        ]
+
+    def _make_mode_icon(self, icon_key, size=22):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        cx = size / 2
+        cy = size / 2
+        r = size * 0.32
+
+        pen = QPen(QColor("#222222"), 2)
+        painter.setPen(pen)
+
+        if icon_key == "data_point":
+            painter.setBrush(QBrush(QColor("#b07cff")))
+            painter.drawEllipse(QPointF(cx, cy), r, r)
+            painter.drawLine(QPointF(cx - r, cy), QPointF(cx + r, cy))
+            painter.drawLine(QPointF(cx, cy - r), QPointF(cx, cy + r))
+
+        elif icon_key == "transition_node":
+            painter.setBrush(QBrush(QColor("#ff7b72")))
+            path = QPainterPath()
+            path.moveTo(cx, cy - r)
+            path.lineTo(cx + r, cy)
+            path.lineTo(cx + r * 0.35, cy)
+            path.lineTo(cx + r * 0.35, cy + r)
+            path.lineTo(cx - r * 0.35, cy + r)
+            path.lineTo(cx - r * 0.35, cy)
+            path.lineTo(cx - r, cy)
+            path.closeSubpath()
+            painter.drawPath(path)
+
+        elif icon_key == "location":
+            painter.setBrush(QBrush(QColor("#18c37e")))
+            painter.drawRoundedRect(
+                int(cx - r),
+                int(cy - r),
+                int(r * 2),
+                int(r * 2),
+                5,
+                5,
+            )
+
+        elif icon_key == "department":
+            painter.setBrush(QBrush(QColor("#1abc9c")))
+            poly = QPolygonF([
+                QPointF(cx, cy - r),
+                QPointF(cx + r, cy - r * 0.2),
+                QPointF(cx + r * 0.65, cy + r),
+                QPointF(cx - r * 0.65, cy + r),
+                QPointF(cx - r, cy - r * 0.2),
+            ])
+            painter.drawPolygon(poly)
+
+        elif icon_key == "corridor_node":
+            painter.setBrush(QBrush(QColor("#f2c94c")))
+            painter.drawRect(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
+            painter.drawLine(QPointF(cx - r, cy), QPointF(cx + r, cy))
+            painter.drawLine(QPointF(cx, cy - r), QPointF(cx, cy + r))
+
+        elif icon_key == "edge":
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#4da3ff"), 3))
+            painter.drawLine(QPointF(4, cy), QPointF(size - 5, cy))
+            painter.drawLine(QPointF(size - 9, cy - 4), QPointF(size - 5, cy))
+            painter.drawLine(QPointF(size - 9, cy + 4), QPointF(size - 5, cy))
+
+        elif icon_key == "select":
+            painter.setBrush(QBrush(QColor("#ffffff")))
+            painter.drawPolygon(QPolygonF([
+                QPointF(5, 4),
+                QPointF(5, size - 5),
+                QPointF(11, size - 11),
+                QPointF(15, size - 4),
+                QPointF(18, size - 6),
+                QPointF(14, size - 13),
+                QPointF(size - 5, size - 13),
+            ]))
+
+        elif icon_key == "pan":
+            painter.setBrush(QBrush(QColor("#cccccc")))
+            painter.drawEllipse(QPointF(cx, cy), r, r)
+            painter.drawLine(QPointF(cx - r, cy), QPointF(cx + r, cy))
+            painter.drawLine(QPointF(cx, cy - r), QPointF(cx, cy + r))
+
+        elif icon_key == "delete":
+            painter.setPen(QPen(QColor("#ff4d4d"), 3))
+            painter.drawLine(QPointF(6, 6), QPointF(size - 6, size - 6))
+            painter.drawLine(QPointF(size - 6, 6), QPointF(6, size - 6))
+
+        painter.end()
+        return QIcon(pixmap)
+
+    def _set_editor_mode(self, mode):
+        self.mode_combo.setCurrentText(mode)
+
+        for button_mode, button in getattr(self, "_mode_buttons", {}).items():
+            button.blockSignals(True)
+            button.setChecked(button_mode == mode)
+            button.blockSignals(False)
+
+        if hasattr(self, "status_label"):
+            self.set_status(f"Mode: {mode}")
+
+    def _mode_icon_button(self, mode, text, icon_key):
+        btn = QToolButton()
+        btn.setCheckable(True)
+        btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        btn.setIcon(self._make_mode_icon(icon_key))
+        btn.setIconSize(QSize(18, 18))
+        btn.setText(text)
+        btn.setToolTip(f"Set mode: {text}")
+        btn.setFixedSize(125, 30)
+        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        btn.clicked.connect(lambda checked=False, m=mode: self._set_editor_mode(m))
+        return btn
+
+    def _build_mode_buttons(self):
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(
+            [mode for mode, _text, _icon in self._mode_definitions()]
+        )
+        self.mode_combo.setVisible(False)
+
+        self._mode_buttons = {}
+        buttons = []
+
+        for mode, text, icon_enum in self._mode_definitions():
+            btn = self._mode_icon_button(mode, text, icon_enum)
+            self._mode_buttons[mode] = btn
+            buttons.append(btn)
+
+        self._set_editor_mode("select_move")
+        return buttons
+
     def _build_ui(self):
         central = QWidget(self)
         self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
 
-        self.sidebar_scroll = QScrollArea()
-        self.sidebar_scroll.setWidgetResizable(True)
-        self.sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.sidebar_scroll.setMinimumWidth(280)
-        self.sidebar_scroll.setMaximumWidth(320)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(4, 4, 4, 4)
 
-        self.sidebar = QWidget()
-        self.sidebar.setMinimumWidth(260)
-        self.sidebar.setMaximumWidth(260)
-        sidebar_layout = QVBoxLayout(self.sidebar)
-
-        self.sidebar_scroll.setWidget(self.sidebar)
-        layout.addWidget(self.sidebar_scroll)
+        self._build_ribbon(main_layout)
+        self._build_menu_bar()
 
         self.scene = QGraphicsScene(self)
         self.canvas = EditorGraphicsView(self)
         self.canvas.setScene(self.scene)
-        self.canvas.set_overlay_provider(self.draw_overlay_panels)
+        # self.canvas.set_overlay_provider(self.draw_overlay_panels)
         self._rubber_band = QRubberBand(QRubberBand.Rectangle, self.canvas.viewport())
-        layout.addWidget(self.canvas, 1)
+        main_layout.addWidget(self.canvas, 1)
+
+        self._build_rhs_search_sidebar()
 
         self.canvas.leftClicked.connect(self.on_left_click)
         self.canvas.leftDoubleClicked.connect(self.on_double_click)
@@ -746,59 +905,474 @@ class CableRouteEditor(QMainWindow):
         self.canvas.mouseWheelScrolled.connect(self.on_mousewheel)
         self.canvas.mouseDragged.connect(self.on_drag)
 
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems(
-            [
-                "select_move",
-                "corridor_node",
-                "location",
-                "department",
-                "data_point",
-                "transition",
-                "edge",
-                "pan",
-                "delete",
-            ]
-        )
+        status_row = QHBoxLayout()
+        status_row.addWidget(QLabel("Current file:"))
+        self.file_label = QLabel("New file")
+        self.file_label.setWordWrap(True)
+        status_row.addWidget(self.file_label, 1)
+
+        status_row.addWidget(QLabel("Status:"))
+        self.status_label = QLabel("Ready")
+        self.status_label.setWordWrap(True)
+        status_row.addWidget(self.status_label, 2)
+
+        main_layout.addLayout(status_row)
+
+    def _build_rhs_search_sidebar(self):
+        self.search_dock = QDockWidget("Search", self)
+        self.search_dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        self.sidebar_search_edit = QLineEdit()
+        self.sidebar_search_edit.setPlaceholderText("Search current module...")
+        self.sidebar_search_edit.textChanged.connect(self.refresh_rhs_search_sidebar)
+        layout.addWidget(self.sidebar_search_edit)
+
+        self.search_tabs = QTabWidget()
+        self.search_tabs.currentChanged.connect(self.refresh_rhs_search_sidebar)
+        layout.addWidget(self.search_tabs, 1)
+
+        self.search_lists = {}
+
+        for module_name in [
+            "Data Points",
+            "Departments",
+            "Locations",
+            "Corridor Nodes",
+            "Transitions",
+            "Connections",
+            "Room Types",
+            "Assets",
+        ]:
+            list_widget = QListWidget()
+            list_widget.itemDoubleClicked.connect(self._rhs_search_item_activated)
+            self.search_tabs.addTab(list_widget, module_name)
+            self.search_lists[module_name] = list_widget
+
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self.refresh_rhs_search_sidebar)
+        layout.addWidget(refresh_btn)
+
+        self.search_dock.setWidget(container)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.search_dock)
+
+        self.refresh_rhs_search_sidebar()
+
+    def refresh_rhs_search_sidebar(self):
+        if not hasattr(self, "search_lists"):
+            return
+
+        search_text = self.sidebar_search_edit.text().strip().lower()
+
+        def visible(text):
+            return not search_text or search_text in text.lower()
+
+        rows = {
+            "Data Points": [
+                item.get("name", "")
+                for item in self.store.data.get("data_points", [])
+            ],
+            "Departments": [
+                f"{item.get('id', '')} - {item.get('name', '')}"
+                for item in self.store.data.get("departments", [])
+            ],
+            "Locations": [
+                item.get("name", "")
+                for item in self.store.data.get("locations", [])
+            ],
+            "Corridor Nodes": [
+                item.get("name", "")
+                for item in self.store.data.get("corridors", {}).get("nodes", [])
+            ],
+            "Transitions": [
+                item.get("id", "")
+                for item in self.store.data.get("transitions", [])
+            ],
+            "Connections": [
+                f"{item.get('id', '')}: {item.get('from', '')} -> {item.get('to', '')}"
+                for item in self.store.data.get("connections", [])
+            ],
+            "Room Types": [
+                f"{item.get('id', '')} - {item.get('name', '')}"
+                for item in self.store.data.get("room_types", [])
+            ],
+            "Assets": [
+                f"{item.get('id', '')} - {item.get('name', '')}"
+                for item in self.store.data.get("assets", [])
+            ],
+        }
+
+        for module_name, list_widget in self.search_lists.items():
+            list_widget.clear()
+
+            for text in sorted(rows.get(module_name, []), key=str.lower):
+                text = str(text).strip()
+                if not text or not visible(text):
+                    continue
+
+                item = QListWidgetItem(text)
+                item.setData(Qt.UserRole, module_name)
+                list_widget.addItem(item)
+
+    def _rhs_search_item_activated(self, item):
+        module_name = item.data(Qt.UserRole)
+        text = item.text()
+
+        if module_name in {"Data Points", "Locations", "Corridor Nodes"}:
+            name = text.strip()
+            self._centre_on_named_point(name)
+            return
+
+        if module_name == "Departments":
+            department_id = text.split(" - ", 1)[0].strip()
+            self._centre_on_department(department_id)
+            return
+
+        if module_name == "Transitions":
+            transition_id = text.strip()
+            self._centre_on_transition(transition_id)
+            return
+
+    def _centre_on_named_point(self, name):
+        point = self.store.all_points().get(name)
+        if not point:
+            self.set_status(f"Could not find {name}")
+            return
+
+        floor = int(point.get("floor", 0))
+
+        if self.floor_spin.value() != floor:
+            self.floor_spin.setValue(floor)
+
+        self.selected_point_name = name
+        self._set_canvas_multi_selection([name], append=False)
+        self.refresh_canvas()
+
+        scene_pos = self.world_to_scene(point["x"], point["y"])
+        self.canvas.centerOn(scene_pos)
+
+        self.set_status(f"Centred on {name}")
+
+
+    def _centre_on_department(self, department_id):
+        for item in self.store.data.get("departments", []):
+            if str(item.get("id", "")).strip() != str(department_id).strip():
+                continue
+
+            floor = int(item.get("floor", 0))
+
+            if self.floor_spin.value() != floor:
+                self.floor_spin.setValue(floor)
+
+            self.refresh_canvas()
+
+            scene_pos = self.world_to_scene(item.get("x", 0.0), item.get("y", 0.0))
+            self.canvas.centerOn(scene_pos)
+
+            self.set_status(f"Centred on department {department_id}")
+            return
+
+        self.set_status(f"Could not find department {department_id}")
+
+
+    def _centre_on_transition(self, transition_id):
+        transition_id = str(transition_id).strip()
+
+        for transition in self.store.data.get("transitions", []):
+            if str(transition.get("id", "")).strip() != transition_id:
+                continue
+
+            floor_locations = transition.get("floor_locations", {})
+            if not floor_locations:
+                self.set_status(f"Transition {transition_id} has no floor locations")
+                return
+
+            floor_text = sorted(floor_locations.keys(), key=lambda x: int(x))[0]
+            pos = floor_locations[floor_text]
+            floor = int(floor_text)
+
+            if self.floor_spin.value() != floor:
+                self.floor_spin.setValue(floor)
+
+            self.refresh_canvas()
+
+            scene_pos = self.world_to_scene(pos.get("x", 0.0), pos.get("y", 0.0))
+            self.canvas.centerOn(scene_pos)
+
+            self.set_status(f"Centred on transition {transition_id}")
+            return
+
+        self.set_status(f"Could not find transition {transition_id}")
+
+    def _build_menu_bar(self):
+        file_menu = self.menuBar().addMenu("File")
+
+        for text, handler in [
+            ("Open JSON", self.open_json),
+            ("Save JSON", self.save_json),
+            ("Save JSON As", self.save_json_as),
+            ("Map DXF to Floor", self.load_dxf),
+            ("Clear Floor DXF", self.clear_floor_dxf),
+            ("Export Floor DXFs", self.export_floor_dxfs),
+        ]:
+            action = file_menu.addAction(text)
+            action.triggered.connect(handler)
+
+        edit_menu = self.menuBar().addMenu("Edit")
+
+        undo_action = edit_menu.addAction("Undo")
+        undo_action.setShortcut(QKeySequence("Ctrl+Z"))
+        undo_action.triggered.connect(self.undo)
+
+        redo_action = edit_menu.addAction("Redo")
+        redo_action.setShortcut(QKeySequence("Ctrl+Y"))
+        redo_action.triggered.connect(self.redo)
+
+        view_menu = self.menuBar().addMenu("View")
+
+        fit_action = view_menu.addAction("Fit View")
+        fit_action.triggered.connect(self.fit_view)
+
+        tools_menu = self.menuBar().addMenu("Tools")
+
+        validate_action = tools_menu.addAction("Validate")
+        validate_action.triggered.connect(self.validate_json)
+
+    def _ribbon_button(self, text, handler):
+        btn = QPushButton(text)
+        btn.setMinimumSize(120, 34)
+        btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        btn.clicked.connect(handler)
+        return btn
+
+    def _ribbon_layers_button(self):
+        btn = QToolButton()
+        btn.setText("Layers")
+        btn.setToolTip("Show / hide drawing layers")
+        btn.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        btn.setIconSize(QSize(16, 16))
+        btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        btn.setPopupMode(QToolButton.InstantPopup)
+        btn.setFixedSize(125, 30)
+        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        menu = QMenu(btn)
+
+        layer_actions = [
+            ("DXF", self.show_dxf_check),
+            ("Labels", self.show_labels_check),
+            ("Edges", self.show_edges_check),
+            ("Nodes", self.show_nodes_check),
+            ("Data Points", self.show_data_points_check),
+            ("Locations", self.show_locations_check),
+            ("Comms Rooms", self.show_comms_rooms_check),
+        ]
+
+        all_on_action = QAction("Show All Layers", menu)
+
+        def enable_all_layers():
+            for _, target in layer_actions:
+                target.setChecked(True)
+
+        all_on_action.triggered.connect(enable_all_layers)
+
+        menu.addAction(all_on_action)
+        menu.addSeparator()
+
+        for text, target in layer_actions:
+            action = QAction(text, menu)
+            action.setCheckable(True)
+            action.setChecked(target.isChecked())
+
+            action.toggled.connect(target.setChecked)
+            target.toggled.connect(action.setChecked)
+
+            menu.addAction(action)
+
+        btn.setMenu(menu)
+        return btn
+
+    def _add_ribbon_group(self, parent_layout, title, widgets, columns=3):
+        frame = QFrame()
+        frame.setObjectName("RibbonGroup")
+        frame.setFrameShape(QFrame.StyledPanel)
+        frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Minimum)
+
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(5, 3, 5, 3)
+        layout.setSpacing(2)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(2)
+
+        # Supports:
+        #   [btn1, btn2, btn3]
+        #   [[btn1, btn2], [btn3, btn4]]
+        if widgets and all(isinstance(row, list) for row in widgets):
+            rows_layout = QVBoxLayout()
+            rows_layout.setContentsMargins(0, 0, 0, 0)
+            rows_layout.setSpacing(4)
+
+            for row_widgets in widgets:
+                row_container = QWidget()
+
+                row_layout = QHBoxLayout(row_container)
+
+                row_layout.setContentsMargins(4, 2, 4, 2)
+                row_layout.setSpacing(6)
+                row_layout.setAlignment(Qt.AlignLeft)
+
+                for widget in row_widgets:
+                    row_layout.addWidget(widget)
+
+                rows_layout.addWidget(row_container)
+
+            layout.addLayout(rows_layout)
+        else:
+            grid = QGridLayout()
+            grid.setContentsMargins(4, 4, 4, 4)
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(6)
+
+            for index, widget in enumerate(widgets):
+                row = index // columns
+                col = index % columns
+                grid.addWidget(widget, row, col)
+
+            layout.addLayout(grid)
+
+        title_label = QLabel(title)
+
+        title_label.setObjectName("RibbonGroupTitle")
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+
+        parent_layout.addWidget(frame)
+
+    def _ribbon_icon_button(self, text, tooltip, icon_enum, handler):
+        btn = QToolButton()
+        btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        btn.setIcon(self.style().standardIcon(icon_enum))
+        btn.setIconSize(QSize(16, 16))
+        btn.setText(text)
+        btn.setToolTip(tooltip)
+
+        btn.setFixedSize(125, 30)
+        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        btn.clicked.connect(handler)
+        return btn
+
+    def _ribbon_toggle_button(self, text, icon_enum, checked=True):
+        btn = QToolButton()
+        btn.setCheckable(True)
+        btn.setChecked(checked)
+        btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        btn.setIcon(self.style().standardIcon(icon_enum))
+        btn.setIconSize(QSize(16, 16))
+        btn.setText(text)
+        btn.setToolTip(text)
+
+        btn.setFixedSize(125, 30)
+        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        return btn
+
+    def _build_ribbon(self, main_layout):
+        mode_buttons = self._build_mode_buttons()
+
         self.floor_spin = QSpinBox()
         self.floor_spin.setRange(0, 99)
         self.floor_spin.valueChanged.connect(self.on_floor_changed)
-        self.snap_check = QCheckBox("Snap to 1.0")
-        self.snap_check.setChecked(True)
-        self.bidirectional_check = QCheckBox("Bidirectional edges")
-        self.bidirectional_check.setChecked(True)
-        self.chain_edges_check = QCheckBox("Chain edges")
-        self.chain_edges_check.setChecked(True)
 
-        self.show_dxf_check = QCheckBox("Show DXF")
-        self.show_dxf_check.setChecked(True)
-
-        self.show_labels_check = QCheckBox("Show labels")
-        self.show_labels_check.setChecked(True)
-
-        self.show_edges_check = QCheckBox("Show edges")
-        self.show_edges_check.setChecked(True)
-
-        self.show_nodes_check = QCheckBox("Show corridor nodes")
-        self.show_nodes_check.setChecked(True)
-
-        self.show_data_points_check = QCheckBox("Show data points")
-        self.show_data_points_check.setChecked(True)
-
-        self.hide_connected_data_points_check = QCheckBox("Hide connected data points")
-        self.hide_connected_data_points_check.setChecked(False)
-
-        self.show_unassigned_room_types_only_check = QCheckBox(
-            "Only show unassigned data points"
+        go_btn = self._ribbon_icon_button(
+            "Go",
+            "Go to floor",
+            QStyle.SP_ArrowForward,
+            self.refresh_canvas,
         )
-        self.show_unassigned_room_types_only_check.setChecked(False)
-        self.show_unassigned_room_types_only_check.toggled.connect(self.refresh_canvas)
 
-        self.show_locations_check = QCheckBox("Show locations")
-        self.show_locations_check.setChecked(True)
+        floor_row = QWidget()
+        floor_layout = QHBoxLayout(floor_row)
+        floor_layout.setContentsMargins(8,5,8,5)
+        floor_layout.setSpacing(10)
+        floor_layout.addWidget(self.floor_spin)
+        floor_layout.addWidget(go_btn)
 
-        self.show_comms_rooms_check = QCheckBox("Show comms rooms")
-        self.show_comms_rooms_check.setChecked(True)
+        self.snap_check = self._ribbon_toggle_button(
+            "Snap",
+            QStyle.SP_DialogApplyButton,
+            True,
+        )
+
+        self.bidirectional_check = self._ribbon_toggle_button(
+            "2-Way",
+            QStyle.SP_BrowserReload,
+            True,
+        )
+
+        self.chain_edges_check = self._ribbon_toggle_button(
+            "Chain",
+            QStyle.SP_CommandLink,
+            True,
+        )
+
+        self.show_dxf_check = self._ribbon_toggle_button(
+            "DXF",
+            QStyle.SP_FileDialogDetailedView,
+            True,
+        )
+
+        self.show_labels_check = self._ribbon_toggle_button(
+            "Labels",
+            QStyle.SP_FileDialogContentsView,
+            True,
+        )
+
+        self.show_edges_check = self._ribbon_toggle_button(
+            "Edges",
+            QStyle.SP_ArrowRight,
+            True,
+        )
+
+        self.show_nodes_check = self._ribbon_toggle_button(
+            "Nodes",
+            QStyle.SP_DirIcon,
+            True,
+        )
+
+        self.show_data_points_check = self._ribbon_toggle_button(
+            "Data",
+            QStyle.SP_DriveNetIcon,
+            True,
+        )
+
+        self.show_unassigned_room_types_only_check = self._ribbon_toggle_button(
+            "Unassigned",
+            QStyle.SP_MessageBoxWarning,
+            False,
+        )
+
+        self.hide_connected_data_points_check = self._ribbon_toggle_button(
+            "Hide Used",
+            QStyle.SP_BrowserStop,
+            False,
+        )
+
+        self.show_locations_check = self._ribbon_toggle_button(
+            "Locations",
+            QStyle.SP_DialogOpenButton,
+            True,
+        )
+
+        self.show_comms_rooms_check = self._ribbon_toggle_button(
+            "Comms",
+            QStyle.SP_ComputerIcon,
+            True,
+        )
 
         for check in [
             self.show_dxf_check,
@@ -806,14 +1380,18 @@ class CableRouteEditor(QMainWindow):
             self.show_edges_check,
             self.show_nodes_check,
             self.show_data_points_check,
+            self.show_unassigned_room_types_only_check,
+            self.hide_connected_data_points_check,
             self.show_locations_check,
             self.show_comms_rooms_check,
-            self.hide_connected_data_points_check,
         ]:
             check.toggled.connect(self.refresh_canvas)
 
-        self.quick_add_corridor_check = QCheckBox("Quick add corridor nodes")
-        self.quick_add_corridor_check.setChecked(False)
+        self.quick_add_corridor_check = self._ribbon_toggle_button(
+            "Quick Add",
+            QStyle.SP_FileDialogNewFolder,
+            False,
+        )
 
         self.default_corridor_height_spin = QDoubleSpinBox()
         self.default_corridor_height_spin.setRange(0.0, 100.0)
@@ -825,108 +1403,366 @@ class CableRouteEditor(QMainWindow):
         self.default_corridor_cable_limit_spin.setRange(0, 1000000)
         self.default_corridor_cable_limit_spin.setValue(0)
 
-        sidebar_layout.addWidget(QLabel("Mode"))
-        sidebar_layout.addWidget(self.mode_combo)
-        sidebar_layout.addSpacing(10)
-        sidebar_layout.addWidget(QLabel("Floor"))
-        floor_row = QHBoxLayout()
-        floor_row.addWidget(self.floor_spin)
-        go_btn = QPushButton("Go")
-        go_btn.clicked.connect(self.refresh_canvas)
-        floor_row.addWidget(go_btn)
-        sidebar_layout.addLayout(floor_row)
-        sidebar_layout.addSpacing(10)
-        sidebar_layout.addWidget(self.snap_check)
-        sidebar_layout.addWidget(self.bidirectional_check)
-        sidebar_layout.addWidget(self.chain_edges_check)
-        sidebar_layout.addWidget(self.show_dxf_check)
-        sidebar_layout.addWidget(self.show_labels_check)
-        sidebar_layout.addWidget(self.show_edges_check)
-        sidebar_layout.addWidget(self.show_nodes_check)
-        sidebar_layout.addWidget(self.show_data_points_check)
-        sidebar_layout.addWidget(self.show_unassigned_room_types_only_check)
-        sidebar_layout.addWidget(self.hide_connected_data_points_check)
-        sidebar_layout.addWidget(self.show_locations_check)
-        sidebar_layout.addWidget(self.show_comms_rooms_check)
-        sidebar_layout.addSpacing(10)
+        ribbon = QTabWidget()
+        ribbon.setObjectName("AeroRibbon")
+        ribbon.setMinimumHeight(135)
+        ribbon.setMaximumHeight(180)
+        main_layout.addWidget(ribbon)
 
-        sidebar_layout.addWidget(self.quick_add_corridor_check)
-        sidebar_layout.addWidget(QLabel("Default corridor height AFFL (m)"))
-        sidebar_layout.addWidget(self.default_corridor_height_spin)
-        sidebar_layout.addWidget(QLabel("Default corridor cable limit"))
-        sidebar_layout.addWidget(self.default_corridor_cable_limit_spin)
+        # ---------------- Home tab ----------------
+        home_tab = QWidget()
+        home_layout = QHBoxLayout(home_tab)
+        home_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        home_layout.setContentsMargins(10, 1, 10, 1)
+        home_layout.setSpacing(10)
 
-        sidebar_layout.addSpacing(10)
-
-        for text, handler in [
-            ("Open JSON", self.open_json),
-            ("Save JSON", self.save_json),
-            ("Save JSON As", self.save_json_as),
-            ("Undo", self.undo),
-            ("Redo", self.redo),
-            ("Map DXF to Floor", self.load_dxf),
-            ("Clear Floor DXF", self.clear_floor_dxf),
-            ("Fit View", self.fit_view),
-            ("Validate", self.validate_json),
-            ("Departments", self.manage_departments),
-            ("Asset Categories", self.manage_asset_categories),
-            ("Assets", self.manage_assets),
-            ("Room Types", self.manage_room_types),
-            ("Locations", self.manage_locations),
-            ("Location Departments", self.manage_location_departments),
-            ("Mass Create Locations", self.start_bulk_location_placement),
-            ("Mass Create Data Points", self.start_bulk_data_point_placement),
-            ("Copy Template Between Floors", self.copy_template_between_floors),
-            ("Data Point Departments", self.manage_data_point_departments),
-            ("Data Points", self.manage_data_points),
-            ("Find Unconnected Data Points", self.find_unconnected_data_points),
-            ("Find Unassigned Data Points", self.show_unassigned_data_point_navigator),
-            ("Find Data Point", self.show_find_data_point_dialog),
-            ("Transitions", self.manage_transitions),
-            ("Connections", self.manage_connections),
-            ("Optimise Comms Rooms", self.optimise_comms_rooms_for_model),
-            ("Autoroute Data Points", self.autoroute_data_points),
-            ("Suggest Comms Room", self.suggest_comms_room_for_department),
-            ("Route Profiles", self.manage_route_profiles),
-            ("Export Floor DXFs", self.export_floor_dxfs),
-        ]:
-            btn = QPushButton(text)
-            btn.clicked.connect(handler)
-            sidebar_layout.addWidget(btn)
-            if text in {"Validate", "Connections"}:
-                sidebar_layout.addSpacing(10)
-
-        cancel_bulk_locations_btn = QPushButton("Cancel Mass Create")
-        cancel_bulk_locations_btn.clicked.connect(self.cancel_bulk_location_placement)
-        sidebar_layout.addWidget(cancel_bulk_locations_btn)
-
-        cancel_bulk_data_points_btn = QPushButton("Cancel Mass Create Data Points")
-        cancel_bulk_data_points_btn.clicked.connect(
-            self.cancel_bulk_data_point_placement
+        self._add_ribbon_group(
+            home_layout,
+            "Layers",
+            [
+                self._ribbon_layers_button(),
+                self.show_unassigned_room_types_only_check,
+                self.hide_connected_data_points_check,
+            ],
         )
-        sidebar_layout.addWidget(cancel_bulk_data_points_btn)
 
-        sidebar_layout.addWidget(QLabel("Current file"))
-        self.file_label = QLabel("New file")
-        self.file_label.setWordWrap(True)
-        sidebar_layout.addWidget(self.file_label)
-        sidebar_layout.addWidget(QLabel("Status"))
-        self.status_label = QLabel("Ready")
-        self.status_label.setWordWrap(True)
-        sidebar_layout.addWidget(self.status_label)
-        sidebar_layout.addStretch(1)
-
-        QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.undo)
-        QShortcut(QKeySequence("Ctrl+Y"), self, activated=self.redo)
-
-        QShortcut(
-            QKeySequence("Ctrl+C"), self, activated=self.copy_selected_template_items
+        self._add_ribbon_group(
+            home_layout,
+            "Placement",
+            [
+                mode_buttons,
+                [
+                    QLabel("Floor"),
+                    floor_row,
+                ],
+                [
+                    self.snap_check,
+                    self.bidirectional_check,
+                    self.chain_edges_check,
+                ],
+            ],
         )
-        QShortcut(
-            QKeySequence("Ctrl+V"),
-            self,
-            activated=self.paste_selected_template_items_at_view_centre,
+        ribbon.addTab(home_tab, "Home")
+
+        # ---------------- Data tab ----------------
+        data_tab = QWidget()
+        data_layout = QHBoxLayout(data_tab)
+
+        self._add_ribbon_group(
+            data_layout,
+            "Master Data",
+            [
+                self._ribbon_icon_button(
+                    "Departments",
+                    "Manage departments",
+                    QStyle.SP_DirHomeIcon,
+                    self.manage_departments,
+                ),
+                self._ribbon_icon_button(
+                    "Categories",
+                    "Asset categories",
+                    QStyle.SP_FileDialogListView,
+                    self.manage_asset_categories,
+                ),
+                self._ribbon_icon_button(
+                    "Assets",
+                    "Manage assets",
+                    QStyle.SP_ComputerIcon,
+                    self.manage_assets,
+                ),
+                self._ribbon_icon_button(
+                    "Rooms", "Room types", QStyle.SP_DirIcon, self.manage_room_types
+                ),
+                self._ribbon_icon_button(
+                    "Locations",
+                    "Manage locations",
+                    QStyle.SP_DialogOpenButton,
+                    self.manage_locations,
+                ),
+                self._ribbon_icon_button(
+                    "Data Points",
+                    "Manage data points",
+                    QStyle.SP_DriveNetIcon,
+                    self.manage_data_points,
+                ),
+            ],
+            columns=3,
         )
+
+        self._add_ribbon_group(
+            data_layout,
+            "Assign / Bulk",
+            [
+                self._ribbon_icon_button(
+                    "Loc Dept",
+                    "Location departments",
+                    QStyle.SP_DialogYesButton,
+                    self.manage_location_departments,
+                ),
+                self._ribbon_icon_button(
+                    "DP Dept",
+                    "Data point departments",
+                    QStyle.SP_DialogYesButton,
+                    self.manage_data_point_departments,
+                ),
+                self._ribbon_icon_button(
+                    "Mass Loc",
+                    "Mass create locations",
+                    QStyle.SP_FileDialogNewFolder,
+                    self.start_bulk_location_placement,
+                ),
+                self._ribbon_icon_button(
+                    "Mass DP",
+                    "Mass create data points",
+                    QStyle.SP_FileIcon,
+                    self.start_bulk_data_point_placement,
+                ),
+                self._ribbon_icon_button(
+                    "Cancel Loc",
+                    "Cancel mass create locations",
+                    QStyle.SP_DialogCancelButton,
+                    self.cancel_bulk_location_placement,
+                ),
+                self._ribbon_icon_button(
+                    "Cancel DP",
+                    "Cancel mass create data points",
+                    QStyle.SP_DialogCancelButton,
+                    self.cancel_bulk_data_point_placement,
+                ),
+            ],
+            columns=3,
+        )
+
+        self._add_ribbon_group(
+            data_layout,
+            "Find",
+            [
+                self._ribbon_icon_button(
+                    "Unconnected",
+                    "Find unconnected data points",
+                    QStyle.SP_MessageBoxQuestion,
+                    self.find_unconnected_data_points,
+                ),
+                self._ribbon_icon_button(
+                    "Unassigned",
+                    "Find unassigned data points",
+                    QStyle.SP_MessageBoxWarning,
+                    self.show_unassigned_data_point_navigator,
+                ),
+                self._ribbon_icon_button(
+                    "Find DP",
+                    "Find data point",
+                    QStyle.SP_FileDialogContentsView,
+                    self.show_find_data_point_dialog,
+                ),
+            ],
+            columns=3,
+        )
+        data_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+
+        ribbon.addTab(data_tab, "Data")
+
+        # ---------------- Routing tab ----------------
+        routing_tab = QWidget()
+        routing_layout = QHBoxLayout(routing_tab)
+        routing_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+
+        self._add_ribbon_group(
+            routing_layout,
+            "Routing",
+            [
+                self._ribbon_icon_button(
+                    "Transitions",
+                    "Manage transitions",
+                    QStyle.SP_ArrowUp,
+                    self.manage_transitions,
+                ),
+                self._ribbon_icon_button(
+                    "Connections",
+                    "Manage connections",
+                    QStyle.SP_ArrowRight,
+                    self.manage_connections,
+                ),
+                self._ribbon_icon_button(
+                    "Optimise",
+                    "Optimise comms rooms",
+                    QStyle.SP_ComputerIcon,
+                    self.optimise_comms_rooms_for_model,
+                ),
+                self._ribbon_icon_button(
+                    "Autoroute",
+                    "Autoroute data points",
+                    QStyle.SP_BrowserReload,
+                    self.autoroute_data_points,
+                ),
+                self._ribbon_icon_button(
+                    "Suggest",
+                    "Suggest comms room",
+                    QStyle.SP_MessageBoxInformation,
+                    self.suggest_comms_room_for_department,
+                ),
+                self._ribbon_icon_button(
+                    "Profiles",
+                    "Route profiles",
+                    QStyle.SP_FileDialogDetailedView,
+                    self.manage_route_profiles,
+                ),
+                self._ribbon_icon_button(
+                    "Copy Floors",
+                    "Copy template between floors",
+                    QStyle.SP_DialogOpenButton,
+                    self.copy_template_between_floors,
+                ),
+            ],
+            columns=4,
+        )
+
+        self._add_ribbon_group(
+            routing_layout,
+            "Corridor Defaults",
+            [
+                self.quick_add_corridor_check,
+                QLabel("Height AFFL"),
+                self.default_corridor_height_spin,
+                QLabel("Cable Limit"),
+                self.default_corridor_cable_limit_spin,
+            ],
+            columns=2,
+        )
+
+        ribbon.addTab(routing_tab, "Routing")
+
+        # ---------------- Map tab ----------------
+        map_tab = QWidget()
+        map_layout = QHBoxLayout(map_tab)
+        map_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+
+        self._add_ribbon_group(
+            map_layout,
+            "DXF / View",
+            [
+                self._ribbon_icon_button(
+                    "Map DXF", "Map DXF to floor", QStyle.SP_DirOpenIcon, self.load_dxf
+                ),
+                self._ribbon_icon_button(
+                    "Clear DXF",
+                    "Clear floor DXF",
+                    QStyle.SP_TrashIcon,
+                    self.clear_floor_dxf,
+                ),
+                self._ribbon_icon_button(
+                    "Fit", "Fit view", QStyle.SP_TitleBarMaxButton, self.fit_view
+                ),
+                self._ribbon_icon_button(
+                    "Export",
+                    "Export floor DXFs",
+                    QStyle.SP_DriveHDIcon,
+                    self.export_floor_dxfs,
+                ),
+            ],
+            columns=2,
+        )        
+
+        ribbon.addTab(map_tab, "Maps")
+
+        # ---------------- Output tab ----------------
+        output_tab = QWidget()
+        output_layout = QHBoxLayout(output_tab)
+        output_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+
+        self._add_ribbon_group(
+            output_layout,
+            "Reports",
+            [
+                self._ribbon_icon_button(
+                    "Cable CSV",
+                    "Generate cable length CSV",
+                    QStyle.SP_FileDialogDetailedView,
+                    self.generate_cable_report,
+                ),
+            ],
+            columns=2,
+        )
+
+        home_layout.addStretch(1)
+        data_layout.addStretch(1)
+        routing_layout.addStretch(1)
+
+        ribbon.addTab(output_tab, "Output")
+
+        ribbon.setStyleSheet("""
+        QTabWidget::pane {
+            border: 1px solid palette(mid);
+            background: palette(window);
+        }
+
+        QTabBar::tab {
+            background: palette(button);
+            color: palette(button-text);
+            border: 1px solid palette(mid);
+            border-bottom: none;
+            padding: 6px 18px;
+            margin-right: 2px;
+            border-top-left-radius: 5px;
+            border-top-right-radius: 5px;
+        }
+
+        QTabBar::tab:selected {
+            background: palette(window);
+            font-weight: bold;
+        }
+
+        QFrame#RibbonGroup {
+            background: palette(base);
+            border: 1px solid palette(mid);
+            border-radius: 7px;
+        }
+
+        QLabel#RibbonGroupTitle {
+            color: palette(text);
+            font-size: 12px;
+        }
+
+        QToolButton {
+            background: palette(button);
+            color: palette(button-text);
+            border: 1px solid palette(mid);
+            border-radius: 6px;
+            padding: 4px;
+        }
+
+        QToolButton:hover {
+            background: palette(highlight);
+            color: palette(highlighted-text);
+        }
+
+        QToolButton:pressed {
+            background: palette(dark);
+        }
+
+        QToolButton:checked {
+            background: palette(highlight);
+            color: palette(highlighted-text);
+            border: 1px solid palette(highlight);
+        }
+
+        QPushButton {
+            background: palette(button);
+            color: palette(button-text);
+            border: 1px solid palette(mid);
+            border-radius: 6px;
+            padding: 4px 8px;
+        }
+
+        QPushButton:hover {
+            background: palette(highlight);
+            color: palette(highlighted-text);
+        }
+
+        QLabel {
+            color: palette(text);
+        }
+        """)
 
     def delete_right_clicked_items(self, picked):
         if not picked:
@@ -1816,6 +2652,9 @@ class CableRouteEditor(QMainWindow):
         self.draw_points(floor)
         self.file_label.setText(self.current_json_path or "New file")
         self.canvas.viewport().update()
+
+        if hasattr(self, "search_lists"):
+            self.refresh_rhs_search_sidebar()
 
     def draw_edges(self, floor):
         if not self.show_edges_check.isChecked():
@@ -3207,6 +4046,53 @@ class CableRouteEditor(QMainWindow):
         while self._format_bulk_location_name(prefix, number) in used:
             number += 1
         return self._format_bulk_location_name(prefix, number), number
+
+    def generate_cable_report(self):
+        if not self.current_json_path:
+            QMessageBox.warning(
+                self,
+                "No project",
+                "Open or save a project JSON first.",
+            )
+            return
+
+        try:
+            self.save_json()
+            script_path = Path(__file__).with_name("cable_length_report.py")
+
+            output_path = Path(self.current_json_path).with_suffix("")
+            output_path = output_path.with_name(output_path.name + "_cable_lengths.csv")
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    str(self.current_json_path),
+                    "-o",
+                    str(output_path),
+                ],
+                check=True,
+            )
+
+            QMessageBox.information(
+                self,
+                "Report complete",
+                f"Cable report written to:\n\n{output_path}",
+            )
+
+        except subprocess.CalledProcessError as exc:
+            QMessageBox.critical(
+                self,
+                "Report failed",
+                f"Report generation failed:\n\n{exc}",
+            )
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Error",
+                str(exc),
+            )
 
     def open_json(self):
         path, _ = QFileDialog.getOpenFileName(
