@@ -3107,9 +3107,25 @@ class CableRouteEditor(QMainWindow):
                 float(point["y"]) - float(y),
             )
 
-            if dist <= float(radius_world) and (best_dist is None or dist < best_dist):
+            if dist <= float(radius_world) and (
+                best_dist is None or dist < best_dist
+            ):
                 best_name = name
                 best_dist = dist
+
+        # ADD THIS BLOCK
+        if self._is_department_visible():
+            for department_id, dept in self.store.departments_for_floor(floor).items():
+                dist = math.hypot(
+                    float(dept["x"]) - float(x),
+                    float(dept["y"]) - float(y),
+                )
+
+                if dist <= float(radius_world) and (
+                    best_dist is None or dist < best_dist
+                ):
+                    best_name = department_id
+                    best_dist = dist
 
         return best_name
 

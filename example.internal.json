@@ -381,8 +381,8 @@
       "id": "54",
       "name": "Command Centre",
       "floor": 0,
-      "x": 164,
-      "y": -79
+      "x": 163.187,
+      "y": -80.526
     }
   ],
   "room_types": [
@@ -15707,7 +15707,7 @@
       "qty": 4,
       "extension_distance_m": 3.0,
       "department_ids": [
-        "54"
+        "55"
       ]
     },
     {
@@ -15718,7 +15718,7 @@
       "qty": 4,
       "extension_distance_m": 3.0,
       "department_ids": [
-        "54"
+        "55"
       ]
     },
     {
@@ -36011,7 +36011,9 @@
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
-      "department_ids": []
+      "department_ids": [
+        "55"
+      ]
     },
     {
       "name": "DP0-645",
@@ -36021,7 +36023,9 @@
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
-      "department_ids": []
+      "department_ids": [
+        "55"
+      ]
     },
     {
       "name": "DP0-646",
@@ -36031,7 +36035,9 @@
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
-      "department_ids": []
+      "department_ids": [
+        "21"
+      ]
     },
     {
       "name": "DP0-647",
@@ -36041,7 +36047,9 @@
       "qty": 1,
       "room_type_id": "RT76",
       "extension_distance_m": 0.0,
-      "department_ids": []
+      "department_ids": [
+        "21"
+      ]
     },
     {
       "name": "DP0-648",
@@ -36051,7 +36059,9 @@
       "qty": 7,
       "room_type_id": "RT65",
       "extension_distance_m": 0.0,
-      "department_ids": []
+      "department_ids": [
+        "55"
+      ]
     },
     {
       "name": "DP0-649",
@@ -36061,7 +36071,9 @@
       "qty": 1,
       "room_type_id": "RT54",
       "extension_distance_m": 0.0,
-      "department_ids": []
+      "department_ids": [
+        "55"
+      ]
     },
     {
       "name": "DP0-650",
