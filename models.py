@@ -110,7 +110,7 @@ class JsonStore:
             asset.setdefault("id", "")
             asset.setdefault("name", asset.get("id", ""))
             asset.setdefault("qty", 1)
-            asset.setdefault("data_points", 1)
+            asset["data_points"] = int(asset.get("data_points", 1))
             asset.setdefault("connection_type", asset.get("type_of_connection", "wired"))
             asset.setdefault("category_id", asset.get("category", ""))
 
@@ -1089,11 +1089,10 @@ class JsonStore:
                     "data_points",
                     asset.get("data_points_each", asset.get("cables", 1)),
                 )
-                or 1
             )
             total += room_asset_qty * data_points
 
-        return max(1, int(total))
+        return max(0, int(total))
         
     def asset_category_options(self) -> List[Tuple[str, str]]:
         return [

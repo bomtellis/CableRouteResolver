@@ -4,6 +4,7 @@ from itertools import combinations
 from copy import deepcopy
 import re
 import subprocess
+import csv
 
 import heapq
 import math
@@ -592,6 +593,9 @@ class CableRouteEditor(QMainWindow):
         self.edge_delete_start = None
         self._item_lookup = {}
         self._point_item_lookup = {}
+        self._static_scene_items = []
+        self._static_scene_key = None
+        self._static_scene_visible_rect = None
         self.bulk_location_session = None
         self.bulk_data_point_session = None
         self._comms_optimisation_dialog = None
@@ -601,12 +605,19 @@ class CableRouteEditor(QMainWindow):
         self._unassigned_dp_names = []
         self._unassigned_dp_index = -1
 
+        self._manual_room_type_dp_dialog = None
+        self._manual_room_type_dp_names = []
+        self._manual_room_type_dp_index = -1
+
         self._find_dp_dialog = None
         self._find_dp_matches = []
         self._find_dp_index = -1
 
         self._build_ui()
         self.refresh_canvas()
+
+    def _invalidate_static_scene_cache(self):
+        self._static_scene_key = None
 
     def _selected_visible_drag_names(self):
         floor = self.floor_spin.value()
@@ -703,6 +714,7 @@ class CableRouteEditor(QMainWindow):
         self.selected_template_names.clear()
         self.selected_for_edge = None
         self.edge_delete_start = None
+        self._invalidate_static_scene_cache()
         self.refresh_canvas()
         self.set_status(f"Undid: {state.get('label', 'Change')}")
 
@@ -724,6 +736,7 @@ class CableRouteEditor(QMainWindow):
         self.selected_template_names.clear()
         self.selected_for_edge = None
         self.edge_delete_start = None
+        self._invalidate_static_scene_cache()
         self.refresh_canvas()
         self.set_status("Redid change")
 
@@ -1053,6 +1066,9 @@ class CableRouteEditor(QMainWindow):
         scene_pos = self.world_to_scene(point["x"], point["y"])
         self.canvas.centerOn(scene_pos)
 
+        self._invalidate_static_scene_cache()
+        self.refresh_canvas()
+
         self.set_status(f"Centred on {name}")
 
 
@@ -1070,6 +1086,9 @@ class CableRouteEditor(QMainWindow):
 
             scene_pos = self.world_to_scene(item.get("x", 0.0), item.get("y", 0.0))
             self.canvas.centerOn(scene_pos)
+
+            self._invalidate_static_scene_cache()
+            self.refresh_canvas()
 
             self.set_status(f"Centred on department {department_id}")
             return
@@ -1100,6 +1119,9 @@ class CableRouteEditor(QMainWindow):
 
             scene_pos = self.world_to_scene(pos.get("x", 0.0), pos.get("y", 0.0))
             self.canvas.centerOn(scene_pos)
+
+            self._invalidate_static_scene_cache()
+            self.refresh_canvas()
 
             self.set_status(f"Centred on transition {transition_id}")
             return
@@ -1136,6 +1158,14 @@ class CableRouteEditor(QMainWindow):
         fit_action.triggered.connect(self.fit_view)
 
         tools_menu = self.menuBar().addMenu("Tools")
+
+        tools_menu.addSeparator()
+
+        export_room_type_matrix_action = tools_menu.addAction("Export Room Type Asset Matrix")
+        export_room_type_matrix_action.triggered.connect(self.export_room_type_asset_matrix)
+
+        import_room_type_matrix_action = tools_menu.addAction("Import Room Type Asset Matrix")
+        import_room_type_matrix_action.triggered.connect(self.import_room_type_asset_matrix)
 
         validate_action = tools_menu.addAction("Validate")
         validate_action.triggered.connect(self.validate_json)
@@ -1550,6 +1580,12 @@ class CableRouteEditor(QMainWindow):
                     self.show_unassigned_data_point_navigator,
                 ),
                 self._ribbon_icon_button(
+                    "Manual RT",
+                    "Find data points with manual or no room type",
+                    QStyle.SP_MessageBoxWarning,
+                    self.show_manual_room_type_data_point_navigator,
+                ),
+                self._ribbon_icon_button(
                     "Find DP",
                     "Find data point",
                     QStyle.SP_FileDialogContentsView,
@@ -1809,6 +1845,7 @@ class CableRouteEditor(QMainWindow):
 
         self.selected_point_name = None
         self._clear_canvas_multi_selection()
+        self._invalidate_static_scene_cache()
         self.refresh_canvas()
         self.set_status(f"Deleted {deleted} item(s)")
 
@@ -1986,6 +2023,7 @@ class CableRouteEditor(QMainWindow):
 
         self.selected_point_name = None
         self._set_canvas_multi_selection(created_names, append=False)
+        self._invalidate_static_scene_cache()
         self.refresh_canvas()
 
         self.set_status(
@@ -2240,6 +2278,7 @@ class CableRouteEditor(QMainWindow):
 
     def on_floor_changed(self, *_):
         self._clear_canvas_multi_selection()
+        self._invalidate_static_scene_cache()
         self.refresh_canvas()
         self._queue_all_floor_dxf_loads(
             active_floor=self.floor_spin.value(), force_reload=False
@@ -2449,6 +2488,7 @@ class CableRouteEditor(QMainWindow):
         self._dxf_cache[floor] = {"path": path, "entities": entities, "bounds": bounds}
         if floor == self.floor_spin.value():
             self._set_active_dxf_floor(floor)
+            self._invalidate_static_scene_cache()
             self.refresh_canvas()
             if self._pending_fit_after_load:
                 self._pending_fit_after_load = False
@@ -2495,6 +2535,17 @@ class CableRouteEditor(QMainWindow):
         max_x = max(b[2] for b in bounds)
         max_y = max(b[3] for b in bounds)
         return min_x, min_y, max_x, max_y
+
+    def _current_visible_scene_rect(self, padding=25.0):
+        if not hasattr(self, "canvas") or self.canvas is None:
+            return None
+
+        viewport_rect = self.canvas.viewport().rect()
+        if viewport_rect.isNull():
+            return None
+
+        visible_rect = self.canvas.mapToScene(viewport_rect).boundingRect()
+        return visible_rect.adjusted(-padding, -padding, padding, padding)
 
     def _scene_rect_for_floor(self, floor, padding=8.0):
         bounds = self._content_bounds(floor)
@@ -2626,37 +2677,110 @@ class CableRouteEditor(QMainWindow):
         else:
             self.set_status("No template items found in selection box")
         return True
+    
+    def _clear_static_scene_items(self):
+        for item in getattr(self, "_static_scene_items", []):
+            try:
+                self.scene.removeItem(item)
+            except RuntimeError:
+                pass
 
-    def refresh_canvas(self):
-        self._unconnected_cache = self._unconnected_data_point_names()
-        self._scene_label_positions = []
-        self.scene.clear()
-        self._item_lookup = {}
-        self._point_item_lookup = {}
-        floor = self.floor_spin.value()
-        self.ensure_floor_dxf_loaded(floor)
-        self.scene.setBackgroundBrush(QBrush(QColor("#111111")))
-        rect = self._scene_rect_for_floor(floor, padding=8.0)
-        if rect is not None:
-            self.scene.setSceneRect(rect.adjusted(-40, -40, 40, 40))
+        self._static_scene_items = []
+
+
+    def _static_scene_cache_key(self, floor, visible_rect):
+        rect_key = None
+        if visible_rect is not None:
+            rect_key = (
+                round(visible_rect.left(), 1),
+                round(visible_rect.top(), 1),
+                round(visible_rect.right(), 1),
+                round(visible_rect.bottom(), 1),
+            )
+
+        return (
+            int(floor),
+            bool(self.show_dxf_check.isChecked()),
+            bool(self.show_edges_check.isChecked()),
+            self.loaded_dxf_floor,
+            self.current_dxf_path,
+            len(self.dxf_scene.entities),
+            rect_key,
+        )
+
+
+    def _rebuild_static_scene_items(self, floor, visible_rect):
+        self._clear_static_scene_items()
+
+        created_items = []
+
         if (
             self.show_dxf_check.isChecked()
             and self.loaded_dxf_floor == int(floor)
             and self.dxf_scene.entities
         ):
-            self.dxf_scene.populate_graphics_scene(
-                self.scene, self.canvas.transform().m11()
+            created_items.extend(
+                self.dxf_scene.populate_graphics_scene(
+                    self.scene,
+                    self.canvas.transform().m11(),
+                    visible_rect=visible_rect,
+                )
             )
-        self.draw_edges(floor)
-        self.draw_departments(floor)
-        self.draw_points(floor)
+
+        if self.show_edges_check.isChecked():
+            before_items = set(self.scene.items())
+            self.draw_edges(floor, visible_rect)
+            after_items = set(self.scene.items())
+            created_items.extend(list(after_items - before_items))
+
+        self._static_scene_items = created_items
+        self._static_scene_key = self._static_scene_cache_key(floor, visible_rect)
+
+
+    def _ensure_static_scene_items(self, floor, visible_rect):
+        key = self._static_scene_cache_key(floor, visible_rect)
+
+        if key == self._static_scene_key:
+            return
+
+        self._rebuild_static_scene_items(floor, visible_rect)
+
+    def refresh_canvas(self):
+        self._unconnected_cache = self._unconnected_data_point_names()
+        self._scene_label_positions = []
+
+        self._item_lookup = {}
+        self._point_item_lookup = {}
+
+        floor = self.floor_spin.value()
+        self.ensure_floor_dxf_loaded(floor)
+
+        self.scene.setBackgroundBrush(QBrush(QColor("#111111")))
+
+        rect = self._scene_rect_for_floor(floor, padding=8.0)
+        if rect is not None:
+            self.scene.setSceneRect(rect.adjusted(-40, -40, 40, 40))
+
+        visible_rect = self._current_visible_scene_rect()
+
+        self._ensure_static_scene_items(floor, visible_rect)
+
+        dynamic_items = [
+            item
+            for item in self.scene.items()
+            if item not in getattr(self, "_static_scene_items", [])
+        ]
+
+        for item in dynamic_items:
+            self.scene.removeItem(item)
+
+        self.draw_departments(floor, visible_rect)
+        self.draw_points(floor, visible_rect)
+
         self.file_label.setText(self.current_json_path or "New file")
         self.canvas.viewport().update()
 
-        if hasattr(self, "search_lists"):
-            self.refresh_rhs_search_sidebar()
-
-    def draw_edges(self, floor):
+    def draw_edges(self, floor, visible_rect=None):
         if not self.show_edges_check.isChecked():
             return
         points = self.store.all_points()
@@ -2674,6 +2798,9 @@ class CableRouteEditor(QMainWindow):
             pa = self.world_to_scene(a["x"], a["y"])
             pb = self.world_to_scene(b["x"], b["y"])
             pen = pen_cross_floor if a_floor != b_floor else pen_same_floor
+            edge_rect = QRectF(pa, pb).normalized().adjusted(-2.0, -2.0, 2.0, 2.0)
+            if visible_rect is not None and not visible_rect.intersects(edge_rect):
+                continue
             item = self.scene.addLine(pa.x(), pa.y(), pb.x(), pb.y(), pen)
             self._item_lookup[item] = ("edge", edge)
 
@@ -2717,9 +2844,12 @@ class CableRouteEditor(QMainWindow):
         self._scene_label_positions.append((x, y))
         return x, y
 
-    def draw_departments(self, floor):
+    def draw_departments(self, floor, visible_rect=None):
         for department_id, dept in self.store.departments_for_floor(floor).items():
             pos = self.world_to_scene(dept["x"], dept["y"])
+            item_rect = QRectF(pos.x() - 1.2, pos.y() - 1.2, 2.4, 2.4)
+            if visible_rect is not None and not visible_rect.intersects(item_rect):
+                continue
             selected = department_id == self.selected_point_name
 
             poly = QPolygonF(
@@ -2746,7 +2876,12 @@ class CableRouteEditor(QMainWindow):
                 label.setPos(lx, ly)
                 self._item_lookup[label] = ("department_label", department_id)
 
-    def _draw_data_point_assignment_marks(self, pos, point):
+    def _draw_data_point_assignment_marks(self, pos, point, visible_rect=None):
+        if visible_rect is not None:
+            marker_rect = QRectF(pos.x() + 0.4, pos.y() - 0.6, 0.8, 1.0)
+            if not visible_rect.intersects(marker_rect):
+                return
+            
         green = QColor("#00ff66")
         pen = QPen(QColor("#003d1f"), 0.05)
         brush = QBrush(green)
@@ -2815,11 +2950,14 @@ class CableRouteEditor(QMainWindow):
             ]
         )
 
-    def draw_points(self, floor):
+    def draw_points(self, floor, visible_rect=None):
         connected_data_points = self._connected_data_point_names()
         hide_connected = self.hide_connected_data_points_check.isChecked()
         for name, point in self.store.points_for_floor(floor).items():
             pos = self.world_to_scene(point["x"], point["y"])
+            item_rect = QRectF(pos.x() - 1.2, pos.y() - 1.2, 2.4, 2.4)
+            if visible_rect is not None and not visible_rect.intersects(item_rect):
+                continue
             selected = (name == self.selected_point_name) or (
                 name in self.selected_template_names
             )
@@ -2913,7 +3051,7 @@ class CableRouteEditor(QMainWindow):
                 self.scene.addItem(item)
                 label_color = QColor("#eadcff")
 
-                self._draw_data_point_assignment_marks(pos, point)
+                self._draw_data_point_assignment_marks(pos, point, visible_rect)
             else:
                 poly = QPolygonF(
                     [
@@ -4181,6 +4319,7 @@ class CableRouteEditor(QMainWindow):
             self.loaded_dxf_floor = None
         self._pending_fit_after_load = True
         self._queue_all_floor_dxf_loads(active_floor=floor, force_reload=True)
+        self._invalidate_static_scene_cache()
         self.refresh_canvas()
         self.set_status(f"Mapped DXF {Path(path).name} to floor {floor}")
 
@@ -4205,6 +4344,7 @@ class CableRouteEditor(QMainWindow):
             self.current_dxf_path = None
             self.loaded_dxf_floor = None
         self.set_status(f"Removed DXF mapping from floor {floor}")
+        self._invalidate_static_scene_cache()
         self.refresh_canvas()
 
     def validate_json(self):
@@ -5133,6 +5273,7 @@ class CableRouteEditor(QMainWindow):
             if self.bidirectional_check.isChecked():
                 self.store.add_edge(end_name, start_name)
 
+            self._invalidate_static_scene_cache()
             self.selected_point_name = end_name
 
             if self.chain_edges_check.isChecked():
@@ -5340,18 +5481,27 @@ class CableRouteEditor(QMainWindow):
             self.refresh_canvas()
 
     def on_left_release(self, event):
+        moved = bool(self.drag_mode_active and self.dragging_point_name)
+
         if self.selection_rect_active:
             handled = self._finish_selection_rect(event)
             self.dragging_point_name = None
             self.drag_mode_active = False
             self.last_pan = None
+            self._clear_multi_drag()
+
             if handled:
                 return
+
         self.dragging_point_name = None
         self.drag_mode_active = False
         self.alt_move_locked = False
         self.last_pan = None
         self._clear_multi_drag()
+
+        if moved:
+            self._invalidate_static_scene_cache()
+            self.refresh_canvas()
 
     def on_right_click(self, event, sx, sy):
         mode = self.mode_combo.currentText()
@@ -5393,6 +5543,10 @@ class CableRouteEditor(QMainWindow):
             self.selected_for_edge = None
             self.selected_point_name = picked
             self.set_status("Edge removed" if removed else "No matching edge to remove")
+            
+            if removed:
+                self._invalidate_static_scene_cache()
+            
             self.refresh_canvas()
             return
 
@@ -5604,7 +5758,6 @@ class CableRouteEditor(QMainWindow):
 
     def on_middle_release(self, event):
         self.last_pan = None
-        self.refresh_canvas()
 
     def on_mousewheel(self, event):
         factor = 1.1 if event.angleDelta().y() > 0 else 0.9
@@ -6809,6 +6962,132 @@ class CableRouteEditor(QMainWindow):
         result.sort(key=lambda row: (row["floor"], row["name"]))
         return [row["name"] for row in result]
 
+    def _manual_room_type_data_point_names(self):
+        result = []
+
+        for item in self.store.data.get("data_points", []):
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+
+            room_type_id = str(item.get("room_type_id", "") or "").strip()
+
+            # Manual / no room type means blank room_type_id.
+            if not room_type_id:
+                result.append(
+                    {
+                        "name": name,
+                        "floor": int(item.get("floor", 0)),
+                        "x": float(item.get("x", 0.0)),
+                        "y": float(item.get("y", 0.0)),
+                    }
+                )
+
+        result.sort(key=lambda row: (row["floor"], row["name"]))
+        return [row["name"] for row in result]
+
+
+    def show_manual_room_type_data_point_navigator(self):
+        self._manual_room_type_dp_names = self._manual_room_type_data_point_names()
+        self._manual_room_type_dp_index = -1
+
+        if self._manual_room_type_dp_dialog is None:
+            self._manual_room_type_dp_dialog = UnassignedDataPointNavigatorDialog(self)
+            self._manual_room_type_dp_dialog.setWindowTitle("Manual / No Room Type Data Points")
+            self._manual_room_type_dp_dialog.nextRequested.connect(
+                self.goto_next_manual_room_type_data_point
+            )
+            self._manual_room_type_dp_dialog.previousRequested.connect(
+                self.goto_previous_manual_room_type_data_point
+            )
+
+        self._manual_room_type_dp_dialog.show()
+        self._manual_room_type_dp_dialog.raise_()
+        self._manual_room_type_dp_dialog.activateWindow()
+
+        if not self._manual_room_type_dp_names:
+            self._manual_room_type_dp_dialog.set_status(
+                "No data points with manual / no room type found."
+            )
+            self.set_status("No data points with manual / no room type found")
+            return
+
+        self.goto_next_manual_room_type_data_point()
+
+
+    def goto_next_manual_room_type_data_point(self):
+        if not self._manual_room_type_dp_names:
+            self._manual_room_type_dp_names = self._manual_room_type_data_point_names()
+
+        if not self._manual_room_type_dp_names:
+            if self._manual_room_type_dp_dialog:
+                self._manual_room_type_dp_dialog.set_status(
+                    "No data points with manual / no room type found."
+                )
+            return
+
+        self._manual_room_type_dp_index = (
+            self._manual_room_type_dp_index + 1
+        ) % len(self._manual_room_type_dp_names)
+
+        self._centre_on_manual_room_type_data_point()
+
+
+    def goto_previous_manual_room_type_data_point(self):
+        if not self._manual_room_type_dp_names:
+            self._manual_room_type_dp_names = self._manual_room_type_data_point_names()
+
+        if not self._manual_room_type_dp_names:
+            if self._manual_room_type_dp_dialog:
+                self._manual_room_type_dp_dialog.set_status(
+                    "No data points with manual / no room type found."
+                )
+            return
+
+        self._manual_room_type_dp_index = (
+            self._manual_room_type_dp_index - 1
+        ) % len(self._manual_room_type_dp_names)
+
+        self._centre_on_manual_room_type_data_point()
+
+
+    def _centre_on_manual_room_type_data_point(self):
+        if self._manual_room_type_dp_index < 0:
+            return
+
+        name = self._manual_room_type_dp_names[self._manual_room_type_dp_index]
+        point = self.store.all_points().get(name)
+
+        if not point:
+            return
+
+        floor = int(point.get("floor", 0))
+
+        if self.floor_spin.value() != floor:
+            self.floor_spin.setValue(floor)
+
+        self.selected_point_name = name
+        self._set_canvas_multi_selection([name], append=False)
+        self.refresh_canvas()
+
+        scene_pos = self.world_to_scene(point["x"], point["y"])
+        self.canvas.centerOn(scene_pos)
+
+        self._invalidate_static_scene_cache()
+        self.refresh_canvas()
+
+        text = (
+            f"{self._manual_room_type_dp_index + 1} / "
+            f"{len(self._manual_room_type_dp_names)}\n"
+            f"{name}\n"
+            f"Floor {floor}"
+        )
+
+        if self._manual_room_type_dp_dialog:
+            self._manual_room_type_dp_dialog.set_status(text)
+
+        self.set_status(f"Centred on manual / no room type data point {name}")
+
     def show_unassigned_data_point_navigator(self):
         self._unassigned_dp_names = self._unassigned_data_point_names()
         self._unassigned_dp_index = -1
@@ -6888,6 +7167,9 @@ class CableRouteEditor(QMainWindow):
 
         scene_pos = self.world_to_scene(point["x"], point["y"])
         self.canvas.centerOn(scene_pos)
+
+        self._invalidate_static_scene_cache()
+        self.refresh_canvas()
 
         text = (
             f"{self._unassigned_dp_index + 1} / {len(self._unassigned_dp_names)}\n"
@@ -7645,6 +7927,208 @@ class CableRouteEditor(QMainWindow):
 
         self.refresh_canvas()
         self.set_status(f"Rotated {len(names)} item(s) 90° clockwise around {picked}")
+
+    def _asset_matrix_header_label(self, asset):
+        asset_id = str(asset.get("id", "")).strip()
+        asset_name = str(asset.get("name", asset_id)).strip()
+        return f"{asset_id} - {asset_name}" if asset_name and asset_name != asset_id else asset_id
+
+
+    def _asset_id_from_matrix_header(self, header):
+        return str(header or "").split(" - ", 1)[0].strip()
+
+
+    def _room_type_asset_qty_map(self, room_type):
+        result = {}
+
+        for row in room_type.get("assets", []) or []:
+            if not isinstance(row, dict):
+                continue
+
+            asset_id = str(row.get("asset_id", row.get("id", ""))).strip()
+            if not asset_id:
+                continue
+
+            result[asset_id] = int(row.get("qty", 1) or 1)
+
+        # Backwards compatibility with old asset_ids-only room types.
+        for asset_id in room_type.get("asset_ids", []) or []:
+            asset_id = str(asset_id).strip()
+            if asset_id and asset_id not in result:
+                result[asset_id] = 1
+
+        return result
+
+    def export_room_type_asset_matrix(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Room Type Asset Matrix",
+            self.current_json_path.replace(".json", "_room_type_asset_matrix.csv")
+            if self.current_json_path
+            else "room_type_asset_matrix.csv",
+            "CSV files (*.csv)",
+        )
+
+        if not path:
+            return
+
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+
+        assets = [
+            asset
+            for asset in self.store.data.get("assets", [])
+            if str(asset.get("id", "")).strip()
+        ]
+
+        room_types = [
+            room_type
+            for room_type in self.store.data.get("room_types", [])
+            if str(room_type.get("id", "")).strip()
+        ]
+
+        headers = ["room_type_id", "room_type_name"] + [
+            self._asset_matrix_header_label(asset) for asset in assets
+        ]
+
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+
+            for room_type in room_types:
+                qty_by_asset_id = self._room_type_asset_qty_map(room_type)
+
+                row = {
+                    "room_type_id": str(room_type.get("id", "")).strip(),
+                    "room_type_name": str(room_type.get("name", "")).strip(),
+                }
+
+                for asset in assets:
+                    asset_id = str(asset.get("id", "")).strip()
+                    header = self._asset_matrix_header_label(asset)
+                    qty = qty_by_asset_id.get(asset_id, 0)
+                    row[header] = qty if qty else ""
+
+                writer.writerow(row)
+
+        self.set_status(f"Exported room type asset matrix to {Path(path).name}")
+
+
+    def import_room_type_asset_matrix(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Room Type Asset Matrix",
+            "",
+            "CSV files (*.csv)",
+        )
+
+        if not path:
+            return
+
+        assets_by_id = {
+            str(asset.get("id", "")).strip(): asset
+            for asset in self.store.data.get("assets", [])
+            if str(asset.get("id", "")).strip()
+        }
+
+        room_types_by_id = {
+            str(room_type.get("id", "")).strip(): room_type
+            for room_type in self.store.data.get("room_types", [])
+            if str(room_type.get("id", "")).strip()
+        }
+
+        updated = 0
+        created = 0
+        ignored_assets = set()
+
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+
+            if not reader.fieldnames:
+                QMessageBox.critical(self, "Import failed", "CSV has no header row.")
+                return
+
+            asset_columns = [
+                header
+                for header in reader.fieldnames
+                if header not in {"room_type_id", "room_type_name"}
+            ]
+
+            self.push_undo_state("Import room type asset matrix")
+
+            for csv_row in reader:
+                room_type_id = str(csv_row.get("room_type_id", "")).strip()
+                room_type_name = str(csv_row.get("room_type_name", "")).strip()
+
+                if not room_type_id:
+                    continue
+
+                asset_rows = []
+
+                for header in asset_columns:
+                    asset_id = self._asset_id_from_matrix_header(header)
+                    if not asset_id:
+                        continue
+
+                    if asset_id not in assets_by_id:
+                        ignored_assets.add(asset_id)
+                        continue
+
+                    raw_qty = str(csv_row.get(header, "")).strip()
+
+                    if not raw_qty:
+                        continue
+
+                    try:
+                        qty = int(float(raw_qty))
+                    except Exception:
+                        continue
+
+                    if qty <= 0:
+                        continue
+
+                    asset_rows.append(
+                        {
+                            "asset_id": asset_id,
+                            "qty": qty,
+                        }
+                    )
+
+                room_type = room_types_by_id.get(room_type_id)
+
+                if room_type is None:
+                    room_type = {
+                        "id": room_type_id,
+                        "name": room_type_name or room_type_id,
+                        "assets": [],
+                        "asset_ids": [],
+                    }
+                    self.store.data.setdefault("room_types", []).append(room_type)
+                    room_types_by_id[room_type_id] = room_type
+                    created += 1
+                else:
+                    updated += 1
+
+                if room_type_name:
+                    room_type["name"] = room_type_name
+
+                room_type["assets"] = asset_rows
+                room_type["asset_ids"] = [row["asset_id"] for row in asset_rows]
+
+        for point in self.store.data.get("data_points", []):
+            name = str(point.get("name", "")).strip()
+            if name:
+                self.store.sync_connection_qty_for_data_point(name)
+
+        self.refresh_canvas()
+
+        message = f"Imported matrix. Updated {updated}, created {created} room type(s)."
+
+        if ignored_assets:
+            message += f"\n\nIgnored unknown asset ID(s): {', '.join(sorted(ignored_assets))}"
+
+        QMessageBox.information(self, "Import complete", message)
+        self.set_status(message.replace("\n", " "))
 
 
 def main():

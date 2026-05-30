@@ -560,7 +560,6 @@ def write_assets_per_room_csv(rows: Iterable[dict], output_path: Path) -> None:
         for row in rows:
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
-
 def room_type_totals_rows(data: dict) -> List[dict]:
     room_types = {
         _item_id(item): item
@@ -568,90 +567,52 @@ def room_type_totals_rows(data: dict) -> List[dict]:
         if isinstance(item, dict) and _item_id(item)
     }
 
-    departments = {
-        _clean_text(item.get("id")): _item_name(item, _clean_text(item.get("id")))
-        for item in data.get("departments", [])
-        if isinstance(item, dict) and _clean_text(item.get("id"))
-    }
-
     grouped = {}
 
-    candidate_rooms = list(data.get("data_points", [])) + [
-        item
-        for item in data.get("locations", [])
-        if _clean_text(item.get("room_type_id") or item.get("room_type"))
-    ]
-
-    for room in candidate_rooms:
-        if not isinstance(room, dict):
+    for point in data.get("data_points", []):
+        if not isinstance(point, dict):
             continue
 
-        room_type_id = _clean_text(room.get("room_type_id") or room.get("room_type"))
+        room_type_id = _clean_text(point.get("room_type_id"))
 
-        if not room_type_id:
-            continue
+        if room_type_id:
+            room_type = room_types.get(room_type_id, {})
+            room_type_name = _item_name(room_type, room_type_id)
+        else:
+            room_type_id = ""
+            room_type_name = "Manual / no room type"
 
-        room_type = room_types.get(room_type_id, {})
-        room_type_name = _item_name(room_type, room_type_id)
+        key = room_type_id
 
-        room_qty = _safe_int(
-            room.get(
-                "room_qty",
-                room.get("room_quantity", room.get("quantity", 1)),
-            ),
+        if key not in grouped:
+            grouped[key] = {
+                "room_type_id": room_type_id,
+                "room_type_name": room_type_name,
+                "total_rooms": 0,
+                "total_data_points": 0,
+            }
+
+        grouped[key]["total_rooms"] += 1
+
+        grouped[key]["total_data_points"] += _safe_int(
+            point.get("qty", 1),
             default=1,
         )
 
-        department_ids = room.get("department_ids", [])
-        if not isinstance(department_ids, list):
-            department_ids = [department_ids] if _clean_text(department_ids) else []
-
-        if not department_ids:
-            department_ids = [""]
-
-        for department_id in department_ids:
-            department_id = _clean_text(department_id)
-            department_name = departments.get(department_id, "Unassigned")
-
-            key = (
-                room.get("floor", ""),
-                department_id,
-                room_type_id,
-            )
-
-            if key not in grouped:
-                grouped[key] = {
-                    "floor": room.get("floor", ""),
-                    "department_id": department_id,
-                    "department_name": department_name,
-                    "room_type_id": room_type_id,
-                    "room_type_name": room_type_name,
-                    "data_point_count": 0,
-                    "room_qty_total": 0,
-                }
-
-            grouped[key]["data_point_count"] += 1
-            grouped[key]["room_qty_total"] += room_qty
-
     return sorted(
         grouped.values(),
-        key=lambda r: (
-            int(r["floor"]) if str(r["floor"]).isdigit() else 9999,
-            str(r["department_name"]),
-            str(r["room_type_name"]),
+        key=lambda row: (
+            row["room_type_name"].lower(),
+            row["room_type_id"].lower(),
         ),
     )
 
-
 def write_room_type_totals_csv(rows: Iterable[dict], output_path: Path) -> None:
     fieldnames = [
-        "floor",
-        "department_id",
-        "department_name",
         "room_type_id",
         "room_type_name",
-        "data_point_count",
-        "room_qty_total",
+        "total_rooms",
+        "total_data_points",
     ]
 
     with output_path.open("w", encoding="utf-8", newline="") as f:

@@ -1,0 +1,469 @@
+{
+  "project": {
+    "name": "Cable Routing Project"
+  },
+  "building": {
+    "floor_height_m": 4.0
+  },
+  "departments": [
+    {
+      "id": "1",
+      "name": "This department name",
+      "floor": 0,
+      "x": -173.244,
+      "y": 102.499
+    }
+  ],
+  "room_types": [
+    {
+      "id": "RT1",
+      "name": "Office space",
+      "assets": [
+        {
+          "asset_id": "A3",
+          "qty": 1
+        },
+        {
+          "asset_id": "A2",
+          "qty": 1
+        },
+        {
+          "asset_id": "A5",
+          "qty": 1
+        },
+        {
+          "asset_id": "A1",
+          "qty": 1
+        }
+      ],
+      "asset_ids": [
+        "A3",
+        "A2",
+        "A5",
+        "A1"
+      ]
+    },
+    {
+      "id": "RT2",
+      "name": "Wi-Fi",
+      "assets": [
+        {
+          "asset_id": "A4",
+          "qty": 1
+        }
+      ],
+      "asset_ids": [
+        "A4"
+      ]
+    },
+    {
+      "id": "RT3",
+      "name": "Double Office space",
+      "assets": [
+        {
+          "asset_id": "A3",
+          "qty": 2
+        },
+        {
+          "asset_id": "A2",
+          "qty": 2
+        },
+        {
+          "asset_id": "A5",
+          "qty": 2
+        },
+        {
+          "asset_id": "A1",
+          "qty": 2
+        }
+      ],
+      "asset_ids": [
+        "A3",
+        "A2",
+        "A5",
+        "A1"
+      ]
+    }
+  ],
+  "asset_categories": [
+    {
+      "id": "AC1",
+      "name": "WiFi"
+    },
+    {
+      "id": "AC2",
+      "name": "Office equipment"
+    }
+  ],
+  "assets": [
+    {
+      "id": "A1",
+      "name": "Screen",
+      "connection_type": "wireless",
+      "category_id": "AC2",
+      "qty": 1,
+      "data_points": 0
+    },
+    {
+      "id": "A2",
+      "name": "Keyboard",
+      "connection_type": "wired",
+      "category_id": "AC2",
+      "qty": 1,
+      "data_points": 0
+    },
+    {
+      "id": "A3",
+      "name": "Desktop",
+      "connection_type": "wired",
+      "category_id": "AC2",
+      "qty": 1,
+      "data_points": 1
+    },
+    {
+      "id": "A4",
+      "name": "Wireless access point",
+      "connection_type": "wired",
+      "category_id": "AC1",
+      "qty": 1,
+      "data_points": 2
+    },
+    {
+      "id": "A5",
+      "name": "Mouse",
+      "connection_type": "wired",
+      "category_id": "AC2",
+      "qty": 1,
+      "data_points": 0
+    }
+  ],
+  "locations": [
+    {
+      "name": "CR1",
+      "floor": 0,
+      "x": -173.898,
+      "y": 105.769,
+      "kind": "comms_room",
+      "department_ids": []
+    }
+  ],
+  "data_points": [
+    {
+      "name": "DP0-1",
+      "floor": 0,
+      "x": -188.0,
+      "y": 110.0,
+      "qty": 2,
+      "room_type_id": "RT3",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-2",
+      "floor": 0,
+      "x": -173.979,
+      "y": 110.714,
+      "qty": 1,
+      "room_type_id": "RT1",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-3",
+      "floor": 0,
+      "x": -158.98,
+      "y": 109.733,
+      "qty": 1,
+      "room_type_id": "RT1",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-4",
+      "floor": 0,
+      "x": -157.673,
+      "y": 94.121,
+      "qty": 1,
+      "room_type_id": "RT1",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-5",
+      "floor": 0,
+      "x": -172.794,
+      "y": 95.102,
+      "qty": 1,
+      "room_type_id": "RT1",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-6",
+      "floor": 0,
+      "x": -185.954,
+      "y": 95.511,
+      "qty": 1,
+      "room_type_id": "RT1",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-7",
+      "floor": 0,
+      "x": -176.268,
+      "y": 104.992,
+      "qty": 2,
+      "room_type_id": "RT2",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    }
+  ],
+  "corridors": {
+    "nodes": [
+      {
+        "name": "C0-1",
+        "floor": 0,
+        "x": -187,
+        "y": 107,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-2",
+        "floor": 0,
+        "x": -174,
+        "y": 108,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-3",
+        "floor": 0,
+        "x": -159,
+        "y": 107,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-4",
+        "floor": 0,
+        "x": -158,
+        "y": 97,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-5",
+        "floor": 0,
+        "x": -173,
+        "y": 97,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C0-6",
+        "floor": 0,
+        "x": -186,
+        "y": 97,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      }
+    ],
+    "edges": [
+      {
+        "from": "C0-1",
+        "to": "C0-2"
+      },
+      {
+        "from": "C0-2",
+        "to": "C0-1"
+      },
+      {
+        "from": "C0-2",
+        "to": "C0-3"
+      },
+      {
+        "from": "C0-3",
+        "to": "C0-2"
+      },
+      {
+        "from": "C0-3",
+        "to": "C0-4"
+      },
+      {
+        "from": "C0-4",
+        "to": "C0-3"
+      },
+      {
+        "from": "C0-4",
+        "to": "C0-5"
+      },
+      {
+        "from": "C0-5",
+        "to": "C0-4"
+      },
+      {
+        "from": "C0-5",
+        "to": "C0-6"
+      },
+      {
+        "from": "C0-6",
+        "to": "C0-5"
+      },
+      {
+        "from": "DP0-6",
+        "to": "C0-6"
+      },
+      {
+        "from": "C0-6",
+        "to": "DP0-6"
+      },
+      {
+        "from": "C0-6",
+        "to": "C0-1"
+      },
+      {
+        "from": "C0-1",
+        "to": "C0-6"
+      },
+      {
+        "from": "C0-1",
+        "to": "DP0-1"
+      },
+      {
+        "from": "DP0-1",
+        "to": "C0-1"
+      },
+      {
+        "from": "C0-2",
+        "to": "DP0-2"
+      },
+      {
+        "from": "DP0-2",
+        "to": "C0-2"
+      },
+      {
+        "from": "C0-3",
+        "to": "DP0-3"
+      },
+      {
+        "from": "DP0-3",
+        "to": "C0-3"
+      },
+      {
+        "from": "C0-4",
+        "to": "DP0-4"
+      },
+      {
+        "from": "DP0-4",
+        "to": "C0-4"
+      },
+      {
+        "from": "C0-5",
+        "to": "DP0-5"
+      },
+      {
+        "from": "DP0-5",
+        "to": "C0-5"
+      },
+      {
+        "from": "C0-2",
+        "to": "CR1"
+      },
+      {
+        "from": "CR1",
+        "to": "C0-2"
+      },
+      {
+        "from": "C0-2",
+        "to": "DP0-7"
+      },
+      {
+        "from": "DP0-7",
+        "to": "C0-2"
+      }
+    ],
+    "auto_connect": false
+  },
+  "transitions": [],
+  "floor_dxf_files": [],
+  "connections": [
+    {
+      "id": "C1",
+      "from": "CR1",
+      "to": "DP0-1",
+      "qty": 2,
+      "route_profile": ""
+    },
+    {
+      "id": "C2",
+      "from": "CR1",
+      "to": "DP0-2",
+      "qty": 1,
+      "route_profile": ""
+    },
+    {
+      "id": "C3",
+      "from": "CR1",
+      "to": "DP0-3",
+      "qty": 1,
+      "route_profile": ""
+    },
+    {
+      "id": "C4",
+      "from": "CR1",
+      "to": "DP0-4",
+      "qty": 1,
+      "route_profile": ""
+    },
+    {
+      "id": "C5",
+      "from": "CR1",
+      "to": "DP0-5",
+      "qty": 1,
+      "route_profile": ""
+    },
+    {
+      "id": "C6",
+      "from": "CR1",
+      "to": "DP0-6",
+      "qty": 1,
+      "route_profile": ""
+    },
+    {
+      "id": "C7",
+      "from": "CR1",
+      "to": "DP0-7",
+      "qty": 2,
+      "route_profile": ""
+    }
+  ],
+  "route_profiles": {
+    "default": {
+      "allowed_transitions": [],
+      "allowed_nodes": [],
+      "allowed_edges": []
+    }
+  }
+}

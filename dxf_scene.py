@@ -55,6 +55,38 @@ class DXFScene:
         xs = [float(p[0]) for p in points]
         ys = [float(p[1]) for p in points]
         return (min(xs), min(ys), max(xs), max(ys))
+    
+    @staticmethod
+    def _bbox_to_scene_rect(bbox, padding: float = 0.0) -> Optional[QRectF]:
+        if not bbox or len(bbox) != 4:
+            return None
+
+        min_x, min_y, max_x, max_y = [float(v) for v in bbox]
+
+        return QRectF(
+            min_x - padding,
+            -(max_y + padding),
+            max(0.001, (max_x - min_x) + (padding * 2.0)),
+            max(0.001, (max_y - min_y) + (padding * 2.0)),
+        )
+
+
+    @classmethod
+    def _bbox_intersects_scene_rect(
+        cls,
+        bbox,
+        visible_rect: Optional[QRectF],
+        padding: float = 0.0,
+    ) -> bool:
+        if visible_rect is None:
+            return True
+
+        entity_rect = cls._bbox_to_scene_rect(bbox, padding=padding)
+
+        if entity_rect is None:
+            return True
+
+        return visible_rect.intersects(entity_rect)
 
     @classmethod
     def load_content(cls, path: str):
@@ -333,7 +365,13 @@ class DXFScene:
             (max_y - min_y) + 2 * padding,
         )
 
-    def populate_graphics_scene(self, scene: QGraphicsScene, view_scale: float = 1.0):
+    def populate_graphics_scene(
+        self,
+        scene: QGraphicsScene,
+        view_scale: float = 1.0,
+        visible_rect: Optional[QRectF] = None,
+        cull_padding: float = 25.0,
+    ):
         pen_line = QPen(QColor("#858585"))
         pen_line.setWidthF(0.0)
 
@@ -350,6 +388,13 @@ class DXFScene:
         created_items = []
 
         for entity in self.entities:
+            if not self._bbox_intersects_scene_rect(
+                entity.get("bbox"),
+                visible_rect,
+                padding=cull_padding,
+            ):
+                continue
+            
             etype = entity["type"]
 
             if etype == "LINE":

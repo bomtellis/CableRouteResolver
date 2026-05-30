@@ -989,14 +989,13 @@ class RoomItemDialog(QDialog):
         self.qty_spin.setValue(int(self.seed.get("qty", 1) or 1))
 
         self.data_points_spin = QSpinBox()
-        self.data_points_spin.setRange(1, 100000)
+        self.data_points_spin.setRange(0, 100000)
         self.data_points_spin.setValue(
             int(
                 self.seed.get(
                     "data_points",
                     self.seed.get("data_points_each", self.seed.get("cables", 1)),
                 )
-                or 1
             )
         )
 
@@ -1181,10 +1180,19 @@ class AssetEditorDialog(QDialog):
         self.qty_spin.setValue(int(self.seed.get("qty", 1) or 1))
 
         self.data_points_spin = QSpinBox()
-        self.data_points_spin.setRange(1, 100000)
-        self.data_points_spin.setValue(
-            int(self.seed.get("data_points", self.seed.get("data_points_each", self.seed.get("cables", 1))) or 1)
+        self.data_points_spin.setRange(0, 100000)
+
+        data_points = self.seed.get(
+            "data_points",
+            self.seed.get("data_points_each", self.seed.get("cables", 1)),
         )
+
+        try:
+            data_points = int(data_points)
+        except (TypeError, ValueError):
+            data_points = 1
+
+        self.data_points_spin.setValue(data_points)
 
         self.connection_type_combo = QComboBox()
         self.connection_type_combo.addItems(["wired", "wireless"])
@@ -1291,16 +1299,18 @@ class AssetsEditorWindow(QMainWindow):
             self.table.insertRow(row)
 
             qty = int(asset.get("qty", 1) or 1)
-            dp = int(
+            dp_value = asset.get(
+                "data_points",
                 asset.get(
-                    "data_points",
-                    asset.get(
-                        "data_points_each",
-                        asset.get("cables", 1),
-                    ),
-                )
-                or 1
+                    "data_points_each",
+                    asset.get("cables", 1),
+                ),
             )
+
+            try:
+                dp = int(dp_value)
+            except (TypeError, ValueError):
+                dp = 1
 
             category_id = str(
                 asset.get(
@@ -1469,7 +1479,7 @@ class RoomTypeEditorDialog(QDialog):
                 last_category = category_name
 
             asset = self.assets_by_id.get(asset_id, {})
-            dp = int(asset.get("data_points", 1) or 1)
+            dp = int(asset.get("data_points", 1))
             room_qty = int(self.asset_rows_by_id.get(asset_id, {}).get("qty", 1) or 1)
             checked = asset_id in self.asset_rows_by_id
 
