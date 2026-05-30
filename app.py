@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QThread,
     Slot,
     QSize,
+    QTimer,
 )
 from PySide6.QtGui import (
     QAction,
@@ -406,6 +407,11 @@ class EditorGraphicsView(QGraphicsView):
         self._middle_panning = False
         self._last_middle_pos = None
 
+        self.setOptimizationFlag(QGraphicsView.DontSavePainterState, True)
+        self.setOptimizationFlag(QGraphicsView.DontAdjustForAntialiasing, True)
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
+        self.setCacheMode(QGraphicsView.CacheBackground)
+
     def mousePressEvent(self, event):
         scene_pos = self.mapToScene(event.position().toPoint())
         if event.button() == Qt.LeftButton:
@@ -442,8 +448,8 @@ class EditorGraphicsView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def wheelEvent(self, event):
+        super().wheelEvent(event)
         self.mouseWheelScrolled.emit(event)
-        event.accept()
 
     def set_overlay_provider(self, overlay_provider):
         self._overlay_provider = overlay_provider
@@ -612,6 +618,10 @@ class CableRouteEditor(QMainWindow):
         self._find_dp_dialog = None
         self._find_dp_matches = []
         self._find_dp_index = -1
+
+        self._viewport_refresh_timer = QTimer(self)
+        self._viewport_refresh_timer.setSingleShot(True)
+        self._viewport_refresh_timer.timeout.connect(self.refresh_canvas)
 
         self._build_ui()
         self.refresh_canvas()
@@ -2536,7 +2546,7 @@ class CableRouteEditor(QMainWindow):
         max_y = max(b[3] for b in bounds)
         return min_x, min_y, max_x, max_y
 
-    def _current_visible_scene_rect(self, padding=25.0):
+    def _current_visible_scene_rect(self, padding=180.0):
         if not hasattr(self, "canvas") or self.canvas is None:
             return None
 
@@ -2689,15 +2699,6 @@ class CableRouteEditor(QMainWindow):
 
 
     def _static_scene_cache_key(self, floor, visible_rect):
-        rect_key = None
-        if visible_rect is not None:
-            rect_key = (
-                round(visible_rect.left(), 1),
-                round(visible_rect.top(), 1),
-                round(visible_rect.right(), 1),
-                round(visible_rect.bottom(), 1),
-            )
-
         return (
             int(floor),
             bool(self.show_dxf_check.isChecked()),
@@ -2705,7 +2706,7 @@ class CableRouteEditor(QMainWindow):
             self.loaded_dxf_floor,
             self.current_dxf_path,
             len(self.dxf_scene.entities),
-            rect_key,
+            round(self.canvas.transform().m11(), 2),
         )
 
 
@@ -2740,7 +2741,12 @@ class CableRouteEditor(QMainWindow):
     def _ensure_static_scene_items(self, floor, visible_rect):
         key = self._static_scene_cache_key(floor, visible_rect)
 
-        if key == self._static_scene_key:
+        if (
+            key == self._static_scene_key
+            and getattr(self, "_static_scene_loaded_rect", None) is not None
+            and visible_rect is not None
+            and self._static_scene_loaded_rect.contains(visible_rect)
+        ):
             return
 
         self._rebuild_static_scene_items(floor, visible_rect)
@@ -5760,9 +5766,14 @@ class CableRouteEditor(QMainWindow):
         self.last_pan = None
 
     def on_mousewheel(self, event):
-        factor = 1.1 if event.angleDelta().y() > 0 else 0.9
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+
+        factor = 1.15 if delta > 0 else 1 / 1.15
         self.canvas.scale(factor, factor)
-        self.canvas.viewport().update()
+
+        self._viewport_refresh_timer.start(120)
 
     def closeEvent(self, event):
         try:

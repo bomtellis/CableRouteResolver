@@ -666,6 +666,86 @@ def write_room_type_totals_csv(rows: Iterable[dict], output_path: Path) -> None:
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
+def department_room_rows(data: dict) -> List[dict]:
+    departments = {
+        _clean_text(item.get("id")): _item_name(item, _clean_text(item.get("id")))
+        for item in data.get("departments", [])
+        if isinstance(item, dict) and _clean_text(item.get("id"))
+    }
+
+    room_types = {
+        _clean_text(item.get("id")): _item_name(item, _clean_text(item.get("id")))
+        for item in data.get("room_types", [])
+        if isinstance(item, dict) and _clean_text(item.get("id"))
+    }
+
+    grouped = {}
+
+    for room in data.get("data_points", []):
+        if not isinstance(room, dict):
+            continue
+
+        room_type_id = _clean_text(room.get("room_type_id"))
+        room_type_name = room_types.get(room_type_id, "Manual / no room type")
+
+        department_ids = room.get("department_ids", [])
+        if not isinstance(department_ids, list):
+            department_ids = [department_ids] if _clean_text(department_ids) else []
+        if not department_ids:
+            department_ids = [""]
+
+        for department_id in department_ids:
+            department_id = _clean_text(department_id)
+            department_name = departments.get(department_id, "Unassigned")
+
+            key = (
+                department_id,
+                department_name,
+                room_type_id,
+                room_type_name,
+            )
+
+            if key not in grouped:
+                grouped[key] = {
+                    "department_id": department_id,
+                    "department_name": department_name,
+                    "floor": room.get("floor", ""),
+                    "room_type_id": room_type_id,
+                    "room_type_name": room_type_name,
+                    "room_count": 0,
+                }
+
+            grouped[key]["room_count"] += 1
+
+    return sorted(
+        grouped.values(),
+        key=lambda row: (
+            row["department_name"].lower(),
+            str(row["floor"]),
+            row["room_type_name"].lower(),
+        ),
+    )
+
+
+def write_department_rooms_csv(rows: Iterable[dict], output_path: Path) -> None:
+    fieldnames = [
+        "department_id",
+        "department_name",
+        "room_name",
+        "floor",
+        "room_type_id",
+        "room_type_name",
+        "room_count",
+    ]
+
+    with output_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
 def write_csv(rows: Iterable[dict], output_path: Path) -> None:
     fieldnames = ["start_location", "end_location", "cable_length_m"]
     with output_path.open("w", encoding="utf-8", newline="") as f:
@@ -726,6 +806,12 @@ def main() -> None:
         room_type_totals_path,
     )
 
+    department_rooms_path = output_path.with_name(
+        f"{output_path.stem}_department_rooms.csv"
+    )
+    department_room_total_rows = department_room_rows(data)
+    write_department_rooms_csv(department_room_total_rows, department_rooms_path)
+
     print(f"Wrote {len(rows)} row(s) to {output_path}")
     print(
         f"Wrote {len(breakdown_rows)} comms room breakdown row(s) to {breakdown_path}"
@@ -735,6 +821,11 @@ def main() -> None:
         f"Wrote {len(room_type_total_rows)} room type total row(s) to "
         f"{room_type_totals_path}"
     )
+    print(
+        f"Wrote {len(department_room_total_rows)} department room row(s) to "
+        f"{department_rooms_path}"
+    )
+
     if args.verbose:
         for row in rows:
             print(
