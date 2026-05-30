@@ -8,10 +8,10 @@
   "departments": [
     {
       "id": "1",
-      "name": "This department name",
+      "name": "Office",
       "floor": 0,
-      "x": -173.244,
-      "y": 102.499
+      "x": -173.224,
+      "y": 102.207
     }
   ],
   "room_types": [
@@ -141,8 +141,8 @@
     {
       "name": "CR1",
       "floor": 0,
-      "x": -173.898,
-      "y": 105.769,
+      "x": -174.0,
+      "y": 105.0,
       "kind": "comms_room",
       "department_ids": []
     }
@@ -151,7 +151,7 @@
     {
       "name": "DP0-1",
       "floor": 0,
-      "x": -188.0,
+      "x": -186.0,
       "y": 110.0,
       "qty": 2,
       "room_type_id": "RT3",
@@ -175,8 +175,8 @@
     {
       "name": "DP0-3",
       "floor": 0,
-      "x": -158.98,
-      "y": 109.733,
+      "x": -158.0,
+      "y": 110.0,
       "qty": 1,
       "room_type_id": "RT1",
       "extension_distance_m": 0.0,
@@ -187,8 +187,8 @@
     {
       "name": "DP0-4",
       "floor": 0,
-      "x": -157.673,
-      "y": 94.121,
+      "x": -158.0,
+      "y": 95.0,
       "qty": 1,
       "room_type_id": "RT1",
       "extension_distance_m": 0.0,
@@ -199,8 +199,8 @@
     {
       "name": "DP0-5",
       "floor": 0,
-      "x": -172.794,
-      "y": 95.102,
+      "x": -173.0,
+      "y": 95.0,
       "qty": 1,
       "room_type_id": "RT1",
       "extension_distance_m": 0.0,
@@ -211,8 +211,8 @@
     {
       "name": "DP0-6",
       "floor": 0,
-      "x": -185.954,
-      "y": 95.511,
+      "x": -186.0,
+      "y": 95.0,
       "qty": 1,
       "room_type_id": "RT1",
       "extension_distance_m": 0.0,
@@ -223,8 +223,8 @@
     {
       "name": "DP0-7",
       "floor": 0,
-      "x": -176.268,
-      "y": 104.992,
+      "x": -170.0,
+      "y": 109.0,
       "qty": 2,
       "room_type_id": "RT2",
       "extension_distance_m": 0.0,
@@ -238,8 +238,8 @@
       {
         "name": "C0-1",
         "floor": 0,
-        "x": -187,
-        "y": 107,
+        "x": -186.0,
+        "y": 107.0,
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": false
@@ -247,8 +247,8 @@
       {
         "name": "C0-2",
         "floor": 0,
-        "x": -174,
-        "y": 108,
+        "x": -174.0,
+        "y": 107.0,
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": false
@@ -256,8 +256,8 @@
       {
         "name": "C0-3",
         "floor": 0,
-        "x": -159,
-        "y": 107,
+        "x": -158.0,
+        "y": 107.0,
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": false
@@ -265,8 +265,8 @@
       {
         "name": "C0-4",
         "floor": 0,
-        "x": -158,
-        "y": 97,
+        "x": -158.0,
+        "y": 97.0,
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": false
@@ -274,8 +274,8 @@
       {
         "name": "C0-5",
         "floor": 0,
-        "x": -173,
-        "y": 97,
+        "x": -173.0,
+        "y": 97.0,
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": false
@@ -283,8 +283,8 @@
       {
         "name": "C0-6",
         "floor": 0,
-        "x": -186,
-        "y": 97,
+        "x": -186.0,
+        "y": 97.0,
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": false

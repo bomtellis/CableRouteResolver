@@ -332,12 +332,12 @@ def comms_room_breakdown_rows(data: dict) -> List[dict]:
                     "source_floor": floor,
                     "department_id": department_id,
                     "department_name": department_name,
-                    "connection_count": 0,
+                    "room_count": 0,
                     "cable_qty": 0,
                     "data_points": [],
                 }
 
-            grouped[key]["connection_count"] += 1
+            grouped[key]["room_count"] += 1
             grouped[key]["cable_qty"] += qty
             grouped[key]["data_points"].append(data_point_name)
 
@@ -362,7 +362,7 @@ def write_comms_room_breakdown_csv(rows: Iterable[dict], output_path: Path) -> N
         "source_floor",
         "department_id",
         "department_name",
-        "connection_count",
+        "room_count",
         "cable_qty",
         "data_points",
     ]
@@ -560,58 +560,101 @@ def write_assets_per_room_csv(rows: Iterable[dict], output_path: Path) -> None:
         for row in rows:
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
+
 def room_type_totals_rows(data: dict) -> List[dict]:
+    assets = {
+        _item_id(item): item
+        for item in data.get("assets", [])
+        if isinstance(item, dict) and _item_id(item)
+    }
+
     room_types = {
         _item_id(item): item
         for item in data.get("room_types", [])
         if isinstance(item, dict) and _item_id(item)
     }
 
-    grouped = {}
+    departments = {
+        _clean_text(item.get("id")): _item_name(item, _clean_text(item.get("id")))
+        for item in data.get("departments", [])
+        if isinstance(item, dict) and _clean_text(item.get("id"))
+    }
 
-    for point in data.get("data_points", []):
-        if not isinstance(point, dict):
+    rows: List[dict] = []
+
+    for room in data.get("data_points", []):
+        if not isinstance(room, dict):
             continue
 
-        room_type_id = _clean_text(point.get("room_type_id"))
+        room_name = _clean_text(room.get("name"))
+        room_type_id = _clean_text(room.get("room_type_id"))
 
-        if room_type_id:
-            room_type = room_types.get(room_type_id, {})
-            room_type_name = _item_name(room_type, room_type_id)
-        else:
-            room_type_id = ""
-            room_type_name = "Manual / no room type"
+        if not room_name or not room_type_id:
+            continue
 
-        key = room_type_id
+        room_type = room_types.get(room_type_id, {})
+        room_type_name = _item_name(room_type, room_type_id)
 
-        if key not in grouped:
-            grouped[key] = {
-                "room_type_id": room_type_id,
-                "room_type_name": room_type_name,
-                "total_rooms": 0,
-                "total_data_points": 0,
-            }
+        department_ids = room.get("department_ids", [])
+        if not isinstance(department_ids, list):
+            department_ids = [department_ids] if _clean_text(department_ids) else []
+        if not department_ids:
+            department_ids = [""]
 
-        grouped[key]["total_rooms"] += 1
+        for asset_entry in _normalise_room_type_assets(room_type):
+            asset_id = asset_entry["asset_id"]
+            asset = assets.get(asset_id, {})
+            asset_name = _item_name(asset, asset_id)
 
-        grouped[key]["total_data_points"] += _safe_int(
-            point.get("qty", 1),
-            default=1,
-        )
+            asset_qty = _safe_int(asset_entry.get("qty", 0), default=0)
+            data_points_per_asset = _safe_int(
+                asset.get("data_points", asset.get("data_point_qty", 0)),
+                default=0,
+            )
+            total_data_points = asset_qty * data_points_per_asset
+
+            for department_id in department_ids:
+                department_id = _clean_text(department_id)
+
+                rows.append(
+                    {
+                        "department_id": department_id,
+                        "department_name": departments.get(department_id, "Unassigned"),
+                        "room_name": room_name,
+                        "floor": room.get("floor", ""),
+                        "room_type_id": room_type_id,
+                        "room_type_name": room_type_name,
+                        "asset_id": asset_id,
+                        "asset_name": asset_name,
+                        "asset_qty": asset_qty,
+                        "data_points_per_asset": data_points_per_asset,
+                        "total_data_points": total_data_points,
+                    }
+                )
 
     return sorted(
-        grouped.values(),
+        rows,
         key=lambda row: (
-            row["room_type_name"].lower(),
-            row["room_type_id"].lower(),
+            row["department_name"].lower(),
+            str(row["floor"]),
+            row["room_name"].lower(),
+            row["asset_name"].lower(),
         ),
     )
 
+
 def write_room_type_totals_csv(rows: Iterable[dict], output_path: Path) -> None:
     fieldnames = [
+        "department_id",
+        "department_name",
+        "room_name",
+        "floor",
         "room_type_id",
         "room_type_name",
-        "total_rooms",
+        "asset_id",
+        "asset_name",
+        "asset_qty",
+        "data_points_per_asset",
         "total_data_points",
     ]
 
