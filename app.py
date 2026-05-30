@@ -3113,7 +3113,6 @@ class CableRouteEditor(QMainWindow):
                 best_name = name
                 best_dist = dist
 
-        # ADD THIS BLOCK
         if self._is_department_visible():
             for department_id, dept in self.store.departments_for_floor(floor).items():
                 dist = math.hypot(
