@@ -1081,7 +1081,6 @@ class CableRouteEditor(QMainWindow):
 
         self.set_status(f"Centred on {name}")
 
-
     def _centre_on_department(self, department_id):
         for item in self.store.data.get("departments", []):
             if str(item.get("id", "")).strip() != str(department_id).strip():
@@ -1104,7 +1103,6 @@ class CableRouteEditor(QMainWindow):
             return
 
         self.set_status(f"Could not find department {department_id}")
-
 
     def _centre_on_transition(self, transition_id):
         transition_id = str(transition_id).strip()
@@ -2687,7 +2685,7 @@ class CableRouteEditor(QMainWindow):
         else:
             self.set_status("No template items found in selection box")
         return True
-    
+
     def _clear_static_scene_items(self):
         for item in getattr(self, "_static_scene_items", []):
             try:
@@ -2697,8 +2695,10 @@ class CableRouteEditor(QMainWindow):
 
         self._static_scene_items = []
 
-
     def _static_scene_cache_key(self, floor, visible_rect):
+        scale = self.canvas.transform().m11()
+        label_tier = 0 if scale < 6 else 1 if scale < 12 else 2
+
         return (
             int(floor),
             bool(self.show_dxf_check.isChecked()),
@@ -2706,9 +2706,8 @@ class CableRouteEditor(QMainWindow):
             self.loaded_dxf_floor,
             self.current_dxf_path,
             len(self.dxf_scene.entities),
-            round(self.canvas.transform().m11(), 2),
+            label_tier,
         )
-
 
     def _rebuild_static_scene_items(self, floor, visible_rect):
         self._clear_static_scene_items()
@@ -2736,7 +2735,9 @@ class CableRouteEditor(QMainWindow):
 
         self._static_scene_items = created_items
         self._static_scene_key = self._static_scene_cache_key(floor, visible_rect)
-
+        self._static_scene_loaded_rect = (
+            QRectF(visible_rect) if visible_rect is not None else None
+        )
 
     def _ensure_static_scene_items(self, floor, visible_rect):
         key = self._static_scene_cache_key(floor, visible_rect)
@@ -2887,7 +2888,7 @@ class CableRouteEditor(QMainWindow):
             marker_rect = QRectF(pos.x() + 0.4, pos.y() - 0.6, 0.8, 1.0)
             if not visible_rect.intersects(marker_rect):
                 return
-            
+
         green = QColor("#00ff66")
         pen = QPen(QColor("#003d1f"), 0.05)
         brush = QBrush(green)
@@ -5549,10 +5550,10 @@ class CableRouteEditor(QMainWindow):
             self.selected_for_edge = None
             self.selected_point_name = picked
             self.set_status("Edge removed" if removed else "No matching edge to remove")
-            
+
             if removed:
                 self._invalidate_static_scene_cache()
-            
+
             self.refresh_canvas()
             return
 
@@ -6997,7 +6998,6 @@ class CableRouteEditor(QMainWindow):
         result.sort(key=lambda row: (row["floor"], row["name"]))
         return [row["name"] for row in result]
 
-
     def show_manual_room_type_data_point_navigator(self):
         self._manual_room_type_dp_names = self._manual_room_type_data_point_names()
         self._manual_room_type_dp_index = -1
@@ -7025,7 +7025,6 @@ class CableRouteEditor(QMainWindow):
 
         self.goto_next_manual_room_type_data_point()
 
-
     def goto_next_manual_room_type_data_point(self):
         if not self._manual_room_type_dp_names:
             self._manual_room_type_dp_names = self._manual_room_type_data_point_names()
@@ -7043,7 +7042,6 @@ class CableRouteEditor(QMainWindow):
 
         self._centre_on_manual_room_type_data_point()
 
-
     def goto_previous_manual_room_type_data_point(self):
         if not self._manual_room_type_dp_names:
             self._manual_room_type_dp_names = self._manual_room_type_data_point_names()
@@ -7060,7 +7058,6 @@ class CableRouteEditor(QMainWindow):
         ) % len(self._manual_room_type_dp_names)
 
         self._centre_on_manual_room_type_data_point()
-
 
     def _centre_on_manual_room_type_data_point(self):
         if self._manual_room_type_dp_index < 0:
@@ -7944,10 +7941,8 @@ class CableRouteEditor(QMainWindow):
         asset_name = str(asset.get("name", asset_id)).strip()
         return f"{asset_id} - {asset_name}" if asset_name and asset_name != asset_id else asset_id
 
-
     def _asset_id_from_matrix_header(self, header):
         return str(header or "").split(" - ", 1)[0].strip()
-
 
     def _room_type_asset_qty_map(self, room_type):
         result = {}
@@ -8023,7 +8018,6 @@ class CableRouteEditor(QMainWindow):
                 writer.writerow(row)
 
         self.set_status(f"Exported room type asset matrix to {Path(path).name}")
-
 
     def import_room_type_asset_matrix(self):
         path, _ = QFileDialog.getOpenFileName(
