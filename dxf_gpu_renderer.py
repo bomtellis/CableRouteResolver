@@ -23,7 +23,6 @@ from PySide6.QtGui import (
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QRubberBand
 
-
 Bounds = Tuple[float, float, float, float]
 PointTuple = Tuple[float, float]
 
@@ -98,11 +97,6 @@ class GpuDxfGraphView(QOpenGLWidget):
         self._same_floor_edge_pen = QPen(QColor("#6aa9ff"), 0.0)
         self._cross_floor_edge_pen = QPen(QColor("#ff4d4f"), 0.0)
 
-        self._graph_label_min_scale = 8.0
-        self._dxf_label_min_scale = 10.0
-        self._graph_label_px = 10
-        self._dxf_label_px = 9
-
     # ------------------------------------------------------------------
     # Public API used by app.py
     # ------------------------------------------------------------------
@@ -174,7 +168,9 @@ class GpuDxfGraphView(QOpenGLWidget):
         self._offset = QPointF(0.0, 0.0)
         self.update()
 
-    def fitInView(self, rect: QRectF, aspect_mode: Qt.AspectRatioMode = Qt.KeepAspectRatio) -> None:
+    def fitInView(
+        self, rect: QRectF, aspect_mode: Qt.AspectRatioMode = Qt.KeepAspectRatio
+    ) -> None:
         self.fit_to_rect(rect, aspect_mode)
 
     def fit_to_content(self, padding: float = 8.0) -> None:
@@ -182,7 +178,9 @@ class GpuDxfGraphView(QOpenGLWidget):
         if rect is not None:
             self.fit_to_rect(rect, Qt.KeepAspectRatio)
 
-    def fit_to_rect(self, rect: QRectF, aspect_mode: Qt.AspectRatioMode = Qt.KeepAspectRatio) -> None:
+    def fit_to_rect(
+        self, rect: QRectF, aspect_mode: Qt.AspectRatioMode = Qt.KeepAspectRatio
+    ) -> None:
         if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
             return
         margin = 30.0
@@ -194,7 +192,9 @@ class GpuDxfGraphView(QOpenGLWidget):
         self._scale = max(0.001, min(5000.0, self._scale))
         centre_scene = rect.center()
         centre_screen = QPointF(self.width() / 2.0, self.height() / 2.0)
-        self._offset = centre_screen - QPointF(centre_scene.x() * self._scale, centre_scene.y() * self._scale)
+        self._offset = centre_screen - QPointF(
+            centre_scene.x() * self._scale, centre_scene.y() * self._scale
+        )
         self.update()
 
     def content_scene_rect(self, padding: float = 8.0) -> Optional[QRectF]:
@@ -217,16 +217,24 @@ class GpuDxfGraphView(QOpenGLWidget):
 
     def world_to_screen(self, x: float, y: float) -> QPointF:
         scene = self.world_to_scene(x, y)
-        return QPointF(scene.x() * self._scale + self._offset.x(), scene.y() * self._scale + self._offset.y())
+        return QPointF(
+            scene.x() * self._scale + self._offset.x(),
+            scene.y() * self._scale + self._offset.y(),
+        )
 
     def screen_to_scene(self, pos: QPointF | QPoint) -> QPointF:
-        return QPointF((float(pos.x()) - self._offset.x()) / self._scale, (float(pos.y()) - self._offset.y()) / self._scale)
+        return QPointF(
+            (float(pos.x()) - self._offset.x()) / self._scale,
+            (float(pos.y()) - self._offset.y()) / self._scale,
+        )
 
     def screen_to_world(self, pos: QPointF | QPoint) -> Tuple[float, float]:
         scene = self.screen_to_scene(pos)
         return self.scene_to_world(scene.x(), scene.y())
 
-    def find_nearest_selectable_name(self, x: float, y: float, radius_px: float = 12.0) -> Optional[str]:
+    def find_nearest_selectable_name(
+        self, x: float, y: float, radius_px: float = 12.0
+    ) -> Optional[str]:
         if self.store is None:
             return None
         radius_world = max(0.2, radius_px / max(self._scale, 0.001))
@@ -234,7 +242,9 @@ class GpuDxfGraphView(QOpenGLWidget):
         best_dist = radius_world
 
         for name, point in self._points_for_floor().items():
-            d = math.hypot(float(point.get("x", 0.0)) - x, float(point.get("y", 0.0)) - y)
+            d = math.hypot(
+                float(point.get("x", 0.0)) - x, float(point.get("y", 0.0)) - y
+            )
             if d <= best_dist:
                 best_dist = d
                 best_name = str(name)
@@ -265,11 +275,7 @@ class GpuDxfGraphView(QOpenGLWidget):
                 self._draw_departments(painter)
                 self._draw_points(painter)
 
-            # Draw all text after geometry, in screen space, with a stable world anchor.
             painter.resetTransform()
-            if self.show_labels:
-                self._draw_graph_labels(painter)
-                self._draw_dxf_text(painter)
             if self.show_overlay and self._overlay_provider is not None:
                 self._overlay_provider(painter, self.rect())
         finally:
@@ -342,11 +348,22 @@ class GpuDxfGraphView(QOpenGLWidget):
             painter.setBrush(Qt.NoBrush)
             painter.drawPath(self._dxf_cache.arc_path)
 
+        if self.show_labels and self._scale >= 6.0:
+            self._draw_dxf_text(painter)
+
     def _ensure_dxf_cache(self) -> None:
         entities = list(getattr(self.dxf_scene, "entities", []) or [])
-        source_key = (getattr(self.dxf_scene, "path", None), id(entities), len(entities))
+        source_key = (
+            getattr(self.dxf_scene, "path", None),
+            id(entities),
+            len(entities),
+        )
         # id(entities) changes because of list() above, so use path + actual scene list id.
-        source_key = (getattr(self.dxf_scene, "path", None), id(getattr(self.dxf_scene, "entities", None)), len(entities))
+        source_key = (
+            getattr(self.dxf_scene, "path", None),
+            id(getattr(self.dxf_scene, "entities", None)),
+            len(entities),
+        )
         if self._dxf_cache.source_key == source_key:
             return
 
@@ -372,7 +389,9 @@ class GpuDxfGraphView(QOpenGLWidget):
             elif etype == "CIRCLE":
                 cx, cy = entity["center"]
                 r = float(entity["radius"])
-                self._dxf_cache.arc_path.addEllipse(QRectF(float(cx) - r, -(float(cy) + r), r * 2.0, r * 2.0))
+                self._dxf_cache.arc_path.addEllipse(
+                    QRectF(float(cx) - r, -(float(cy) + r), r * 2.0, r * 2.0)
+                )
             elif etype == "ARC":
                 cx, cy = entity["center"]
                 r = float(entity["radius"])
@@ -392,91 +411,24 @@ class GpuDxfGraphView(QOpenGLWidget):
                     continue
                 self._dxf_cache.text_entities.append(entity)
 
-    def _label_pixel_size(self) -> int:
-        if self._scale < 2.5:
-            return 0
-
-        # Slow, gentle growth only.
-        return max(9, min(13, int(round(9 + ((self._scale - 2.5) * 0.25)))))
-
-    def _draw_graph_labels(self, painter: QPainter) -> None:
-        if self._scale < 2.5:
-            return
-
-        painter.save()
-        painter.resetTransform()
-
-        font = QFont("Arial")
-        font.setPixelSize(self._label_pixel_size())
-        font.setHintingPreference(QFont.PreferFullHinting)
-        painter.setFont(font)
-
-        for department_id, dept in self._departments_for_floor().items():
-            text = str(dept.get("name") or department_id)
-            screen = self.world_to_screen(
-                float(dept.get("x", 0.0)), float(dept.get("y", 0.0))
-            )
-
-            if not self.rect().adjusted(-120, -120, 120, 120).contains(screen.toPoint()):
-                continue
-
-            painter.setPen(QColor("#aaf7ea"))
-            painter.drawText(
-                screen + QPointF(0.45 * self._scale, -0.45 * self._scale), text
-            )
-
-        for name, point in self._points_for_floor().items():
-            kind = str(point.get("kind", ""))
-            screen = self.world_to_screen(
-                float(point.get("x", 0.0)), float(point.get("y", 0.0))
-            )
-
-            if not self.rect().adjusted(-120, -120, 120, 120).contains(screen.toPoint()):
-                continue
-
-            if kind in {"location", "comms_room"}:
-                color = QColor("#9bf0cd")
-            elif kind == "corridor_node":
-                color = QColor("#ffe8a3")
-            elif kind == "data_point":
-                color = QColor("#eadcff")
-            else:
-                color = QColor("#ffb3ae")
-
-            painter.setPen(color)
-            painter.drawText(
-                screen + QPointF(0.45 * self._scale, -0.45 * self._scale), str(name)
-            )
-
-        painter.restore()
-
     def _draw_dxf_text(self, painter: QPainter) -> None:
-        if self._scale < 2.5:
-            return
-
         painter.save()
-        painter.resetTransform()
-
         painter.setPen(QColor("#C0C0C0"))
-
-        font = QFont("Arial")
-        font.setPixelSize(self._label_pixel_size())
-        font.setHintingPreference(QFont.PreferFullHinting)
+        font = QFont()
+        font.setPixelSize(max(5, min(16, int(7 + self._scale * 0.25))))
         painter.setFont(font)
-
+        # Text is drawn in screen space so it remains legible and avoids enormous glyph paths.
+        painter.resetTransform()
         for entity in self._dxf_cache.text_entities:
             x, y = entity.get("insert", (0.0, 0.0))
             screen = self.world_to_screen(float(x), float(y))
-
-            if not self.rect().adjusted(-120, -120, 120, 120).contains(screen.toPoint()):
+            if not self.rect().adjusted(-80, -80, 80, 80).contains(screen.toPoint()):
                 continue
-
             painter.save()
             painter.translate(screen)
             painter.rotate(-float(entity.get("rotation", 0.0)))
             painter.drawText(QPointF(0.0, 0.0), str(entity.get("text") or ""))
             painter.restore()
-
         painter.restore()
 
     # ------------------------------------------------------------------
@@ -495,31 +447,55 @@ class GpuDxfGraphView(QOpenGLWidget):
             b_floor = int(b.get("floor", 0))
             if self.floor not in {a_floor, b_floor}:
                 continue
-            painter.setPen(self._cross_floor_edge_pen if a_floor != b_floor else self._same_floor_edge_pen)
+            painter.setPen(
+                self._cross_floor_edge_pen
+                if a_floor != b_floor
+                else self._same_floor_edge_pen
+            )
             pa = self.world_to_scene(float(a.get("x", 0.0)), float(a.get("y", 0.0)))
             pb = self.world_to_scene(float(b.get("x", 0.0)), float(b.get("y", 0.0)))
             painter.drawLine(pa, pb)
 
     def _draw_departments(self, painter: QPainter) -> None:
         for department_id, dept in self._departments_for_floor().items():
-            pos = self.world_to_scene(float(dept.get("x", 0.0)), float(dept.get("y", 0.0)))
+            pos = self.world_to_scene(
+                float(dept.get("x", 0.0)), float(dept.get("y", 0.0))
+            )
             selected = str(department_id) == str(self.selected_point_name)
-            poly = QPolygonF([
-                QPointF(pos.x(), pos.y() - 0.7),
-                QPointF(pos.x() + 0.7, pos.y()),
-                QPointF(pos.x(), pos.y() + 0.7),
-                QPointF(pos.x() - 0.7, pos.y()),
-            ])
+            poly = QPolygonF(
+                [
+                    QPointF(pos.x(), pos.y() - 0.7),
+                    QPointF(pos.x() + 0.7, pos.y()),
+                    QPointF(pos.x(), pos.y() + 0.7),
+                    QPointF(pos.x() - 0.7, pos.y()),
+                ]
+            )
             painter.setBrush(QBrush(QColor("#1abc9c")))
-            painter.setPen(QPen(QColor("#ffffff") if selected else QColor("#8ef3df"), 0.08))
+            painter.setPen(
+                QPen(QColor("#ffffff") if selected else QColor("#8ef3df"), 0.08)
+            )
             painter.drawPolygon(poly)
+            if self.show_labels:
+                self._draw_screen_label(
+                    painter,
+                    pos,
+                    str(dept.get("name") or department_id),
+                    QColor("#aaf7ea"),
+                )
 
     def _draw_points(self, painter: QPainter) -> None:
         for name, point in self._points_for_floor().items():
-            pos = self.world_to_scene(float(point.get("x", 0.0)), float(point.get("y", 0.0)))
-            selected = str(name) == str(self.selected_point_name) or str(name) in self.selected_template_names
+            pos = self.world_to_scene(
+                float(point.get("x", 0.0)), float(point.get("y", 0.0))
+            )
+            selected = (
+                str(name) == str(self.selected_point_name)
+                or str(name) in self.selected_template_names
+            )
             kind = str(point.get("kind", ""))
-            outline = QPen(QColor("#ffffff") if selected else QColor("transparent"), 0.0)
+            outline = QPen(
+                QColor("#ffffff") if selected else QColor("transparent"), 0.0
+            )
 
             if kind in {"location", "comms_room"}:
                 painter.setPen(outline)
@@ -534,20 +510,39 @@ class GpuDxfGraphView(QOpenGLWidget):
                 painter.drawRect(QRectF(pos.x() - r, pos.y() - r, r * 2.0, r * 2.0))
                 label_color = QColor("#ffe8a3")
             elif kind == "data_point":
-                self._draw_diamond(painter, pos, 0.45, QColor("#b07cff"), QColor("#ffffff") if selected else QColor("#d5bbff"))
+                self._draw_diamond(
+                    painter,
+                    pos,
+                    0.45,
+                    QColor("#b07cff"),
+                    QColor("#ffffff") if selected else QColor("#d5bbff"),
+                )
                 label_color = QColor("#eadcff")
             else:
-                self._draw_diamond(painter, pos, 0.5, QColor("#ff7b72"), QColor("#ffffff") if selected else QColor("#ffb3ae"))
+                self._draw_diamond(
+                    painter,
+                    pos,
+                    0.5,
+                    QColor("#ff7b72"),
+                    QColor("#ffffff") if selected else QColor("#ffb3ae"),
+                )
                 label_color = QColor("#ffb3ae")
 
+            if self.show_labels:
+                self._draw_screen_label(painter, pos, str(name), label_color)
+
     @staticmethod
-    def _draw_diamond(painter: QPainter, pos: QPointF, r: float, fill: QColor, outline: QColor) -> None:
-        poly = QPolygonF([
-            QPointF(pos.x(), pos.y() - r),
-            QPointF(pos.x() + r, pos.y()),
-            QPointF(pos.x(), pos.y() + r),
-            QPointF(pos.x() - r, pos.y()),
-        ])
+    def _draw_diamond(
+        painter: QPainter, pos: QPointF, r: float, fill: QColor, outline: QColor
+    ) -> None:
+        poly = QPolygonF(
+            [
+                QPointF(pos.x(), pos.y() - r),
+                QPointF(pos.x() + r, pos.y()),
+                QPointF(pos.x(), pos.y() + r),
+                QPointF(pos.x() - r, pos.y()),
+            ]
+        )
         painter.setBrush(QBrush(fill))
         painter.setPen(QPen(outline, 0.08))
         painter.drawPolygon(poly)
@@ -555,29 +550,21 @@ class GpuDxfGraphView(QOpenGLWidget):
     def _draw_screen_label(
         self, painter: QPainter, scene_pos: QPointF, text: str, color: QColor
     ) -> None:
-        if not text:
+        if not text or self._scale < 2.5:
             return
-
-        if self._scale < 1.5:
-            return
-
         screen = QPointF(
             scene_pos.x() * self._scale + self._offset.x(),
             scene_pos.y() * self._scale + self._offset.y(),
         )
-
+        if not self.rect().adjusted(-80, -80, 80, 80).contains(screen.toPoint()):
+            return
         painter.save()
         painter.resetTransform()
-
         painter.setPen(color)
-
-        font = QFont("Arial")
-        font.setPixelSize(max(7, min(22, int(2.2 * self._scale))))
-        font.setHintingPreference(QFont.PreferFullHinting)
+        font = QFont()
+        font.setPixelSize(11)
         painter.setFont(font)
-
-        painter.drawText(screen + QPointF(8, -8), text)
-
+        painter.drawText(screen + QPointF(6.0, -6.0), text)
         painter.restore()
 
     # ------------------------------------------------------------------
