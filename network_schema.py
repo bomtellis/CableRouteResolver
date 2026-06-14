@@ -40,7 +40,7 @@ NETWORK_ASSET_TYPES = {
     "other",
 }
 
-NETWORK_MEDIA = {"copper", "fibre", "wireless", "virtual", "none"}
+NETWORK_MEDIA = {"copper", "fibre", "wireless", "virtual", "stacking", "none"}
 NETWORK_CONNECTION_ROLES = {"input", "output", "uplink"}
 NETWORK_LOCATION_TYPES = {"mer", "polan"}
 
@@ -142,6 +142,10 @@ def ensure_network_schema(data: dict) -> dict:
         asset["connections_in"] = max(0, _as_int(asset.get("connections_in")))
         asset["connections_out"] = max(0, _as_int(asset.get("connections_out")))
         asset["uplink_ports"] = max(0, _as_int(asset.get("uplink_ports")))
+        asset["supports_stacking"] = bool(asset.get("supports_stacking", False))
+        asset["max_stack_members"] = max(1, _as_int(asset.get("max_stack_members"), 1))
+        if not asset["supports_stacking"]:
+            asset["max_stack_members"] = 1
         asset["rack_units"] = max(0, _as_int(asset.get("rack_units"), 1))
         for field, default in (
             ("input_connection_type", "copper"),
@@ -175,6 +179,14 @@ def ensure_network_schema(data: dict) -> dict:
         instance.setdefault("management_vlan", "")
         instance.setdefault("power_feed", "")
         instance.setdefault("ups_source", "")
+        instance["logical_stack"] = bool(instance.get("logical_stack", False))
+        instance["stack_member_count"] = max(1, _as_int(instance.get("stack_member_count"), 1))
+        instance.setdefault("stack_member_asset_id", "")
+        instance["stack_interconnect_count"] = max(0, _as_int(instance.get("stack_interconnect_count"), max(0, instance["stack_member_count"] - 1)))
+        instance["stack_interconnect_medium"] = _text(instance.get("stack_interconnect_medium")).lower() or "stacking"
+        if instance["stack_interconnect_medium"] not in NETWORK_MEDIA:
+            instance["stack_interconnect_medium"] = "stacking"
+        instance.setdefault("stack_interconnect_specification", "")
         instance.setdefault("notes", "")
 
     for connection in data["network_connections"]:
@@ -466,10 +478,11 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     for instance_id, used_ports in port_loads.items():
         instance = instances_by_id.get(instance_id, {})
         asset = assets_by_id.get(_text(instance.get("asset_id")), {})
-        capacity = max(0, _as_int(asset.get("number_of_ports")))
+        stack_members = max(1, _as_int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+        capacity = max(0, _as_int(asset.get("number_of_ports"))) * stack_members
         if capacity and used_ports > capacity:
             messages.append(f"Network instance {instance_id} uses {used_ports} endpoint ports but provides only {capacity}.")
-        poe_budget = max(0.0, _as_float(asset.get("poe_budget_w")))
+        poe_budget = max(0.0, _as_float(asset.get("poe_budget_w"))) * stack_members
         poe_load = poe_loads.get(instance_id, 0.0)
         if poe_load > poe_budget + 0.001:
             messages.append(

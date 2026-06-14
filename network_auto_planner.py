@@ -614,6 +614,11 @@ class DesignBuilder:
     ) -> dict:
         connection_id = _next_identifier(self.connection_ids, "AUTO-NC-")
         length_m, route_path = self.graph.route(route_source, route_destination) if route_source and route_destination else (0.0, [])
+        cable_specification = {
+            "fibre": "OS2 single-mode fibre",
+            "copper": "Category 6A",
+            "stacking": "Switch stack interconnect",
+        }.get(medium, "")
         connection = {
             "id": connection_id,
             "from_instance_id": _text(from_instance.get("id")),
@@ -622,7 +627,7 @@ class DesignBuilder:
             "to_port": str(to_port),
             "connection_role": "uplink",
             "medium": medium,
-            "cable_specification": "OS2 single-mode fibre" if medium == "fibre" else "Category 6A",
+            "cable_specification": cable_specification,
             "fibre_count": 2 if medium == "fibre" else 0,
             "vlan_ids": [],
             "route_profile": "",
@@ -725,15 +730,26 @@ def _nearest_location(point: EndpointDemand | dict, locations: Sequence[dict], s
 
 
 def _choose_core_candidates(data: dict) -> List[dict]:
+    def is_core_asset(asset: dict) -> bool:
+        name = _text(asset.get("name")).lower()
+        return (
+            _text(asset.get("output_connection_type")).lower() == "fibre"
+            or "core" in name
+            or "distribution" in name
+            or "aggregation" in name
+        )
+
+    def is_access_asset(asset: dict) -> bool:
+        name = _text(asset.get("name")).lower()
+        return "access" in name and not any(word in name for word in ("core", "distribution", "aggregation"))
+
     candidates = _candidate_assets(
         data,
         "network_switch",
-        lambda asset: _text(asset.get("output_connection_type")).lower() == "fibre"
-        or "core" in _text(asset.get("name")).lower()
-        or "distribution" in _text(asset.get("name")).lower(),
+        lambda asset: is_core_asset(asset) and not is_access_asset(asset),
     )
     if not candidates:
-        candidates = _candidate_assets(data, "network_switch")
+        candidates = _candidate_assets(data, "network_switch", lambda asset: not is_access_asset(asset))
     return candidates
 
 
@@ -785,6 +801,7 @@ def _build_core_layer(
                 leaf_location,
                 root_name,
                 redundancy_role=_text(leaf.get("core_redundancy_role")),
+                fibre_count=1,
             )
             leaf["_uplinks_used"] = _int(leaf.get("_uplinks_used"), 0) + 1
             core_port += 1
@@ -842,7 +859,11 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
         builder.data,
         "network_switch",
         lambda asset: _text(asset.get("output_connection_type")).lower() == "copper"
-        and _int(asset.get("number_of_ports")) > 0,
+        and _int(asset.get("number_of_ports")) > 0
+        and not any(
+            word in _text(asset.get("name")).lower()
+            for word in ("core", "distribution", "aggregation")
+        ),
     )
     if not switch_candidates:
         raise NetworkPlanningError("No copper-output network switch assets are available for Traditional design.")
@@ -859,28 +880,62 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
             f"access switch at {room_name}",
         )
         packed = _pack_ports_to_devices(port_items, mix, spare_fraction)
-        for switch_number, (asset, assigned) in enumerate(zip(mix, packed), start=1):
+        switch_number = 1
+        stack_number = 1
+        index = 0
+        while index < len(mix):
+            asset = mix[index]
+            max_stack_members = max(1, _int(asset.get("max_stack_members"), 1)) if bool(asset.get("supports_stacking")) else 1
+            group_end = index + 1
+            while (
+                group_end < len(mix)
+                and group_end - index < max_stack_members
+                and _text(mix[group_end].get("id")) == _text(asset.get("id"))
+            ):
+                group_end += 1
+
+            group_assignments = packed[index:group_end]
+            member_count = group_end - index
+            is_stack = member_count > 1
+            instance_name = (
+                f"AUTO {room_name} Access Stack {stack_number}"
+                if is_stack
+                else f"AUTO {room_name} Access Switch {switch_number}"
+            )
             instance = builder.add_instance(
                 asset,
-                f"AUTO {room_name} Access Switch {switch_number}",
+                instance_name,
                 room,
                 "access_switch",
                 rack_name=f"AUTO-RACK-{room_name}",
                 rack_start_u=switch_number,
                 route_anchor=room_name,
+                logical_stack=is_stack,
+                stack_member_count=member_count,
+                stack_member_asset_id=_text(asset.get("id")) if is_stack else "",
+                stack_max_members=max_stack_members if is_stack else 1,
+                stack_interconnect_count=max(0, member_count - 1) if is_stack else 0,
+                stack_interconnect_medium="stacking",
+                stack_interconnect_specification="Cisco StackWise stacking cables" if is_stack else "",
             )
-            for port_number, item in enumerate(assigned, start=1):
-                length_m, path = builder.graph.route(room_name, item.endpoint_name)
-                length_m += item.extension_distance_m
-                builder.add_assignment(
-                    item,
-                    instance,
-                    str(port_number),
-                    length_m,
-                    path,
-                    source_location=room_name,
-                )
+            for member_offset, assigned in enumerate(group_assignments, start=1):
+                for port_number, item in enumerate(assigned, start=1):
+                    length_m, path = builder.graph.route(room_name, item.endpoint_name)
+                    length_m += item.extension_distance_m
+                    builder.add_assignment(
+                        item,
+                        instance,
+                        f"{member_offset}/{port_number}" if is_stack else str(port_number),
+                        length_m,
+                        path,
+                        source_location=room_name,
+                        stack_member=member_offset if is_stack else 0,
+                    )
             access_switches.append(instance)
+            switch_number += member_count
+            if is_stack:
+                stack_number += 1
+            index = group_end
 
     mer_locations = _locations_by_kind(builder.data, {"mer"})
     if not mer_locations:
@@ -1314,11 +1369,13 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
     }
     installed_ports = sum(
         _int(assets_by_id.get(_text(item.get("asset_id")), {}).get("number_of_ports"))
+        * (max(1, _int(item.get("stack_member_count"), 1)) if bool(item.get("logical_stack")) else 1)
         for item in builder.instances
         if _text(item.get("design_role")) in {"access_switch", "ont"}
     )
     installed_poe = sum(
         _float(assets_by_id.get(_text(item.get("asset_id")), {}).get("poe_budget_w"))
+        * (max(1, _int(item.get("stack_member_count"), 1)) if bool(item.get("logical_stack")) else 1)
         for item in builder.instances
         if _text(item.get("design_role")) in {"access_switch", "ont"}
     )

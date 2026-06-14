@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import math
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -179,6 +179,8 @@ class TopologyNode:
 
     @property
     def type_label(self) -> str:
+        if bool(self.instance.get("logical_stack")):
+            return "Switch stack"
         return _type_label(self.asset_type, self.role)
 
     @property
@@ -269,8 +271,13 @@ class TopologyModel:
     def _build(self) -> None:
         assignments_by_instance: Dict[str, List[dict]] = defaultdict(list)
         for assignment in self.data.get("network_endpoint_assignments", []):
-            if isinstance(assignment, dict):
-                assignments_by_instance[_text(assignment.get("network_instance_id"))].append(assignment)
+            if not isinstance(assignment, dict):
+                continue
+            instance_id = _text(assignment.get("network_instance_id"))
+            network_port = _text(assignment.get("network_port"))
+            endpoint_name = _text(assignment.get("endpoint_name"))
+            if instance_id and endpoint_name and network_port and network_port != "0":
+                assignments_by_instance[instance_id].append(assignment)
 
         connection_counts: Dict[str, int] = defaultdict(int)
         for connection in self.data.get("network_connections", []):
@@ -312,6 +319,7 @@ class TopologyModel:
             location = self.locations.get(location_name, {})
             assignments = assignments_by_instance.get(instance_id, [])
             endpoint_locations = {_text(item.get("endpoint_name")) for item in assignments if _text(item.get("endpoint_name"))}
+            stack_members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
             node = TopologyNode(
                 node_id=instance_id,
                 name=_text(instance.get("name")) or instance_id,
@@ -325,9 +333,9 @@ class TopologyModel:
                 manufacturer=_text(asset.get("manufacturer")),
                 model=_text(asset.get("model")),
                 management_ip=_text(instance.get("management_ip")),
-                port_capacity=max(0, _int(asset.get("number_of_ports"))),
+                port_capacity=max(0, _int(asset.get("number_of_ports"))) * stack_members,
                 ports_used=len(assignments),
-                poe_budget_w=max(0.0, _float(asset.get("poe_budget_w"))),
+                poe_budget_w=max(0.0, _float(asset.get("poe_budget_w"))) * stack_members,
                 poe_used_w=sum(max(0.0, _float(item.get("poe_power_w"))) for item in assignments),
                 connection_count=connection_counts.get(instance_id, 0),
                 endpoint_count=len(assignments),
@@ -367,6 +375,26 @@ class TopologyModel:
             neighbour.name.lower() if neighbour else neighbour_id,
         )
 
+    def _hierarchy_rank(self, node_id: str) -> int:
+        node = self.nodes[node_id]
+        return _role_rank(node.role, node.asset_type)
+
+    def _can_descend(self, parent_id: str, child_id: str) -> bool:
+        parent = self.nodes[parent_id]
+        child = self.nodes[child_id]
+        parent_rank = self._hierarchy_rank(parent_id)
+        child_rank = self._hierarchy_rank(child_id)
+
+        if child_rank < parent_rank:
+            return False
+
+        parent_is_access = parent.role == "access_switch" or parent.asset_type == "wireless_access_point"
+        child_is_access = child.role == "access_switch" or child.asset_type == "wireless_access_point"
+        if parent_is_access and child_is_access:
+            return False
+
+        return True
+
     def _build_hierarchy(self) -> None:
         unvisited = set(self.nodes)
         while unvisited:
@@ -382,23 +410,30 @@ class TopologyModel:
                         queue.append(neighbour)
             unvisited.difference_update(component)
 
-            root = min(component, key=lambda node_id: self._node_root_key(node_id))
-            self.roots.append(root)
-            self.level[root] = 0
-            bfs = deque([root])
-            discovered = {root}
-            while bfs:
-                current = bfs.popleft()
-                for neighbour, edge in sorted(self.adjacency.get(current, []), key=self._edge_sort_key):
-                    if neighbour not in component or neighbour in discovered:
-                        continue
-                    discovered.add(neighbour)
-                    self.parent[neighbour] = current
-                    self.parent_edge[neighbour] = edge.edge_id
-                    self.children[current].append(neighbour)
-                    self.level[neighbour] = self.level[current] + 1
-                    self.tree_edge_ids.add(edge.edge_id)
-                    bfs.append(neighbour)
+            discovered: Set[str] = set()
+            remaining = set(component)
+            while remaining:
+                root = min(remaining, key=lambda node_id: self._node_root_key(node_id))
+                self.roots.append(root)
+                self.level[root] = 0
+                bfs = deque([root])
+                discovered.add(root)
+                remaining.discard(root)
+                while bfs:
+                    current = bfs.popleft()
+                    for neighbour, edge in sorted(self.adjacency.get(current, []), key=self._edge_sort_key):
+                        if neighbour not in component or neighbour in discovered:
+                            continue
+                        if not self._can_descend(current, neighbour):
+                            continue
+                        discovered.add(neighbour)
+                        remaining.discard(neighbour)
+                        self.parent[neighbour] = current
+                        self.parent_edge[neighbour] = edge.edge_id
+                        self.children[current].append(neighbour)
+                        self.level[neighbour] = self.level[current] + 1
+                        self.tree_edge_ids.add(edge.edge_id)
+                        bfs.append(neighbour)
 
         for parent_id, child_ids in self.children.items():
             child_ids.sort(
@@ -491,6 +526,8 @@ class TopologyCardItem(QGraphicsObject):
 
     WIDTH = 232.0
     HEIGHT = 98.0
+    STACK_MEMBER_H = 34.0
+    STACK_HEADER_H = 56.0
 
     def __init__(
         self,
@@ -506,13 +543,30 @@ class TopologyCardItem(QGraphicsObject):
         self.has_children = has_children
         self.expanded = expanded
         self.search_match = False
+        self._height = self._calculate_height()
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
         self.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
         self.setToolTip(self._tooltip())
 
     def boundingRect(self) -> QRectF:
-        return QRectF(0.0, 0.0, self.WIDTH, self.HEIGHT)
+        return QRectF(0.0, 0.0, self.WIDTH, self._height)
+
+    @property
+    def height(self) -> float:
+        return self._height
+
+    def _stack_member_count(self) -> int:
+        if not bool(self.node.instance.get("logical_stack")):
+            return 0
+        return max(1, _int(self.node.instance.get("stack_member_count"), 1))
+
+    def _calculate_height(self) -> float:
+        members = self._stack_member_count()
+        if members <= 1:
+            return self.HEIGHT
+        visible_members = min(members, 8)
+        return max(self.HEIGHT, self.STACK_HEADER_H + visible_members * self.STACK_MEMBER_H + 34.0)
 
     def _tooltip(self) -> str:
         node = self.node
@@ -614,6 +668,11 @@ class TopologyCardItem(QGraphicsObject):
         location = detail_metrics.elidedText(location, Qt.ElideRight, 145)
         painter.drawText(QRectF(68.0, 52.0, 148.0, 16.0), Qt.AlignLeft | Qt.AlignVCenter, location)
 
+        stack_members = self._stack_member_count()
+        if stack_members > 1:
+            self._paint_stack_members(painter, stack_members)
+            return
+
         stat_font = QFont("Arial", 8)
         stat_font.setBold(True)
         painter.setFont(stat_font)
@@ -635,7 +694,7 @@ class TopologyCardItem(QGraphicsObject):
         painter.drawText(QRectF(112.0, 75.0, 105.0, 16.0), Qt.AlignRight | Qt.AlignVCenter, right_stat)
 
         if self.has_children:
-            badge_rect = QRectF(self.WIDTH - 31.0, self.HEIGHT - 24.0, 22.0, 16.0)
+            badge_rect = QRectF(self.WIDTH - 31.0, self._height - 24.0, 22.0, 16.0)
             painter.setBrush(QColor("#34414d"))
             painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(badge_rect, 7.0, 7.0)
@@ -643,6 +702,52 @@ class TopologyCardItem(QGraphicsObject):
             badge = "−" if self.expanded else (f"+{self.hidden_descendants}" if self.hidden_descendants < 100 else "+")
             painter.drawText(badge_rect, Qt.AlignCenter, badge)
 
+    def _paint_stack_members(self, painter: QPainter, stack_members: int) -> None:
+        visible_members = min(stack_members, 8)
+        row_left = 24.0
+        row_width = self.WIDTH - 48.0
+        row_top = self.STACK_HEADER_H + 8.0
+        row_gap = 6.0
+        stack_links = max(0, _int(self.node.instance.get("stack_interconnect_count"), max(0, stack_members - 1)))
+
+        frame_h = visible_members * self.STACK_MEMBER_H + row_gap * max(0, visible_members - 1) + 18.0
+        stack_frame = QRectF(14.0, self.STACK_HEADER_H, self.WIDTH - 28.0, frame_h)
+        painter.setBrush(QColor("#18222c"))
+        painter.setPen(QPen(QColor("#526273"), 1.0))
+        painter.drawRoundedRect(stack_frame, 8.0, 8.0)
+
+        row_font = QFont("Arial", 8)
+        row_font.setBold(True)
+        painter.setFont(row_font)
+        for index in range(visible_members):
+            y = row_top + index * (self.STACK_MEMBER_H + row_gap)
+            row_rect = QRectF(row_left, y, row_width, self.STACK_MEMBER_H)
+            painter.setBrush(QColor("#263342"))
+            painter.setPen(QPen(QColor("#7f8ea0"), 1.0))
+            painter.drawRoundedRect(row_rect, 4.0, 4.0)
+            painter.setPen(QColor("#edf3f7"))
+            painter.drawText(row_rect.adjusted(10.0, 0.0, -10.0, 0.0), Qt.AlignLeft | Qt.AlignVCenter, f"Switch {index + 1}")
+
+            if index < visible_members - 1:
+                link_x = row_rect.right() - 14.0
+                painter.setPen(QPen(QColor("#b779e3"), 2.0))
+                painter.drawLine(QPointF(link_x, row_rect.bottom()), QPointF(link_x, row_rect.bottom() + row_gap))
+
+        if stack_members > visible_members:
+            painter.setPen(QColor("#b8c4ce"))
+            painter.drawText(
+                QRectF(row_left, stack_frame.bottom() - 18.0, row_width, 14.0),
+                Qt.AlignCenter,
+                f"+{stack_members - visible_members} more",
+            )
+
+        footer_rect = QRectF(14.0, self._height - 22.0, self.WIDTH - 28.0, 16.0)
+        painter.setBrush(QColor("#3a2450"))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(footer_rect, 6.0, 6.0)
+        painter.setFont(QFont("Arial", 7))
+        painter.setPen(QColor("#e5c8ff"))
+        painter.drawText(footer_rect, Qt.AlignCenter, f"{stack_links} stack links - 2 fibre uplinks")
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.LeftButton:
@@ -722,6 +827,9 @@ class TopologyGraphicsView(QGraphicsView):
         self._panning = False
         self._pan_button = Qt.NoButton
         self._pan_start = QPoint()
+        self._navigation_margin = 5000.0
+        self._min_zoom = 0.005
+        self._max_zoom = 8.0
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         position = event.position().toPoint()
@@ -773,6 +881,8 @@ class TopologyGraphicsView(QGraphicsView):
 
     def wheelEvent(self, event) -> None:  # noqa: ANN001
         delta = event.angleDelta().y()
+        if delta == 0:
+            delta = event.pixelDelta().y()
 
         if delta == 0:
             event.ignore()
@@ -786,9 +896,18 @@ class TopologyGraphicsView(QGraphicsView):
         current_scale = abs(self.transform().m11())
         target_scale = current_scale * zoom_factor
 
-        if target_scale < 0.05 or target_scale > 6.0:
+        if current_scale <= 0.0:
             event.accept()
             return
+        if delta > 0 and current_scale >= self._max_zoom:
+            event.accept()
+            return
+        if delta < 0 and current_scale <= self._min_zoom:
+            event.accept()
+            return
+
+        target_scale = min(self._max_zoom, max(self._min_zoom, target_scale))
+        zoom_factor = target_scale / current_scale
 
         self.scale(zoom_factor, zoom_factor)
 
@@ -834,8 +953,34 @@ class TopologyGraphicsView(QGraphicsView):
         event.accept()
 
     def _pan_viewport_by(self, dx: int, dy: int) -> None:
-        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - dx)
-        self.verticalScrollBar().setValue(self.verticalScrollBar().value() - dy)
+        current_center = self.mapToScene(self.viewport().rect().center())
+        next_center = self.mapToScene(self.viewport().rect().center() - QPoint(int(dx), int(dy)))
+        self._center_on_unbounded(current_center + (next_center - current_center))
+
+    def _center_on_unbounded(self, point: QPointF) -> None:
+        self._ensure_scene_contains_view(point)
+        self.centerOn(point)
+
+    def _ensure_scene_contains_view(self, center: Optional[QPointF] = None) -> None:
+        scene = self.scene()
+        if scene is None:
+            return
+
+        current_rect = scene.sceneRect()
+        if current_rect.isNull() or current_rect.isEmpty():
+            current_rect = scene.itemsBoundingRect()
+        if current_rect.isNull() or current_rect.isEmpty():
+            current_rect = QRectF(-self._navigation_margin, -self._navigation_margin, self._navigation_margin * 2.0, self._navigation_margin * 2.0)
+
+        visible_rect = self.mapToScene(self.viewport().rect()).boundingRect()
+        required = visible_rect
+        if center is not None:
+            required = required.united(QRectF(center.x() - 1.0, center.y() - 1.0, 2.0, 2.0))
+
+        margin = max(self._navigation_margin, visible_rect.width(), visible_rect.height())
+        required = required.adjusted(-margin, -margin, margin, margin)
+        if not current_rect.contains(required):
+            scene.setSceneRect(current_rect.united(required))
 
     def fit_topology(self) -> None:
         scene = self.scene()
@@ -854,12 +999,15 @@ class TopologyGraphicsView(QGraphicsView):
             return
 
         self.resetTransform()
+        self._ensure_scene_contains_view(rect.center())
         self.fitInView(rect, Qt.KeepAspectRatio)
 
         # Avoid enlarging a small topology beyond its natural scale.
         if abs(self.transform().m11()) > 1.0:
             self.resetTransform()
-            self.centerOn(rect.center())
+            self._center_on_unbounded(rect.center())
+        else:
+            self._ensure_scene_contains_view(rect.center())
 
 
 class NetworkTopologyDialog(QDialog):
@@ -869,13 +1017,17 @@ class NetworkTopologyDialog(QDialog):
     CARD_H = TopologyCardItem.HEIGHT
 
     # Horizontal distance between sibling branches.
-    X_GAP = 95.0
+    X_GAP = 90
 
     # Vertical distance between hierarchy levels.
-    Y_GAP = 130.0
+    Y_GAP = 260
 
     # Distance between independent root trees.
-    ROOT_GAP = 220.0
+    ROOT_GAP = 180
+
+    # Maximum preferred width of a grouped floor band before wrapping it into
+    # additional vertical rows.
+    FLOOR_ROW_MAX_WIDTH = 2600.0
 
     def __init__(self, parent: Optional[QWidget], data: dict):
         super().__init__(parent)
@@ -890,8 +1042,12 @@ class NetworkTopologyDialog(QDialog):
         self.visible_parent_edge: Dict[str, str] = {}
         self._search_matches: List[str] = []
         self._search_index = -1
+        self._fit_after_show = False
 
         self.setWindowTitle("Network Topology")
+        self.setWindowFlag(Qt.Window, True)
+        self.setWindowFlag(Qt.WindowMinMaxButtonsHint, True)
+        self.setWindowModality(Qt.NonModal)
         self.setMinimumSize(1180, 720)
         self.resize(1540, 900)
         self.setModal(False)
@@ -934,6 +1090,12 @@ class NetworkTopologyDialog(QDialog):
 
         self.scene.selectionChanged.connect(self._scene_selection_changed)
         self.rebuild_scene(fit=True)
+
+    def showEvent(self, event) -> None:  # noqa: ANN001
+        super().showEvent(event)
+        if self._fit_after_show:
+            self._fit_after_show = False
+            self._schedule_fit_topology()
 
     def _build_header(self) -> QWidget:
         header = QWidget()
@@ -989,6 +1151,12 @@ class NetworkTopologyDialog(QDialog):
         self.show_redundant_check.setChecked(True)
         self.show_redundant_check.toggled.connect(lambda _checked: self.rebuild_scene(fit=False))
         layout.addWidget(self.show_redundant_check)
+
+        self.group_floors_check = QCheckBox("Group floors")
+        self.group_floors_check.setToolTip("Group visible locations by floor level before location and rack groups")
+        self.group_floors_check.setChecked(True)
+        self.group_floors_check.toggled.connect(lambda _checked: self.rebuild_scene(fit=False))
+        layout.addWidget(self.group_floors_check)
 
         self.show_link_labels_check = QCheckBox("Link labels")
         self.show_link_labels_check.setChecked(True)
@@ -1102,6 +1270,16 @@ class NetworkTopologyDialog(QDialog):
         if not node.pseudo:
             self._detail_row("Instance ID", node.node_id)
             self._detail_row("Asset ID", _text(node.instance.get("asset_id")))
+            if bool(node.instance.get("logical_stack")):
+                members = max(1, _int(node.instance.get("stack_member_count"), 1))
+                max_members = max(1, _int(node.instance.get("stack_max_members"), members))
+                self._detail_row("Logical stack", f"{members} members / {max_members} maximum")
+                self._detail_row("Fibre uplinks", str(node.connection_count))
+                interconnects = max(0, _int(node.instance.get("stack_interconnect_count"), max(0, members - 1)))
+                interconnect_medium = _text(node.instance.get("stack_interconnect_medium")) or "stacking"
+                interconnect_spec = _text(node.instance.get("stack_interconnect_specification")) or "Switch stack interconnect"
+                self._detail_row("Stack links", f"{interconnects} {interconnect_medium} links")
+                self._detail_row("Stack link type", interconnect_spec)
             self._detail_row("Location", node.location_name)
             self._detail_row("Floor", str(node.floor))
             self._detail_row("Management IP", node.management_ip)
@@ -1254,6 +1432,15 @@ class NetworkTopologyDialog(QDialog):
         visible_set = set(visible_ids)
         widths: Dict[str, float] = {}
 
+        def card_height(node_id: str) -> float:
+            node = self._node_for(node_id)
+            if node is None:
+                return self.CARD_H
+            members = max(1, _int(node.instance.get("stack_member_count"), 1)) if bool(node.instance.get("logical_stack")) else 1
+            if members <= 1:
+                return self.CARD_H
+            return max(self.CARD_H, TopologyCardItem.STACK_HEADER_H + min(members, 8) * TopologyCardItem.STACK_MEMBER_H + 34.0)
+
         def visible_children(node_id: str) -> List[str]:
             return [child_id for child_id in self._children_for(node_id) if child_id in visible_set and self.visible_parent.get(child_id) == node_id]
 
@@ -1290,12 +1477,12 @@ class NetworkTopologyDialog(QDialog):
 
         positions: Dict[str, QPointF] = {}
 
-        def place(node_id: str, left: float, level: int) -> None:
+        def place(node_id: str, left: float, top_y: float) -> None:
             width = widths[node_id]
             x = left + (width - self.CARD_W) / 2.0
-            y = level * (self.CARD_H + self.Y_GAP)
-            positions[node_id] = QPointF(x, y)
+            positions[node_id] = QPointF(x, top_y)
             children = visible_children(node_id)
+            child_top = top_y + card_height(node_id) + self.Y_GAP
             cursor = left
             branch_gap = self.X_GAP
 
@@ -1306,14 +1493,238 @@ class NetworkTopologyDialog(QDialog):
                 branch_gap *= 1.20
 
             for child_id in children:
-                place(child_id, cursor, level + 1)
+                place(child_id, cursor, child_top)
                 cursor += widths[child_id] + branch_gap
 
         cursor = 0.0
         for root_id in roots:
-            place(root_id, cursor, 0)
+            place(root_id, cursor, 0.0)
             cursor += widths[root_id] + self.ROOT_GAP
+        if self.group_floors_check.isChecked():
+            self._pack_floor_location_groups(visible_ids, positions)
+        else:
+            self._stack_same_rack_logical_stacks(visible_ids, positions)
+            self._separate_overlapping_cards(visible_ids, positions)
+        self._recenter_group_nodes(visible_ids, positions)
         return positions
+
+    def _pack_floor_location_groups(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
+        grouped: Dict[int, Dict[int, Dict[Tuple[str, str], List[str]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+        pseudo_ids: List[str] = []
+        for node_id in visible_ids:
+            node = self._node_for(node_id)
+            if node is None or node_id not in positions:
+                continue
+            if node.pseudo:
+                pseudo_ids.append(node_id)
+                continue
+            rack = _text(node.instance.get("rack_name"))
+            location = node.location_name or f"Floor {node.floor}"
+            rank = self.model._hierarchy_rank(node_id)
+            grouped[node.floor][rank][(location, rack)].append(node_id)
+
+        if not grouped:
+            return
+
+        rank_gap = 300.0
+        group_gap_y = 90.0
+        floor_gap = 280.0
+        floor_tops: Dict[int, float] = {}
+        all_ranks = sorted({rank for rank_groups in grouped.values() for rank in rank_groups})
+        column_widths: Dict[int, float] = {}
+        for rank in all_ranks:
+            max_width = self.CARD_W
+            for rank_groups in grouped.values():
+                for (_location, _rack), node_ids in rank_groups.get(rank, {}).items():
+                    group_width = len(node_ids) * self.CARD_W + max(0, len(node_ids) - 1) * self.X_GAP
+                    max_width = max(max_width, group_width)
+            column_widths[rank] = max_width
+
+        column_lefts: Dict[int, float] = {}
+        cursor_x = 0.0
+        for rank in all_ranks:
+            column_lefts[rank] = cursor_x
+            cursor_x += column_widths[rank] + rank_gap
+
+        cursor_y = 0.0
+
+        for floor in sorted(grouped, reverse=True):
+            floor_tops[floor] = cursor_y
+            floor_height = self.CARD_H
+            for rank in all_ranks:
+                group_top = cursor_y
+                floor_groups = sorted(
+                    grouped[floor].get(rank, {}).items(),
+                    key=lambda item: (item[0][0].lower(), item[0][1].lower()),
+                )
+                for (_location, _rack), node_ids in floor_groups:
+                    ordered = sorted(
+                        node_ids,
+                        key=lambda node_id: (
+                            0 if bool(self._node_for(node_id).instance.get("logical_stack")) else 1,
+                            self._node_for(node_id).name.lower(),
+                        ),
+                    )
+                    group_width = len(ordered) * self.CARD_W + max(0, len(ordered) - 1) * self.X_GAP
+                    group_left = column_lefts[rank] + max(0.0, (column_widths[rank] - group_width) / 2.0)
+                    group_height = max(self._node_card_height(node_id) for node_id in ordered)
+                    for index, node_id in enumerate(ordered):
+                        positions[node_id] = QPointF(group_left + index * (self.CARD_W + self.X_GAP), group_top)
+                    group_top += group_height + group_gap_y
+                floor_height = max(floor_height, group_top - cursor_y - group_gap_y)
+            cursor_y += floor_height + floor_gap
+
+        if pseudo_ids:
+            first_floor_top = min(floor_tops.values())
+            non_pseudo = [
+                node_id
+                for rank_groups in grouped.values()
+                for floor_groups in rank_groups.values()
+                for nodes in floor_groups.values()
+                for node_id in nodes
+            ]
+            if non_pseudo:
+                left = min(positions[node_id].x() for node_id in non_pseudo)
+                for index, node_id in enumerate(pseudo_ids):
+                    positions[node_id] = QPointF(left - self.CARD_W - rank_gap, first_floor_top + index * (self.CARD_H + 90.0))
+
+    def _arrange_floor_rows(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
+        if not self.group_floors_check.isChecked() or self._selected_floor() is not None:
+            return
+
+        floor_rects: Dict[int, QRectF] = {}
+        for node_id in visible_ids:
+            node = self._node_for(node_id)
+            if node is None or node.pseudo or node_id not in positions:
+                continue
+            rect = self._card_rect(node_id, positions)
+            floor_rects[node.floor] = rect if node.floor not in floor_rects else floor_rects[node.floor].united(rect)
+
+        if len(floor_rects) < 2:
+            return
+
+        row_gap = 220.0
+        row_tops: Dict[int, float] = {}
+        cursor_y = 0.0
+        for floor in sorted(floor_rects, reverse=True):
+            rect = floor_rects[floor]
+            row_tops[floor] = cursor_y
+            cursor_y += rect.height() + row_gap
+
+        for node_id in visible_ids:
+            node = self._node_for(node_id)
+            if node is None or node.pseudo or node_id not in positions:
+                continue
+            rect = floor_rects[node.floor]
+            pos = positions[node_id]
+            positions[node_id] = QPointF(pos.x(), row_tops[node.floor] + (pos.y() - rect.top()))
+
+    def _wrap_floor_rows(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
+        if not self.group_floors_check.isChecked():
+            return
+
+        grouped: Dict[int, List[str]] = defaultdict(list)
+        for node_id in visible_ids:
+            node = self._node_for(node_id)
+            if node is None or node.pseudo or node_id not in positions:
+                continue
+            grouped[node.floor].append(node_id)
+
+        row_gap = 80.0
+        for floor, node_ids in grouped.items():
+            rect: Optional[QRectF] = None
+            for node_id in node_ids:
+                card_rect = self._card_rect(node_id, positions)
+                rect = card_rect if rect is None else rect.united(card_rect)
+            if rect is None or rect.width() <= self.FLOOR_ROW_MAX_WIDTH:
+                continue
+
+            ordered = sorted(node_ids, key=lambda node_id: (positions[node_id].x(), positions[node_id].y()))
+            base_left = rect.left()
+            row_top = rect.top()
+            row_height = 0.0
+            cursor_x = base_left
+            for node_id in ordered:
+                pos = positions[node_id]
+                if cursor_x > base_left and cursor_x + self.CARD_W - base_left > self.FLOOR_ROW_MAX_WIDTH:
+                    cursor_x = base_left
+                    row_top += row_height + row_gap
+                    row_height = 0.0
+                positions[node_id] = QPointF(cursor_x, row_top + (pos.y() - rect.top()))
+                cursor_x += self.CARD_W + self.X_GAP
+                row_height = max(row_height, self._node_card_height(node_id) + (pos.y() - rect.top()))
+
+    def _stack_same_rack_logical_stacks(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
+        grouped: Dict[Tuple[str, Tuple[int, str, str]], List[str]] = defaultdict(list)
+        for node_id in visible_ids:
+            node = self._node_for(node_id)
+            if node is None or not bool(node.instance.get("logical_stack")):
+                continue
+            parent_id = self.visible_parent.get(node_id, "")
+            key = self._switch_group_key(node_id)
+            if parent_id and key != (0, "", ""):
+                grouped[(parent_id, key)].append(node_id)
+
+        stack_gap = max(self.X_GAP, 80.0)
+        for (_parent_id, _key), node_ids in grouped.items():
+            if len(node_ids) < 2:
+                continue
+            ordered = sorted(
+                node_ids,
+                key=lambda value: (
+                    positions[value].x(),
+                    self._node_for(value).name.lower() if self._node_for(value) else value,
+                ),
+            )
+            left_x = min(positions[node_id].x() for node_id in ordered)
+            top_y = min(positions[node_id].y() for node_id in ordered)
+            for index, node_id in enumerate(ordered):
+                positions[node_id] = QPointF(left_x + index * (self.CARD_W + stack_gap), top_y)
+
+    def _separate_overlapping_cards(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
+        grouped: Dict[int, List[str]] = defaultdict(list)
+        for node_id in visible_ids:
+            node = self._node_for(node_id)
+            if node is None or node.pseudo or node_id not in positions:
+                continue
+            grouped[node.floor].append(node_id)
+
+        min_gap = 36.0
+        for _floor, node_ids in grouped.items():
+            placed: List[QRectF] = []
+            ordered = sorted(node_ids, key=lambda node_id: (positions[node_id].y(), positions[node_id].x()))
+            for node_id in ordered:
+                rect = self._card_rect(node_id, positions)
+                while any(rect.adjusted(-8.0, -8.0, 8.0, 8.0).intersects(existing) for existing in placed):
+                    blocking_bottom = max(
+                        existing.bottom()
+                        for existing in placed
+                        if rect.adjusted(-8.0, -8.0, 8.0, 8.0).intersects(existing)
+                    )
+                    positions[node_id] = QPointF(positions[node_id].x(), blocking_bottom + min_gap)
+                    rect = self._card_rect(node_id, positions)
+                placed.append(rect)
+
+    def _recenter_group_nodes(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
+        visible_set = set(visible_ids)
+
+        def visible_children(node_id: str) -> List[str]:
+            return [
+                child_id
+                for child_id in self._children_for(node_id)
+                if child_id in visible_set and self.visible_parent.get(child_id) == node_id and child_id in positions
+            ]
+
+        for node_id in reversed(visible_ids):
+            node = self._node_for(node_id)
+            if node is None or not node.pseudo or node_id not in positions:
+                continue
+            children = visible_children(node_id)
+            if not children:
+                continue
+            left = min(positions[child_id].x() for child_id in children)
+            right = max(positions[child_id].x() + self.CARD_W for child_id in children)
+            positions[node_id] = QPointF((left + right - self.CARD_W) / 2.0, positions[node_id].y())
 
     def rebuild_scene(self, fit: bool = False) -> None:
         selected_id = ""
@@ -1327,18 +1738,33 @@ class NetworkTopologyDialog(QDialog):
         visible_ids = self._collect_visible()
         positions = self._layout_visible(visible_ids)
 
+        self._add_location_groups(visible_ids, positions)
+
         # Tree links first so cards sit above them.
+        children_by_parent: Dict[str, List[str]] = defaultdict(list)
         for child_id, parent_id in self.visible_parent.items():
-            if child_id.startswith("client::"):
-                self._add_link(parent_id, child_id, positions, None, client_link=True)
+            children_by_parent[parent_id].append(child_id)
+
+        for parent_id, child_ids in children_by_parent.items():
+            if len(child_ids) >= 2:
+                self._add_link_rail(parent_id, child_ids, positions)
                 continue
-            edge = self.model.edges_by_id.get(self.visible_parent_edge.get(child_id, ""))
-            self._add_link(parent_id, child_id, positions, edge)
+            child_id = child_ids[0]
+            edge = None if child_id.startswith("client::") else self.model.edges_by_id.get(self.visible_parent_edge.get(child_id, ""))
+            self._add_link(parent_id, child_id, positions, edge, client_link=child_id.startswith("client::"))
 
         if self.show_redundant_check.isChecked():
+            cross_by_source: Dict[str, List[Tuple[str, TopologyEdge]]] = defaultdict(list)
             for edge in self.model.cross_edges():
                 if edge.source_id in positions and edge.target_id in positions:
-                    self._add_link(edge.source_id, edge.target_id, positions, edge, cross_link=True)
+                    source_id, target_id = self._cross_link_origin_target(edge)
+                    cross_by_source[source_id].append((target_id, edge))
+            for source_id, targets in cross_by_source.items():
+                if len(targets) >= 2:
+                    self._add_cross_link_rail(source_id, targets, positions)
+                    continue
+                target_id, edge = targets[0]
+                self._add_link(source_id, target_id, positions, edge, cross_link=True)
 
         for node_id in visible_ids:
             node = self._node_for(node_id)
@@ -1357,7 +1783,13 @@ class NetworkTopologyDialog(QDialog):
             self.scene.addItem(item)
             self.node_items[node_id] = item
 
-        scene_rect = self.scene.itemsBoundingRect().adjusted(-80.0, -80.0, 80.0, 80.0)
+        navigation_margin = getattr(self.view, "_navigation_margin", 5000.0)
+        scene_rect = self.scene.itemsBoundingRect().adjusted(
+            -navigation_margin,
+            -navigation_margin,
+            navigation_margin,
+            navigation_margin,
+        )
         self.scene.setSceneRect(scene_rect)
         self._apply_search_highlight(self.search_edit.text())
 
@@ -1374,7 +1806,266 @@ class NetworkTopologyDialog(QDialog):
             + " · Double-click a device to expand or collapse its branch · Drag to pan · Wheel to zoom"
         )
         if fit:
-            self.view.fit_topology()
+            if self.isVisible() and self.view.viewport().width() > 0 and self.view.viewport().height() > 0:
+                self._schedule_fit_topology()
+            else:
+                self._fit_after_show = True
+
+    def _schedule_fit_topology(self) -> None:
+        QTimer.singleShot(0, self.view.fit_topology)
+
+    def _node_card_height(self, node_id: str) -> float:
+        node = self._node_for(node_id)
+        if node is None:
+            return self.CARD_H
+        members = max(1, _int(node.instance.get("stack_member_count"), 1)) if bool(node.instance.get("logical_stack")) else 1
+        if members <= 1:
+            return self.CARD_H
+        return max(self.CARD_H, TopologyCardItem.STACK_HEADER_H + min(members, 8) * TopologyCardItem.STACK_MEMBER_H + 34.0)
+
+    def _card_rect(self, node_id: str, positions: Dict[str, QPointF]) -> QRectF:
+        pos = positions[node_id]
+        return QRectF(pos.x(), pos.y(), self.CARD_W, self._node_card_height(node_id))
+
+    def _switch_group_key(self, node_id: str) -> Tuple[int, str, str]:
+        node = self._node_for(node_id)
+        if node is None or node.asset_type != "network_switch":
+            return (0, "", "")
+        rack = _text(node.instance.get("rack_name"))
+        location = node.location_name
+        if not location and not rack:
+            return (0, "", "")
+        return (node.floor if self.group_floors_check.isChecked() else 0, location, rack)
+
+    def _add_location_groups(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
+        if self.group_floors_check.isChecked():
+            self._add_floor_groups(visible_ids, positions)
+
+        grouped: Dict[Tuple[int, str, str], List[str]] = defaultdict(list)
+        for node_id in visible_ids:
+            key = self._switch_group_key(node_id)
+            if key != (0, "", ""):
+                grouped[key].append(node_id)
+
+        for (_floor, location, rack), node_ids in grouped.items():
+            if len(node_ids) < 2:
+                continue
+            rect: Optional[QRectF] = None
+            for node_id in node_ids:
+                if node_id not in positions:
+                    continue
+                card_rect = self._card_rect(node_id, positions)
+                rect = card_rect if rect is None else rect.united(card_rect)
+            if rect is None:
+                continue
+            rect = rect.adjusted(-20.0, -34.0, 20.0, 22.0)
+            path = QPainterPath()
+            path.addRoundedRect(rect, 10.0, 10.0)
+            item = QGraphicsPathItem(path)
+            item.setBrush(QColor(29, 40, 50, 150))
+            item.setPen(QPen(QColor("#344653"), 1.0, Qt.DashLine))
+            item.setZValue(-1.5)
+            self.scene.addItem(item)
+
+            label_text = rack or location
+            if rack and location:
+                label_text = f"{location} / {rack}"
+            label = QGraphicsSimpleTextItem(label_text)
+            label.setFont(QFont("Arial", 8))
+            label.setBrush(QBrush(QColor("#9fb0bd")))
+            label.setPos(rect.left() + 10.0, rect.top() + 8.0)
+            label.setZValue(-1.4)
+            self.scene.addItem(label)
+
+    def _add_floor_groups(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
+        grouped: Dict[int, List[str]] = defaultdict(list)
+        for node_id in visible_ids:
+            node = self._node_for(node_id)
+            if node is None or node.pseudo:
+                continue
+            if node_id in positions:
+                grouped[node.floor].append(node_id)
+
+        for floor, node_ids in grouped.items():
+            if len(node_ids) < 2:
+                continue
+            rect: Optional[QRectF] = None
+            for node_id in node_ids:
+                if node_id not in positions:
+                    continue
+                card_rect = self._card_rect(node_id, positions)
+                rect = card_rect if rect is None else rect.united(card_rect)
+            if rect is None:
+                continue
+            rect = rect.adjusted(-42.0, -58.0, 42.0, 42.0)
+            path = QPainterPath()
+            path.addRoundedRect(rect, 14.0, 14.0)
+            item = QGraphicsPathItem(path)
+            item.setBrush(QColor(20, 29, 37, 115))
+            item.setPen(QPen(QColor("#2d3b47"), 1.2))
+            item.setZValue(-2.0)
+            self.scene.addItem(item)
+
+            label = QGraphicsSimpleTextItem(f"Floor {floor}")
+            label.setFont(QFont("Arial", 9))
+            label.setBrush(QBrush(QColor("#b9c6cf")))
+            label.setPos(rect.left() + 12.0, rect.top() + 10.0)
+            label.setZValue(-1.9)
+            self.scene.addItem(label)
+
+    def _link_colour(self, medium: str) -> QColor:
+        return {
+            "fibre": QColor("#6f8dff"),
+            "copper": QColor("#4fbfa3"),
+            "wireless": QColor("#e3a34e"),
+            "virtual": QColor("#6f7b86"),
+            "stacking": QColor("#b779e3"),
+            "none": QColor("#6f7b86"),
+        }.get(medium, QColor("#6f7b86"))
+
+    def _add_link_label(self, text: str, colour: QColor, point: QPointF) -> None:
+        if not text:
+            return
+        label = LinkLabelItem(text, colour)
+        label.setPos(point)
+        self.scene.addItem(label)
+
+    def _add_link_rail(self, source_id: str, child_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
+        if source_id not in positions:
+            return
+        source_pos = positions[source_id]
+        start = QPointF(source_pos.x() + self.CARD_W / 2.0, source_pos.y() + self._node_card_height(source_id))
+        endpoints = []
+        for child_id in child_ids:
+            target_pos = positions.get(child_id)
+            if target_pos is None:
+                continue
+            edge = None if child_id.startswith("client::") else self.model.edges_by_id.get(self.visible_parent_edge.get(child_id, ""))
+            endpoints.append((child_id, QPointF(target_pos.x() + self.CARD_W / 2.0, target_pos.y()), edge))
+        if len(endpoints) < 2:
+            if endpoints:
+                child_id, _end, edge = endpoints[0]
+                self._add_link(source_id, child_id, positions, edge, client_link=child_id.startswith("client::"))
+            return
+
+        if max(point.x() for _child_id, point, _edge in endpoints) - min(point.x() for _child_id, point, _edge in endpoints) < 8.0:
+            self._add_vertical_link_rail(start, endpoints, QColor("#60717f"), z_value=-1.0)
+            return
+
+        rail_y = min(point.y() for _child_id, point, _edge in endpoints) - 32.0
+        rail_left = min(point.x() for _child_id, point, _edge in endpoints)
+        rail_right = max(point.x() for _child_id, point, _edge in endpoints)
+        trunk_colour = QColor("#60717f")
+        trunk_pen = QPen(trunk_colour, 2.0)
+
+        trunk = QPainterPath(start)
+        trunk.lineTo(QPointF(start.x(), rail_y))
+        if rail_left != rail_right:
+            trunk.moveTo(QPointF(rail_left, rail_y))
+            trunk.lineTo(QPointF(rail_right, rail_y))
+        trunk_item = QGraphicsPathItem(trunk)
+        trunk_item.setPen(trunk_pen)
+        trunk_item.setZValue(-1.0)
+        self.scene.addItem(trunk_item)
+
+        for child_id, end, edge in endpoints:
+            client_link = child_id.startswith("client::")
+            medium = edge.medium if edge else ("virtual" if client_link else "copper")
+            colour = self._link_colour(medium)
+            standby = bool(edge and (edge.standby or edge.redundancy_role.lower() in {"secondary", "standby"}))
+            pen = QPen(colour, 2.0 if not client_link else 1.3)
+            if standby or client_link:
+                pen.setStyle(Qt.DashLine)
+            branch = QPainterPath(QPointF(end.x(), rail_y))
+            branch.lineTo(end)
+            branch_item = QGraphicsPathItem(branch)
+            branch_item.setPen(pen)
+            branch_item.setZValue(-0.95)
+            self.scene.addItem(branch_item)
+            if edge and self.show_link_labels_check.isChecked() and not client_link:
+                self._add_link_label(edge.label, colour, QPointF(end.x(), (rail_y + end.y()) / 2.0))
+
+    def _add_vertical_link_rail(
+        self,
+        start: QPointF,
+        endpoints: Sequence[Tuple[str, QPointF, Optional[TopologyEdge]]],
+        trunk_colour: QColor,
+        z_value: float,
+        cross_link: bool = False,
+        rail_x: Optional[float] = None,
+    ) -> None:
+        if rail_x is None:
+            rail_x = min(point.x() for _child_id, point, _edge in endpoints) - self.CARD_W / 2.0 - 34.0
+        rail_top = min(start.y(), min(point.y() for _child_id, point, _edge in endpoints))
+        rail_bottom = max(point.y() for _child_id, point, _edge in endpoints)
+        trunk_pen = QPen(trunk_colour, 2.0)
+        if cross_link:
+            trunk_pen.setStyle(Qt.DashLine)
+
+        trunk = QPainterPath(start)
+        trunk.lineTo(QPointF(rail_x, start.y()))
+        trunk.lineTo(QPointF(rail_x, rail_top))
+        trunk.moveTo(QPointF(rail_x, rail_top))
+        trunk.lineTo(QPointF(rail_x, rail_bottom))
+        trunk_item = QGraphicsPathItem(trunk)
+        trunk_item.setPen(trunk_pen)
+        trunk_item.setZValue(z_value)
+        self.scene.addItem(trunk_item)
+
+        for child_id, end, edge in endpoints:
+            client_link = child_id.startswith("client::")
+            medium = edge.medium if edge else ("virtual" if client_link else "copper")
+            colour = QColor("#d68f52") if cross_link else self._link_colour(medium)
+            standby = bool(edge and (edge.standby or edge.redundancy_role.lower() in {"secondary", "standby"}))
+            pen = QPen(colour, 2.0 if not client_link else 1.3)
+            if standby or client_link or cross_link:
+                pen.setStyle(Qt.DashLine)
+            branch_y = end.y()
+            branch = QPainterPath(QPointF(rail_x, branch_y))
+            branch.lineTo(end)
+            branch_item = QGraphicsPathItem(branch)
+            branch_item.setPen(pen)
+            branch_item.setZValue(z_value + 0.05)
+            self.scene.addItem(branch_item)
+            if edge and self.show_link_labels_check.isChecked() and not client_link:
+                self._add_link_label(edge.label, colour, QPointF((rail_x + end.x()) / 2.0, branch_y))
+
+    def _cross_link_origin_target(self, edge: TopologyEdge) -> Tuple[str, str]:
+        source_rank = self.model._hierarchy_rank(edge.source_id)
+        target_rank = self.model._hierarchy_rank(edge.target_id)
+        if target_rank < source_rank:
+            return edge.target_id, edge.source_id
+        return edge.source_id, edge.target_id
+
+    def _add_cross_link_rail(
+        self,
+        source_id: str,
+        targets: Sequence[Tuple[str, TopologyEdge]],
+        positions: Dict[str, QPointF],
+    ) -> None:
+        source_pos = positions[source_id]
+        endpoints = []
+        for target_id, edge in targets:
+            target_pos = positions.get(target_id)
+            if target_pos is None:
+                continue
+            endpoints.append((target_id, QPointF(target_pos.x() + self.CARD_W / 2.0, target_pos.y() + self._node_card_height(target_id) / 2.0), edge))
+        if len(endpoints) < 2:
+            if endpoints:
+                _target_id, _end, edge = endpoints[0]
+                self._add_link(*self._cross_link_origin_target(edge), positions, edge, cross_link=True)
+            return
+
+        average_target_x = sum(point.x() for _target_id, point, _edge in endpoints) / len(endpoints)
+        route_right = average_target_x >= source_pos.x() + self.CARD_W / 2.0
+        if route_right:
+            start = QPointF(source_pos.x() + self.CARD_W + 8.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
+            rail_x = source_pos.x() + self.CARD_W + 52.0
+        else:
+            start = QPointF(source_pos.x() - 8.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
+            rail_x = source_pos.x() - 52.0
+
+        self._add_vertical_link_rail(start, endpoints, QColor("#a76a42"), z_value=-0.82, cross_link=True, rail_x=rail_x)
 
     def _add_link(
         self,
@@ -1387,8 +2078,18 @@ class NetworkTopologyDialog(QDialog):
     ) -> None:
         source_pos = positions[source_id]
         target_pos = positions[target_id]
-        start = QPointF(source_pos.x() + self.CARD_W / 2.0, source_pos.y() + self.CARD_H)
-        end = QPointF(target_pos.x() + self.CARD_W / 2.0, target_pos.y())
+        if cross_link:
+            source_center = QPointF(source_pos.x() + self.CARD_W / 2.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
+            target_center = QPointF(target_pos.x() + self.CARD_W / 2.0, target_pos.y() + self._node_card_height(target_id) / 2.0)
+            if target_center.x() >= source_center.x():
+                start = QPointF(source_pos.x() + self.CARD_W + 8.0, source_center.y())
+                end = QPointF(target_pos.x() - 8.0, target_center.y())
+            else:
+                start = QPointF(source_pos.x() - 8.0, source_center.y())
+                end = QPointF(target_pos.x() + self.CARD_W + 8.0, target_center.y())
+        else:
+            start = QPointF(source_pos.x() + self.CARD_W / 2.0, source_pos.y() + self._node_card_height(source_id))
+            end = QPointF(target_pos.x() + self.CARD_W / 2.0, target_pos.y())
         mid_y = (start.y() + end.y()) / 2.0
         path = QPainterPath(start)
         if cross_link:
@@ -1400,13 +2101,7 @@ class NetworkTopologyDialog(QDialog):
             path.cubicTo(QPointF(start.x(), mid_y), QPointF(end.x(), mid_y), end)
 
         medium = edge.medium if edge else ("virtual" if client_link else "copper")
-        colour = {
-            "fibre": QColor("#6f8dff"),
-            "copper": QColor("#4fbfa3"),
-            "wireless": QColor("#e3a34e"),
-            "virtual": QColor("#6f7b86"),
-            "none": QColor("#6f7b86"),
-        }.get(medium, QColor("#6f7b86"))
+        colour = QColor("#d68f52") if cross_link else self._link_colour(medium)
         standby = bool(edge and (edge.standby or edge.redundancy_role.lower() in {"secondary", "standby"}))
         pen = QPen(colour, 2.0 if not client_link else 1.3)
         if standby or cross_link or client_link:
@@ -1417,10 +2112,8 @@ class NetworkTopologyDialog(QDialog):
         self.scene.addItem(path_item)
 
         if edge and self.show_link_labels_check.isChecked() and not client_link:
-            label = LinkLabelItem(edge.label, colour)
             point = path.pointAtPercent(0.50)
-            label.setPos(point)
-            self.scene.addItem(label)
+            self._add_link_label(edge.label, colour, point)
 
     def _card_activated(self, node_id: str) -> None:
         item = self.node_items.get(node_id)

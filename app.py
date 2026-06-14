@@ -2530,6 +2530,22 @@ class CableRouteEditor(QMainWindow):
     def scene_to_world(self, sx, sy):
         return float(sx), -float(sy)
 
+    def _viewport_rect_to_scene_rect(self, rect):
+        canvas = self.canvas
+        if hasattr(canvas, "mapToScene"):
+            return canvas.mapToScene(rect).boundingRect()
+        if hasattr(canvas, "screen_to_scene"):
+            top_left = canvas.screen_to_scene(rect.topLeft())
+            bottom_right = canvas.screen_to_scene(rect.bottomRight())
+            return QRectF(top_left, bottom_right).normalized()
+        if hasattr(canvas, "screen_to_world"):
+            top_left_world = canvas.screen_to_world(rect.topLeft())
+            bottom_right_world = canvas.screen_to_world(rect.bottomRight())
+            top_left = self.world_to_scene(*top_left_world)
+            bottom_right = self.world_to_scene(*bottom_right_world)
+            return QRectF(top_left, bottom_right).normalized()
+        return QRectF()
+
     def snap(self, x, y):
         if self.snap_check.isChecked():
             return round(x), round(y)
@@ -2669,7 +2685,9 @@ class CableRouteEditor(QMainWindow):
         if rect.width() < 4 and rect.height() < 4:
             return False
 
-        scene_rect = self.canvas.mapToScene(rect).boundingRect()
+        scene_rect = self._viewport_rect_to_scene_rect(rect)
+        if scene_rect.isEmpty():
+            return False
         floor = self.floor_spin.value()
         selected = []
 

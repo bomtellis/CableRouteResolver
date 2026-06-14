@@ -42,7 +42,7 @@ NETWORK_ASSET_TYPES = [
     ("other", "Other"),
 ]
 
-CONNECTION_MEDIA = ["copper", "fibre", "wireless", "virtual", "none"]
+CONNECTION_MEDIA = ["copper", "fibre", "wireless", "virtual", "stacking", "none"]
 CONNECTION_ROLES = ["input", "output", "uplink"]
 PATCH_PANEL_TYPES = ["", "copper", "fibre"]
 SPLIT_RATIOS = ["", "1:2", "1:4", "1:8", "1:16", "1:32", "1:64", "1:128"]
@@ -168,6 +168,13 @@ class NetworkAssetEditorDialog(QDialog):
         self.uplink_ports_spin.setRange(0, 100_000)
         self.uplink_ports_spin.setValue(int(self.asset.get("uplink_ports", 0) or 0))
 
+        self.supports_stacking_check = QCheckBox("Can form a logical stack")
+        self.supports_stacking_check.setChecked(bool(self.asset.get("supports_stacking", False)))
+
+        self.max_stack_members_spin = QSpinBox()
+        self.max_stack_members_spin.setRange(1, 64)
+        self.max_stack_members_spin.setValue(max(1, int(self.asset.get("max_stack_members", 1) or 1)))
+
         self.input_type_combo = QComboBox()
         self.input_type_combo.addItems(CONNECTION_MEDIA)
         _set_combo_text(self.input_type_combo, _text(self.asset.get("input_connection_type")) or "copper")
@@ -203,6 +210,8 @@ class NetworkAssetEditorDialog(QDialog):
         form.addRow("Connections in", self.connections_in_spin)
         form.addRow("Connections out", self.connections_out_spin)
         form.addRow("Uplink ports", self.uplink_ports_spin)
+        form.addRow("Stacking", self.supports_stacking_check)
+        form.addRow("Maximum stack members", self.max_stack_members_spin)
         form.addRow("Input connection type", self.input_type_combo)
         form.addRow("Output connection type", self.output_type_combo)
         form.addRow("Uplink connection type", self.uplink_type_combo)
@@ -210,6 +219,7 @@ class NetworkAssetEditorDialog(QDialog):
         form.addRow("Notes", self.notes_edit)
 
         self.asset_type_combo.currentIndexChanged.connect(self._update_visibility)
+        self.supports_stacking_check.toggled.connect(self._update_visibility)
         self._update_visibility()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -224,6 +234,9 @@ class NetworkAssetEditorDialog(QDialog):
         enabled_frequencies = asset_type == "wireless_access_point"
         self.frequencies_list.setEnabled(enabled_frequencies)
         self.additional_frequencies_edit.setEnabled(enabled_frequencies)
+        stacking_enabled = asset_type == "network_switch" and self.supports_stacking_check.isChecked()
+        self.supports_stacking_check.setEnabled(asset_type == "network_switch")
+        self.max_stack_members_spin.setEnabled(stacking_enabled)
 
     def _frequencies(self) -> List[str]:
         result = []
@@ -269,6 +282,8 @@ class NetworkAssetEditorDialog(QDialog):
             "connections_in": int(self.connections_in_spin.value()),
             "connections_out": int(self.connections_out_spin.value()),
             "uplink_ports": int(self.uplink_ports_spin.value()),
+            "supports_stacking": bool(asset_type == "network_switch" and self.supports_stacking_check.isChecked()),
+            "max_stack_members": int(self.max_stack_members_spin.value()) if asset_type == "network_switch" and self.supports_stacking_check.isChecked() else 1,
             "input_connection_type": self.input_type_combo.currentText().strip(),
             "output_connection_type": self.output_type_combo.currentText().strip(),
             "uplink_connection_type": self.uplink_type_combo.currentText().strip(),
@@ -768,7 +783,7 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("", info)
         self.tabs.addTab(settings_tab, "Settings")
 
-        self.assets_tab = _CrudTab(["ID", "Name", "Type", "Ports", "In", "Out", "Uplinks", "Power W", "PoE W", "Rack U"])
+        self.assets_tab = _CrudTab(["ID", "Name", "Type", "Ports", "In", "Out", "Uplinks", "Stack", "Max stack", "Power W", "PoE W", "Rack U"])
         self.instances_tab = _CrudTab(["ID", "Name", "Asset", "Location", "Floor", "Rack", "Start U", "Management IP"])
         self.connections_tab = _CrudTab(["ID", "From", "Port", "To", "Port", "Role", "Medium", "Cable", "VLANs"])
         self.vlans_tab = _CrudTab(["Record ID", "VLAN", "Name", "Purpose", "Subnet", "Gateway", "Zone"])
@@ -868,6 +883,7 @@ class NetworkPlannerDialog(QDialog):
         self.assets_tab.set_rows([
             [item.get("id", ""), item.get("name", ""), item.get("asset_type", ""), item.get("number_of_ports", 0),
              item.get("connections_in", 0), item.get("connections_out", 0), item.get("uplink_ports", 0),
+             "Yes" if item.get("supports_stacking", False) else "No", item.get("max_stack_members", 1),
              item.get("power_input_w", 0), item.get("poe_budget_w", 0), item.get("rack_units", 0)]
             for item in self._items("network_assets")
         ])
@@ -1137,4 +1153,3 @@ class NetworkPlannerDialog(QDialog):
         self._sync_planner_settings()
         self.on_save(deepcopy(self.data))
         QMessageBox.information(self, "Network planning", "Network planning data saved.")
-

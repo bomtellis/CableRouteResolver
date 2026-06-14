@@ -172,12 +172,23 @@ def _open_network_planner(editor) -> None:
 def _open_network_topology(editor) -> None:
     """Open the read-only network hierarchy and connection diagram."""
     ensure_network_schema(editor.store.data)
+    windows = getattr(editor, "_network_topology_windows", None)
+    if windows is None:
+        windows = []
+        editor._network_topology_windows = windows
+
     dialog = NetworkTopologyDialog(editor, editor.store.data)
+    windows.append(dialog)
     editor._network_topology_dialog = dialog
-    try:
-        dialog.exec()
-    finally:
-        editor._network_topology_dialog = None
+
+    def forget_window() -> None:
+        if dialog in windows:
+            windows.remove(dialog)
+        if getattr(editor, "_network_topology_dialog", None) is dialog:
+            editor._network_topology_dialog = windows[-1] if windows else None
+
+    dialog.destroyed.connect(forget_window)
+    dialog.showMaximized()
 
 
 def _export_network_schedules(editor) -> None:
