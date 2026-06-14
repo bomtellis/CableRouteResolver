@@ -147,15 +147,19 @@ def _open_network_planner(editor) -> None:
 
     def save(payload: dict) -> None:
         _safe_push_undo(editor, "Update network planning data")
+        dict_keys = {"network_settings", "network_design_summary"}
         for key in (
             "network_settings",
             "network_assets",
             "network_asset_instances",
             "network_connections",
+            "network_endpoint_assignments",
+            "network_redundancy_groups",
             "network_vlans",
             "network_routes",
+            "network_design_summary",
         ):
-            editor.store.data[key] = deepcopy(payload.get(key, {} if key == "network_settings" else []))
+            editor.store.data[key] = deepcopy(payload.get(key, {} if key in dict_keys else []))
         ensure_network_schema(editor.store.data)
         _sync_network_technology_controls(editor)
         editor.refresh_canvas()

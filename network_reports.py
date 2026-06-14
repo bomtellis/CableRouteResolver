@@ -55,6 +55,10 @@ def _instance_description(instance: dict, assets: Dict[str, dict], locations: Di
     asset = assets.get(_text(instance.get("asset_id")), {})
     location_name = _text(instance.get("location_name"))
     location = locations.get(location_name, {})
+    stack_members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+    rack_units = _int(asset.get("rack_units"))
+    if _text(asset.get("asset_type")) == "network_switch":
+        rack_units = max(1, _int(asset.get("switch_rack_unit_allowance"), rack_units or 1)) * stack_members
     return {
         "instance_id": _text(instance.get("id")),
         "instance_name": _text(instance.get("name")) or _text(instance.get("id")),
@@ -68,10 +72,22 @@ def _instance_description(instance: dict, assets: Dict[str, dict], locations: Di
         "floor": instance.get("floor", location.get("floor", "")),
         "rack_name": _text(instance.get("rack_name")),
         "rack_start_u": instance.get("rack_start_u", ""),
-        "rack_units": _int(asset.get("rack_units")),
+        "rack_units": rack_units,
+        "logical_stack": "Yes" if bool(instance.get("logical_stack")) else "No",
+        "stack_member_count": stack_members,
         "management_ip": _text(instance.get("management_ip")),
         "management_vlan": _text(instance.get("management_vlan")),
     }
+
+
+def _effective_ports(instance: dict, asset: dict) -> int:
+    stack_members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+    return max(0, _int(asset.get("number_of_ports"))) * stack_members
+
+
+def _effective_poe_budget(instance: dict, asset: dict) -> float:
+    stack_members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+    return max(0.0, _float(asset.get("poe_budget_w"))) * stack_members
 
 
 def _switch_schedule(data: dict) -> List[dict]:
@@ -93,8 +109,8 @@ def _switch_schedule(data: dict) -> List[dict]:
         assignments = endpoint_assignments.get(instance_id, [])
         assigned_ports = len(assignments)
         poe_load = sum(_float(item.get("poe_power_w")) for item in assignments)
-        number_of_ports = _int(asset.get("number_of_ports"))
-        poe_budget = _float(asset.get("poe_budget_w"))
+        number_of_ports = _effective_ports(instance, asset)
+        poe_budget = _effective_poe_budget(instance, asset)
         row = _instance_description(instance, assets, locations)
         row.update(
             {
@@ -152,9 +168,17 @@ def _port_schedule(data: dict) -> List[dict]:
     for instance in instances.values():
         instance_id = _text(instance.get("id"))
         asset = assets.get(_text(instance.get("asset_id")), {})
-        count = max(0, _int(asset.get("number_of_ports")))
+        per_member_ports = max(0, _int(asset.get("number_of_ports")))
+        stack_members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
         base = _instance_description(instance, assets, locations)
-        port_names = {str(number) for number in range(1, count + 1)}
+        if bool(instance.get("logical_stack")) and stack_members > 1:
+            port_names = {
+                f"{member}/{port}"
+                for member in range(1, stack_members + 1)
+                for port in range(1, per_member_ports + 1)
+            }
+        else:
+            port_names = {str(number) for number in range(1, per_member_ports + 1)}
         port_names.update(port for (owner, port) in endpoint_map if owner == instance_id)
         port_names.update(port for (owner, port) in assignment_map if owner == instance_id)
 
@@ -408,16 +432,18 @@ def _power_schedule(data: dict) -> List[dict]:
         instance_id = _text(instance.get("id"))
         asset = assets.get(_text(instance.get("asset_id")), {})
         power_input = _float(asset.get("power_input_w"))
-        poe_budget = _float(asset.get("poe_budget_w"))
+        stack_members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+        effective_power_input = power_input * stack_members
+        poe_budget = _effective_poe_budget(instance, asset)
         poe_load = endpoint_loads.get(instance_id, 0.0)
-        total_input += power_input
+        total_input += effective_power_input
         total_poe_budget += poe_budget
         total_poe_load += poe_load
         row = _instance_description(instance, assets, locations)
         row.update(
             {
                 "design_role": _text(instance.get("design_role")),
-                "power_input_w": power_input,
+                "power_input_w": effective_power_input,
                 "poe_budget_w": poe_budget,
                 "poe_load_w": round(poe_load, 3),
                 "poe_headroom_w": round(max(0.0, poe_budget - poe_load), 3),
@@ -471,7 +497,7 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
             [
                 "network_technology", "design_role", "instance_id", "instance_name", "asset_id", "asset_name",
                 "asset_type", "manufacturer", "model", "location_name", "location_type", "floor",
-                "rack_name", "rack_start_u", "rack_units", "management_ip", "management_vlan",
+                "rack_name", "rack_start_u", "rack_units", "logical_stack", "stack_member_count", "management_ip", "management_vlan",
                 "number_of_ports", "assigned_endpoint_ports", "available_endpoint_ports", "port_utilisation_percent",
                 "connections_in", "connections_out", "uplink_ports",
                 "input_connection_type", "output_connection_type", "uplink_connection_type",
@@ -483,7 +509,7 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
             "port_schedule",
             [
                 "instance_id", "instance_name", "asset_id", "asset_name", "asset_type", "location_name",
-                "floor", "port", "status", "connection_id", "connection_role", "medium",
+                "floor", "logical_stack", "stack_member_count", "port", "status", "connection_id", "connection_role", "medium",
                 "connected_to_instance", "connected_to_port", "endpoint_name", "endpoint_port",
                 "endpoint_asset_name", "department_id", "department_name", "poe_power_w", "copper_length_m",
                 "vlan_ids", "cable_specification",
@@ -539,7 +565,7 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
             [
                 "instance_id", "instance_name", "asset_id", "asset_name", "asset_type", "manufacturer", "model",
                 "location_name", "location_type", "floor", "rack_name", "rack_start_u", "rack_units",
-                "design_role", "power_input_w", "poe_budget_w", "poe_load_w", "poe_headroom_w",
+                "logical_stack", "stack_member_count", "design_role", "power_input_w", "poe_budget_w", "poe_load_w", "poe_headroom_w",
                 "poe_utilisation_percent", "endpoint_ports_served", "power_feed", "ups_source", "notes",
             ],
             _power_schedule(data),

@@ -753,6 +753,52 @@ def _choose_core_candidates(data: dict) -> List[dict]:
     return candidates
 
 
+def _rack_units_for_asset(asset: dict, member_count: int = 1) -> int:
+    member_count = max(1, int(member_count or 1))
+    if _text(asset.get("asset_type")) == "network_switch":
+        allowance = max(0, _int(asset.get("switch_rack_unit_allowance"), _int(asset.get("rack_units"), 1)))
+        return max(1, allowance) * member_count
+    return max(0, _int(asset.get("rack_units"), 1))
+
+
+def _assert_generated_capacity(builder: DesignBuilder, spare_fraction: float) -> None:
+    assets_by_id = {
+        _text(item.get("id")): item
+        for item in builder.data.get("network_assets", [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    loads: Dict[str, Tuple[int, float]] = defaultdict(lambda: (0, 0.0))
+    for assignment in builder.assignments:
+        instance_id = _text(assignment.get("network_instance_id"))
+        if not instance_id:
+            continue
+        ports, poe = loads[instance_id]
+        loads[instance_id] = (ports + 1, poe + max(0.0, _float(assignment.get("poe_power_w"))))
+
+    for instance in builder.instances:
+        instance_id = _text(instance.get("id"))
+        role = _text(instance.get("design_role"))
+        if role not in {"access_switch", "ont"}:
+            continue
+        asset = assets_by_id.get(_text(instance.get("asset_id")), {})
+        stack_members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+        port_capacity = max(0, _int(asset.get("number_of_ports"))) * stack_members
+        poe_capacity = max(0.0, _float(asset.get("poe_budget_w"))) * stack_members
+        used_ports, used_poe = loads.get(instance_id, (0, 0.0))
+        required_ports = int(math.ceil(used_ports * (1.0 + spare_fraction)))
+        required_poe = used_poe * (1.0 + spare_fraction)
+        if port_capacity and required_ports > port_capacity:
+            raise NetworkPlanningError(
+                f"Generated {instance.get('name') or instance_id} would use {used_ports} ports "
+                f"plus spare capacity ({required_ports} required) but only has {port_capacity}."
+            )
+        if required_poe > poe_capacity + 1e-9:
+            raise NetworkPlanningError(
+                f"Generated {instance.get('name') or instance_id} would use {used_poe:.1f} W PoE "
+                f"plus spare capacity ({required_poe:.1f} W required) but only has {poe_capacity:.1f} W."
+            )
+
+
 def _build_core_layer(
     builder: DesignBuilder,
     leaves_by_root: Dict[str, List[dict]],
@@ -770,17 +816,27 @@ def _build_core_layer(
             continue
         root = roots[root_name]
         mix = _minimum_asset_mix(candidates, len(leaves), 0.0, spare_fraction, "core switch")
-        core_instances = [
-            builder.add_instance(
-                asset,
-                f"AUTO Core {root_name} {index + 1}",
-                root,
-                "core_switch",
-                rack_name=f"AUTO-RACK-{root_name}",
-                rack_start_u=index + 1,
+        rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
+        rack_index = 1
+        next_rack_u = 1
+        core_instances = []
+        for index, asset in enumerate(mix):
+            rack_u = _rack_units_for_asset(asset, 1)
+            if next_rack_u + rack_u - 1 > rack_size_u and next_rack_u > 1:
+                rack_index += 1
+                next_rack_u = 1
+            core_instances.append(
+                builder.add_instance(
+                    asset,
+                    f"AUTO Core {root_name} {index + 1}",
+                    root,
+                    "core_switch",
+                    rack_name=f"AUTO-RACK-{root_name}" if rack_index == 1 else f"AUTO-RACK-{root_name}-{rack_index}",
+                    rack_start_u=next_rack_u,
+                    rack_size_u=rack_size_u,
+                )
             )
-            for index, asset in enumerate(mix)
-        ]
+            next_rack_u += rack_u
         # Spare capacity is already included in the selected aggregate mix.
         capacities = [max(0, _int(asset.get("number_of_ports"))) for asset in mix]
         core_index = 0
@@ -882,6 +938,9 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
         packed = _pack_ports_to_devices(port_items, mix, spare_fraction)
         switch_number = 1
         stack_number = 1
+        rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
+        rack_index = 1
+        next_rack_u = 1
         index = 0
         while index < len(mix):
             asset = mix[index]
@@ -907,8 +966,9 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
                 instance_name,
                 room,
                 "access_switch",
-                rack_name=f"AUTO-RACK-{room_name}",
-                rack_start_u=switch_number,
+                rack_name=f"AUTO-RACK-{room_name}" if rack_index == 1 else f"AUTO-RACK-{room_name}-{rack_index}",
+                rack_start_u=next_rack_u,
+                rack_size_u=rack_size_u,
                 route_anchor=room_name,
                 logical_stack=is_stack,
                 stack_member_count=member_count,
@@ -918,6 +978,13 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
                 stack_interconnect_medium="stacking",
                 stack_interconnect_specification="Cisco StackWise stacking cables" if is_stack else "",
             )
+            rack_u = _rack_units_for_asset(asset, member_count)
+            if next_rack_u + rack_u - 1 > rack_size_u and next_rack_u > 1:
+                rack_index += 1
+                next_rack_u = 1
+                instance["rack_name"] = f"AUTO-RACK-{room_name}-{rack_index}"
+                instance["rack_start_u"] = next_rack_u
+            instance["rack_size_u"] = rack_size_u
             for member_offset, assigned in enumerate(group_assignments, start=1):
                 for port_number, item in enumerate(assigned, start=1):
                     length_m, path = builder.graph.route(room_name, item.endpoint_name)
@@ -933,6 +1000,7 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
                     )
             access_switches.append(instance)
             switch_number += member_count
+            next_rack_u += rack_u
             if is_stack:
                 stack_number += 1
             index = group_end
@@ -1360,6 +1428,7 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         _traditional_design(builder, endpoints, spare_fraction)
     else:
         _polan_design(builder, endpoints, spare_fraction)
+    _assert_generated_capacity(builder, spare_fraction)
     builder.commit()
 
     assets_by_id = {

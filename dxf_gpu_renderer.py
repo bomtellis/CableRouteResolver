@@ -23,6 +23,8 @@ from PySide6.QtGui import (
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QRubberBand
 
+from network_schema import network_instances_for_floor
+
 Bounds = Tuple[float, float, float, float]
 PointTuple = Tuple[float, float]
 
@@ -297,6 +299,16 @@ class GpuDxfGraphView(QOpenGLWidget):
                 best_dist = d
                 best_name = str(department_id)
 
+        if self.show_network:
+            for instance_id, instance in self._network_instances_for_floor().items():
+                d = math.hypot(
+                    float(instance.get("x", 0.0)) - x,
+                    float(instance.get("y", 0.0)) - y,
+                )
+                if d <= best_dist:
+                    best_dist = d
+                    best_name = str(instance_id)
+
         return best_name
 
     # ------------------------------------------------------------------
@@ -316,6 +328,7 @@ class GpuDxfGraphView(QOpenGLWidget):
                 self._draw_edges(painter)
                 self._draw_departments(painter)
                 self._draw_points(painter)
+                self._draw_network(painter)
 
             painter.resetTransform()
             if self.show_overlay and self._overlay_provider is not None:
@@ -609,6 +622,66 @@ class GpuDxfGraphView(QOpenGLWidget):
             if self.show_labels:
                 self._draw_screen_label(painter, pos, str(name), label_color)
 
+    def _draw_network(self, painter: QPainter) -> None:
+        if self.store is None or not self.show_network:
+            return
+        instances = self._network_instances_for_floor()
+        if not instances:
+            return
+
+        data = getattr(self.store, "data", {}) or {}
+        assets = {
+            str(item.get("id", "")).strip(): item
+            for item in data.get("network_assets", [])
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        }
+
+        fibre_pen = QPen(QColor("#6f8dff"), 0.08)
+        copper_pen = QPen(QColor("#4fbfa3"), 0.06)
+        failover_pen = QPen(QColor("#d68f52"), 0.07, Qt.DashLine)
+
+        for connection in data.get("network_connections", []):
+            if not isinstance(connection, dict):
+                continue
+            source = instances.get(str(connection.get("from_instance_id", "")).strip())
+            target = instances.get(str(connection.get("to_instance_id", "")).strip())
+            if not source or not target:
+                continue
+            medium = str(connection.get("medium", "") or "").strip().lower()
+            standby = bool(connection.get("standby", False)) or str(connection.get("redundancy_role", "")).lower() in {"secondary", "standby"}
+            painter.setPen(failover_pen if standby else (fibre_pen if medium == "fibre" else copper_pen))
+            source_pos = self.world_to_scene(float(source.get("x", 0.0)), float(source.get("y", 0.0)))
+            target_pos = self.world_to_scene(float(target.get("x", 0.0)), float(target.get("y", 0.0)))
+            painter.drawLine(source_pos, target_pos)
+
+        for instance_id, instance in instances.items():
+            asset = assets.get(str(instance.get("asset_id", "")).strip(), {})
+            asset_type = str(asset.get("asset_type", "") or "").strip()
+            pos = self.world_to_scene(float(instance.get("x", 0.0)), float(instance.get("y", 0.0)))
+            selected = str(instance_id) == str(self.selected_point_name)
+            fill = {
+                "network_switch": QColor("#265f88"),
+                "network_router": QColor("#7259a7"),
+                "firewall": QColor("#a04f4f"),
+                "optical_line_terminal": QColor("#4a5fa8"),
+                "optical_network_terminal": QColor("#2d806d"),
+                "patch_panel": QColor("#53616d"),
+            }.get(asset_type, QColor("#53616d"))
+            self._draw_diamond(
+                painter,
+                pos,
+                0.62,
+                fill,
+                QColor("#ffffff") if selected else QColor("#cce7ff"),
+            )
+            if self.show_labels:
+                self._draw_screen_label(
+                    painter,
+                    pos,
+                    str(instance.get("name") or instance_id),
+                    QColor("#cce7ff"),
+                )
+
     @staticmethod
     def _draw_diamond(
         painter: QPainter, pos: QPointF, r: float, fill: QColor, outline: QColor
@@ -705,6 +778,14 @@ class GpuDxfGraphView(QOpenGLWidget):
             return self.store.departments_for_floor(self.floor)
         return {}
 
+    def _network_instances_for_floor(self) -> Dict[str, dict]:
+        if self.store is None:
+            return {}
+        data = getattr(self.store, "data", None)
+        if not isinstance(data, dict):
+            return {}
+        return network_instances_for_floor(data, self.floor)
+
     def _content_bounds(self) -> Optional[Bounds]:
         bounds: List[Bounds] = []
         if self.dxf_scene is not None and getattr(self.dxf_scene, "bounds", None):
@@ -720,6 +801,12 @@ class GpuDxfGraphView(QOpenGLWidget):
         if departments:
             xs = [float(p.get("x", 0.0)) for p in departments.values()]
             ys = [float(p.get("y", 0.0)) for p in departments.values()]
+            bounds.append((min(xs), min(ys), max(xs), max(ys)))
+
+        network_instances = self._network_instances_for_floor() if self.show_network else {}
+        if network_instances:
+            xs = [float(p.get("x", 0.0)) for p in network_instances.values()]
+            ys = [float(p.get("y", 0.0)) for p in network_instances.values()]
             bounds.append((min(xs), min(ys), max(xs), max(ys)))
 
         if not bounds:

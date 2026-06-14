@@ -192,6 +192,11 @@ class NetworkAssetEditorDialog(QDialog):
         self.rack_units_spin.setSuffix("U")
         self.rack_units_spin.setValue(int(self.asset.get("rack_units", 1) or 0))
 
+        self.switch_rack_allowance_spin = QSpinBox()
+        self.switch_rack_allowance_spin.setRange(0, 100)
+        self.switch_rack_allowance_spin.setSuffix("U")
+        self.switch_rack_allowance_spin.setValue(int(self.asset.get("switch_rack_unit_allowance", self.asset.get("rack_units", 1)) or 0))
+
         self.notes_edit = QTextEdit(_text(self.asset.get("notes")))
         self.notes_edit.setMinimumHeight(90)
 
@@ -216,6 +221,7 @@ class NetworkAssetEditorDialog(QDialog):
         form.addRow("Output connection type", self.output_type_combo)
         form.addRow("Uplink connection type", self.uplink_type_combo)
         form.addRow("Rack spaces", self.rack_units_spin)
+        form.addRow("Switch rack allowance", self.switch_rack_allowance_spin)
         form.addRow("Notes", self.notes_edit)
 
         self.asset_type_combo.currentIndexChanged.connect(self._update_visibility)
@@ -237,6 +243,7 @@ class NetworkAssetEditorDialog(QDialog):
         stacking_enabled = asset_type == "network_switch" and self.supports_stacking_check.isChecked()
         self.supports_stacking_check.setEnabled(asset_type == "network_switch")
         self.max_stack_members_spin.setEnabled(stacking_enabled)
+        self.switch_rack_allowance_spin.setEnabled(asset_type == "network_switch")
 
     def _frequencies(self) -> List[str]:
         result = []
@@ -288,6 +295,7 @@ class NetworkAssetEditorDialog(QDialog):
             "output_connection_type": self.output_type_combo.currentText().strip(),
             "uplink_connection_type": self.uplink_type_combo.currentText().strip(),
             "rack_units": int(self.rack_units_spin.value()),
+            "switch_rack_unit_allowance": int(self.switch_rack_allowance_spin.value()) if asset_type == "network_switch" else 0,
             "notes": self.notes_edit.toPlainText().strip(),
         }
         super().accept()
@@ -360,6 +368,11 @@ class NetworkInstanceEditorDialog(QDialog):
         self.rack_start_spin.setRange(0, 1000)
         self.rack_start_spin.setSuffix("U")
         self.rack_start_spin.setValue(int(self.instance.get("rack_start_u", 0) or 0))
+        self.rack_size_spin = QSpinBox()
+        self.rack_size_spin.setRange(0, 200)
+        self.rack_size_spin.setSuffix("U")
+        self.rack_size_spin.setSpecialValueText("Default")
+        self.rack_size_spin.setValue(int(self.instance.get("rack_size_u", 0) or 0))
         self.management_ip_edit = QLineEdit(_text(self.instance.get("management_ip")))
         self.management_vlan_edit = QLineEdit(_text(self.instance.get("management_vlan")))
         self.power_feed_edit = QLineEdit(_text(self.instance.get("power_feed")))
@@ -376,6 +389,7 @@ class NetworkInstanceEditorDialog(QDialog):
         form.addRow("Y", self.y_spin)
         form.addRow("Rack", self.rack_name_edit)
         form.addRow("Rack start", self.rack_start_spin)
+        form.addRow("Rack cabinet size", self.rack_size_spin)
         form.addRow("Management IP", self.management_ip_edit)
         form.addRow("Management VLAN", self.management_vlan_edit)
         form.addRow("Power feed", self.power_feed_edit)
@@ -422,6 +436,7 @@ class NetworkInstanceEditorDialog(QDialog):
             "y": float(self.y_spin.value()),
             "rack_name": self.rack_name_edit.text().strip(),
             "rack_start_u": int(self.rack_start_spin.value()),
+            "rack_size_u": int(self.rack_size_spin.value()),
             "management_ip": self.management_ip_edit.text().strip(),
             "management_vlan": self.management_vlan_edit.text().strip(),
             "power_feed": self.power_feed_edit.text().strip(),
@@ -762,11 +777,19 @@ class NetworkPlannerDialog(QDialog):
         self.polan_max_copper_spin.setSuffix(" m")
         self.polan_max_copper_spin.setValue(float(settings.get("polan_max_ont_copper_m", 30.0) or 30.0))
 
+        self.default_rack_size_spin = QSpinBox()
+        self.default_rack_size_spin.setRange(1, 200)
+        self.default_rack_size_spin.setSuffix("U")
+        self.default_rack_size_spin.setValue(int(settings.get("default_rack_size_u", 42) or 42))
+
         self.olt_failover_check = QCheckBox("Provide standby OLT failover for each protected splitter")
         self.olt_failover_check.setChecked(bool(settings.get("polan_olt_failover", True)))
 
         self.auto_design_button = QPushButton("Generate Minimum-Component Network")
         self.auto_design_button.clicked.connect(self.generate_automatic_design)
+        self.visual_edit_button = QPushButton("Edit visually on plan")
+        self.visual_edit_button.setToolTip("Save this generated network and return to the drawing canvas for drag/drop editing")
+        self.visual_edit_button.clicked.connect(self.edit_visually_on_plan)
 
         info = QLabel(
             "MER locations are treated as roots of the network tree. PoLAN locations can be used for optical distribution, OLT, splitter or ONT placement."
@@ -777,14 +800,16 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("Spare port and PoE capacity", self.spare_capacity_spin)
         settings_layout.addRow("Traditional maximum copper route", self.traditional_max_copper_spin)
         settings_layout.addRow("PoLAN maximum ONT copper distance", self.polan_max_copper_spin)
+        settings_layout.addRow("Default rack cabinet size", self.default_rack_size_spin)
         settings_layout.addRow("", self.redundant_core_check)
         settings_layout.addRow("", self.olt_failover_check)
         settings_layout.addRow("", self.auto_design_button)
+        settings_layout.addRow("", self.visual_edit_button)
         settings_layout.addRow("", info)
         self.tabs.addTab(settings_tab, "Settings")
 
-        self.assets_tab = _CrudTab(["ID", "Name", "Type", "Ports", "In", "Out", "Uplinks", "Stack", "Max stack", "Power W", "PoE W", "Rack U"])
-        self.instances_tab = _CrudTab(["ID", "Name", "Asset", "Location", "Floor", "Rack", "Start U", "Management IP"])
+        self.assets_tab = _CrudTab(["ID", "Name", "Type", "Ports", "In", "Out", "Uplinks", "Stack", "Max stack", "Power W", "PoE W", "Rack U", "Switch U"])
+        self.instances_tab = _CrudTab(["ID", "Name", "Asset", "Location", "Floor", "Rack", "Start U", "Rack U", "Management IP"])
         self.connections_tab = _CrudTab(["ID", "From", "Port", "To", "Port", "Role", "Medium", "Cable", "VLANs"])
         self.vlans_tab = _CrudTab(["Record ID", "VLAN", "Name", "Purpose", "Subnet", "Gateway", "Zone"])
         self.routes_tab = _CrudTab(["ID", "Source", "Destination", "VLAN", "Protocol", "Next hop", "Metric", "Policy"])
@@ -884,12 +909,14 @@ class NetworkPlannerDialog(QDialog):
             [item.get("id", ""), item.get("name", ""), item.get("asset_type", ""), item.get("number_of_ports", 0),
              item.get("connections_in", 0), item.get("connections_out", 0), item.get("uplink_ports", 0),
              "Yes" if item.get("supports_stacking", False) else "No", item.get("max_stack_members", 1),
-             item.get("power_input_w", 0), item.get("poe_budget_w", 0), item.get("rack_units", 0)]
+             item.get("power_input_w", 0), item.get("poe_budget_w", 0), item.get("rack_units", 0),
+             item.get("switch_rack_unit_allowance", 0)]
             for item in self._items("network_assets")
         ])
         self.instances_tab.set_rows([
             [item.get("id", ""), item.get("name", ""), item.get("asset_id", ""), item.get("location_name", ""),
-             item.get("floor", 0), item.get("rack_name", ""), item.get("rack_start_u", 0), item.get("management_ip", "")]
+             item.get("floor", 0), item.get("rack_name", ""), item.get("rack_start_u", 0),
+             item.get("rack_size_u", 0) or "", item.get("management_ip", "")]
             for item in self._items("network_asset_instances")
         ])
         self.connections_tab.set_rows([
@@ -918,6 +945,7 @@ class NetworkPlannerDialog(QDialog):
         settings["spare_capacity_percent"] = float(self.spare_capacity_spin.value())
         settings["traditional_max_copper_m"] = float(self.traditional_max_copper_spin.value())
         settings["polan_max_ont_copper_m"] = float(self.polan_max_copper_spin.value())
+        settings["default_rack_size_u"] = int(self.default_rack_size_spin.value())
         settings["polan_olt_failover"] = self.olt_failover_check.isChecked()
 
     def _refresh_design_summary(self) -> None:
@@ -975,6 +1003,7 @@ class NetworkPlannerDialog(QDialog):
         finally:
             QApplication.restoreOverrideCursor()
         self.refresh_tables()
+        self.on_save(deepcopy(self.data))
         self.tabs.setCurrentWidget(self.summary_text)
         QMessageBox.information(
             self,
@@ -985,6 +1014,23 @@ class NetworkPlannerDialog(QDialog):
             f"Copper: {summary.get('estimated_copper_length_m', 0)} m\n"
             f"Fibre: {summary.get('estimated_fibre_length_m', 0)} m",
         )
+
+    def edit_visually_on_plan(self) -> None:
+        self._sync_planner_settings()
+        self.on_save(deepcopy(self.data))
+        parent = self.parent()
+        setter = getattr(parent, "_set_editor_mode", None)
+        if callable(setter):
+            setter("network_asset")
+        else:
+            mode_combo = getattr(parent, "mode_combo", None)
+            if mode_combo is not None:
+                index = mode_combo.findText("network_asset")
+                if index < 0:
+                    index = mode_combo.findData("network_asset")
+                if index >= 0:
+                    mode_combo.setCurrentIndex(index)
+        self.accept()
 
     def add_asset(self) -> None:
         dialog = NetworkAssetEditorDialog(self, suggested_id=_next_id(self._items("network_assets"), "NA"))
