@@ -5,7 +5,6 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Dict, Iterable, List, Optional
 
-
 NETWORK_DEFAULTS = {
     "network_settings": {
         "technology": "Traditional",
@@ -14,6 +13,8 @@ NETWORK_DEFAULTS = {
         "spare_capacity_percent": 15.0,
         "traditional_max_copper_m": 90.0,
         "polan_max_ont_copper_m": 30.0,
+        "polan_max_onts_per_splitter": 8,
+        "polan_max_splitter_ont_route_m": 120.0,
         "polan_olt_failover": True,
         "default_poe_power_w": 0.0,
         "poe_power_defaults": {},
@@ -93,20 +94,40 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("spare_capacity_percent", 15.0)
     settings.setdefault("traditional_max_copper_m", 90.0)
     settings.setdefault("polan_max_ont_copper_m", 30.0)
+    settings.setdefault("polan_max_onts_per_splitter", 8)
+    settings.setdefault("polan_max_splitter_ont_route_m", 120.0)
     settings.setdefault("polan_olt_failover", True)
     settings.setdefault("default_poe_power_w", 0.0)
     settings.setdefault("poe_power_defaults", {})
     settings.setdefault("default_rack_size_u", 42)
     technology = _text(settings.get("technology")) or "Traditional"
     settings["technology"] = "PoLAN" if technology.lower() == "polan" else "Traditional"
-    settings["expected_mer_count"] = max(1, _as_int(settings.get("expected_mer_count"), 2))
+    settings["expected_mer_count"] = max(
+        1, _as_int(settings.get("expected_mer_count"), 2)
+    )
     settings["redundant_core"] = bool(settings.get("redundant_core", True))
-    settings["spare_capacity_percent"] = max(0.0, _as_float(settings.get("spare_capacity_percent"), 15.0))
-    settings["traditional_max_copper_m"] = max(1.0, _as_float(settings.get("traditional_max_copper_m"), 90.0))
-    settings["polan_max_ont_copper_m"] = max(1.0, _as_float(settings.get("polan_max_ont_copper_m"), 30.0))
+    settings["spare_capacity_percent"] = max(
+        0.0, _as_float(settings.get("spare_capacity_percent"), 15.0)
+    )
+    settings["traditional_max_copper_m"] = max(
+        1.0, _as_float(settings.get("traditional_max_copper_m"), 90.0)
+    )
+    settings["polan_max_ont_copper_m"] = max(
+        1.0, _as_float(settings.get("polan_max_ont_copper_m"), 30.0)
+    )
+    settings["polan_max_onts_per_splitter"] = max(
+        1, _as_int(settings.get("polan_max_onts_per_splitter"), 8)
+    )
+    settings["polan_max_splitter_ont_route_m"] = max(
+        0.0, _as_float(settings.get("polan_max_splitter_ont_route_m"), 120.0)
+    )
     settings["polan_olt_failover"] = bool(settings.get("polan_olt_failover", True))
-    settings["default_poe_power_w"] = max(0.0, _as_float(settings.get("default_poe_power_w"), 0.0))
-    settings["default_rack_size_u"] = max(1, _as_int(settings.get("default_rack_size_u"), 42))
+    settings["default_poe_power_w"] = max(
+        0.0, _as_float(settings.get("default_poe_power_w"), 0.0)
+    )
+    settings["default_rack_size_u"] = max(
+        1, _as_int(settings.get("default_rack_size_u"), 42)
+    )
     if not isinstance(settings.get("poe_power_defaults"), dict):
         settings["poe_power_defaults"] = {}
 
@@ -131,9 +152,14 @@ def ensure_network_schema(data: dict) -> dict:
         asset.setdefault("id", "")
         asset.setdefault("name", asset.get("id", ""))
         asset_type = _text(asset.get("asset_type")) or "other"
-        if asset_type == "other" and "network_router" in _text(asset.get("notes")).lower():
+        if (
+            asset_type == "other"
+            and "network_router" in _text(asset.get("notes")).lower()
+        ):
             asset_type = "network_router"
-        asset["asset_type"] = asset_type if asset_type in NETWORK_ASSET_TYPES else "other"
+        asset["asset_type"] = (
+            asset_type if asset_type in NETWORK_ASSET_TYPES else "other"
+        )
         asset.setdefault("manufacturer", "")
         asset.setdefault("model", "")
         asset.setdefault("patch_panel_type", "")
@@ -189,7 +215,9 @@ def ensure_network_schema(data: dict) -> dict:
         instance.setdefault("asset_id", "")
         instance.setdefault("location_name", "")
         linked_location = locations.get(_text(instance.get("location_name")), {})
-        instance["floor"] = _as_int(instance.get("floor", linked_location.get("floor", 0)))
+        instance["floor"] = _as_int(
+            instance.get("floor", linked_location.get("floor", 0))
+        )
         instance["x"] = _as_float(instance.get("x", linked_location.get("x", 0.0)))
         instance["y"] = _as_float(instance.get("y", linked_location.get("y", 0.0)))
         instance.setdefault("rack_name", "")
@@ -200,10 +228,20 @@ def ensure_network_schema(data: dict) -> dict:
         instance.setdefault("power_feed", "")
         instance.setdefault("ups_source", "")
         instance["logical_stack"] = bool(instance.get("logical_stack", False))
-        instance["stack_member_count"] = max(1, _as_int(instance.get("stack_member_count"), 1))
+        instance["stack_member_count"] = max(
+            1, _as_int(instance.get("stack_member_count"), 1)
+        )
         instance.setdefault("stack_member_asset_id", "")
-        instance["stack_interconnect_count"] = max(0, _as_int(instance.get("stack_interconnect_count"), max(0, instance["stack_member_count"] - 1)))
-        instance["stack_interconnect_medium"] = _text(instance.get("stack_interconnect_medium")).lower() or "stacking"
+        instance["stack_interconnect_count"] = max(
+            0,
+            _as_int(
+                instance.get("stack_interconnect_count"),
+                max(0, instance["stack_member_count"] - 1),
+            ),
+        )
+        instance["stack_interconnect_medium"] = (
+            _text(instance.get("stack_interconnect_medium")).lower() or "stacking"
+        )
         if instance["stack_interconnect_medium"] not in NETWORK_MEDIA:
             instance["stack_interconnect_medium"] = "stacking"
         instance.setdefault("stack_interconnect_specification", "")
@@ -218,14 +256,18 @@ def ensure_network_schema(data: dict) -> dict:
         connection.setdefault("to_instance_id", "")
         connection.setdefault("to_port", "")
         role = _text(connection.get("connection_role")).lower() or "output"
-        connection["connection_role"] = role if role in NETWORK_CONNECTION_ROLES else "output"
+        connection["connection_role"] = (
+            role if role in NETWORK_CONNECTION_ROLES else "output"
+        )
         medium = _text(connection.get("medium")).lower() or "copper"
         connection["medium"] = medium if medium in NETWORK_MEDIA else "copper"
         connection.setdefault("cable_specification", "")
         connection["fibre_count"] = max(0, _as_int(connection.get("fibre_count")))
         connection["vlan_ids"] = _normalise_string_list(connection.get("vlan_ids", []))
         connection.setdefault("route_profile", "")
-        connection["route_path"] = _normalise_string_list(connection.get("route_path", []))
+        connection["route_path"] = _normalise_string_list(
+            connection.get("route_path", [])
+        )
         connection.setdefault("notes", "")
 
     for assignment in data["network_endpoint_assignments"]:
@@ -233,7 +275,9 @@ def ensure_network_schema(data: dict) -> dict:
             continue
         assignment.setdefault("id", "")
         assignment.setdefault("endpoint_name", "")
-        assignment["endpoint_port"] = max(1, _as_int(assignment.get("endpoint_port"), 1))
+        assignment["endpoint_port"] = max(
+            1, _as_int(assignment.get("endpoint_port"), 1)
+        )
         assignment.setdefault("endpoint_asset_id", "")
         assignment.setdefault("endpoint_asset_name", "")
         assignment.setdefault("department_id", "")
@@ -245,8 +289,12 @@ def ensure_network_schema(data: dict) -> dict:
         assignment.setdefault("network_instance_id", "")
         assignment.setdefault("network_port", "")
         assignment["poe_power_w"] = max(0.0, _as_float(assignment.get("poe_power_w")))
-        assignment["copper_length_m"] = max(0.0, _as_float(assignment.get("copper_length_m")))
-        assignment["route_path"] = _normalise_string_list(assignment.get("route_path", []))
+        assignment["copper_length_m"] = max(
+            0.0, _as_float(assignment.get("copper_length_m"))
+        )
+        assignment["route_path"] = _normalise_string_list(
+            assignment.get("route_path", [])
+        )
         assignment["vlan_ids"] = _normalise_string_list(assignment.get("vlan_ids", []))
         assignment.setdefault("technology", settings["technology"])
         assignment["auto_generated"] = bool(assignment.get("auto_generated", False))
@@ -270,14 +318,30 @@ def ensure_network_schema(data: dict) -> dict:
             continue
         vlan.setdefault("id", "")
         vlan["vlan_id"] = max(0, _as_int(vlan.get("vlan_id")))
-        for field in ("name", "purpose", "subnet", "gateway", "dhcp_scope", "security_zone", "notes"):
+        for field in (
+            "name",
+            "purpose",
+            "subnet",
+            "gateway",
+            "dhcp_scope",
+            "security_zone",
+            "notes",
+        ):
             vlan.setdefault(field, "")
 
     for route in data["network_routes"]:
         if not isinstance(route, dict):
             continue
         route.setdefault("id", "")
-        for field in ("source", "destination", "vlan_id", "protocol", "next_hop", "firewall_policy", "notes"):
+        for field in (
+            "source",
+            "destination",
+            "vlan_id",
+            "protocol",
+            "next_hop",
+            "firewall_policy",
+            "notes",
+        ):
             route.setdefault(field, "")
         route["metric"] = max(0, _as_int(route.get("metric")))
 
@@ -392,13 +456,20 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         asset_id = _text(asset.get("id")) or "(unnamed)"
         asset_type = _text(asset.get("asset_type"))
         if asset_type not in NETWORK_ASSET_TYPES:
-            messages.append(f"Network asset {asset_id} has unsupported type {asset_type!r}.")
-        if asset_type == "patch_panel" and _text(asset.get("patch_panel_type")) not in {"copper", "fibre"}:
+            messages.append(
+                f"Network asset {asset_id} has unsupported type {asset_type!r}."
+            )
+        if asset_type == "patch_panel" and _text(asset.get("patch_panel_type")) not in {
+            "copper",
+            "fibre",
+        }:
             messages.append(f"Patch panel {asset_id} must specify copper or fibre.")
         if asset_type == "fibre_splitter" and not _text(asset.get("split_ratio")):
             messages.append(f"Fibre splitter {asset_id} requires a split ratio.")
         if asset_type == "wireless_access_point" and not asset.get("frequencies"):
-            messages.append(f"Wireless access point {asset_id} requires at least one frequency.")
+            messages.append(
+                f"Wireless access point {asset_id} requires at least one frequency."
+            )
 
     for instance in data.get("network_asset_instances", []):
         if not isinstance(instance, dict):
@@ -406,29 +477,49 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         instance_id = _text(instance.get("id")) or "(unnamed)"
         asset_id = _text(instance.get("asset_id"))
         if asset_id not in asset_ids:
-            messages.append(f"Network instance {instance_id} references missing asset {asset_id!r}.")
+            messages.append(
+                f"Network instance {instance_id} references missing asset {asset_id!r}."
+            )
         location_name = _text(instance.get("location_name"))
         if location_name and location_name not in locations:
-            messages.append(f"Network instance {instance_id} references missing location {location_name!r}.")
+            messages.append(
+                f"Network instance {instance_id} references missing location {location_name!r}."
+            )
 
     def rack_units_for(instance: dict, asset: dict) -> int:
         asset_type = _text(asset.get("asset_type"))
-        stack_members = max(1, _as_int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+        stack_members = (
+            max(1, _as_int(instance.get("stack_member_count"), 1))
+            if bool(instance.get("logical_stack"))
+            else 1
+        )
         if asset_type == "network_switch":
-            allowance = max(0, _as_int(asset.get("switch_rack_unit_allowance"), _as_int(asset.get("rack_units"), 1)))
+            allowance = max(
+                0,
+                _as_int(
+                    asset.get("switch_rack_unit_allowance"),
+                    _as_int(asset.get("rack_units"), 1),
+                ),
+            )
             return max(1, allowance) * stack_members
         return max(0, _as_int(asset.get("rack_units"), 1))
 
     rack_groups: Dict[tuple[int, str, str], List[tuple[str, int, int]]] = {}
     rack_sizes: Dict[tuple[int, str, str], int] = {}
-    default_rack_size = max(1, _as_int(data.get("network_settings", {}).get("default_rack_size_u"), 42))
+    default_rack_size = max(
+        1, _as_int(data.get("network_settings", {}).get("default_rack_size_u"), 42)
+    )
     for instance in data.get("network_asset_instances", []):
         if not isinstance(instance, dict):
             continue
         rack = _text(instance.get("rack_name"))
         if not rack:
             continue
-        key = (_as_int(instance.get("floor")), _text(instance.get("location_name")), rack)
+        key = (
+            _as_int(instance.get("floor")),
+            _text(instance.get("location_name")),
+            rack,
+        )
         instance_id = _text(instance.get("id")) or "(unnamed)"
         asset = assets_by_id.get(_text(instance.get("asset_id")), {})
         start_u = max(1, _as_int(instance.get("rack_start_u"), 1))
@@ -447,14 +538,18 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         rack_label = f"{location or 'Floor ' + str(floor)} / {rack}"
         for instance_id, start_u, end_u in rows:
             if end_u > capacity:
-                messages.append(f"Rack {rack_label} capacity is {capacity}U but {instance_id} occupies U{start_u}-U{end_u}.")
+                messages.append(
+                    f"Rack {rack_label} capacity is {capacity}U but {instance_id} occupies U{start_u}-U{end_u}."
+                )
         ordered = sorted(rows, key=lambda row: (row[1], row[2], row[0]))
         for index, (instance_id, start_u, end_u) in enumerate(ordered):
-            for other_id, other_start, other_end in ordered[index + 1:]:
+            for other_id, other_start, other_end in ordered[index + 1 :]:
                 if other_start > end_u:
                     break
                 if other_end >= start_u:
-                    messages.append(f"Rack {rack_label} has overlapping rack units: {instance_id} U{start_u}-U{end_u} and {other_id} U{other_start}-U{other_end}.")
+                    messages.append(
+                        f"Rack {rack_label} has overlapping rack units: {instance_id} U{start_u}-U{end_u} and {other_id} U{other_start}-U{other_end}."
+                    )
 
     used_endpoints: set[tuple[str, str]] = set()
     for connection in data.get("network_connections", []):
@@ -464,17 +559,25 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         from_id = _text(connection.get("from_instance_id"))
         to_id = _text(connection.get("to_instance_id"))
         if from_id not in instance_ids:
-            messages.append(f"Network connection {connection_id} references missing source instance {from_id!r}.")
+            messages.append(
+                f"Network connection {connection_id} references missing source instance {from_id!r}."
+            )
         if to_id not in instance_ids:
-            messages.append(f"Network connection {connection_id} references missing destination instance {to_id!r}.")
+            messages.append(
+                f"Network connection {connection_id} references missing destination instance {to_id!r}."
+            )
         if from_id and from_id == to_id:
-            messages.append(f"Network connection {connection_id} connects an instance to itself.")
+            messages.append(
+                f"Network connection {connection_id} connects an instance to itself."
+            )
         for side, instance_id, port in (
             ("source", from_id, _text(connection.get("from_port"))),
             ("destination", to_id, _text(connection.get("to_port"))),
         ):
             if not port:
-                messages.append(f"Network connection {connection_id} has no {side} port.")
+                messages.append(
+                    f"Network connection {connection_id} has no {side} port."
+                )
                 continue
             endpoint = (instance_id, port)
             if instance_id and endpoint in used_endpoints:
@@ -484,7 +587,9 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             used_endpoints.add(endpoint)
         for vlan_id in connection.get("vlan_ids", []):
             if _text(vlan_id) not in vlan_record_ids:
-                messages.append(f"Network connection {connection_id} references missing VLAN record {_text(vlan_id)!r}.")
+                messages.append(
+                    f"Network connection {connection_id} references missing VLAN record {_text(vlan_id)!r}."
+                )
 
     endpoint_names = {
         _text(item.get("name"))
@@ -494,7 +599,9 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     assigned_endpoint_ports: set[tuple[str, int]] = set()
     port_loads: Dict[str, int] = {}
     poe_loads: Dict[str, float] = {}
-    max_ont_copper = _as_float(data.get("network_settings", {}).get("polan_max_ont_copper_m"), 30.0)
+    max_ont_copper = _as_float(
+        data.get("network_settings", {}).get("polan_max_ont_copper_m"), 30.0
+    )
 
     for assignment in data.get("network_endpoint_assignments", []):
         if not isinstance(assignment, dict):
@@ -505,22 +612,32 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         instance_id = _text(assignment.get("network_instance_id"))
         network_port = _text(assignment.get("network_port"))
         if endpoint_name not in endpoint_names:
-            messages.append(f"Endpoint assignment {assignment_id} references missing data point {endpoint_name!r}.")
+            messages.append(
+                f"Endpoint assignment {assignment_id} references missing data point {endpoint_name!r}."
+            )
         physical_endpoint = (endpoint_name, endpoint_port)
         if physical_endpoint in assigned_endpoint_ports:
-            messages.append(f"Data-point port {endpoint_name}:{endpoint_port} is assigned more than once.")
+            messages.append(
+                f"Data-point port {endpoint_name}:{endpoint_port} is assigned more than once."
+            )
         assigned_endpoint_ports.add(physical_endpoint)
         if instance_id not in instance_ids:
-            messages.append(f"Endpoint assignment {assignment_id} references missing network instance {instance_id!r}.")
+            messages.append(
+                f"Endpoint assignment {assignment_id} references missing network instance {instance_id!r}."
+            )
         if not network_port:
             messages.append(f"Endpoint assignment {assignment_id} has no network port.")
         elif instance_id:
             network_endpoint = (instance_id, network_port)
             if network_endpoint in used_endpoints:
-                messages.append(f"Network endpoint {instance_id}:{network_port} is used more than once.")
+                messages.append(
+                    f"Network endpoint {instance_id}:{network_port} is used more than once."
+                )
             used_endpoints.add(network_endpoint)
         port_loads[instance_id] = port_loads.get(instance_id, 0) + 1
-        poe_loads[instance_id] = poe_loads.get(instance_id, 0.0) + max(0.0, _as_float(assignment.get("poe_power_w")))
+        poe_loads[instance_id] = poe_loads.get(instance_id, 0.0) + max(
+            0.0, _as_float(assignment.get("poe_power_w"))
+        )
         if _text(assignment.get("technology")) == "PoLAN":
             copper = max(0.0, _as_float(assignment.get("copper_length_m")))
             extension = 0.0
@@ -533,10 +650,16 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     for instance_id, used_ports in port_loads.items():
         instance = instances_by_id.get(instance_id, {})
         asset = assets_by_id.get(_text(instance.get("asset_id")), {})
-        stack_members = max(1, _as_int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+        stack_members = (
+            max(1, _as_int(instance.get("stack_member_count"), 1))
+            if bool(instance.get("logical_stack"))
+            else 1
+        )
         capacity = max(0, _as_int(asset.get("number_of_ports"))) * stack_members
         if capacity and used_ports > capacity:
-            messages.append(f"Network instance {instance_id} uses {used_ports} endpoint ports but provides only {capacity}.")
+            messages.append(
+                f"Network instance {instance_id} uses {used_ports} endpoint ports but provides only {capacity}."
+            )
         poe_budget = max(0.0, _as_float(asset.get("poe_budget_w"))) * stack_members
         poe_load = poe_loads.get(instance_id, 0.0)
         if poe_load > poe_budget + 0.001:
@@ -552,11 +675,17 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         secondary = _text(group.get("secondary_olt_instance_id"))
         protected = _text(group.get("protected_instance_id"))
         if protected not in instance_ids:
-            messages.append(f"Redundancy group {group_id} references missing protected instance {protected!r}.")
+            messages.append(
+                f"Redundancy group {group_id} references missing protected instance {protected!r}."
+            )
         if primary not in instance_ids or secondary not in instance_ids:
-            messages.append(f"Redundancy group {group_id} must reference both primary and secondary OLT instances.")
+            messages.append(
+                f"Redundancy group {group_id} must reference both primary and secondary OLT instances."
+            )
         elif primary == secondary:
-            messages.append(f"Redundancy group {group_id} uses the same OLT for primary and secondary service.")
+            messages.append(
+                f"Redundancy group {group_id} uses the same OLT for primary and secondary service."
+            )
 
     vlan_numbers: set[int] = set()
     for vlan in data.get("network_vlans", []):
@@ -564,19 +693,26 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             continue
         number = _as_int(vlan.get("vlan_id"))
         if number < 1 or number > 4094:
-            messages.append(f"VLAN {_text(vlan.get('id')) or '(unnamed)'} must use an ID between 1 and 4094.")
+            messages.append(
+                f"VLAN {_text(vlan.get('id')) or '(unnamed)'} must use an ID between 1 and 4094."
+            )
         elif number in vlan_numbers:
             messages.append(f"VLAN number {number} is duplicated.")
         vlan_numbers.add(number)
 
     if include_advisories:
         mer_locations = [
-            item for item in data.get("locations", [])
+            item
+            for item in data.get("locations", [])
             if isinstance(item, dict) and _text(item.get("kind")).lower() == "mer"
         ]
-        expected = _as_int(data.get("network_settings", {}).get("expected_mer_count"), 2)
+        expected = _as_int(
+            data.get("network_settings", {}).get("expected_mer_count"), 2
+        )
         if not mer_locations:
-            messages.append("Advisory: no MER location has been created; the network tree has no root.")
+            messages.append(
+                "Advisory: no MER location has been created; the network tree has no root."
+            )
         elif len(mer_locations) < expected:
             messages.append(
                 f"Advisory: {len(mer_locations)} MER location(s) exist; the design expects {expected}."
@@ -592,7 +728,9 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                 if isinstance(instance, dict)
             )
             if not has_olt:
-                messages.append("Advisory: a PoLAN design normally requires at least one OLT.")
+                messages.append(
+                    "Advisory: a PoLAN design normally requires at least one OLT."
+                )
 
     return messages
 
@@ -615,23 +753,29 @@ def install_json_store_extensions(json_store_class) -> None:
     json_store_class.__init__ = init_wrapper
 
     if original_load is not None:
+
         def load_wrapper(self, payload):
             result = original_load(self, payload)
             ensure_network_schema(self.data)
             return result
+
         json_store_class._load_from_payload = load_wrapper
 
     if original_save is not None:
+
         def save_wrapper(self, path):
             ensure_network_schema(self.data)
             return original_save(self, path)
+
         json_store_class.save = save_wrapper
 
     if original_validate is not None:
+
         def validate_wrapper(self, *args, **kwargs):
             result = list(original_validate(self, *args, **kwargs) or [])
             result.extend(validate_network_data(self.data, include_advisories=False))
             return result
+
         json_store_class.validate = validate_wrapper
 
     def assets_by_id(self):
