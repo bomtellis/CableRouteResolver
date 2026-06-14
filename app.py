@@ -1864,7 +1864,7 @@ class CableRouteEditor(QMainWindow):
         self.selected_point_name = None
         self._clear_canvas_multi_selection()
         if hasattr(self.canvas, "invalidate_dxf_cache"):
-                self.canvas.invalidate_dxf_cache()
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
         self.set_status(f"Deleted {deleted} item(s)")
 
@@ -2043,7 +2043,7 @@ class CableRouteEditor(QMainWindow):
         self.selected_point_name = None
         self._set_canvas_multi_selection(created_names, append=False)
         if hasattr(self.canvas, "invalidate_dxf_cache"):
-                self.canvas.invalidate_dxf_cache()
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
 
         self.set_status(
@@ -2298,7 +2298,7 @@ class CableRouteEditor(QMainWindow):
     def on_floor_changed(self, *_):
         self._clear_canvas_multi_selection()
         if hasattr(self.canvas, "invalidate_dxf_cache"):
-                self.canvas.invalidate_dxf_cache()
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
         self._queue_all_floor_dxf_loads(
             active_floor=self.floor_spin.value(), force_reload=False
@@ -2775,6 +2775,11 @@ class CableRouteEditor(QMainWindow):
             show_labels=self.show_labels_check.isChecked(),
             show_graph=True,
             show_overlay=True,
+            show_edges=self.show_edges_check.isChecked(),
+            show_nodes=self.show_nodes_check.isChecked(),
+            show_data_points=self.show_data_points_check.isChecked(),
+            show_locations=self.show_locations_check.isChecked(),
+            show_comms_rooms=self.show_comms_rooms_check.isChecked(),
         )
         self.canvas.set_selection(
             self.selected_point_name,
@@ -5523,7 +5528,14 @@ class CableRouteEditor(QMainWindow):
         # In edge mode, right click is ONLY for deleting edges.
         # Never fall through to the normal context menu.
         if mode == "edge":
+
             if not picked:
+                if self.selected_for_edge:
+                    self.selected_for_edge = None
+                    self.set_status("Edge chaining cancelled")
+                    self.refresh_canvas()
+                    return
+
                 self.set_status("No nearby point found for edge delete")
                 return
 
@@ -8128,6 +8140,12 @@ class CableRouteEditor(QMainWindow):
 
         QMessageBox.information(self, "Import complete", message)
         self.set_status(message.replace("\n", " "))
+
+
+# NETWORK_PLANNING_EXTENSION_START
+from network_integration import install_network_planning
+install_network_planning(CableRouteEditor)
+# NETWORK_PLANNING_EXTENSION_END
 
 
 def main():

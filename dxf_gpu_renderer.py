@@ -74,10 +74,20 @@ class GpuDxfGraphView(QOpenGLWidget):
         self.store = None
         self.dxf_scene = None
         self.floor = 0
+
         self.show_dxf = True
         self.show_labels = True
         self.show_graph = True
         self.show_overlay = True
+
+        # Individual graph layers
+        self.show_edges = True
+        self.show_nodes = True
+        self.show_data_points = True
+        self.show_locations = True
+        self.show_comms_rooms = True
+        self.show_departments = True
+        self.show_network = True
 
         self.selected_point_name: Optional[str] = None
         self.selected_template_names: set[str] = set()
@@ -120,15 +130,47 @@ class GpuDxfGraphView(QOpenGLWidget):
         show_labels: Optional[bool] = None,
         show_graph: Optional[bool] = None,
         show_overlay: Optional[bool] = None,
+        show_edges: Optional[bool] = None,
+        show_nodes: Optional[bool] = None,
+        show_data_points: Optional[bool] = None,
+        show_locations: Optional[bool] = None,
+        show_comms_rooms: Optional[bool] = None,
+        show_departments: Optional[bool] = None,
+        show_network: Optional[bool] = None,
     ) -> None:
         if show_dxf is not None:
             self.show_dxf = bool(show_dxf)
+
         if show_labels is not None:
             self.show_labels = bool(show_labels)
+
         if show_graph is not None:
             self.show_graph = bool(show_graph)
+
         if show_overlay is not None:
             self.show_overlay = bool(show_overlay)
+
+        if show_edges is not None:
+            self.show_edges = bool(show_edges)
+
+        if show_nodes is not None:
+            self.show_nodes = bool(show_nodes)
+
+        if show_data_points is not None:
+            self.show_data_points = bool(show_data_points)
+
+        if show_locations is not None:
+            self.show_locations = bool(show_locations)
+
+        if show_comms_rooms is not None:
+            self.show_comms_rooms = bool(show_comms_rooms)
+
+        if show_departments is not None:
+            self.show_departments = bool(show_departments)
+
+        if show_network is not None:
+            self.show_network = bool(show_network)
+
         self.update()
 
     def set_selection(
@@ -412,30 +454,40 @@ class GpuDxfGraphView(QOpenGLWidget):
                 self._dxf_cache.text_entities.append(entity)
 
     def _draw_dxf_text(self, painter: QPainter) -> None:
-        painter.save()
-        painter.setPen(QColor("#C0C0C0"))
-        font = QFont()
-        font.setPixelSize(max(5, min(16, int(7 + self._scale * 0.25))))
-        painter.setFont(font)
-        # Text is drawn in screen space so it remains legible and avoids enormous glyph paths.
-        painter.resetTransform()
+        """Draw DXF text in world space so it scales naturally with camera zoom."""
         for entity in self._dxf_cache.text_entities:
-            x, y = entity.get("insert", (0.0, 0.0))
-            screen = self.world_to_screen(float(x), float(y))
-            if not self.rect().adjusted(-80, -80, 80, 80).contains(screen.toPoint()):
+            text = str(entity.get("text") or "").strip()
+            if not text:
                 continue
-            painter.save()
-            painter.translate(screen)
-            painter.rotate(-float(entity.get("rotation", 0.0)))
-            painter.drawText(QPointF(0.0, 0.0), str(entity.get("text") or ""))
-            painter.restore()
-        painter.restore()
+
+            x, y = entity.get("insert", (0.0, 0.0))
+            scene_pos = self.world_to_scene(float(x), float(y))
+            screen = self.world_to_screen(float(x), float(y))
+
+            if not self.rect().adjusted(-120, -120, 120, 120).contains(screen.toPoint()):
+                continue
+
+            raw_height = float(entity.get("height") or 0.0)
+            world_height = raw_height if raw_height > 0.0 else 0.8
+            world_height = max(0.45, min(3.0, world_height))
+
+            self._draw_world_label(
+                painter,
+                scene_pos,
+                text,
+                QColor("#C0C0C0"),
+                world_height=world_height,
+                rotation_degrees=-float(entity.get("rotation", 0.0)),
+                offset=QPointF(0.0, 0.0),
+            )
 
     # ------------------------------------------------------------------
     # Cable graph drawing
     # ------------------------------------------------------------------
+
+
     def _draw_edges(self, painter: QPainter) -> None:
-        if self.store is None:
+        if self.store is None or not self.show_edges:
             return
         points = self._all_points()
         for edge in self.store.data.get("corridors", {}).get("edges", []):
@@ -457,7 +509,11 @@ class GpuDxfGraphView(QOpenGLWidget):
             painter.drawLine(pa, pb)
 
     def _draw_departments(self, painter: QPainter) -> None:
+        if not self.show_departments:
+            return
+
         for department_id, dept in self._departments_for_floor().items():
+
             pos = self.world_to_scene(
                 float(dept.get("x", 0.0)), float(dept.get("y", 0.0))
             )
@@ -492,7 +548,29 @@ class GpuDxfGraphView(QOpenGLWidget):
                 str(name) == str(self.selected_point_name)
                 or str(name) in self.selected_template_names
             )
-            kind = str(point.get("kind", ""))
+
+            kind = str(point.get("kind", "")).strip()
+
+            # Apply individual graph-layer visibility.
+            if kind == "corridor_node" and not self.show_nodes:
+                continue
+
+            if kind == "data_point" and not self.show_data_points:
+                continue
+
+            if kind == "comms_room" and not self.show_comms_rooms:
+                continue
+
+            if kind in {
+                "location",
+                "distributed_equipment_room",
+                "mer",
+                "main_equipment_room",
+                "polan",
+                "polan_location",
+            } and not self.show_locations:
+                continue
+
             outline = QPen(
                 QColor("#ffffff") if selected else QColor("transparent"), 0.0
             )
@@ -550,21 +628,61 @@ class GpuDxfGraphView(QOpenGLWidget):
     def _draw_screen_label(
         self, painter: QPainter, scene_pos: QPointF, text: str, color: QColor
     ) -> None:
+        """Compatibility wrapper for graph labels, now drawn in world space."""
         if not text or self._scale < 2.5:
             return
+
         screen = QPointF(
             scene_pos.x() * self._scale + self._offset.x(),
             scene_pos.y() * self._scale + self._offset.y(),
         )
-        if not self.rect().adjusted(-80, -80, 80, 80).contains(screen.toPoint()):
+        if not self.rect().adjusted(-120, -120, 120, 120).contains(screen.toPoint()):
             return
+
+        self._draw_world_label(
+            painter,
+            scene_pos,
+            text,
+            color,
+            world_height=0.25,
+            offset=QPointF(0.42, -0.42),
+        )
+
+    @staticmethod
+    def _draw_world_label(
+        painter: QPainter,
+        scene_pos: QPointF,
+        text: str,
+        color: QColor,
+        *,
+        world_height: float,
+        rotation_degrees: float = 0.0,
+        offset: QPointF = QPointF(0.0, 0.0),
+    ) -> None:
+        """
+        Draw text at a fixed model-space size.
+
+        The camera transform remains active, so zooming in makes the text appear
+        larger and zooming out makes it appear smaller. The text origin remains
+        attached to the same world coordinate and therefore does not drift.
+        """
+        if not text:
+            return
+
+        reference_pixels = 32.0
+        local_scale = max(0.001, float(world_height) / reference_pixels)
+
         painter.save()
-        painter.resetTransform()
+        painter.translate(scene_pos + offset)
+        painter.rotate(float(rotation_degrees))
+        painter.scale(local_scale, local_scale)
         painter.setPen(color)
-        font = QFont()
-        font.setPixelSize(11)
+
+        font = QFont("Arial")
+        font.setPixelSize(int(reference_pixels))
+        font.setHintingPreference(QFont.PreferFullHinting)
         painter.setFont(font)
-        painter.drawText(screen + QPointF(6.0, -6.0), text)
+        painter.drawText(QPointF(0.0, 0.0), text)
         painter.restore()
 
     # ------------------------------------------------------------------
