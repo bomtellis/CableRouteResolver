@@ -54,7 +54,9 @@ def _split_ratio_outputs(asset: dict) -> int:
             return max(0, int(ratio.split(":", 1)[1]))
         except ValueError:
             pass
-    return max(0, _int(asset.get("connections_out")), _int(asset.get("number_of_ports")) - 1)
+    return max(
+        0, _int(asset.get("connections_out")), _int(asset.get("number_of_ports")) - 1
+    )
 
 
 def _asset_type(asset: dict) -> str:
@@ -110,7 +112,9 @@ class RoutingGraph:
         self.data = data
         self.points: Dict[str, dict] = {}
         self.graph: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
-        self.floor_height_m = _float(data.get("building", {}).get("floor_height_m"), 4.0)
+        self.floor_height_m = _float(
+            data.get("building", {}).get("floor_height_m"), 4.0
+        )
         self._trees: Dict[str, Tuple[Dict[str, float], Dict[str, str]]] = {}
         self._build()
 
@@ -130,7 +134,9 @@ class RoutingGraph:
     def _build(self) -> None:
         for item in self.data.get("locations", []):
             if isinstance(item, dict):
-                self._add_point(item.get("name"), item, _text(item.get("kind")) or "location")
+                self._add_point(
+                    item.get("name"), item, _text(item.get("kind")) or "location"
+                )
         for item in self.data.get("data_points", []):
             if isinstance(item, dict):
                 self._add_point(item.get("name"), item, "data_point")
@@ -142,12 +148,16 @@ class RoutingGraph:
             if not isinstance(transition, dict):
                 continue
             transition_id = _text(transition.get("id"))
-            for floor_text, coordinates in (transition.get("floor_locations") or {}).items():
+            for floor_text, coordinates in (
+                transition.get("floor_locations") or {}
+            ).items():
                 if not isinstance(coordinates, dict):
                     continue
                 point = dict(coordinates)
                 point["floor"] = _int(floor_text)
-                self._add_point(f"{transition_id}-F{floor_text}", point, "transition_node")
+                self._add_point(
+                    f"{transition_id}-F{floor_text}", point, "transition_node"
+                )
 
         for edge in self.data.get("corridors", {}).get("edges", []):
             if not isinstance(edge, dict):
@@ -175,7 +185,10 @@ class RoutingGraph:
                 for b_name in names[index + 1 :]:
                     a = self.points[a_name]
                     b = self.points[b_name]
-                    weight = abs(_int(a.get("floor")) - _int(b.get("floor"))) * self.floor_height_m
+                    weight = (
+                        abs(_int(a.get("floor")) - _int(b.get("floor")))
+                        * self.floor_height_m
+                    )
                     self.graph[a_name].append((b_name, weight))
                     self.graph[b_name].append((a_name, weight))
 
@@ -251,7 +264,10 @@ def _poe_power_for_asset(asset: dict, settings: dict) -> float:
     for field_name in ("poe_power_w", "poe_w", "poe_load_w"):
         if field_name in asset:
             return max(0.0, _float(asset.get(field_name)))
-    if not bool(asset.get("requires_poe", False)) and _text(asset.get("connection_type")).lower() != "wired":
+    if (
+        not bool(asset.get("requires_poe", False))
+        and _text(asset.get("connection_type")).lower() != "wired"
+    ):
         return 0.0
     name = _text(asset.get("name")).lower()
     configured = settings.get("poe_power_defaults", {})
@@ -262,7 +278,11 @@ def _poe_power_for_asset(asset: dict, settings: dict) -> float:
     for keyword, watts in DEFAULT_POE_BY_KEYWORD.items():
         if keyword in name:
             return watts
-    return max(0.0, _float(settings.get("default_poe_power_w"), 0.0)) if asset.get("requires_poe") else 0.0
+    return (
+        max(0.0, _float(settings.get("default_poe_power_w"), 0.0))
+        if asset.get("requires_poe")
+        else 0.0
+    )
 
 
 def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]:
@@ -300,7 +320,9 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
         name = _text(point.get("name"))
         if not name:
             continue
-        department_ids = [_text(value) for value in point.get("department_ids", []) if _text(value)]
+        department_ids = [
+            _text(value) for value in point.get("department_ids", []) if _text(value)
+        ]
         department_id = department_ids[0] if department_ids else "UNASSIGNED"
         room_type_id = _text(point.get("room_type_id"))
         room_type = room_types.get(room_type_id, {})
@@ -339,7 +361,9 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
             extension_distance_m=max(0.0, _float(point.get("extension_distance_m"))),
             existing_comms_room=existing_sources.get(name, ""),
         )
-        for index, (asset_id, asset_name, poe_w) in enumerate(templates[:target_ports], start=1):
+        for index, (asset_id, asset_name, poe_w) in enumerate(
+            templates[:target_ports], start=1
+        ):
             endpoint.ports.append(
                 PortDemand(
                     endpoint_name=name,
@@ -360,7 +384,8 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
 
     if missing_room_types:
         warnings.append(
-            "Missing room-type definitions for: " + ", ".join(sorted(missing_room_types))
+            "Missing room-type definitions for: "
+            + ", ".join(sorted(missing_room_types))
         )
     return results, warnings
 
@@ -396,12 +421,16 @@ def _minimum_asset_mix(
 
     candidates = [item for item in candidates if _int(item.get("number_of_ports")) > 0]
     if not candidates:
-        raise NetworkPlanningError(f"No usable {label} assets exist in the network asset library.")
+        raise NetworkPlanningError(
+            f"No usable {label} assets exist in the network asset library."
+        )
 
     required_ports = max(0, int(math.ceil(actual_ports * (1.0 + spare_fraction))))
     required_poe = max(0, int(math.ceil(actual_poe_w * (1.0 + spare_fraction))))
     max_ports = max(_int(item.get("number_of_ports")) for item in candidates)
-    max_poe = max(int(math.floor(_float(item.get("poe_budget_w")))) for item in candidates)
+    max_poe = max(
+        int(math.floor(_float(item.get("poe_budget_w")))) for item in candidates
+    )
     if required_poe > 0 and max_poe <= 0:
         raise NetworkPlanningError(f"The available {label} assets have no PoE budget.")
 
@@ -427,21 +456,32 @@ def _minimum_asset_mix(
 
     port_cap = required_ports + max_ports
     poe_cap = required_poe + max_poe
-    frontier: Dict[Tuple[int, int], Tuple[List[int], float, int]] = {(0, 0): ([], 0.0, 0)}
+    frontier: Dict[Tuple[int, int], Tuple[List[int], float, int]] = {
+        (0, 0): ([], 0.0, 0)
+    }
 
     for device_count in range(1, upper + 1):
         generated: Dict[Tuple[int, int], Tuple[List[int], float, int]] = {}
         for (ports, poe), (indices, power, rack) in frontier.items():
             for candidate_index, asset in enumerate(candidates):
                 next_ports = min(port_cap, ports + _int(asset.get("number_of_ports")))
-                next_poe = min(poe_cap, poe + int(math.floor(_float(asset.get("poe_budget_w")))))
+                next_poe = min(
+                    poe_cap, poe + int(math.floor(_float(asset.get("poe_budget_w"))))
+                )
                 next_power = power + _float(asset.get("power_input_w"))
                 next_rack = rack + _int(asset.get("rack_units"))
                 key = (next_ports, next_poe)
                 previous = generated.get(key)
                 score = (next_rack, next_power, indices + [candidate_index])
-                if previous is None or (next_rack, next_power) < (previous[2], previous[1]):
-                    generated[key] = (indices + [candidate_index], next_power, next_rack)
+                if previous is None or (next_rack, next_power) < (
+                    previous[2],
+                    previous[1],
+                ):
+                    generated[key] = (
+                        indices + [candidate_index],
+                        next_power,
+                        next_rack,
+                    )
 
         feasible = [
             (key, value)
@@ -461,7 +501,9 @@ def _minimum_asset_mix(
             return [candidates[index] for index in value[0]]
 
         # Retain only capacity states that are not dominated at this device count.
-        sorted_states = sorted(generated.items(), key=lambda row: (-row[0][0], -row[0][1]))
+        sorted_states = sorted(
+            generated.items(), key=lambda row: (-row[0][0], -row[0][1])
+        )
         pruned: Dict[Tuple[int, int], Tuple[List[int], float, int]] = {}
         best_poe = -1
         for key, value in sorted_states:
@@ -500,7 +542,10 @@ def _pack_ports_to_devices(
         }
         for asset in device_assets
     ]
-    for item in sorted(port_items, key=lambda row: (-row.poe_power_w, row.endpoint_name, row.endpoint_port)):
+    for item in sorted(
+        port_items,
+        key=lambda row: (-row.poe_power_w, row.endpoint_name, row.endpoint_port),
+    ):
         choices = []
         for index, device in enumerate(devices):
             if device["ports"] < 1 or device["poe"] + 1e-9 < item.poe_power_w:
@@ -538,22 +583,34 @@ def _next_identifier(existing: set[str], prefix: str) -> str:
 
 def _clear_previous_auto_design(data: dict) -> None:
     data["network_asset_instances"] = [
-        item for item in data.get("network_asset_instances", []) if not bool(item.get("auto_generated"))
+        item
+        for item in data.get("network_asset_instances", [])
+        if not bool(item.get("auto_generated"))
     ]
     data["network_connections"] = [
-        item for item in data.get("network_connections", []) if not bool(item.get("auto_generated"))
+        item
+        for item in data.get("network_connections", [])
+        if not bool(item.get("auto_generated"))
     ]
     data["network_endpoint_assignments"] = [
-        item for item in data.get("network_endpoint_assignments", []) if not bool(item.get("auto_generated"))
+        item
+        for item in data.get("network_endpoint_assignments", [])
+        if not bool(item.get("auto_generated"))
     ]
     data["network_assets"] = [
-        item for item in data.get("network_assets", []) if not bool(item.get("auto_network_asset"))
+        item
+        for item in data.get("network_assets", [])
+        if not bool(item.get("auto_network_asset"))
     ]
     data["locations"] = [
-        item for item in data.get("locations", []) if not bool(item.get("auto_network_location"))
+        item
+        for item in data.get("locations", [])
+        if not bool(item.get("auto_network_location"))
     ]
     data["network_redundancy_groups"] = [
-        item for item in data.get("network_redundancy_groups", []) if not bool(item.get("auto_generated"))
+        item
+        for item in data.get("network_redundancy_groups", [])
+        if not bool(item.get("auto_generated"))
     ]
 
 
@@ -563,11 +620,31 @@ class DesignBuilder:
         self.technology = technology
         self.settings = data.setdefault("network_settings", {})
         self.graph = RoutingGraph(data)
-        self.asset_ids = {_text(item.get("id")) for item in data.get("network_assets", []) if _text(item.get("id"))}
-        self.instance_ids = {_text(item.get("id")) for item in data.get("network_asset_instances", []) if _text(item.get("id"))}
-        self.connection_ids = {_text(item.get("id")) for item in data.get("network_connections", []) if _text(item.get("id"))}
-        self.assignment_ids = {_text(item.get("id")) for item in data.get("network_endpoint_assignments", []) if _text(item.get("id"))}
-        self.location_names = {_text(item.get("name")) for item in data.get("locations", []) if _text(item.get("name"))}
+        self.asset_ids = {
+            _text(item.get("id"))
+            for item in data.get("network_assets", [])
+            if _text(item.get("id"))
+        }
+        self.instance_ids = {
+            _text(item.get("id"))
+            for item in data.get("network_asset_instances", [])
+            if _text(item.get("id"))
+        }
+        self.connection_ids = {
+            _text(item.get("id"))
+            for item in data.get("network_connections", [])
+            if _text(item.get("id"))
+        }
+        self.assignment_ids = {
+            _text(item.get("id"))
+            for item in data.get("network_endpoint_assignments", [])
+            if _text(item.get("id"))
+        }
+        self.location_names = {
+            _text(item.get("name"))
+            for item in data.get("locations", [])
+            if _text(item.get("name"))
+        }
         self.warnings: List[str] = []
         self.instances: List[dict] = []
         self.connections: List[dict] = []
@@ -577,7 +654,9 @@ class DesignBuilder:
         self.total_copper_m = 0.0
         self.total_fibre_m = 0.0
 
-    def add_instance(self, asset: dict, name: str, location: dict, role: str, **extra) -> dict:
+    def add_instance(
+        self, asset: dict, name: str, location: dict, role: str, **extra
+    ) -> dict:
         instance_id = _next_identifier(self.instance_ids, "AUTO-NI-")
         instance = {
             "id": instance_id,
@@ -613,7 +692,11 @@ class DesignBuilder:
         **extra,
     ) -> dict:
         connection_id = _next_identifier(self.connection_ids, "AUTO-NC-")
-        length_m, route_path = self.graph.route(route_source, route_destination) if route_source and route_destination else (0.0, [])
+        length_m, route_path = (
+            self.graph.route(route_source, route_destination)
+            if route_source and route_destination
+            else (0.0, [])
+        )
         cable_specification = {
             "fibre": "OS2 single-mode fibre",
             "copper": "Category 6A",
@@ -679,7 +762,9 @@ class DesignBuilder:
         self.total_copper_m += max(0.0, copper_length_m)
         return assignment
 
-    def add_polan_location(self, floor: int, x: float, y: float, department_id: str, anchor: str) -> dict:
+    def add_polan_location(
+        self, floor: int, x: float, y: float, department_id: str, anchor: str
+    ) -> dict:
         name = _next_identifier(self.location_names, f"AUTO-POLAN-F{floor}-")
         location = {
             "name": name,
@@ -700,8 +785,12 @@ class DesignBuilder:
         self.data.setdefault("locations", []).extend(self.locations)
         self.data.setdefault("network_asset_instances", []).extend(self.instances)
         self.data.setdefault("network_connections", []).extend(self.connections)
-        self.data.setdefault("network_endpoint_assignments", []).extend(self.assignments)
-        self.data.setdefault("network_redundancy_groups", []).extend(self.redundancy_groups)
+        self.data.setdefault("network_endpoint_assignments", []).extend(
+            self.assignments
+        )
+        self.data.setdefault("network_redundancy_groups", []).extend(
+            self.redundancy_groups
+        )
 
 
 def _locations_by_kind(data: dict, kinds: Iterable[str]) -> List[dict]:
@@ -709,11 +798,17 @@ def _locations_by_kind(data: dict, kinds: Iterable[str]) -> List[dict]:
     return [
         item
         for item in data.get("locations", [])
-        if isinstance(item, dict) and _text(item.get("kind")).lower() in wanted and _text(item.get("name"))
+        if isinstance(item, dict)
+        and _text(item.get("kind")).lower() in wanted
+        and _text(item.get("name"))
     ]
 
 
-def _nearest_location(point: EndpointDemand | dict, locations: Sequence[dict], same_floor_first: bool = True) -> Optional[dict]:
+def _nearest_location(
+    point: EndpointDemand | dict,
+    locations: Sequence[dict],
+    same_floor_first: bool = True,
+) -> Optional[dict]:
     if not locations:
         return None
     floor = _int(point.get("floor")) if isinstance(point, dict) else point.floor
@@ -741,7 +836,9 @@ def _choose_core_candidates(data: dict) -> List[dict]:
 
     def is_access_asset(asset: dict) -> bool:
         name = _text(asset.get("name")).lower()
-        return "access" in name and not any(word in name for word in ("core", "distribution", "aggregation"))
+        return "access" in name and not any(
+            word in name for word in ("core", "distribution", "aggregation")
+        )
 
     candidates = _candidate_assets(
         data,
@@ -749,14 +846,22 @@ def _choose_core_candidates(data: dict) -> List[dict]:
         lambda asset: is_core_asset(asset) and not is_access_asset(asset),
     )
     if not candidates:
-        candidates = _candidate_assets(data, "network_switch", lambda asset: not is_access_asset(asset))
+        candidates = _candidate_assets(
+            data, "network_switch", lambda asset: not is_access_asset(asset)
+        )
     return candidates
 
 
 def _rack_units_for_asset(asset: dict, member_count: int = 1) -> int:
     member_count = max(1, int(member_count or 1))
     if _text(asset.get("asset_type")) == "network_switch":
-        allowance = max(0, _int(asset.get("switch_rack_unit_allowance"), _int(asset.get("rack_units"), 1)))
+        allowance = max(
+            0,
+            _int(
+                asset.get("switch_rack_unit_allowance"),
+                _int(asset.get("rack_units"), 1),
+            ),
+        )
         return max(1, allowance) * member_count
     return max(0, _int(asset.get("rack_units"), 1))
 
@@ -773,7 +878,10 @@ def _assert_generated_capacity(builder: DesignBuilder, spare_fraction: float) ->
         if not instance_id:
             continue
         ports, poe = loads[instance_id]
-        loads[instance_id] = (ports + 1, poe + max(0.0, _float(assignment.get("poe_power_w"))))
+        loads[instance_id] = (
+            ports + 1,
+            poe + max(0.0, _float(assignment.get("poe_power_w"))),
+        )
 
     for instance in builder.instances:
         instance_id = _text(instance.get("id"))
@@ -781,7 +889,11 @@ def _assert_generated_capacity(builder: DesignBuilder, spare_fraction: float) ->
         if role not in {"access_switch", "ont"}:
             continue
         asset = assets_by_id.get(_text(instance.get("asset_id")), {})
-        stack_members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+        stack_members = (
+            max(1, _int(instance.get("stack_member_count"), 1))
+            if bool(instance.get("logical_stack"))
+            else 1
+        )
         port_capacity = max(0, _int(asset.get("number_of_ports"))) * stack_members
         poe_capacity = max(0.0, _float(asset.get("poe_budget_w"))) * stack_members
         used_ports, used_poe = loads.get(instance_id, (0, 0.0))
@@ -808,14 +920,18 @@ def _build_core_layer(
     cores: List[dict] = []
     candidates = _choose_core_candidates(builder.data)
     if not candidates:
-        builder.warnings.append("No core/distribution switch asset was available; uplinks were not terminated at a core.")
+        builder.warnings.append(
+            "No core/distribution switch asset was available; uplinks were not terminated at a core."
+        )
         return cores
 
     for root_name, leaves in leaves_by_root.items():
         if not leaves:
             continue
         root = roots[root_name]
-        mix = _minimum_asset_mix(candidates, len(leaves), 0.0, spare_fraction, "core switch")
+        mix = _minimum_asset_mix(
+            candidates, len(leaves), 0.0, spare_fraction, "core switch"
+        )
         rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
         rack_index = 1
         next_rack_u = 1
@@ -831,7 +947,11 @@ def _build_core_layer(
                     f"AUTO Core {root_name} {index + 1}",
                     root,
                     "core_switch",
-                    rack_name=f"AUTO-RACK-{root_name}" if rack_index == 1 else f"AUTO-RACK-{root_name}-{rack_index}",
+                    rack_name=(
+                        f"AUTO-RACK-{root_name}"
+                        if rack_index == 1
+                        else f"AUTO-RACK-{root_name}-{rack_index}"
+                    ),
                     rack_start_u=next_rack_u,
                     rack_size_u=rack_size_u,
                 )
@@ -846,8 +966,12 @@ def _build_core_layer(
                 core_index += 1
                 core_port = 1
             if core_index >= len(core_instances):
-                raise NetworkPlanningError("Core switch port allocation exceeded the selected capacity.")
-            leaf_location = _text(leaf.get("route_anchor")) or _text(leaf.get("location_name"))
+                raise NetworkPlanningError(
+                    "Core switch port allocation exceeded the selected capacity."
+                )
+            leaf_location = _text(leaf.get("route_anchor")) or _text(
+                leaf.get("location_name")
+            )
             builder.add_connection(
                 leaf,
                 f"Uplink-{_int(leaf.get('_uplinks_used'), 0) + 1}",
@@ -865,12 +989,18 @@ def _build_core_layer(
     return cores
 
 
-def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], spare_fraction: float) -> None:
+def _traditional_design(
+    builder: DesignBuilder, endpoints: Sequence[EndpointDemand], spare_fraction: float
+) -> None:
     comms_rooms = _locations_by_kind(builder.data, {"comms_room"})
     if not comms_rooms:
-        raise NetworkPlanningError("Traditional network planning requires at least one comms_room location.")
+        raise NetworkPlanningError(
+            "Traditional network planning requires at least one comms_room location."
+        )
     room_map = {_text(item.get("name")): item for item in comms_rooms}
-    max_copper_m = max(1.0, _float(builder.settings.get("traditional_max_copper_m"), 90.0))
+    max_copper_m = max(
+        1.0, _float(builder.settings.get("traditional_max_copper_m"), 90.0)
+    )
 
     # Keep each department/floor together by choosing its dominant established comms-room route.
     grouped: Dict[Tuple[str, int], List[EndpointDemand]] = defaultdict(list)
@@ -889,14 +1019,18 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
         else:
             centre = {
                 "floor": group[0].floor,
-                "x": sum(item.x * item.port_count for item in group) / max(1, sum(item.port_count for item in group)),
-                "y": sum(item.y * item.port_count for item in group) / max(1, sum(item.port_count for item in group)),
+                "x": sum(item.x * item.port_count for item in group)
+                / max(1, sum(item.port_count for item in group)),
+                "y": sum(item.y * item.port_count for item in group)
+                / max(1, sum(item.port_count for item in group)),
             }
             dominant = _nearest_location(centre, comms_rooms)
         for endpoint in group:
             selected = dominant
             if selected is not None:
-                route_length, _ = builder.graph.route(_text(selected.get("name")), endpoint.name)
+                route_length, _ = builder.graph.route(
+                    _text(selected.get("name")), endpoint.name
+                )
                 route_length += endpoint.extension_distance_m
                 if route_length > max_copper_m:
                     own = room_map.get(endpoint.existing_comms_room)
@@ -904,12 +1038,16 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
                         own = _nearest_location(endpoint, comms_rooms)
                     selected = own
             if selected is None:
-                raise NetworkPlanningError(f"No comms room could be selected for {endpoint.name}.")
+                raise NetworkPlanningError(
+                    f"No comms room could be selected for {endpoint.name}."
+                )
             endpoint_room[endpoint.name] = selected
 
     room_ports: Dict[str, List[PortDemand]] = defaultdict(list)
     for endpoint in endpoints:
-        room_ports[_text(endpoint_room[endpoint.name].get("name"))].extend(endpoint.ports)
+        room_ports[_text(endpoint_room[endpoint.name].get("name"))].extend(
+            endpoint.ports
+        )
 
     switch_candidates = _candidate_assets(
         builder.data,
@@ -922,7 +1060,9 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
         ),
     )
     if not switch_candidates:
-        raise NetworkPlanningError("No copper-output network switch assets are available for Traditional design.")
+        raise NetworkPlanningError(
+            "No copper-output network switch assets are available for Traditional design."
+        )
 
     access_switches: List[dict] = []
     for room_name in sorted(room_ports):
@@ -944,7 +1084,11 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
         index = 0
         while index < len(mix):
             asset = mix[index]
-            max_stack_members = max(1, _int(asset.get("max_stack_members"), 1)) if bool(asset.get("supports_stacking")) else 1
+            max_stack_members = (
+                max(1, _int(asset.get("max_stack_members"), 1))
+                if bool(asset.get("supports_stacking"))
+                else 1
+            )
             group_end = index + 1
             while (
                 group_end < len(mix)
@@ -966,7 +1110,11 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
                 instance_name,
                 room,
                 "access_switch",
-                rack_name=f"AUTO-RACK-{room_name}" if rack_index == 1 else f"AUTO-RACK-{room_name}-{rack_index}",
+                rack_name=(
+                    f"AUTO-RACK-{room_name}"
+                    if rack_index == 1
+                    else f"AUTO-RACK-{room_name}-{rack_index}"
+                ),
                 rack_start_u=next_rack_u,
                 rack_size_u=rack_size_u,
                 route_anchor=room_name,
@@ -976,7 +1124,9 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
                 stack_max_members=max_stack_members if is_stack else 1,
                 stack_interconnect_count=max(0, member_count - 1) if is_stack else 0,
                 stack_interconnect_medium="stacking",
-                stack_interconnect_specification="Cisco StackWise stacking cables" if is_stack else "",
+                stack_interconnect_specification=(
+                    "Cisco StackWise stacking cables" if is_stack else ""
+                ),
             )
             rack_u = _rack_units_for_asset(asset, member_count)
             if next_rack_u + rack_u - 1 > rack_size_u and next_rack_u > 1:
@@ -992,7 +1142,11 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
                     builder.add_assignment(
                         item,
                         instance,
-                        f"{member_offset}/{port_number}" if is_stack else str(port_number),
+                        (
+                            f"{member_offset}/{port_number}"
+                            if is_stack
+                            else str(port_number)
+                        ),
                         length_m,
                         path,
                         source_location=room_name,
@@ -1008,17 +1162,27 @@ def _traditional_design(builder: DesignBuilder, endpoints: Sequence[EndpointDema
     mer_locations = _locations_by_kind(builder.data, {"mer"})
     if not mer_locations:
         mer_locations = [comms_rooms[0]]
-        builder.warnings.append("No MER exists; the first comms room was used as the network root.")
+        builder.warnings.append(
+            "No MER exists; the first comms room was used as the network root."
+        )
     redundant = bool(builder.settings.get("redundant_core", True))
-    roots_list = mer_locations[:2] if redundant and len(mer_locations) >= 2 else mer_locations[:1]
+    roots_list = (
+        mer_locations[:2]
+        if redundant and len(mer_locations) >= 2
+        else mer_locations[:1]
+    )
     roots = {_text(item.get("name")): item for item in roots_list}
     leaves_by_root = {name: list(access_switches) for name in roots}
     if redundant and len(roots) < 2:
-        builder.warnings.append("Only one MER is available, so access-switch core uplinks are not room-diverse.")
+        builder.warnings.append(
+            "Only one MER is available, so access-switch core uplinks are not room-diverse."
+        )
     _build_core_layer(builder, leaves_by_root, roots, spare_fraction)
 
 
-def _fits_any_ont(candidates: Sequence[dict], ports: int, poe_w: float, spare_fraction: float) -> bool:
+def _fits_any_ont(
+    candidates: Sequence[dict], ports: int, poe_w: float, spare_fraction: float
+) -> bool:
     required_ports = int(math.ceil(ports * (1.0 + spare_fraction)))
     required_poe = poe_w * (1.0 + spare_fraction)
     return any(
@@ -1028,17 +1192,22 @@ def _fits_any_ont(candidates: Sequence[dict], ports: int, poe_w: float, spare_fr
     )
 
 
-def _choose_single_ont(candidates: Sequence[dict], items: Sequence[PortDemand], spare_fraction: float) -> dict:
+def _choose_single_ont(
+    candidates: Sequence[dict], items: Sequence[PortDemand], spare_fraction: float
+) -> dict:
     ports = len(items)
     poe = sum(item.poe_power_w for item in items)
     feasible = [
         asset
         for asset in candidates
-        if _int(asset.get("number_of_ports")) >= math.ceil(ports * (1.0 + spare_fraction))
+        if _int(asset.get("number_of_ports"))
+        >= math.ceil(ports * (1.0 + spare_fraction))
         and _float(asset.get("poe_budget_w")) + 1e-9 >= poe * (1.0 + spare_fraction)
     ]
     if not feasible:
-        raise NetworkPlanningError(f"No ONT can support a cluster of {ports} ports and {poe:.1f} W PoE.")
+        raise NetworkPlanningError(
+            f"No ONT can support a cluster of {ports} ports and {poe:.1f} W PoE."
+        )
     return min(
         feasible,
         key=lambda asset: (
@@ -1062,20 +1231,26 @@ def _cluster_polan_ports(
         # The existing comms-room route is used as a graph branch.  This avoids
         # clustering ports that are physically close in XY but separated by
         # walls or by different established cable-routing branches.
-        groups[(endpoint.department_id, endpoint.floor, endpoint.existing_comms_room)].append(endpoint)
+        groups[
+            (endpoint.department_id, endpoint.floor, endpoint.existing_comms_room)
+        ].append(endpoint)
 
     clusters: List[Tuple[dict, List[PortDemand], EndpointDemand]] = []
     for group_key in sorted(groups, key=lambda value: (value[1], value[0], value[2])):
         points = groups[group_key]
         remaining: Dict[str, deque[PortDemand]] = {
-            point.name: deque(sorted(point.ports, key=lambda item: -item.poe_power_w)) for point in points
+            point.name: deque(sorted(point.ports, key=lambda item: -item.poe_power_w))
+            for point in points
         }
         point_map = {point.name: point for point in points}
 
         while any(remaining.values()):
             seed_name = max(
                 (name for name, queue in remaining.items() if queue),
-                key=lambda name: (len(remaining[name]), sum(item.poe_power_w for item in remaining[name])),
+                key=lambda name: (
+                    len(remaining[name]),
+                    sum(item.poe_power_w for item in remaining[name]),
+                ),
             )
             seed = point_map[seed_name]
             candidates = sorted(
@@ -1095,8 +1270,12 @@ def _cluster_polan_ports(
                 while queue:
                     item = queue[0]
                     next_ports = len(cluster_items) + 1
-                    next_poe = sum(row.poe_power_w for row in cluster_items) + item.poe_power_w
-                    if not _fits_any_ont(ont_candidates, next_ports, next_poe, spare_fraction):
+                    next_poe = (
+                        sum(row.poe_power_w for row in cluster_items) + item.poe_power_w
+                    )
+                    if not _fits_any_ont(
+                        ont_candidates, next_ports, next_poe, spare_fraction
+                    ):
                         break
                     cluster_items.append(queue.popleft())
                     took_any = True
@@ -1119,11 +1298,15 @@ def _cluster_polan_ports(
             medoid = min(
                 represented,
                 key=lambda candidate: sum(
-                    counts[other.name] * math.hypot(candidate.x - other.x, candidate.y - other.y)
+                    counts[other.name]
+                    * math.hypot(candidate.x - other.x, candidate.y - other.y)
                     for other in represented
                 ),
             )
-            if any(math.hypot(medoid.x - other.x, medoid.y - other.y) > max_copper_m for other in represented):
+            if any(
+                math.hypot(medoid.x - other.x, medoid.y - other.y) > max_copper_m
+                for other in represented
+            ):
                 medoid = seed
             asset = _choose_single_ont(ont_candidates, cluster_items, spare_fraction)
             clusters.append((asset, cluster_items, medoid))
@@ -1150,8 +1333,12 @@ def _protected_splitter_asset(builder: DesignBuilder, base_asset: dict) -> dict:
     return asset
 
 
-def _polan_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], spare_fraction: float) -> None:
-    max_copper_m = max(1.0, _float(builder.settings.get("polan_max_ont_copper_m"), 30.0))
+def _polan_design(
+    builder: DesignBuilder, endpoints: Sequence[EndpointDemand], spare_fraction: float
+) -> None:
+    max_copper_m = max(
+        1.0, _float(builder.settings.get("polan_max_ont_copper_m"), 30.0)
+    )
     ont_candidates = _candidate_assets(
         builder.data,
         "optical_network_terminal",
@@ -1159,9 +1346,13 @@ def _polan_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], s
         and _text(asset.get("output_connection_type")).lower() == "copper",
     )
     if not ont_candidates:
-        raise NetworkPlanningError("No copper-output ONT assets exist in the network asset library.")
+        raise NetworkPlanningError(
+            "No copper-output ONT assets exist in the network asset library."
+        )
 
-    clusters = _cluster_polan_ports(endpoints, ont_candidates, spare_fraction, max_copper_m)
+    clusters = _cluster_polan_ports(
+        endpoints, ont_candidates, spare_fraction, max_copper_m
+    )
     ont_records: List[dict] = []
     endpoint_lookup = {item.name: item for item in endpoints}
 
@@ -1185,7 +1376,10 @@ def _polan_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], s
         source_counts: Dict[str, int] = defaultdict(int)
         for port_number, item in enumerate(port_items, start=1):
             endpoint = endpoint_lookup[item.endpoint_name]
-            copper = math.hypot(endpoint.x - medoid.x, endpoint.y - medoid.y) + item.extension_distance_m
+            copper = (
+                math.hypot(endpoint.x - medoid.x, endpoint.y - medoid.y)
+                + item.extension_distance_m
+            )
             if copper > max_copper_m + item.extension_distance_m + 1e-9:
                 raise NetworkPlanningError(
                     f"ONT placement for {item.endpoint_name} exceeds {max_copper_m:.1f} m local copper limit."
@@ -1207,17 +1401,24 @@ def _polan_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], s
                 "anchor": medoid.name,
                 "department_id": medoid.department_id,
                 "floor": medoid.floor,
-                "source_room": max(source_counts, key=source_counts.get) if source_counts else "",
+                "source_room": (
+                    max(source_counts, key=source_counts.get) if source_counts else ""
+                ),
             }
         )
 
     olt_candidates = _candidate_assets(
         builder.data,
         "optical_line_terminal",
-        lambda asset: max(_int(asset.get("connections_out")), _int(asset.get("number_of_ports"))) > 0,
+        lambda asset: max(
+            _int(asset.get("connections_out")), _int(asset.get("number_of_ports"))
+        )
+        > 0,
     )
     if not olt_candidates:
-        raise NetworkPlanningError("No OLT with a defined PON-port count exists in the network asset library.")
+        raise NetworkPlanningError(
+            "No OLT with a defined PON-port count exists in the network asset library."
+        )
     olt_max_split = max(_split_ratio_outputs(asset) for asset in olt_candidates)
     splitter_candidates = _candidate_assets(
         builder.data,
@@ -1225,12 +1426,25 @@ def _polan_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], s
         lambda asset: 0 < _split_ratio_outputs(asset) <= max(1, olt_max_split),
     )
     if not splitter_candidates:
-        raise NetworkPlanningError("No fibre splitter compatible with the available OLT split ratio exists.")
+        raise NetworkPlanningError(
+            "No fibre splitter compatible with the available OLT split ratio exists."
+        )
 
     largest_splitter = max(splitter_candidates, key=_split_ratio_outputs)
-    splitter_capacity = max(1, int(math.floor(_split_ratio_outputs(largest_splitter) / (1.0 + spare_fraction))))
+    splitter_capacity = max(
+        1,
+        int(
+            math.floor(_split_ratio_outputs(largest_splitter) / (1.0 + spare_fraction))
+        ),
+    )
     failover = bool(builder.settings.get("polan_olt_failover", True))
-    comms_and_polan = _locations_by_kind(builder.data, {"comms_room", "polan"})
+
+    # PoLAN splitters are passive distribution devices and must not be placed in
+    # conventional comms rooms.  MER locations remain the OLT/core roots only.
+    # Existing PoLAN locations can host splitters; where no suitable PoLAN
+    # location exists on the floor, create an auto-generated PoLAN distribution
+    # location near the ONT group.
+    polan_distribution_locations = _locations_by_kind(builder.data, {"polan"})
 
     splitter_records: List[dict] = []
     onts_by_floor: Dict[int, List[dict]] = defaultdict(list)
@@ -1240,34 +1454,59 @@ def _polan_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], s
     for floor in sorted(onts_by_floor):
         records = sorted(
             onts_by_floor[floor],
-            key=lambda row: (row["department_id"], _float(row["location"].get("x")), _float(row["location"].get("y"))),
+            key=lambda row: (
+                row["department_id"],
+                _float(row["location"].get("x")),
+                _float(row["location"].get("y")),
+            ),
         )
         for start in range(0, len(records), splitter_capacity):
             group = records[start : start + splitter_capacity]
             required_outputs = int(math.ceil(len(group) * (1.0 + spare_fraction)))
             base_asset = min(
-                (asset for asset in splitter_candidates if _split_ratio_outputs(asset) >= required_outputs),
+                (
+                    asset
+                    for asset in splitter_candidates
+                    if _split_ratio_outputs(asset) >= required_outputs
+                ),
                 key=_split_ratio_outputs,
                 default=largest_splitter,
             )
-            asset = _protected_splitter_asset(builder, base_asset) if failover else base_asset
-            same_floor_locations = [item for item in comms_and_polan if _int(item.get("floor")) == floor]
+            asset = (
+                _protected_splitter_asset(builder, base_asset)
+                if failover
+                else base_asset
+            )
+            same_floor_locations = [
+                item
+                for item in polan_distribution_locations
+                if _int(item.get("floor")) == floor
+            ]
             if same_floor_locations:
                 location = min(
                     same_floor_locations,
                     key=lambda candidate: sum(
                         math.hypot(
-                            _float(candidate.get("x")) - _float(row["location"].get("x")),
-                            _float(candidate.get("y")) - _float(row["location"].get("y")),
+                            _float(candidate.get("x"))
+                            - _float(row["location"].get("x")),
+                            _float(candidate.get("y"))
+                            - _float(row["location"].get("y")),
                         )
                         for row in group
                     ),
                 )
                 anchor = _text(location.get("name"))
             else:
-                centre_x = sum(_float(row["location"].get("x")) for row in group) / len(group)
-                centre_y = sum(_float(row["location"].get("y")) for row in group) / len(group)
-                location = builder.add_polan_location(floor, centre_x, centre_y, "", group[0]["anchor"])
+                centre_x = sum(_float(row["location"].get("x")) for row in group) / len(
+                    group
+                )
+                centre_y = sum(_float(row["location"].get("y")) for row in group) / len(
+                    group
+                )
+                location = builder.add_polan_location(
+                    floor, centre_x, centre_y, "", group[0]["anchor"]
+                )
+                polan_distribution_locations.append(location)
                 anchor = group[0]["anchor"]
             splitter = builder.add_instance(
                 asset,
@@ -1301,27 +1540,32 @@ def _polan_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], s
 
     mer_locations = _locations_by_kind(builder.data, {"mer"})
     if not mer_locations:
-        fallback = _locations_by_kind(builder.data, {"comms_room"})
-        if not fallback:
-            raise NetworkPlanningError("PoLAN planning requires a MER or comms room for OLT placement.")
-        mer_locations = [fallback[0]]
-        builder.warnings.append("No MER exists; the first comms room was used for OLT placement.")
+        raise NetworkPlanningError(
+            "PoLAN planning requires at least one MER for OLT placement."
+        )
     primary_root = mer_locations[0]
     secondary_root = mer_locations[1] if len(mer_locations) > 1 else mer_locations[0]
     if failover and len(mer_locations) < 2:
-        builder.warnings.append("Only one MER exists; primary and standby OLTs are equipment-redundant but not room-diverse.")
+        builder.warnings.append(
+            "Only one MER exists; primary and standby OLTs are equipment-redundant but not room-diverse."
+        )
 
     required_pon_ports = len(splitter_records)
     eligible_olts = [
         asset
         for asset in olt_candidates
-        if _split_ratio_outputs(asset) >= max(record["split_capacity"] for record in splitter_records)
+        if _split_ratio_outputs(asset)
+        >= max(record["split_capacity"] for record in splitter_records)
     ]
     if not eligible_olts:
-        raise NetworkPlanningError("The selected splitter ratio exceeds every available OLT capability.")
+        raise NetworkPlanningError(
+            "The selected splitter ratio exceeds every available OLT capability."
+        )
 
     def build_olt_side(side: str, root: dict) -> List[dict]:
-        mix = _minimum_asset_mix(eligible_olts, required_pon_ports, 0.0, spare_fraction, f"{side} OLT")
+        mix = _minimum_asset_mix(
+            eligible_olts, required_pon_ports, 0.0, spare_fraction, f"{side} OLT"
+        )
         instances = [
             builder.add_instance(
                 asset,
@@ -1343,11 +1587,16 @@ def _polan_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], s
         instance_index = 0
         port_number = 1
         for splitter_index, splitter_record in enumerate(splitter_records, start=1):
-            while instance_index < len(capacities) and port_number > capacities[instance_index]:
+            while (
+                instance_index < len(capacities)
+                and port_number > capacities[instance_index]
+            ):
                 instance_index += 1
                 port_number = 1
             if instance_index >= len(instances):
-                raise NetworkPlanningError("OLT PON-port allocation exceeded selected capacity.")
+                raise NetworkPlanningError(
+                    "OLT PON-port allocation exceeded selected capacity."
+                )
             input_name = "Input-A" if side == "Primary" else "Input-B"
             protection_group = f"AUTO-PG-{splitter_index}"
             builder.add_connection(
@@ -1369,8 +1618,12 @@ def _polan_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], s
                     {
                         "id": protection_group,
                         "technology": "PoLAN",
-                        "protected_instance_id": _text(splitter_record["instance"].get("id")),
-                        "primary_olt_instance_id": _text(instances[instance_index].get("id")),
+                        "protected_instance_id": _text(
+                            splitter_record["instance"].get("id")
+                        ),
+                        "primary_olt_instance_id": _text(
+                            instances[instance_index].get("id")
+                        ),
                         "secondary_olt_instance_id": "",
                         "protection_type": "Type B / dual-fed protected splitter",
                         "auto_generated": True,
@@ -1379,7 +1632,9 @@ def _polan_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], s
             else:
                 for group in builder.redundancy_groups:
                     if _text(group.get("id")) == protection_group:
-                        group["secondary_olt_instance_id"] = _text(instances[instance_index].get("id"))
+                        group["secondary_olt_instance_id"] = _text(
+                            instances[instance_index].get("id")
+                        )
                         break
             port_number += 1
         return instances
@@ -1391,7 +1646,9 @@ def _polan_design(builder: DesignBuilder, endpoints: Sequence[EndpointDemand], s
     leaves_by_root = {_text(primary_root.get("name")): primary_olts}
     if secondary_olts:
         roots[_text(secondary_root.get("name"))] = secondary_root
-        leaves_by_root.setdefault(_text(secondary_root.get("name")), []).extend(secondary_olts)
+        leaves_by_root.setdefault(_text(secondary_root.get("name")), []).extend(
+            secondary_olts
+        )
     _build_core_layer(builder, leaves_by_root, roots, spare_fraction)
 
 
@@ -1416,11 +1673,15 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
     settings.setdefault("traditional_max_copper_m", 90.0)
     settings.setdefault("polan_max_ont_copper_m", 30.0)
     settings.setdefault("polan_olt_failover", True)
-    spare_fraction = max(0.0, _float(settings.get("spare_capacity_percent"), 15.0)) / 100.0
+    spare_fraction = (
+        max(0.0, _float(settings.get("spare_capacity_percent"), 15.0)) / 100.0
+    )
 
     endpoints, warnings = build_endpoint_demands(data)
     if not endpoints:
-        raise NetworkPlanningError("No data-point port demand was found in the project.")
+        raise NetworkPlanningError(
+            "No data-point port demand was found in the project."
+        )
 
     builder = DesignBuilder(data, technology_value)
     builder.warnings.extend(warnings)
@@ -1438,13 +1699,21 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
     }
     installed_ports = sum(
         _int(assets_by_id.get(_text(item.get("asset_id")), {}).get("number_of_ports"))
-        * (max(1, _int(item.get("stack_member_count"), 1)) if bool(item.get("logical_stack")) else 1)
+        * (
+            max(1, _int(item.get("stack_member_count"), 1))
+            if bool(item.get("logical_stack"))
+            else 1
+        )
         for item in builder.instances
         if _text(item.get("design_role")) in {"access_switch", "ont"}
     )
     installed_poe = sum(
         _float(assets_by_id.get(_text(item.get("asset_id")), {}).get("poe_budget_w"))
-        * (max(1, _int(item.get("stack_member_count"), 1)) if bool(item.get("logical_stack")) else 1)
+        * (
+            max(1, _int(item.get("stack_member_count"), 1))
+            if bool(item.get("logical_stack"))
+            else 1
+        )
         for item in builder.instances
         if _text(item.get("design_role")) in {"access_switch", "ont"}
     )
@@ -1470,7 +1739,11 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         "estimated_copper_length_m": round(builder.total_copper_m, 3),
         "estimated_fibre_length_m": round(builder.total_fibre_m, 3),
         "polan_max_ont_copper_m": _float(settings.get("polan_max_ont_copper_m"), 30.0),
-        "olt_failover_enabled": bool(settings.get("polan_olt_failover", True)) if technology_value == "PoLAN" else False,
+        "olt_failover_enabled": (
+            bool(settings.get("polan_olt_failover", True))
+            if technology_value == "PoLAN"
+            else False
+        ),
         "warnings": builder.warnings,
     }
     data["network_design_summary"] = summary
