@@ -84,6 +84,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from dxf_scene import DXFScene
+from dxf_gpu_renderer import GpuDxfGraphView
+
 from dialogs import (
     BulkDataPointPlacementDialog,
     BulkLocationPlacementDialog,
@@ -627,7 +629,8 @@ class CableRouteEditor(QMainWindow):
         self.refresh_canvas()
 
     def _invalidate_static_scene_cache(self):
-        self._static_scene_key = None
+        if hasattr(self, "canvas") and hasattr(self.canvas, "invalidate_dxf_cache"):
+            self.canvas.invalidate_dxf_cache()
 
     def _selected_visible_drag_names(self):
         floor = self.floor_spin.value()
@@ -724,7 +727,8 @@ class CableRouteEditor(QMainWindow):
         self.selected_template_names.clear()
         self.selected_for_edge = None
         self.edge_delete_start = None
-        self._invalidate_static_scene_cache()
+        if hasattr(self.canvas, "invalidate_dxf_cache"):
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
         self.set_status(f"Undid: {state.get('label', 'Change')}")
 
@@ -746,7 +750,8 @@ class CableRouteEditor(QMainWindow):
         self.selected_template_names.clear()
         self.selected_for_edge = None
         self.edge_delete_start = None
-        self._invalidate_static_scene_cache()
+        if hasattr(self.canvas, "invalidate_dxf_cache"):
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
         self.set_status("Redid change")
 
@@ -909,11 +914,14 @@ class CableRouteEditor(QMainWindow):
         self._build_ribbon(main_layout)
         self._build_menu_bar()
 
-        self.scene = QGraphicsScene(self)
-        self.canvas = EditorGraphicsView(self)
-        self.canvas.setScene(self.scene)
-        # self.canvas.set_overlay_provider(self.draw_overlay_panels)
-        self._rubber_band = QRubberBand(QRubberBand.Rectangle, self.canvas.viewport())
+        self.scene = None
+
+        self.canvas = GpuDxfGraphView(self)
+        self.canvas.set_store(self.store)
+        self.canvas.set_dxf_scene(self.dxf_scene)
+        self.canvas.set_overlay_provider(self.draw_overlay_panels)
+
+        self._rubber_band = QRubberBand(QRubberBand.Rectangle, self.canvas)
         main_layout.addWidget(self.canvas, 1)
 
         self._build_rhs_search_sidebar()
@@ -1073,10 +1081,10 @@ class CableRouteEditor(QMainWindow):
         self._set_canvas_multi_selection([name], append=False)
         self.refresh_canvas()
 
-        scene_pos = self.world_to_scene(point["x"], point["y"])
-        self.canvas.centerOn(scene_pos)
+        self.canvas.fit_to_rect(QRectF(point["x"] - 10, -point["y"] - 10, 20, 20), Qt.KeepAspectRatio)
 
-        self._invalidate_static_scene_cache()
+        if hasattr(self.canvas, "invalidate_dxf_cache"):
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
 
         self.set_status(f"Centred on {name}")
@@ -1096,7 +1104,8 @@ class CableRouteEditor(QMainWindow):
             scene_pos = self.world_to_scene(item.get("x", 0.0), item.get("y", 0.0))
             self.canvas.centerOn(scene_pos)
 
-            self._invalidate_static_scene_cache()
+            if hasattr(self.canvas, "invalidate_dxf_cache"):
+                self.canvas.invalidate_dxf_cache()
             self.refresh_canvas()
 
             self.set_status(f"Centred on department {department_id}")
@@ -1128,7 +1137,8 @@ class CableRouteEditor(QMainWindow):
             scene_pos = self.world_to_scene(pos.get("x", 0.0), pos.get("y", 0.0))
             self.canvas.centerOn(scene_pos)
 
-            self._invalidate_static_scene_cache()
+            if hasattr(self.canvas, "invalidate_dxf_cache"):
+                self.canvas.invalidate_dxf_cache()
             self.refresh_canvas()
 
             self.set_status(f"Centred on transition {transition_id}")
@@ -1853,7 +1863,8 @@ class CableRouteEditor(QMainWindow):
 
         self.selected_point_name = None
         self._clear_canvas_multi_selection()
-        self._invalidate_static_scene_cache()
+        if hasattr(self.canvas, "invalidate_dxf_cache"):
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
         self.set_status(f"Deleted {deleted} item(s)")
 
@@ -2031,7 +2042,8 @@ class CableRouteEditor(QMainWindow):
 
         self.selected_point_name = None
         self._set_canvas_multi_selection(created_names, append=False)
-        self._invalidate_static_scene_cache()
+        if hasattr(self.canvas, "invalidate_dxf_cache"):
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
 
         self.set_status(
@@ -2183,8 +2195,7 @@ class CableRouteEditor(QMainWindow):
         self._set_canvas_multi_selection([name], append=False)
         self.refresh_canvas()
 
-        scene_pos = self.world_to_scene(point["x"], point["y"])
-        self.canvas.centerOn(scene_pos)
+        self.canvas.fit_to_rect(QRectF(point["x"] - 10, -point["y"] - 10, 20, 20), Qt.KeepAspectRatio)
 
         status = (
             f"{self._find_dp_index + 1} / {len(self._find_dp_matches)}\n"
@@ -2286,7 +2297,8 @@ class CableRouteEditor(QMainWindow):
 
     def on_floor_changed(self, *_):
         self._clear_canvas_multi_selection()
-        self._invalidate_static_scene_cache()
+        if hasattr(self.canvas, "invalidate_dxf_cache"):
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
         self._queue_all_floor_dxf_loads(
             active_floor=self.floor_spin.value(), force_reload=False
@@ -2496,7 +2508,8 @@ class CableRouteEditor(QMainWindow):
         self._dxf_cache[floor] = {"path": path, "entities": entities, "bounds": bounds}
         if floor == self.floor_spin.value():
             self._set_active_dxf_floor(floor)
-            self._invalidate_static_scene_cache()
+            if hasattr(self.canvas, "invalidate_dxf_cache"):
+                self.canvas.invalidate_dxf_cache()
             self.refresh_canvas()
             if self._pending_fit_after_load:
                 self._pending_fit_after_load = False
@@ -2571,19 +2584,15 @@ class CableRouteEditor(QMainWindow):
         floor = self.floor_spin.value()
         ready = self.ensure_floor_dxf_loaded(floor)
         rect = self._scene_rect_for_floor(floor, padding=8.0)
+
         if rect is None and not ready and self.get_floor_dxf_path(floor):
             self._pending_fit_after_load = True
             return
-        if (
-            rect is not None
-            and not rect.isNull()
-            and rect.width() > 0
-            and rect.height() > 0
-        ):
+
+        if rect is not None and not rect.isNull():
             self.canvas.resetTransform()
             self.canvas.fitInView(rect, Qt.KeepAspectRatio)
-            self.scene.setSceneRect(rect.adjusted(-40, -40, 40, 40))
-            self.canvas.viewport().update()
+
         self.refresh_canvas()
 
     def _clear_canvas_multi_selection(self):
@@ -2754,38 +2763,32 @@ class CableRouteEditor(QMainWindow):
 
     def refresh_canvas(self):
         self._unconnected_cache = self._unconnected_data_point_names()
-        self._scene_label_positions = []
-
-        self._item_lookup = {}
-        self._point_item_lookup = {}
 
         floor = self.floor_spin.value()
         self.ensure_floor_dxf_loaded(floor)
 
-        self.scene.setBackgroundBrush(QBrush(QColor("#111111")))
-
-        rect = self._scene_rect_for_floor(floor, padding=8.0)
-        if rect is not None:
-            self.scene.setSceneRect(rect.adjusted(-40, -40, 40, 40))
-
-        visible_rect = self._current_visible_scene_rect()
-
-        self._ensure_static_scene_items(floor, visible_rect)
-
-        dynamic_items = [
-            item
-            for item in self.scene.items()
-            if item not in getattr(self, "_static_scene_items", [])
-        ]
-
-        for item in dynamic_items:
-            self.scene.removeItem(item)
-
-        self.draw_departments(floor, visible_rect)
-        self.draw_points(floor, visible_rect)
+        self.canvas.set_store(self.store)
+        self.canvas.set_dxf_scene(self.dxf_scene)
+        self.canvas.set_floor(floor)
+        self.canvas.set_visible_layers(
+            show_dxf=self.show_dxf_check.isChecked(),
+            show_labels=self.show_labels_check.isChecked(),
+            show_graph=True,
+            show_overlay=True,
+            show_edges=self.show_edges_check.isChecked(),
+            show_nodes=self.show_nodes_check.isChecked(),
+            show_data_points=self.show_data_points_check.isChecked(),
+            show_locations=self.show_locations_check.isChecked(),
+            show_comms_rooms=self.show_comms_rooms_check.isChecked(),
+        )
+        self.canvas.set_selection(
+            self.selected_point_name,
+            self.selected_template_names,
+            self.selected_for_edge,
+        )
 
         self.file_label.setText(self.current_json_path or "New file")
-        self.canvas.viewport().update()
+        self.canvas.update()
 
     def draw_edges(self, floor, visible_rect=None):
         if not self.show_edges_check.isChecked():
@@ -4326,7 +4329,8 @@ class CableRouteEditor(QMainWindow):
             self.loaded_dxf_floor = None
         self._pending_fit_after_load = True
         self._queue_all_floor_dxf_loads(active_floor=floor, force_reload=True)
-        self._invalidate_static_scene_cache()
+        if hasattr(self.canvas, "invalidate_dxf_cache"):
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
         self.set_status(f"Mapped DXF {Path(path).name} to floor {floor}")
 
@@ -4351,7 +4355,8 @@ class CableRouteEditor(QMainWindow):
             self.current_dxf_path = None
             self.loaded_dxf_floor = None
         self.set_status(f"Removed DXF mapping from floor {floor}")
-        self._invalidate_static_scene_cache()
+        if hasattr(self.canvas, "invalidate_dxf_cache"):
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
 
     def validate_json(self):
@@ -4944,7 +4949,7 @@ class CableRouteEditor(QMainWindow):
     def on_left_click(self, event, sx, sy):
         mode = self.mode_combo.currentText()
         floor = self.floor_spin.value()
-        x, y = self.scene_to_world(sx, sy)
+        x, y = sx, sy
         x, y = self.snap(x, y)
 
         if mode == "pan":
@@ -5280,7 +5285,8 @@ class CableRouteEditor(QMainWindow):
             if self.bidirectional_check.isChecked():
                 self.store.add_edge(end_name, start_name)
 
-            self._invalidate_static_scene_cache()
+            if hasattr(self.canvas, "invalidate_dxf_cache"):
+                self.canvas.invalidate_dxf_cache()
             self.selected_point_name = end_name
 
             if self.chain_edges_check.isChecked():
@@ -5338,7 +5344,7 @@ class CableRouteEditor(QMainWindow):
 
     def on_double_click(self, event, sx, sy):
         floor = self.floor_spin.value()
-        x, y = self.scene_to_world(sx, sy)
+        x, y = sx, sy
         picked = self.find_nearest_selectable_name(x, y, floor)
         if not picked:
             return
@@ -5507,13 +5513,14 @@ class CableRouteEditor(QMainWindow):
         self._clear_multi_drag()
 
         if moved:
-            self._invalidate_static_scene_cache()
+            if hasattr(self.canvas, "invalidate_dxf_cache"):
+                self.canvas.invalidate_dxf_cache()
             self.refresh_canvas()
 
     def on_right_click(self, event, sx, sy):
         mode = self.mode_combo.currentText()
         floor = self.floor_spin.value()
-        x, y = self.scene_to_world(sx, sy)
+        x, y = sx, sy
         picked = self.find_nearest_selectable_name(x, y, floor)
 
         x, y = self.snap(x, y)
@@ -5521,7 +5528,14 @@ class CableRouteEditor(QMainWindow):
         # In edge mode, right click is ONLY for deleting edges.
         # Never fall through to the normal context menu.
         if mode == "edge":
+
             if not picked:
+                if self.selected_for_edge:
+                    self.selected_for_edge = None
+                    self.set_status("Edge chaining cancelled")
+                    self.refresh_canvas()
+                    return
+
                 self.set_status("No nearby point found for edge delete")
                 return
 
@@ -5552,7 +5566,8 @@ class CableRouteEditor(QMainWindow):
             self.set_status("Edge removed" if removed else "No matching edge to remove")
 
             if removed:
-                self._invalidate_static_scene_cache()
+                if hasattr(self.canvas, "invalidate_dxf_cache"):
+                    self.canvas.invalidate_dxf_cache()
 
             self.refresh_canvas()
             return
@@ -5691,14 +5706,8 @@ class CableRouteEditor(QMainWindow):
                 return
             dx = current.x() - self.last_pan.x()
             dy = current.y() - self.last_pan.y()
-            self.canvas.horizontalScrollBar().setValue(
-                self.canvas.horizontalScrollBar().value() - dx
-            )
-            self.canvas.verticalScrollBar().setValue(
-                self.canvas.verticalScrollBar().value() - dy
-            )
             self.last_pan = current
-            self.canvas.viewport().update()
+            self.canvas.update()
             return
         if mode == "select_move":
             if self.selection_rect_active:
@@ -5718,7 +5727,7 @@ class CableRouteEditor(QMainWindow):
                     self._clear_multi_drag()
                     return
 
-                x, y = self.scene_to_world(sx, sy)
+                x, y = sx, sy
                 x, y = self.snap(x, y)
 
                 if (
@@ -5754,26 +5763,23 @@ class CableRouteEditor(QMainWindow):
             return
         dx = current.x() - self.last_pan.x()
         dy = current.y() - self.last_pan.y()
-        self.canvas.horizontalScrollBar().setValue(
-            self.canvas.horizontalScrollBar().value() - dx
-        )
-        self.canvas.verticalScrollBar().setValue(
-            self.canvas.verticalScrollBar().value() - dy
-        )
+
         self.last_pan = current
-        self.canvas.viewport().update()
+        self.canvas.update()
 
     def on_middle_release(self, event):
         self.last_pan = None
 
     def on_mousewheel(self, event):
+        if isinstance(self.canvas, GpuDxfGraphView):
+            return
+
         delta = event.angleDelta().y()
         if delta == 0:
             return
 
         factor = 1.15 if delta > 0 else 1 / 1.15
         self.canvas.scale(factor, factor)
-
         self._viewport_refresh_timer.start(120)
 
     def closeEvent(self, event):
@@ -7078,10 +7084,10 @@ class CableRouteEditor(QMainWindow):
         self._set_canvas_multi_selection([name], append=False)
         self.refresh_canvas()
 
-        scene_pos = self.world_to_scene(point["x"], point["y"])
-        self.canvas.centerOn(scene_pos)
+        self.canvas.fit_to_rect(QRectF(point["x"] - 10, -point["y"] - 10, 20, 20), Qt.KeepAspectRatio)
 
-        self._invalidate_static_scene_cache()
+        if hasattr(self.canvas, "invalidate_dxf_cache"):
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
 
         text = (
@@ -7173,10 +7179,10 @@ class CableRouteEditor(QMainWindow):
         self._set_canvas_multi_selection([name], append=False)
         self.refresh_canvas()
 
-        scene_pos = self.world_to_scene(point["x"], point["y"])
-        self.canvas.centerOn(scene_pos)
+        self.canvas.fit_to_rect(QRectF(point["x"] - 10, -point["y"] - 10, 20, 20), Qt.KeepAspectRatio)
 
-        self._invalidate_static_scene_cache()
+        if hasattr(self.canvas, "invalidate_dxf_cache"):
+            self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
 
         text = (
@@ -8134,6 +8140,12 @@ class CableRouteEditor(QMainWindow):
 
         QMessageBox.information(self, "Import complete", message)
         self.set_status(message.replace("\n", " "))
+
+
+# NETWORK_PLANNING_EXTENSION_START
+from network_integration import install_network_planning
+install_network_planning(CableRouteEditor)
+# NETWORK_PLANNING_EXTENSION_END
 
 
 def main():
