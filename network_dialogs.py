@@ -6,6 +6,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -33,6 +34,7 @@ NETWORK_ASSET_TYPES = [
     ("patch_panel", "Patch panel"),
     ("fibre_splitter", "Fibre splitter"),
     ("network_switch", "Network switch"),
+    ("network_router", "Network router"),
     ("firewall", "Firewall"),
     ("wireless_access_point", "Wireless access point"),
     ("optical_line_terminal", "Optical line terminal (OLT)"),
@@ -46,6 +48,8 @@ PATCH_PANEL_TYPES = ["", "copper", "fibre"]
 SPLIT_RATIOS = ["", "1:2", "1:4", "1:8", "1:16", "1:32", "1:64", "1:128"]
 FREQUENCY_OPTIONS = ["2.4 GHz", "5 GHz", "6 GHz", "60 GHz", "868 MHz", "433 MHz"]
 NETWORK_TECHNOLOGIES = ["Traditional", "PoLAN"]
+
+from network_auto_planner import NetworkPlanningError, generate_network_design
 
 
 def _text(value) -> str:
@@ -723,13 +727,44 @@ class NetworkPlannerDialog(QDialog):
         self.expected_mer_spin.setValue(int(self.data.get("network_settings", {}).get("expected_mer_count", 2) or 2))
         self.redundant_core_check = QCheckBox("Use redundant core / MER design")
         self.redundant_core_check.setChecked(bool(self.data.get("network_settings", {}).get("redundant_core", True)))
+
+        settings = self.data.get("network_settings", {})
+        self.spare_capacity_spin = QDoubleSpinBox()
+        self.spare_capacity_spin.setRange(0.0, 100.0)
+        self.spare_capacity_spin.setDecimals(1)
+        self.spare_capacity_spin.setSuffix(" %")
+        self.spare_capacity_spin.setValue(float(settings.get("spare_capacity_percent", 15.0) or 0.0))
+
+        self.traditional_max_copper_spin = QDoubleSpinBox()
+        self.traditional_max_copper_spin.setRange(1.0, 1000.0)
+        self.traditional_max_copper_spin.setDecimals(1)
+        self.traditional_max_copper_spin.setSuffix(" m")
+        self.traditional_max_copper_spin.setValue(float(settings.get("traditional_max_copper_m", 90.0) or 90.0))
+
+        self.polan_max_copper_spin = QDoubleSpinBox()
+        self.polan_max_copper_spin.setRange(1.0, 500.0)
+        self.polan_max_copper_spin.setDecimals(1)
+        self.polan_max_copper_spin.setSuffix(" m")
+        self.polan_max_copper_spin.setValue(float(settings.get("polan_max_ont_copper_m", 30.0) or 30.0))
+
+        self.olt_failover_check = QCheckBox("Provide standby OLT failover for each protected splitter")
+        self.olt_failover_check.setChecked(bool(settings.get("polan_olt_failover", True)))
+
+        self.auto_design_button = QPushButton("Generate Minimum-Component Network")
+        self.auto_design_button.clicked.connect(self.generate_automatic_design)
+
         info = QLabel(
             "MER locations are treated as roots of the network tree. PoLAN locations can be used for optical distribution, OLT, splitter or ONT placement."
         )
         info.setWordWrap(True)
         settings_layout.addRow("Network technology", self.technology_combo)
         settings_layout.addRow("Expected MER locations", self.expected_mer_spin)
+        settings_layout.addRow("Spare port and PoE capacity", self.spare_capacity_spin)
+        settings_layout.addRow("Traditional maximum copper route", self.traditional_max_copper_spin)
+        settings_layout.addRow("PoLAN maximum ONT copper distance", self.polan_max_copper_spin)
         settings_layout.addRow("", self.redundant_core_check)
+        settings_layout.addRow("", self.olt_failover_check)
+        settings_layout.addRow("", self.auto_design_button)
         settings_layout.addRow("", info)
         self.tabs.addTab(settings_tab, "Settings")
 
@@ -744,6 +779,10 @@ class NetworkPlannerDialog(QDialog):
         self.tabs.addTab(self.connections_tab, "Connections")
         self.tabs.addTab(self.vlans_tab, "VLANs")
         self.tabs.addTab(self.routes_tab, "Routing")
+
+        self.summary_text = QTextEdit()
+        self.summary_text.setReadOnly(True)
+        self.tabs.addTab(self.summary_text, "Generated Design")
 
         self.assets_tab.add_button.clicked.connect(self.add_asset)
         self.assets_tab.edit_button.clicked.connect(self.edit_asset)
@@ -815,6 +854,9 @@ class NetworkPlannerDialog(QDialog):
                     connection["from_instance_id"] = new_id
                 if _text(connection.get("to_instance_id")) == old_id:
                     connection["to_instance_id"] = new_id
+            for assignment in self._items("network_endpoint_assignments"):
+                if _text(assignment.get("network_instance_id")) == old_id:
+                    assignment["network_instance_id"] = new_id
         elif key == "network_vlans":
             for connection in self._items("network_connections"):
                 connection["vlan_ids"] = [new_id if _text(value) == old_id else value for value in connection.get("vlan_ids", [])]
@@ -850,6 +892,83 @@ class NetworkPlannerDialog(QDialog):
              item.get("protocol", ""), item.get("next_hop", ""), item.get("metric", 0), item.get("firewall_policy", "")]
             for item in self._items("network_routes")
         ])
+        self._refresh_design_summary()
+
+    def _sync_planner_settings(self) -> None:
+        settings = self.data.setdefault("network_settings", {})
+        settings["technology"] = self.technology_combo.currentText().strip()
+        settings["expected_mer_count"] = int(self.expected_mer_spin.value())
+        settings["redundant_core"] = self.redundant_core_check.isChecked()
+        settings["spare_capacity_percent"] = float(self.spare_capacity_spin.value())
+        settings["traditional_max_copper_m"] = float(self.traditional_max_copper_spin.value())
+        settings["polan_max_ont_copper_m"] = float(self.polan_max_copper_spin.value())
+        settings["polan_olt_failover"] = self.olt_failover_check.isChecked()
+
+    def _refresh_design_summary(self) -> None:
+        summary = self.data.get("network_design_summary", {})
+        if not isinstance(summary, dict) or not summary:
+            self.summary_text.setPlainText("No automatic network design has been generated.")
+            return
+        lines = [
+            f"Technology: {summary.get('technology', '')}",
+            f"Objective: {summary.get('objective', '')}",
+            "",
+            f"Endpoint locations: {summary.get('endpoint_locations', 0)}",
+            f"Required ports: {summary.get('required_ports', 0)}",
+            f"Required PoE: {summary.get('required_poe_w', 0)} W",
+            f"Installed endpoint ports: {summary.get('installed_endpoint_ports', 0)}",
+            f"Installed PoE budget: {summary.get('installed_poe_budget_w', 0)} W",
+            f"Spare capacity: {summary.get('spare_capacity_percent', 0)}%",
+            f"Estimated copper: {summary.get('estimated_copper_length_m', 0)} m",
+            f"Estimated fibre: {summary.get('estimated_fibre_length_m', 0)} m",
+            "",
+            "Components:",
+        ]
+        for role, quantity in (summary.get("component_counts", {}) or {}).items():
+            lines.append(f"  {role}: {quantity}")
+        warnings = summary.get("warnings", []) or []
+        if warnings:
+            lines.extend(["", "Warnings:"])
+            lines.extend(f"  • {warning}" for warning in warnings)
+        self.summary_text.setPlainText("\n".join(lines))
+
+    def generate_automatic_design(self) -> None:
+        self._sync_planner_settings()
+        technology = self.technology_combo.currentText().strip()
+        existing_auto = any(
+            bool(item.get("auto_generated"))
+            for item in self.data.get("network_asset_instances", [])
+            if isinstance(item, dict)
+        )
+        if existing_auto and QMessageBox.question(
+            self,
+            "Regenerate network",
+            "Replace the previous automatically generated network configuration? "
+            "Manually placed network assets will be preserved.",
+        ) != QMessageBox.Yes:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            summary = generate_network_design(self.data, technology)
+        except NetworkPlanningError as exc:
+            QMessageBox.critical(self, "Automatic network planning", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Automatic network planning", f"Unexpected planning error:\n{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.refresh_tables()
+        self.tabs.setCurrentWidget(self.summary_text)
+        QMessageBox.information(
+            self,
+            "Automatic network planning",
+            f"Generated {summary.get('technology', technology)} network configuration.\n\n"
+            f"Endpoint ports: {summary.get('required_ports', 0)}\n"
+            f"Generated components: {summary.get('auto_generated_instances', 0)}\n"
+            f"Copper: {summary.get('estimated_copper_length_m', 0)} m\n"
+            f"Fibre: {summary.get('estimated_fibre_length_m', 0)} m",
+        )
 
     def add_asset(self) -> None:
         dialog = NetworkAssetEditorDialog(self, suggested_id=_next_id(self._items("network_assets"), "NA"))
@@ -920,6 +1039,11 @@ class NetworkPlannerDialog(QDialog):
             for connection in self._items("network_connections")
             if _text(connection.get("from_instance_id")) != instance_id
             and _text(connection.get("to_instance_id")) != instance_id
+        ]
+        self.data["network_endpoint_assignments"] = [
+            assignment
+            for assignment in self._items("network_endpoint_assignments")
+            if _text(assignment.get("network_instance_id")) != instance_id
         ]
         self.refresh_tables()
 
@@ -1010,9 +1134,7 @@ class NetworkPlannerDialog(QDialog):
             self.refresh_tables()
 
     def save(self) -> None:
-        self.data.setdefault("network_settings", {})["technology"] = self.technology_combo.currentText().strip()
-        self.data["network_settings"]["expected_mer_count"] = int(self.expected_mer_spin.value())
-        self.data["network_settings"]["redundant_core"] = self.redundant_core_check.isChecked()
+        self._sync_planner_settings()
         self.on_save(deepcopy(self.data))
         QMessageBox.information(self, "Network planning", "Network planning data saved.")
 

@@ -11,18 +11,28 @@ NETWORK_DEFAULTS = {
         "technology": "Traditional",
         "expected_mer_count": 2,
         "redundant_core": True,
+        "spare_capacity_percent": 15.0,
+        "traditional_max_copper_m": 90.0,
+        "polan_max_ont_copper_m": 30.0,
+        "polan_olt_failover": True,
+        "default_poe_power_w": 0.0,
+        "poe_power_defaults": {},
     },
     "network_assets": [],
     "network_asset_instances": [],
     "network_connections": [],
+    "network_endpoint_assignments": [],
+    "network_redundancy_groups": [],
     "network_vlans": [],
     "network_routes": [],
+    "network_design_summary": {},
 }
 
 NETWORK_ASSET_TYPES = {
     "patch_panel",
     "fibre_splitter",
     "network_switch",
+    "network_router",
     "firewall",
     "wireless_access_point",
     "optical_line_terminal",
@@ -79,20 +89,38 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("technology", "Traditional")
     settings.setdefault("expected_mer_count", 2)
     settings.setdefault("redundant_core", True)
+    settings.setdefault("spare_capacity_percent", 15.0)
+    settings.setdefault("traditional_max_copper_m", 90.0)
+    settings.setdefault("polan_max_ont_copper_m", 30.0)
+    settings.setdefault("polan_olt_failover", True)
+    settings.setdefault("default_poe_power_w", 0.0)
+    settings.setdefault("poe_power_defaults", {})
     technology = _text(settings.get("technology")) or "Traditional"
     settings["technology"] = "PoLAN" if technology.lower() == "polan" else "Traditional"
     settings["expected_mer_count"] = max(1, _as_int(settings.get("expected_mer_count"), 2))
     settings["redundant_core"] = bool(settings.get("redundant_core", True))
+    settings["spare_capacity_percent"] = max(0.0, _as_float(settings.get("spare_capacity_percent"), 15.0))
+    settings["traditional_max_copper_m"] = max(1.0, _as_float(settings.get("traditional_max_copper_m"), 90.0))
+    settings["polan_max_ont_copper_m"] = max(1.0, _as_float(settings.get("polan_max_ont_copper_m"), 30.0))
+    settings["polan_olt_failover"] = bool(settings.get("polan_olt_failover", True))
+    settings["default_poe_power_w"] = max(0.0, _as_float(settings.get("default_poe_power_w"), 0.0))
+    if not isinstance(settings.get("poe_power_defaults"), dict):
+        settings["poe_power_defaults"] = {}
 
     for key in (
         "network_assets",
         "network_asset_instances",
         "network_connections",
+        "network_endpoint_assignments",
+        "network_redundancy_groups",
         "network_vlans",
         "network_routes",
     ):
         if not isinstance(data.get(key), list):
             data[key] = []
+
+    if not isinstance(data.get("network_design_summary"), dict):
+        data["network_design_summary"] = {}
 
     for asset in data["network_assets"]:
         if not isinstance(asset, dict):
@@ -100,6 +128,8 @@ def ensure_network_schema(data: dict) -> dict:
         asset.setdefault("id", "")
         asset.setdefault("name", asset.get("id", ""))
         asset_type = _text(asset.get("asset_type")) or "other"
+        if asset_type == "other" and "network_router" in _text(asset.get("notes")).lower():
+            asset_type = "network_router"
         asset["asset_type"] = asset_type if asset_type in NETWORK_ASSET_TYPES else "other"
         asset.setdefault("manufacturer", "")
         asset.setdefault("model", "")
@@ -165,6 +195,43 @@ def ensure_network_schema(data: dict) -> dict:
         connection.setdefault("route_profile", "")
         connection["route_path"] = _normalise_string_list(connection.get("route_path", []))
         connection.setdefault("notes", "")
+
+    for assignment in data["network_endpoint_assignments"]:
+        if not isinstance(assignment, dict):
+            continue
+        assignment.setdefault("id", "")
+        assignment.setdefault("endpoint_name", "")
+        assignment["endpoint_port"] = max(1, _as_int(assignment.get("endpoint_port"), 1))
+        assignment.setdefault("endpoint_asset_id", "")
+        assignment.setdefault("endpoint_asset_name", "")
+        assignment.setdefault("department_id", "")
+        assignment.setdefault("department_name", "")
+        assignment.setdefault("room_type_id", "")
+        assignment["floor"] = _as_int(assignment.get("floor"))
+        assignment["x"] = _as_float(assignment.get("x"))
+        assignment["y"] = _as_float(assignment.get("y"))
+        assignment.setdefault("network_instance_id", "")
+        assignment.setdefault("network_port", "")
+        assignment["poe_power_w"] = max(0.0, _as_float(assignment.get("poe_power_w")))
+        assignment["copper_length_m"] = max(0.0, _as_float(assignment.get("copper_length_m")))
+        assignment["route_path"] = _normalise_string_list(assignment.get("route_path", []))
+        assignment["vlan_ids"] = _normalise_string_list(assignment.get("vlan_ids", []))
+        assignment.setdefault("technology", settings["technology"])
+        assignment["auto_generated"] = bool(assignment.get("auto_generated", False))
+
+    for group in data["network_redundancy_groups"]:
+        if not isinstance(group, dict):
+            continue
+        for field in (
+            "id",
+            "technology",
+            "protected_instance_id",
+            "primary_olt_instance_id",
+            "secondary_olt_instance_id",
+            "protection_type",
+        ):
+            group.setdefault(field, "")
+        group["auto_generated"] = bool(group.get("auto_generated", False))
 
     for vlan in data["network_vlans"]:
         if not isinstance(vlan, dict):
@@ -276,6 +343,8 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     asset_ids = validate_unique_id("network_assets", "Network asset")
     instance_ids = validate_unique_id("network_asset_instances", "Network instance")
     connection_ids = validate_unique_id("network_connections", "Network connection")
+    validate_unique_id("network_endpoint_assignments", "Network endpoint assignment")
+    validate_unique_id("network_redundancy_groups", "Network redundancy group")
     vlan_record_ids = validate_unique_id("network_vlans", "VLAN record")
     validate_unique_id("network_routes", "Network route")
 
@@ -339,6 +408,87 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         for vlan_id in connection.get("vlan_ids", []):
             if _text(vlan_id) not in vlan_record_ids:
                 messages.append(f"Network connection {connection_id} references missing VLAN record {_text(vlan_id)!r}.")
+
+    endpoint_names = {
+        _text(item.get("name"))
+        for item in data.get("data_points", [])
+        if isinstance(item, dict) and _text(item.get("name"))
+    }
+    assets_by_id = {
+        _text(item.get("id")): item
+        for item in data.get("network_assets", [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    instances_by_id = {
+        _text(item.get("id")): item
+        for item in data.get("network_asset_instances", [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    assigned_endpoint_ports: set[tuple[str, int]] = set()
+    port_loads: Dict[str, int] = {}
+    poe_loads: Dict[str, float] = {}
+    max_ont_copper = _as_float(data.get("network_settings", {}).get("polan_max_ont_copper_m"), 30.0)
+
+    for assignment in data.get("network_endpoint_assignments", []):
+        if not isinstance(assignment, dict):
+            continue
+        assignment_id = _text(assignment.get("id")) or "(unnamed)"
+        endpoint_name = _text(assignment.get("endpoint_name"))
+        endpoint_port = max(1, _as_int(assignment.get("endpoint_port"), 1))
+        instance_id = _text(assignment.get("network_instance_id"))
+        network_port = _text(assignment.get("network_port"))
+        if endpoint_name not in endpoint_names:
+            messages.append(f"Endpoint assignment {assignment_id} references missing data point {endpoint_name!r}.")
+        physical_endpoint = (endpoint_name, endpoint_port)
+        if physical_endpoint in assigned_endpoint_ports:
+            messages.append(f"Data-point port {endpoint_name}:{endpoint_port} is assigned more than once.")
+        assigned_endpoint_ports.add(physical_endpoint)
+        if instance_id not in instance_ids:
+            messages.append(f"Endpoint assignment {assignment_id} references missing network instance {instance_id!r}.")
+        if not network_port:
+            messages.append(f"Endpoint assignment {assignment_id} has no network port.")
+        elif instance_id:
+            network_endpoint = (instance_id, network_port)
+            if network_endpoint in used_endpoints:
+                messages.append(f"Network endpoint {instance_id}:{network_port} is used more than once.")
+            used_endpoints.add(network_endpoint)
+        port_loads[instance_id] = port_loads.get(instance_id, 0) + 1
+        poe_loads[instance_id] = poe_loads.get(instance_id, 0.0) + max(0.0, _as_float(assignment.get("poe_power_w")))
+        if _text(assignment.get("technology")) == "PoLAN":
+            copper = max(0.0, _as_float(assignment.get("copper_length_m")))
+            extension = 0.0
+            if copper > max_ont_copper + extension + 0.001:
+                messages.append(
+                    f"PoLAN endpoint assignment {assignment_id} has {copper:.1f} m of copper; "
+                    f"the configured ONT limit is {max_ont_copper:.1f} m."
+                )
+
+    for instance_id, used_ports in port_loads.items():
+        instance = instances_by_id.get(instance_id, {})
+        asset = assets_by_id.get(_text(instance.get("asset_id")), {})
+        capacity = max(0, _as_int(asset.get("number_of_ports")))
+        if capacity and used_ports > capacity:
+            messages.append(f"Network instance {instance_id} uses {used_ports} endpoint ports but provides only {capacity}.")
+        poe_budget = max(0.0, _as_float(asset.get("poe_budget_w")))
+        poe_load = poe_loads.get(instance_id, 0.0)
+        if poe_load > poe_budget + 0.001:
+            messages.append(
+                f"Network instance {instance_id} has {poe_load:.1f} W PoE load but only {poe_budget:.1f} W budget."
+            )
+
+    for group in data.get("network_redundancy_groups", []):
+        if not isinstance(group, dict):
+            continue
+        group_id = _text(group.get("id")) or "(unnamed)"
+        primary = _text(group.get("primary_olt_instance_id"))
+        secondary = _text(group.get("secondary_olt_instance_id"))
+        protected = _text(group.get("protected_instance_id"))
+        if protected not in instance_ids:
+            messages.append(f"Redundancy group {group_id} references missing protected instance {protected!r}.")
+        if primary not in instance_ids or secondary not in instance_ids:
+            messages.append(f"Redundancy group {group_id} must reference both primary and secondary OLT instances.")
+        elif primary == secondary:
+            messages.append(f"Redundancy group {group_id} uses the same OLT for primary and secondary service.")
 
     vlan_numbers: set[int] = set()
     for vlan in data.get("network_vlans", []):

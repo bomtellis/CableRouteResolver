@@ -42,6 +42,7 @@ from network_dialogs import (
     NetworkPlannerDialog,
 )
 from network_reports import write_network_schedules
+from network_topology import NetworkTopologyDialog
 from network_schema import (
     ensure_network_schema,
     find_nearest_network_instance,
@@ -166,6 +167,17 @@ def _open_network_planner(editor) -> None:
     editor._network_planner_dialog = dialog
     dialog.exec()
     editor._network_planner_dialog = None
+
+
+def _open_network_topology(editor) -> None:
+    """Open the read-only network hierarchy and connection diagram."""
+    ensure_network_schema(editor.store.data)
+    dialog = NetworkTopologyDialog(editor, editor.store.data)
+    editor._network_topology_dialog = dialog
+    try:
+        dialog.exec()
+    finally:
+        editor._network_topology_dialog = None
 
 
 def _export_network_schedules(editor) -> None:
@@ -300,6 +312,7 @@ def _augment_network_ui(editor) -> None:
         management = QWidget()
         management_layout = QVBoxLayout(management)
         management_layout.setContentsMargins(4, 4, 4, 4)
+        management_layout.addWidget(button("Topology", lambda: _open_network_topology(editor), "Show the network hierarchy and connection diagram"))
         management_layout.addWidget(button("Network Planner", lambda: _open_network_planner(editor)))
         management_layout.addWidget(button("Validate Network", lambda: _validate_network(editor)))
         management_layout.addWidget(button("Export Schedules", lambda: _export_network_schedules(editor)))
@@ -324,6 +337,7 @@ def _augment_network_ui(editor) -> None:
             panel = QWidget()
             panel_layout = QHBoxLayout(panel)
             for text, handler in (
+                ("Topology", lambda: _open_network_topology(editor)),
                 ("Network Planner", lambda: _open_network_planner(editor)),
                 ("Place Network Asset", lambda: _set_network_mode(editor, "network_asset")),
                 ("Connect Network Assets", lambda: _set_network_mode(editor, "network_connection")),
@@ -655,53 +669,40 @@ def install_network_planning(editor_class) -> None:
         self._network_connection_start = None
         self._network_drag_instance_id = None
         self._network_planner_dialog = None
+        self._network_topology_dialog = None
         _augment_network_ui(self)
         self.refresh_canvas()
 
     editor_class.__init__ = init_wrapper
 
     def refresh_canvas_wrapper(self, *_signal_args, **_signal_kwargs):
-        """
-        Refresh the original canvas, then apply the network-layer visibility.
-
-        Qt signals such as toggled(bool) and valueChanged(int) may pass an
-        additional argument. These signal arguments must not be forwarded to
-        CableRouteEditor.refresh_canvas(), because the original method only
-        accepts self.
-        """
         ensure_network_schema(self.store.data)
-
-        # Do not pass Qt signal arguments into the original method.
+        # Qt signals may pass bool/int values, but the original method accepts only self.
         result = original_refresh_canvas(self)
 
-        # During CableRouteEditor.__init__, refresh_canvas() is called before
-        # _augment_network_ui() has created show_network_check.
+        # ``original_init`` calls ``self.refresh_canvas()`` before the network
+        # controls are appended by ``_augment_network_ui``.  Treat the network
+        # layer as enabled during that first construction-time refresh.
         layer_control = getattr(self, "show_network_check", None)
-
-        if layer_control is None:
-            show_network = True
-        else:
+        show_network = True
+        if layer_control is not None:
             try:
                 show_network = bool(layer_control.isChecked())
             except RuntimeError:
+                # The Qt object may already be queued for deletion while the
+                # application is closing.  Avoid turning shutdown into a crash.
                 show_network = True
 
         canvas = getattr(self, "canvas", None)
-
         if canvas is not None and hasattr(canvas, "set_visible_layers"):
             try:
                 canvas.set_visible_layers(show_network=show_network)
             except TypeError:
-                # Allows startup with an older renderer that does not yet accept
-                # the show_network keyword.
-                pass
-
-        if canvas is not None:
-            try:
+                # The extension package includes a renderer with this argument;
+                # this fallback keeps older custom renderers usable.
+                setattr(canvas, "show_network", show_network)
                 canvas.update()
-            except RuntimeError:
-                pass
-
+        _refresh_network_search(self)
         return result
 
     editor_class.refresh_canvas = refresh_canvas_wrapper
@@ -769,8 +770,9 @@ def install_network_planning(editor_class) -> None:
         editor_class.on_left_release = on_left_release_wrapper
 
     if original_open_json is not None:
-        def open_json_wrapper(self, *args, **kwargs):
-            result = original_open_json(self, *args, **kwargs)
+        def open_json_wrapper(self, *_signal_args, **_signal_kwargs):
+            # QAction.triggered(bool) must not be forwarded to the original zero-argument method.
+            result = original_open_json(self)
             ensure_network_schema(self.store.data)
             _sync_network_technology_controls(self)
             self.refresh_canvas()
@@ -807,6 +809,7 @@ def install_network_planning(editor_class) -> None:
             return original_visible(self, point)
         editor_class._is_point_kind_visible = visible_wrapper
 
+    editor_class.open_network_topology = _open_network_topology
     editor_class.open_network_planner = _open_network_planner
     editor_class.export_network_schedules = _export_network_schedules
     editor_class.validate_network_plan = _validate_network
