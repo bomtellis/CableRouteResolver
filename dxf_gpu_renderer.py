@@ -485,7 +485,11 @@ class GpuDxfGraphView(QOpenGLWidget):
             scene_pos = self.world_to_scene(float(x), float(y))
             screen = self.world_to_screen(float(x), float(y))
 
-            if not self.rect().adjusted(-120, -120, 120, 120).contains(screen.toPoint()):
+            if (
+                not self.rect()
+                .adjusted(-120, -120, 120, 120)
+                .contains(screen.toPoint())
+            ):
                 continue
 
             raw_height = float(entity.get("height") or 0.0)
@@ -505,7 +509,6 @@ class GpuDxfGraphView(QOpenGLWidget):
     # ------------------------------------------------------------------
     # Cable graph drawing
     # ------------------------------------------------------------------
-
 
     def _draw_edges(self, painter: QPainter) -> None:
         if self.store is None or not self.show_edges:
@@ -582,14 +585,18 @@ class GpuDxfGraphView(QOpenGLWidget):
             if kind == "comms_room" and not self.show_comms_rooms:
                 continue
 
-            if kind in {
-                "location",
-                "distributed_equipment_room",
-                "mer",
-                "main_equipment_room",
-                "polan",
-                "polan_location",
-            } and not self.show_locations:
+            if (
+                kind
+                in {
+                    "location",
+                    "distributed_equipment_room",
+                    "mer",
+                    "main_equipment_room",
+                    "polan",
+                    "polan_location",
+                }
+                and not self.show_locations
+            ):
                 continue
 
             outline = QPen(
@@ -633,41 +640,83 @@ class GpuDxfGraphView(QOpenGLWidget):
     def _draw_network(self, painter: QPainter) -> None:
         if self.store is None or not self.show_network:
             return
-        instances = self._network_instances_for_floor()
-        if not instances:
-            return
 
         data = getattr(self.store, "data", {}) or {}
+        floor = int(self.floor)
+        floor_instances = self._network_instances_for_floor()
+        all_instances = {
+            str(item.get("id", "")).strip(): item
+            for item in data.get("network_asset_instances", [])
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        }
         assets = {
             str(item.get("id", "")).strip(): item
             for item in data.get("network_assets", [])
             if isinstance(item, dict) and str(item.get("id", "")).strip()
         }
+        all_points = self.store.all_points() if hasattr(self.store, "all_points") else {}
 
         fibre_pen = QPen(QColor("#6f8dff"), 0.08)
         copper_pen = QPen(QColor("#4fbfa3"), 0.06)
         failover_pen = QPen(QColor("#d68f52"), 0.07, Qt.DashLine)
 
+        def draw_routed_polyline(records, pen):
+            painter.setPen(pen)
+            for a, b in zip(records, records[1:]):
+                try:
+                    if int(a.get("floor", floor)) != floor or int(b.get("floor", floor)) != floor:
+                        continue
+                    a_pos = self.world_to_scene(float(a.get("x", 0.0)), float(a.get("y", 0.0)))
+                    b_pos = self.world_to_scene(float(b.get("x", 0.0)), float(b.get("y", 0.0)))
+                    painter.drawLine(a_pos, b_pos)
+                except (TypeError, ValueError):
+                    continue
+
+        # Every physical connection belongs exclusively to the network-links layer.
         if self.show_network_links:
-            
             for connection in data.get("network_connections", []):
                 if not isinstance(connection, dict):
                     continue
-                source = instances.get(str(connection.get("from_instance_id", "")).strip())
-                target = instances.get(str(connection.get("to_instance_id", "")).strip())
+                source = all_instances.get(str(connection.get("from_instance_id", "")).strip())
+                target = all_instances.get(str(connection.get("to_instance_id", "")).strip())
                 if not source or not target:
                     continue
+                route_records = [
+                    all_points[name]
+                    for name in connection.get("route_path", [])
+                    if str(name) in all_points
+                ]
+                records = [source] + route_records + [target]
                 medium = str(connection.get("medium", "") or "").strip().lower()
-                standby = bool(connection.get("standby", False)) or str(connection.get("redundancy_role", "")).lower() in {"secondary", "standby"}
-                painter.setPen(failover_pen if standby else (fibre_pen if medium == "fibre" else copper_pen))
-                source_pos = self.world_to_scene(float(source.get("x", 0.0)), float(source.get("y", 0.0)))
-                target_pos = self.world_to_scene(float(target.get("x", 0.0)), float(target.get("y", 0.0)))
-                painter.drawLine(source_pos, target_pos)
+                standby = bool(connection.get("standby", False)) or str(
+                    connection.get("redundancy_role", "")
+                ).lower() in {"secondary", "standby"}
+                pen = failover_pen if standby else (fibre_pen if medium == "fibre" else copper_pen)
+                draw_routed_polyline(records, pen)
 
-            for instance_id, instance in instances.items():
+            # Endpoint-to-ONT copper assignments are links too and must follow their saved graph path.
+            for assignment in data.get("network_endpoint_assignments", []):
+                if not isinstance(assignment, dict):
+                    continue
+                instance = all_instances.get(str(assignment.get("network_instance_id", "")).strip())
+                endpoint = all_points.get(str(assignment.get("endpoint_name", "")).strip())
+                if not instance or not endpoint:
+                    continue
+                route_records = [
+                    all_points[name]
+                    for name in assignment.get("route_path", [])
+                    if str(name) in all_points
+                ]
+                draw_routed_polyline([instance] + route_records + [endpoint], copper_pen)
+
+        # Every placed network device belongs exclusively to the network-assets layer.
+        if self.show_network_assets:
+            for instance_id, instance in floor_instances.items():
                 asset = assets.get(str(instance.get("asset_id", "")).strip(), {})
                 asset_type = str(asset.get("asset_type", "") or "").strip()
-                pos = self.world_to_scene(float(instance.get("x", 0.0)), float(instance.get("y", 0.0)))
+                pos = self.world_to_scene(
+                    float(instance.get("x", 0.0)), float(instance.get("y", 0.0))
+                )
                 selected = str(instance_id) == str(self.selected_point_name)
                 fill = {
                     "network_switch": QColor("#265f88"),
@@ -675,21 +724,16 @@ class GpuDxfGraphView(QOpenGLWidget):
                     "firewall": QColor("#a04f4f"),
                     "optical_line_terminal": QColor("#4a5fa8"),
                     "optical_network_terminal": QColor("#2d806d"),
+                    "fibre_splitter": QColor("#697f3f"),
                     "patch_panel": QColor("#53616d"),
                 }.get(asset_type, QColor("#53616d"))
                 self._draw_diamond(
-                    painter,
-                    pos,
-                    0.62,
-                    fill,
+                    painter, pos, 0.62, fill,
                     QColor("#ffffff") if selected else QColor("#cce7ff"),
                 )
                 if self.show_labels:
                     self._draw_screen_label(
-                        painter,
-                        pos,
-                        str(instance.get("name") or instance_id),
-                        QColor("#cce7ff"),
+                        painter, pos, str(instance.get("name") or instance_id), QColor("#cce7ff")
                     )
 
     @staticmethod
@@ -813,7 +857,9 @@ class GpuDxfGraphView(QOpenGLWidget):
             ys = [float(p.get("y", 0.0)) for p in departments.values()]
             bounds.append((min(xs), min(ys), max(xs), max(ys)))
 
-        network_instances = self._network_instances_for_floor() if self.show_network else {}
+        network_instances = (
+            self._network_instances_for_floor() if self.show_network else {}
+        )
         if network_instances:
             xs = [float(p.get("x", 0.0)) for p in network_instances.values()]
             ys = [float(p.get("y", 0.0)) for p in network_instances.values()]

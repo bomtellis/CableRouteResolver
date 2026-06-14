@@ -1135,7 +1135,7 @@ def install_network_planning(editor_class) -> None:
                 canvas.set_visible_layers(
                     show_network=show_network,
                     show_network_assets=show_network_assets,
-                    show_network_connections=show_network_connections,
+                    show_network_links=show_network_connections,
                 )
             except TypeError:
                 # The extension package includes a renderer with this argument;

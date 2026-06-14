@@ -983,6 +983,19 @@ class NetworkPlannerDialog(QDialog):
 
         self.auto_design_button = QPushButton("Generate Minimum-Component Network")
         self.auto_design_button.clicked.connect(self.generate_automatic_design)
+
+        self.clear_installed_button = QPushButton(
+            "Clear Installed Assets and Connections"
+        )
+        self.clear_installed_button.setToolTip(
+            "Remove installed network asset instances, physical connections, "
+            "endpoint assignments and generated redundancy records. The network "
+            "asset library, settings, VLANs and routing records are preserved."
+        )
+        self.clear_installed_button.clicked.connect(
+            self.clear_installed_assets_and_connections
+        )
+
         self.visual_edit_button = QPushButton("Edit visually on plan")
         self.visual_edit_button.setToolTip(
             "Save this generated network and return to the drawing canvas for drag/drop editing"
@@ -1012,6 +1025,7 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("", self.redundant_core_check)
         settings_layout.addRow("", self.olt_failover_check)
         settings_layout.addRow("", self.auto_design_button)
+        settings_layout.addRow("", self.clear_installed_button)
         settings_layout.addRow("", self.visual_edit_button)
         settings_layout.addRow("", info)
         self.tabs.addTab(settings_tab, "Settings")
@@ -1338,6 +1352,58 @@ class NetworkPlannerDialog(QDialog):
             f"Generated components: {summary.get('auto_generated_instances', 0)}\n"
             f"Copper: {summary.get('estimated_copper_length_m', 0)} m\n"
             f"Fibre: {summary.get('estimated_fibre_length_m', 0)} m",
+        )
+
+    def clear_installed_assets_and_connections(self) -> None:
+        instance_count = len(self.data.get("network_asset_instances", []))
+        connection_count = len(self.data.get("network_connections", []))
+        assignment_count = len(self.data.get("network_endpoint_assignments", []))
+        redundancy_count = len(self.data.get("network_redundancy_groups", []))
+
+        if not any(
+            (instance_count, connection_count, assignment_count, redundancy_count)
+        ):
+            QMessageBox.information(
+                self,
+                "Clear installed networking",
+                "There are no installed network assets or connections to clear.",
+            )
+            return
+
+        message = (
+            "Clear all installed network assets and physical connections?\n\n"
+            f"Installed assets: {instance_count}\n"
+            f"Connections: {connection_count}\n"
+            f"Endpoint assignments: {assignment_count}\n"
+            f"Redundancy groups: {redundancy_count}\n\n"
+            "The network asset library, planner settings, VLANs and routing "
+            "records will be preserved."
+        )
+        if (
+            QMessageBox.question(
+                self,
+                "Clear installed networking",
+                message,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+
+        self.data["network_asset_instances"] = []
+        self.data["network_connections"] = []
+        self.data["network_endpoint_assignments"] = []
+        self.data["network_redundancy_groups"] = []
+        self.data["network_design_summary"] = {}
+
+        self.refresh_tables()
+        self.on_save(deepcopy(self.data))
+
+        QMessageBox.information(
+            self,
+            "Clear installed networking",
+            "Installed network assets and connections have been cleared.",
         )
 
     def edit_visually_on_plan(self) -> None:

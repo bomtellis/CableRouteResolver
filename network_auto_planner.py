@@ -230,11 +230,9 @@ class RoutingGraph:
             return 0.0, [source]
         distances, parents = self._tree(source)
         if destination not in distances:
-            a = self.points.get(source)
-            b = self.points.get(destination)
-            if a and b:
-                return _distance(a, b, self.floor_height_m), [source, destination]
-            return 0.0, [source, destination]
+            raise NetworkPlanningError(
+                f"No cable-graph route exists from {source!r} to {destination!r}."
+            )
         path = [destination]
         node = destination
         guard = 0
@@ -1223,17 +1221,21 @@ def _cluster_polan_ports(
     ont_candidates: Sequence[dict],
     spare_fraction: float,
     max_copper_m: float,
+    graph: RoutingGraph,
 ) -> List[Tuple[dict, List[PortDemand], EndpointDemand]]:
-    """Department-first capacitated clustering with an ONT at a local medoid."""
+    """Cluster PoLAN ports using routed cable distance, never XY distance."""
 
     groups: Dict[Tuple[str, int, str], List[EndpointDemand]] = defaultdict(list)
     for endpoint in endpoints:
-        # The existing comms-room route is used as a graph branch.  This avoids
-        # clustering ports that are physically close in XY but separated by
-        # walls or by different established cable-routing branches.
-        groups[
-            (endpoint.department_id, endpoint.floor, endpoint.existing_comms_room)
-        ].append(endpoint)
+        groups[(endpoint.department_id, endpoint.floor, endpoint.existing_comms_room)].append(endpoint)
+
+    route_cache: Dict[Tuple[str, str], Tuple[float, List[str]]] = {}
+
+    def routed(a: EndpointDemand, b: EndpointDemand) -> Tuple[float, List[str]]:
+        key = (a.name, b.name)
+        if key not in route_cache:
+            route_cache[key] = graph.route(a.name, b.name)
+        return route_cache[key]
 
     clusters: List[Tuple[dict, List[PortDemand], EndpointDemand]] = []
     for group_key in sorted(groups, key=lambda value: (value[1], value[0], value[2])):
@@ -1247,35 +1249,32 @@ def _cluster_polan_ports(
         while any(remaining.values()):
             seed_name = max(
                 (name for name, queue in remaining.items() if queue),
-                key=lambda name: (
-                    len(remaining[name]),
-                    sum(item.poe_power_w for item in remaining[name]),
-                ),
+                key=lambda name: (len(remaining[name]), sum(item.poe_power_w for item in remaining[name])),
             )
             seed = point_map[seed_name]
-            candidates = sorted(
-                (point for point in points if remaining[point.name]),
-                key=lambda point: (
-                    math.hypot(point.x - seed.x, point.y - seed.y),
-                    -len(remaining[point.name]),
-                ),
-            )
+            reachable = []
+            for point in points:
+                if not remaining[point.name]:
+                    continue
+                try:
+                    distance, _ = routed(seed, point)
+                except NetworkPlanningError:
+                    continue
+                total = distance + point.extension_distance_m
+                if total <= max_copper_m + 1e-9:
+                    reachable.append((distance, point))
+            candidates = [point for _distance_m, point in sorted(reachable, key=lambda row: (row[0], -len(remaining[row[1].name])))]
+
             cluster_items: List[PortDemand] = []
             represented: List[EndpointDemand] = []
             for point in candidates:
-                if math.hypot(point.x - seed.x, point.y - seed.y) > max_copper_m + 1e-9:
-                    continue
                 took_any = False
                 queue = remaining[point.name]
                 while queue:
                     item = queue[0]
                     next_ports = len(cluster_items) + 1
-                    next_poe = (
-                        sum(row.poe_power_w for row in cluster_items) + item.poe_power_w
-                    )
-                    if not _fits_any_ont(
-                        ont_candidates, next_ports, next_poe, spare_fraction
-                    ):
+                    next_poe = sum(row.poe_power_w for row in cluster_items) + item.poe_power_w
+                    if not _fits_any_ont(ont_candidates, next_ports, next_poe, spare_fraction):
                         break
                     cluster_items.append(queue.popleft())
                     took_any = True
@@ -1285,29 +1284,38 @@ def _cluster_polan_ports(
             if not cluster_items:
                 item = remaining[seed_name][0]
                 raise NetworkPlanningError(
-                    f"No ONT can serve {item.endpoint_name} port {item.endpoint_port} "
-                    f"with {item.poe_power_w:.1f} W PoE and the configured spare capacity."
+                    f"No ONT can serve {item.endpoint_name} port {item.endpoint_port} within "
+                    f"the configured {max_copper_m:.1f} m routed copper limit."
                 )
 
-            # Select the point minimising weighted copper length.  The seed is a
-            # guaranteed fallback because every cluster point lies within the
-            # configured maximum copper distance from it.
             counts = defaultdict(int)
             for item in cluster_items:
                 counts[item.endpoint_name] += 1
-            medoid = min(
-                represented,
-                key=lambda candidate: sum(
-                    counts[other.name]
-                    * math.hypot(candidate.x - other.x, candidate.y - other.y)
-                    for other in represented
-                ),
-            )
-            if any(
-                math.hypot(medoid.x - other.x, medoid.y - other.y) > max_copper_m
-                for other in represented
-            ):
-                medoid = seed
+
+            feasible_medoids = []
+            for candidate in represented:
+                weighted_total = 0.0
+                feasible = True
+                for other in represented:
+                    try:
+                        distance, _ = routed(candidate, other)
+                    except NetworkPlanningError:
+                        feasible = False
+                        break
+                    if distance + other.extension_distance_m > max_copper_m + 1e-9:
+                        feasible = False
+                        break
+                    weighted_total += counts[other.name] * distance
+                if feasible:
+                    feasible_medoids.append((weighted_total, candidate))
+
+            if not feasible_medoids:
+                names = ", ".join(sorted(counts))
+                raise NetworkPlanningError(
+                    f"No graph-connected ONT position can serve PoLAN endpoints {names} within "
+                    f"{max_copper_m:.1f} m."
+                )
+            medoid = min(feasible_medoids, key=lambda row: row[0])[1]
             asset = _choose_single_ont(ont_candidates, cluster_items, spare_fraction)
             clusters.append((asset, cluster_items, medoid))
     return clusters
@@ -1351,7 +1359,7 @@ def _polan_design(
         )
 
     clusters = _cluster_polan_ports(
-        endpoints, ont_candidates, spare_fraction, max_copper_m
+        endpoints, ont_candidates, spare_fraction, max_copper_m, builder.graph
     )
     ont_records: List[dict] = []
     endpoint_lookup = {item.name: item for item in endpoints}
@@ -1376,20 +1384,19 @@ def _polan_design(
         source_counts: Dict[str, int] = defaultdict(int)
         for port_number, item in enumerate(port_items, start=1):
             endpoint = endpoint_lookup[item.endpoint_name]
-            copper = (
-                math.hypot(endpoint.x - medoid.x, endpoint.y - medoid.y)
-                + item.extension_distance_m
-            )
-            if copper > max_copper_m + item.extension_distance_m + 1e-9:
+            route_length, route_path = builder.graph.route(medoid.name, endpoint.name)
+            copper = route_length + item.extension_distance_m
+            if copper > max_copper_m + 1e-9:
                 raise NetworkPlanningError(
-                    f"ONT placement for {item.endpoint_name} exceeds {max_copper_m:.1f} m local copper limit."
+                    f"ONT placement for {item.endpoint_name} requires {copper:.1f} m of routed copper; "
+                    f"the configured limit is {max_copper_m:.1f} m."
                 )
             builder.add_assignment(
                 item,
                 ont,
                 str(port_number),
                 copper,
-                [item.endpoint_name, _text(location.get("name"))],
+                route_path,
                 ont_location=_text(location.get("name")),
             )
             if endpoint.existing_comms_room:
