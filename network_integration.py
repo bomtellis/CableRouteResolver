@@ -128,6 +128,158 @@ def _find_network_instance(editor, x: float, y: float) -> Optional[str]:
     )
 
 
+def _point_segment_distance(
+    px: float, py: float, ax: float, ay: float, bx: float, by: float
+) -> float:
+    dx = bx - ax
+    dy = by - ay
+    if abs(dx) < 1e-12 and abs(dy) < 1e-12:
+        return ((px - ax) ** 2 + (py - ay) ** 2) ** 0.5
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / ((dx * dx) + (dy * dy))))
+    cx = ax + t * dx
+    cy = ay + t * dy
+    return ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
+
+
+def _find_network_location(editor, x: float, y: float) -> Optional[str]:
+    floor = int(editor.floor_spin.value())
+    radius = _network_pick_radius(editor)
+    best_name = None
+    best_distance = radius
+    for name, point in editor.store.all_points().items():
+        if _text(point.get("kind")).lower() not in {"mer", "polan"}:
+            continue
+        if int(point.get("floor", floor)) != floor:
+            continue
+        distance = (
+            (float(point.get("x", 0.0)) - float(x)) ** 2
+            + (float(point.get("y", 0.0)) - float(y)) ** 2
+        ) ** 0.5
+        if distance <= best_distance:
+            best_name = name
+            best_distance = distance
+    return best_name
+
+
+def _network_connection_segments(
+    editor, connection: dict, instances: dict, all_points: dict
+):
+    source = instances.get(_text(connection.get("from_instance_id")))
+    target = instances.get(_text(connection.get("to_instance_id")))
+    if not source or not target:
+        return []
+    route_points = [
+        all_points[name]
+        for name in connection.get("route_path", [])
+        if _text(name) in all_points
+    ]
+    points = [source] + route_points + [target]
+    segments = []
+    floor = int(editor.floor_spin.value())
+    for a, b in zip(points, points[1:]):
+        try:
+            af = int(a.get("floor", floor))
+            bf = int(b.get("floor", floor))
+        except Exception:
+            continue
+        if af != floor or bf != floor:
+            continue
+        segments.append(
+            (
+                float(a.get("x", 0.0)),
+                float(a.get("y", 0.0)),
+                float(b.get("x", 0.0)),
+                float(b.get("y", 0.0)),
+            )
+        )
+    return segments
+
+
+def _find_network_connection(editor, x: float, y: float) -> Optional[str]:
+    ensure_network_schema(editor.store.data)
+    instances = network_instances_by_id(editor.store.data)
+    all_points = editor.store.all_points()
+    radius = max(_network_pick_radius(editor), 0.5)
+    best_id = None
+    best_distance = radius
+    for connection in editor.store.data.get("network_connections", []):
+        if not isinstance(connection, dict):
+            continue
+        connection_id = _text(connection.get("id"))
+        if not connection_id:
+            continue
+        for ax, ay, bx, by in _network_connection_segments(
+            editor, connection, instances, all_points
+        ):
+            distance = _point_segment_distance(float(x), float(y), ax, ay, bx, by)
+            if distance <= best_distance:
+                best_id = connection_id
+                best_distance = distance
+    return best_id
+
+
+def _move_network_location(editor, name: str, x: float, y: float) -> bool:
+    moved = False
+    floor = int(editor.floor_spin.value())
+    for location in editor.store.data.get("locations", []):
+        if _text(location.get("name")) == name and _text(
+            location.get("kind")
+        ).lower() in {"mer", "polan"}:
+            location["x"] = round(float(x), 3)
+            location["y"] = round(float(y), 3)
+            location["floor"] = floor
+            moved = True
+            break
+    if not moved:
+        return False
+    for instance in editor.store.data.get("network_asset_instances", []):
+        if _text(instance.get("location_name")) == name:
+            instance["x"] = round(float(x), 3)
+            instance["y"] = round(float(y), 3)
+            instance["floor"] = floor
+    return True
+
+
+def _begin_network_selection(editor, x: float, y: float) -> bool:
+    instance_id = _find_network_instance(editor, x, y)
+    if instance_id:
+        editor.selected_point_name = instance_id
+        editor._network_drag_instance_id = instance_id
+        editor._network_drag_location_name = None
+        _safe_push_undo(editor, "Move network asset")
+        editor.refresh_canvas()
+        if hasattr(editor, "set_status"):
+            editor.set_status(f"Selected network asset {instance_id}")
+        return True
+
+    location_name = _find_network_location(editor, x, y)
+    if location_name:
+        editor.selected_point_name = location_name
+        editor._network_drag_instance_id = None
+        editor._network_drag_location_name = location_name
+        _safe_push_undo(editor, "Move network location")
+        editor.refresh_canvas()
+        if hasattr(editor, "set_status"):
+            editor.set_status(f"Selected network location {location_name}")
+        return True
+
+    connection_id = _find_network_connection(editor, x, y)
+    if connection_id:
+        editor.selected_point_name = connection_id
+        editor._network_drag_instance_id = None
+        editor._network_drag_location_name = None
+        editor.refresh_canvas()
+        if hasattr(editor, "set_status"):
+            editor.set_status(f"Selected network connection {connection_id}")
+        return True
+
+    editor.selected_point_name = None
+    editor._network_drag_instance_id = None
+    editor._network_drag_location_name = None
+    editor.refresh_canvas()
+    return True
+
+
 def _replace_by_id(items: list, value: dict, old_id: str = "") -> bool:
     value_id = _text(value.get("id"))
     for index, item in enumerate(items):
@@ -159,7 +311,9 @@ def _open_network_planner(editor) -> None:
             "network_routes",
             "network_design_summary",
         ):
-            editor.store.data[key] = deepcopy(payload.get(key, {} if key in dict_keys else []))
+            editor.store.data[key] = deepcopy(
+                payload.get(key, {} if key in dict_keys else [])
+            )
         ensure_network_schema(editor.store.data)
         _sync_network_technology_controls(editor)
         editor.refresh_canvas()
@@ -200,7 +354,11 @@ def _export_network_schedules(editor) -> None:
     output_directory = QFileDialog.getExistingDirectory(
         editor,
         "Select network schedule output folder",
-        str(Path(editor.current_json_path).parent) if getattr(editor, "current_json_path", None) else "",
+        (
+            str(Path(editor.current_json_path).parent)
+            if getattr(editor, "current_json_path", None)
+            else ""
+        ),
     )
     if not output_directory:
         return
@@ -212,7 +370,9 @@ def _export_network_schedules(editor) -> None:
     prefix = re.sub(r"[^A-Za-z0-9_.-]+", "_", prefix).strip("_") or "network"
 
     try:
-        paths = write_network_schedules(editor.store.data, Path(output_directory), prefix)
+        paths = write_network_schedules(
+            editor.store.data, Path(output_directory), prefix
+        )
     except Exception as exc:
         QMessageBox.critical(editor, "Network schedules", str(exc))
         return
@@ -229,9 +389,13 @@ def _export_network_schedules(editor) -> None:
 def _validate_network(editor) -> None:
     messages = validate_network_data(editor.store.data, include_advisories=True)
     if not messages:
-        QMessageBox.information(editor, "Network validation", "No network planning issues were found.")
+        QMessageBox.information(
+            editor, "Network validation", "No network planning issues were found."
+        )
         return
-    QMessageBox.warning(editor, "Network validation", "\n".join(f"• {item}" for item in messages))
+    QMessageBox.warning(
+        editor, "Network validation", "\n".join(f"• {item}" for item in messages)
+    )
 
 
 def _set_network_mode(editor, mode: str) -> None:
@@ -244,9 +408,13 @@ def _set_network_mode(editor, mode: str) -> None:
 
 def _technology_changed(editor, value: str) -> None:
     ensure_network_schema(editor.store.data)
-    editor.store.data["network_settings"]["technology"] = "PoLAN" if value == "PoLAN" else "Traditional"
+    editor.store.data["network_settings"]["technology"] = (
+        "PoLAN" if value == "PoLAN" else "Traditional"
+    )
     if hasattr(editor, "set_status"):
-        editor.set_status(f"Network technology: {editor.store.data['network_settings']['technology']}")
+        editor.set_status(
+            f"Network technology: {editor.store.data['network_settings']['technology']}"
+        )
 
 
 def _sync_network_technology_controls(editor) -> None:
@@ -268,19 +436,36 @@ def _add_network_layer_action(editor) -> None:
         if any(action.text() == "Network Planning" for action in menu.actions()):
             return
         menu.addSeparator()
-        action = QAction("Network Planning", menu)
-        action.setCheckable(True)
-        action.setChecked(editor.show_network_check.isChecked())
-        action.toggled.connect(editor.show_network_check.setChecked)
-        editor.show_network_check.toggled.connect(action.setChecked)
-        menu.addAction(action)
+        for label, target in (
+            ("Network Planning", editor.show_network_check),
+            (
+                "Network Assets",
+                getattr(editor, "show_network_assets_check", editor.show_network_check),
+            ),
+            (
+                "Network Links",
+                getattr(
+                    editor, "show_network_connections_check", editor.show_network_check
+                ),
+            ),
+        ):
+            action = QAction(label, menu)
+            action.setCheckable(True)
+            action.setChecked(target.isChecked())
+            action.toggled.connect(target.setChecked)
+            target.toggled.connect(action.setChecked)
+            menu.addAction(action)
         return
 
 
 def _add_network_search_tab(editor) -> None:
     tabs = getattr(editor, "search_tabs", None)
     search_lists = getattr(editor, "search_lists", None)
-    if tabs is None or not isinstance(search_lists, dict) or "Network Assets" in search_lists:
+    if (
+        tabs is None
+        or not isinstance(search_lists, dict)
+        or "Network Assets" in search_lists
+    ):
         return
     widget = QListWidget()
     widget.itemDoubleClicked.connect(editor._rhs_search_item_activated)
@@ -294,6 +479,12 @@ def _augment_network_ui(editor) -> None:
     editor.show_network_check = QCheckBox("Network layer")
     editor.show_network_check.setChecked(True)
     editor.show_network_check.toggled.connect(editor.refresh_canvas)
+    editor.show_network_assets_check = QCheckBox("Network assets")
+    editor.show_network_assets_check.setChecked(True)
+    editor.show_network_assets_check.toggled.connect(editor.refresh_canvas)
+    editor.show_network_connections_check = QCheckBox("Network links")
+    editor.show_network_connections_check.setChecked(True)
+    editor.show_network_connections_check.toggled.connect(editor.refresh_canvas)
 
     ribbon = editor.findChild(QTabWidget, "AeroRibbon")
     if ribbon is not None:
@@ -315,6 +506,8 @@ def _augment_network_ui(editor) -> None:
         )
         technology_layout.addWidget(editor.network_technology_combo)
         technology_layout.addWidget(editor.show_network_check)
+        technology_layout.addWidget(editor.show_network_assets_check)
+        technology_layout.addWidget(editor.show_network_connections_check)
         layout.addWidget(technology_box)
 
         def button(text: str, handler, tooltip: str = "") -> QPushButton:
@@ -327,35 +520,74 @@ def _augment_network_ui(editor) -> None:
         management = QWidget()
         management_layout = QVBoxLayout(management)
         management_layout.setContentsMargins(4, 4, 4, 4)
-        management_layout.addWidget(button("Topology", lambda: _open_network_topology(editor), "Show the network hierarchy and connection diagram"))
-        management_layout.addWidget(button("Network Planner", lambda: _open_network_planner(editor)))
-        management_layout.addWidget(button("Validate Network", lambda: _validate_network(editor)))
-        management_layout.addWidget(button("Export Schedules", lambda: _export_network_schedules(editor)))
+        management_layout.addWidget(
+            button(
+                "Topology",
+                lambda: _open_network_topology(editor),
+                "Show the network hierarchy and connection diagram",
+            )
+        )
+        management_layout.addWidget(
+            button("Network Planner", lambda: _open_network_planner(editor))
+        )
+        management_layout.addWidget(
+            button("Validate Network", lambda: _validate_network(editor))
+        )
+        management_layout.addWidget(
+            button("Export Schedules", lambda: _export_network_schedules(editor))
+        )
         layout.addWidget(management)
 
         placement = QWidget()
         placement_layout = QVBoxLayout(placement)
         placement_layout.setContentsMargins(4, 4, 4, 4)
-        placement_layout.addWidget(button("Place Asset", lambda: _set_network_mode(editor, "network_asset")))
-        placement_layout.addWidget(button("Connect Assets", lambda: _set_network_mode(editor, "network_connection")))
+        placement_layout.addWidget(
+            button(
+                "Network Mode",
+                lambda: _set_network_mode(editor, "network_select"),
+                "Select, move, edit or delete network items",
+            )
+        )
+        placement_layout.addWidget(
+            button("Place Asset", lambda: _set_network_mode(editor, "network_asset"))
+        )
+        placement_layout.addWidget(
+            button(
+                "Connect Assets",
+                lambda: _set_network_mode(editor, "network_connection"),
+            )
+        )
         location_row = QHBoxLayout()
-        location_row.addWidget(button("Place MER", lambda: _set_network_mode(editor, "mer_location")))
-        location_row.addWidget(button("Place PoLAN", lambda: _set_network_mode(editor, "polan_location")))
+        location_row.addWidget(
+            button("Place MER", lambda: _set_network_mode(editor, "mer_location"))
+        )
+        location_row.addWidget(
+            button("Place PoLAN", lambda: _set_network_mode(editor, "polan_location"))
+        )
         placement_layout.addLayout(location_row)
         layout.addWidget(placement)
         layout.addStretch(1)
         ribbon.addTab(tab, "Network")
     else:
         # Compatibility fallback for older sidebar-based layouts.
-        dock_parent = editor.centralWidget().layout() if editor.centralWidget() else None
+        dock_parent = (
+            editor.centralWidget().layout() if editor.centralWidget() else None
+        )
         if dock_parent is not None:
             panel = QWidget()
             panel_layout = QHBoxLayout(panel)
             for text, handler in (
                 ("Topology", lambda: _open_network_topology(editor)),
                 ("Network Planner", lambda: _open_network_planner(editor)),
-                ("Place Network Asset", lambda: _set_network_mode(editor, "network_asset")),
-                ("Connect Network Assets", lambda: _set_network_mode(editor, "network_connection")),
+                ("Network Mode", lambda: _set_network_mode(editor, "network_select")),
+                (
+                    "Place Network Asset",
+                    lambda: _set_network_mode(editor, "network_asset"),
+                ),
+                (
+                    "Connect Network Assets",
+                    lambda: _set_network_mode(editor, "network_connection"),
+                ),
                 ("Export Network Schedules", lambda: _export_network_schedules(editor)),
             ):
                 control = QPushButton(text)
@@ -370,7 +602,8 @@ def _augment_network_ui(editor) -> None:
 def _add_network_location(editor, kind: str, x: float, y: float) -> None:
     floor = int(editor.floor_spin.value())
     existing = [
-        item for item in editor.store.data.get("locations", [])
+        item
+        for item in editor.store.data.get("locations", [])
         if _text(item.get("kind")).lower() == kind
     ]
     prefix = "MER" if kind == "mer" else "POLAN"
@@ -385,10 +618,14 @@ def _add_network_location(editor, kind: str, x: float, y: float) -> None:
         return
     name = _text(name)
     if name in editor.store.names_in_use():
-        QMessageBox.critical(editor, "Duplicate name", "A point with this name already exists.")
+        QMessageBox.critical(
+            editor, "Duplicate name", "A point with this name already exists."
+        )
         return
     _safe_push_undo(editor, f"Add {prefix} location")
-    editor.store.add_location(name, floor, float(x), float(y), kind=kind, department_ids=[])
+    editor.store.add_location(
+        name, floor, float(x), float(y), kind=kind, department_ids=[]
+    )
     editor.selected_point_name = name
     editor.refresh_canvas()
     if hasattr(editor, "set_status"):
@@ -402,7 +639,9 @@ def _place_or_select_network_asset(editor, x: float, y: float) -> None:
         editor._network_drag_instance_id = instance_id
         editor.refresh_canvas()
         if hasattr(editor, "set_status"):
-            editor.set_status(f"Selected network asset {instance_id}; double-click to edit")
+            editor.set_status(
+                f"Selected network asset {instance_id}; double-click to edit"
+            )
         return
 
     assets = editor.store.data.get("network_assets", [])
@@ -419,7 +658,9 @@ def _place_or_select_network_asset(editor, x: float, y: float) -> None:
         editor,
         assets=assets,
         locations=editor.store.data.get("locations", []),
-        suggested_id=next_network_id(editor.store.data.get("network_asset_instances", []), "NI"),
+        suggested_id=next_network_id(
+            editor.store.data.get("network_asset_instances", []), "NI"
+        ),
         default_floor=int(editor.floor_spin.value()),
         default_x=float(x),
         default_y=float(y),
@@ -446,7 +687,9 @@ def _connect_network_asset(editor, x: float, y: float) -> None:
         editor.selected_point_name = picked
         editor.refresh_canvas()
         if hasattr(editor, "set_status"):
-            editor.set_status(f"Network connection start: {picked}; select the destination")
+            editor.set_status(
+                f"Network connection start: {picked}; select the destination"
+            )
         return
 
     start = editor._network_connection_start
@@ -461,7 +704,9 @@ def _connect_network_asset(editor, x: float, y: float) -> None:
         instances=editor.store.data.get("network_asset_instances", []),
         vlans=editor.store.data.get("network_vlans", []),
         route_profiles=list(editor.store.data.get("route_profiles", {}).keys()),
-        suggested_id=next_network_id(editor.store.data.get("network_connections", []), "NC"),
+        suggested_id=next_network_id(
+            editor.store.data.get("network_connections", []), "NC"
+        ),
         default_from=start,
         default_to=picked,
     )
@@ -476,7 +721,9 @@ def _connect_network_asset(editor, x: float, y: float) -> None:
 
 def _edit_network_instance(editor, instance_id: str) -> None:
     instances = editor.store.data.get("network_asset_instances", [])
-    current = next((item for item in instances if _text(item.get("id")) == instance_id), None)
+    current = next(
+        (item for item in instances if _text(item.get("id")) == instance_id), None
+    )
     if current is None:
         return
     dialog = NetworkInstanceEditorDialog(
@@ -489,8 +736,12 @@ def _edit_network_instance(editor, instance_id: str) -> None:
     if dialog.exec() != QDialog.Accepted or not dialog.result:
         return
     new_id = _text(dialog.result.get("id"))
-    if new_id != instance_id and any(_text(item.get("id")) == new_id for item in instances):
-        QMessageBox.critical(editor, "Duplicate ID", f"Network instance {new_id} already exists.")
+    if new_id != instance_id and any(
+        _text(item.get("id")) == new_id for item in instances
+    ):
+        QMessageBox.critical(
+            editor, "Duplicate ID", f"Network instance {new_id} already exists."
+        )
         return
     _safe_push_undo(editor, "Edit network asset instance")
     _replace_by_id(instances, dialog.result, old_id=instance_id)
@@ -505,19 +756,24 @@ def _edit_network_instance(editor, instance_id: str) -> None:
 
 
 def _delete_network_instance(editor, instance_id: str) -> None:
-    if QMessageBox.question(
-        editor,
-        "Delete network asset",
-        f"Delete installed network asset {instance_id} and all of its network connections?",
-    ) != QMessageBox.Yes:
+    if (
+        QMessageBox.question(
+            editor,
+            "Delete network asset",
+            f"Delete installed network asset {instance_id} and all of its network connections?",
+        )
+        != QMessageBox.Yes
+    ):
         return
     _safe_push_undo(editor, "Delete network asset instance")
     editor.store.data["network_asset_instances"] = [
-        item for item in editor.store.data.get("network_asset_instances", [])
+        item
+        for item in editor.store.data.get("network_asset_instances", [])
         if _text(item.get("id")) != instance_id
     ]
     editor.store.data["network_connections"] = [
-        item for item in editor.store.data.get("network_connections", [])
+        item
+        for item in editor.store.data.get("network_connections", [])
         if _text(item.get("from_instance_id")) != instance_id
         and _text(item.get("to_instance_id")) != instance_id
     ]
@@ -534,12 +790,18 @@ def _edit_network_location(editor, name: str) -> bool:
     except Exception:
         return False
     item = next(
-        (row for row in editor.store.data.get("locations", []) if _text(row.get("name")) == name),
+        (
+            row
+            for row in editor.store.data.get("locations", [])
+            if _text(row.get("name")) == name
+        ),
         None,
     )
     if item is None:
         return False
-    options = editor.department_options() if hasattr(editor, "department_options") else []
+    options = (
+        editor.department_options() if hasattr(editor, "department_options") else []
+    )
     dialog = LocationEditorDialog(editor, name, dict(item), options)
     if dialog.exec() != QDialog.Accepted or not dialog.result:
         return True
@@ -561,6 +823,131 @@ def _edit_network_location(editor, name: str) -> bool:
     editor.selected_point_name = new_name
     editor.refresh_canvas()
     return True
+
+
+def _delete_network_location(editor, name: str) -> None:
+    linked_instances = [
+        item
+        for item in editor.store.data.get("network_asset_instances", [])
+        if _text(item.get("location_name")) == name
+    ]
+    extra = ""
+    if linked_instances:
+        extra = f"\n\nThis will also delete {len(linked_instances)} installed network asset(s) and their network connections."
+    if (
+        QMessageBox.question(
+            editor,
+            "Delete network location",
+            f"Delete network location {name}?{extra}",
+        )
+        != QMessageBox.Yes
+    ):
+        return
+    linked_ids = {
+        _text(item.get("id")) for item in linked_instances if _text(item.get("id"))
+    }
+    _safe_push_undo(editor, "Delete network location")
+    editor.store.data["locations"] = [
+        item
+        for item in editor.store.data.get("locations", [])
+        if _text(item.get("name")) != name
+    ]
+    if linked_ids:
+        editor.store.data["network_asset_instances"] = [
+            item
+            for item in editor.store.data.get("network_asset_instances", [])
+            if _text(item.get("id")) not in linked_ids
+        ]
+        editor.store.data["network_connections"] = [
+            item
+            for item in editor.store.data.get("network_connections", [])
+            if _text(item.get("from_instance_id")) not in linked_ids
+            and _text(item.get("to_instance_id")) not in linked_ids
+        ]
+        editor.store.data["network_endpoint_assignments"] = [
+            item
+            for item in editor.store.data.get("network_endpoint_assignments", [])
+            if _text(item.get("network_instance_id")) not in linked_ids
+        ]
+    editor.selected_point_name = None
+    editor.refresh_canvas()
+
+
+def _edit_network_connection(editor, connection_id: str) -> None:
+    connections = editor.store.data.get("network_connections", [])
+    current = next(
+        (item for item in connections if _text(item.get("id")) == connection_id), None
+    )
+    if current is None:
+        return
+    dialog = NetworkConnectionEditorDialog(
+        editor,
+        connection=current,
+        instances=editor.store.data.get("network_asset_instances", []),
+        vlans=editor.store.data.get("network_vlans", []),
+        route_profiles=list(editor.store.data.get("route_profiles", {}).keys()),
+        suggested_id=connection_id,
+    )
+    if dialog.exec() != QDialog.Accepted or not dialog.result:
+        return
+    new_id = _text(dialog.result.get("id"))
+    if new_id != connection_id and any(
+        _text(item.get("id")) == new_id for item in connections
+    ):
+        QMessageBox.critical(
+            editor, "Duplicate ID", f"Network connection {new_id} already exists."
+        )
+        return
+    _safe_push_undo(editor, "Edit network connection")
+    _replace_by_id(connections, dialog.result, old_id=connection_id)
+    editor.selected_point_name = new_id
+    editor.refresh_canvas()
+
+
+def _delete_network_connection(editor, connection_id: str) -> None:
+    if (
+        QMessageBox.question(
+            editor,
+            "Delete network connection",
+            f"Delete network connection {connection_id}?",
+        )
+        != QMessageBox.Yes
+    ):
+        return
+    _safe_push_undo(editor, "Delete network connection")
+    editor.store.data["network_connections"] = [
+        item
+        for item in editor.store.data.get("network_connections", [])
+        if _text(item.get("id")) != connection_id
+    ]
+    editor.selected_point_name = None
+    editor.refresh_canvas()
+
+
+def _show_network_location_context_menu(editor, event, name: str) -> None:
+    editor.selected_point_name = name
+    editor.refresh_canvas()
+    menu = QMenu(editor)
+    edit_action = menu.addAction("Edit network location")
+    delete_action = menu.addAction("Delete network location")
+    action = menu.exec(event.globalPosition().toPoint())
+    if action == edit_action:
+        _edit_network_location(editor, name)
+    elif action == delete_action:
+        _delete_network_location(editor, name)
+
+
+def _show_network_connection_context_menu(editor, event, connection_id: str) -> None:
+    editor.selected_point_name = connection_id
+    editor.refresh_canvas()
+    menu = QMenu(editor)
+    edit_action = menu.addAction("Edit network connection")
+    delete_action = menu.addAction("Delete network connection")
+    action = menu.exec(event.globalPosition().toPoint())
+    if action == edit_action:
+        _edit_network_connection(editor, connection_id)
+    elif action == delete_action:
+        _delete_network_connection(editor, connection_id)
 
 
 def _show_network_context_menu(editor, event, instance_id: str) -> None:
@@ -627,13 +1014,23 @@ def _centre_on_network_instance(editor, instance_id: str) -> None:
         centre = getattr(canvas, "centerOn", None)
         if callable(centre):
             try:
-                centre(editor.world_to_scene(instance.get("x", 0.0), instance.get("y", 0.0)))
+                centre(
+                    editor.world_to_scene(
+                        instance.get("x", 0.0), instance.get("y", 0.0)
+                    )
+                )
             except Exception:
                 pass
         elif hasattr(canvas, "fit_to_rect"):
             from PySide6.QtCore import QRectF
+
             canvas.fit_to_rect(
-                QRectF(float(instance.get("x", 0.0)) - 10.0, -float(instance.get("y", 0.0)) - 10.0, 20.0, 20.0),
+                QRectF(
+                    float(instance.get("x", 0.0)) - 10.0,
+                    -float(instance.get("y", 0.0)) - 10.0,
+                    20.0,
+                    20.0,
+                ),
                 Qt.KeepAspectRatio,
             )
     if hasattr(editor, "set_status"):
@@ -661,14 +1058,18 @@ def install_network_planning(editor_class) -> None:
     original_on_left_release = getattr(editor_class, "on_left_release", None)
     original_open_json = getattr(editor_class, "open_json", None)
     original_refresh_search = getattr(editor_class, "refresh_rhs_search_sidebar", None)
-    original_search_activated = getattr(editor_class, "_rhs_search_item_activated", None)
+    original_search_activated = getattr(
+        editor_class, "_rhs_search_item_activated", None
+    )
     original_visible = getattr(editor_class, "_is_point_kind_visible", None)
 
     if original_mode_definitions is not None:
+
         def mode_definitions(self):
             rows = list(original_mode_definitions(self))
             existing = {row[0] for row in rows}
             additions = [
+                ("network_select", "Network", "select"),
                 ("network_asset", "Net Asset", "data_point"),
                 ("network_connection", "Net Link", "edge"),
                 ("mer_location", "MER", "location"),
@@ -676,6 +1077,7 @@ def install_network_planning(editor_class) -> None:
             ]
             rows.extend(row for row in additions if row[0] not in existing)
             return rows
+
         editor_class._mode_definitions = mode_definitions
 
     def init_wrapper(self, *args, **kwargs):
@@ -683,6 +1085,7 @@ def install_network_planning(editor_class) -> None:
         ensure_network_schema(self.store.data)
         self._network_connection_start = None
         self._network_drag_instance_id = None
+        self._network_drag_location_name = None
         self._network_planner_dialog = None
         self._network_topology_dialog = None
         _augment_network_ui(self)
@@ -711,7 +1114,29 @@ def install_network_planning(editor_class) -> None:
         canvas = getattr(self, "canvas", None)
         if canvas is not None and hasattr(canvas, "set_visible_layers"):
             try:
-                canvas.set_visible_layers(show_network=show_network)
+                assets_control = getattr(self, "show_network_assets_check", None)
+                links_control = getattr(self, "show_network_connections_check", None)
+                show_network_assets = show_network
+                show_network_connections = show_network
+                if assets_control is not None:
+                    try:
+                        show_network_assets = show_network and bool(
+                            assets_control.isChecked()
+                        )
+                    except RuntimeError:
+                        show_network_assets = show_network
+                if links_control is not None:
+                    try:
+                        show_network_connections = show_network and bool(
+                            links_control.isChecked()
+                        )
+                    except RuntimeError:
+                        show_network_connections = show_network
+                canvas.set_visible_layers(
+                    show_network=show_network,
+                    show_network_assets=show_network_assets,
+                    show_network_connections=show_network_connections,
+                )
             except TypeError:
                 # The extension package includes a renderer with this argument;
                 # this fallback keeps older custom renderers usable.
@@ -731,6 +1156,22 @@ def install_network_planning(editor_class) -> None:
         if mode == "polan_location":
             _add_network_location(self, "polan", x, y)
             return
+        if mode == "network_select":
+            _begin_network_selection(self, x, y)
+            return
+        if mode == "delete":
+            instance_id = _find_network_instance(self, x, y)
+            if instance_id:
+                _delete_network_instance(self, instance_id)
+                return
+            location_name = _find_network_location(self, x, y)
+            if location_name:
+                _delete_network_location(self, location_name)
+                return
+            connection_id = _find_network_connection(self, x, y)
+            if connection_id:
+                _delete_network_connection(self, connection_id)
+                return
         if mode == "network_asset":
             _place_or_select_network_asset(self, x, y)
             return
@@ -742,17 +1183,26 @@ def install_network_planning(editor_class) -> None:
     editor_class.on_left_click = on_left_click_wrapper
 
     if original_on_double_click is not None:
+
         def on_double_click_wrapper(self, event, sx, sy):
             x, y = float(sx), float(sy)
             instance_id = _find_network_instance(self, x, y)
             if instance_id:
                 _edit_network_instance(self, instance_id)
                 return
+            location_name = _find_network_location(self, x, y)
+            if location_name and _edit_network_location(self, location_name):
+                return
+            connection_id = _find_network_connection(self, x, y)
+            if connection_id:
+                _edit_network_connection(self, connection_id)
+                return
             floor = int(self.floor_spin.value())
             nearest = self.find_nearest_selectable_name(x, y, floor)
             if nearest and _edit_network_location(self, nearest):
                 return
             return original_on_double_click(self, event, sx, sy)
+
         editor_class.on_double_click = on_double_click_wrapper
 
     def on_right_click_wrapper(self, event, sx, sy):
@@ -760,31 +1210,58 @@ def install_network_planning(editor_class) -> None:
         if instance_id:
             _show_network_context_menu(self, event, instance_id)
             return
+        location_name = _find_network_location(self, float(sx), float(sy))
+        if location_name:
+            _show_network_location_context_menu(self, event, location_name)
+            return
+        connection_id = _find_network_connection(self, float(sx), float(sy))
+        if connection_id:
+            _show_network_connection_context_menu(self, event, connection_id)
+            return
         return original_on_right_click(self, event, sx, sy)
 
     editor_class.on_right_click = on_right_click_wrapper
 
     if original_on_drag is not None:
+
         def on_drag_wrapper(self, event, sx, sy):
-            if self.mode_combo.currentText() == "network_asset" and getattr(self, "_network_drag_instance_id", None):
-                instance = network_instances_by_id(self.store.data).get(self._network_drag_instance_id)
+            mode = self.mode_combo.currentText()
+            if mode in {"network_select", "network_asset"} and getattr(
+                self, "_network_drag_instance_id", None
+            ):
+                instance = network_instances_by_id(self.store.data).get(
+                    self._network_drag_instance_id
+                )
                 if instance is not None:
                     x, y = self.snap(float(sx), float(sy))
-                    instance["x"] = float(x)
-                    instance["y"] = float(y)
+                    instance["x"] = round(float(x), 3)
+                    instance["y"] = round(float(y), 3)
                     instance["floor"] = int(self.floor_spin.value())
+                    instance["location_name"] = ""
+                    self.refresh_canvas()
+                    return
+            if mode == "network_select" and getattr(
+                self, "_network_drag_location_name", None
+            ):
+                x, y = self.snap(float(sx), float(sy))
+                if _move_network_location(self, self._network_drag_location_name, x, y):
                     self.refresh_canvas()
                     return
             return original_on_drag(self, event, sx, sy)
+
         editor_class.on_drag = on_drag_wrapper
 
     if original_on_left_release is not None:
+
         def on_left_release_wrapper(self, event):
             self._network_drag_instance_id = None
+            self._network_drag_location_name = None
             return original_on_left_release(self, event)
+
         editor_class.on_left_release = on_left_release_wrapper
 
     if original_open_json is not None:
+
         def open_json_wrapper(self, *_signal_args, **_signal_kwargs):
             # QAction.triggered(bool) must not be forwarded to the original zero-argument method.
             result = original_open_json(self)
@@ -792,9 +1269,11 @@ def install_network_planning(editor_class) -> None:
             _sync_network_technology_controls(self)
             self.refresh_canvas()
             return result
+
         editor_class.open_json = open_json_wrapper
 
     if original_refresh_search is not None:
+
         def refresh_search_wrapper(self, *_signal_args, **_signal_kwargs):
             # Qt signals such as ``textChanged`` and ``currentChanged`` pass a
             # value/index to their slots.  The application's original refresh
@@ -803,9 +1282,11 @@ def install_network_planning(editor_class) -> None:
             result = original_refresh_search(self)
             _refresh_network_search(self)
             return result
+
         editor_class.refresh_rhs_search_sidebar = refresh_search_wrapper
 
     if original_search_activated is not None:
+
         def search_activated_wrapper(self, item):
             if item.data(Qt.UserRole) == "Network Assets":
                 instance_id = _text(item.data(Qt.UserRole + 1))
@@ -814,14 +1295,17 @@ def install_network_planning(editor_class) -> None:
                 _centre_on_network_instance(self, instance_id)
                 return
             return original_search_activated(self, item)
+
         editor_class._rhs_search_item_activated = search_activated_wrapper
 
     if original_visible is not None:
+
         def visible_wrapper(self, point):
             kind = _text((point or {}).get("kind")).lower()
             if kind in {"mer", "polan"}:
                 return self.show_locations_check.isChecked()
             return original_visible(self, point)
+
         editor_class._is_point_kind_visible = visible_wrapper
 
     editor_class.open_network_topology = _open_network_topology

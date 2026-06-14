@@ -1431,10 +1431,18 @@ def _polan_design(
         )
 
     largest_splitter = max(splitter_candidates, key=_split_ratio_outputs)
-    splitter_capacity = max(
-        1,
-        int(
-            math.floor(_split_ratio_outputs(largest_splitter) / (1.0 + spare_fraction))
+    configured_splitter_limit = max(
+        1, _int(builder.settings.get("polan_max_onts_per_splitter"), 16)
+    )
+    splitter_capacity = min(
+        configured_splitter_limit,
+        max(
+            1,
+            int(
+                math.floor(
+                    _split_ratio_outputs(largest_splitter) / (1.0 + spare_fraction)
+                )
+            ),
         ),
     )
     failover = bool(builder.settings.get("polan_olt_failover", True))
@@ -1673,6 +1681,8 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
     settings.setdefault("traditional_max_copper_m", 90.0)
     settings.setdefault("polan_max_ont_copper_m", 30.0)
     settings.setdefault("polan_olt_failover", True)
+    settings.setdefault("polan_max_onts_per_splitter", 16)
+    settings.setdefault("polan_max_splitter_to_ont_m", 150.0)
     spare_fraction = (
         max(0.0, _float(settings.get("spare_capacity_percent"), 15.0)) / 100.0
     )
@@ -1739,6 +1749,12 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         "estimated_copper_length_m": round(builder.total_copper_m, 3),
         "estimated_fibre_length_m": round(builder.total_fibre_m, 3),
         "polan_max_ont_copper_m": _float(settings.get("polan_max_ont_copper_m"), 30.0),
+        "polan_max_onts_per_splitter": _int(
+            settings.get("polan_max_onts_per_splitter"), 16
+        ),
+        "polan_max_splitter_to_ont_m": _float(
+            settings.get("polan_max_splitter_to_ont_m"), 150.0
+        ),
         "olt_failover_enabled": (
             bool(settings.get("polan_olt_failover", True))
             if technology_value == "PoLAN"
