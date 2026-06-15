@@ -420,9 +420,15 @@ class TopologyModel:
         return True
 
     def _build_hierarchy(self) -> None:
+        sorted_adjacency = {
+            node_id: sorted(edges, key=self._edge_sort_key)
+            for node_id, edges in self.adjacency.items()
+        }
         unvisited = set(self.nodes)
-        while unvisited:
-            seed = min(unvisited, key=lambda node_id: self._node_root_key(node_id))
+        ordered_nodes = sorted(self.nodes, key=lambda node_id: self._node_root_key(node_id))
+        for seed in ordered_nodes:
+            if seed not in unvisited:
+                continue
             component: Set[str] = set()
             queue = deque([seed])
             component.add(seed)
@@ -436,8 +442,10 @@ class TopologyModel:
 
             discovered: Set[str] = set()
             remaining = set(component)
-            while remaining:
-                root = min(remaining, key=lambda node_id: self._node_root_key(node_id))
+            ordered_component = sorted(component, key=lambda node_id: self._node_root_key(node_id))
+            for root in ordered_component:
+                if root not in remaining:
+                    continue
                 self.roots.append(root)
                 self.level[root] = 0
                 bfs = deque([root])
@@ -445,7 +453,7 @@ class TopologyModel:
                 remaining.discard(root)
                 while bfs:
                     current = bfs.popleft()
-                    for neighbour, edge in sorted(self.adjacency.get(current, []), key=self._edge_sort_key):
+                    for neighbour, edge in sorted_adjacency.get(current, []):
                         if neighbour not in component or neighbour in discovered:
                             continue
                         if not self._can_descend(current, neighbour):
