@@ -74,6 +74,24 @@ def _as_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _normalise_split_ratio(value) -> tuple[str, int, int]:
+    """Normalise passive splitter ratios and allow one or two feeder inputs."""
+
+    text = _text(value).lower().replace("×", ":").replace("x", ":")
+    text = "".join(text.split())
+    if ":" not in text:
+        return "", 0, 0
+    left, right = text.split(":", 1)
+    try:
+        inputs = int(left)
+        outputs = int(right)
+    except (TypeError, ValueError):
+        return "", 0, 0
+    if inputs not in {1, 2} or outputs < 1:
+        return "", 0, 0
+    return f"{inputs}:{outputs}", inputs, outputs
+
+
 def _normalise_string_list(values) -> List[str]:
     if values is None:
         return []
@@ -174,7 +192,20 @@ def ensure_network_schema(data: dict) -> dict:
         asset.setdefault("model", "")
         asset.setdefault("patch_panel_type", "")
         asset.setdefault("split_ratio", "")
-        asset.setdefault("max_split_ratio", "")
+        if asset["asset_type"] == "fibre_splitter":
+            split_ratio, split_inputs, split_outputs = _normalise_split_ratio(
+                asset.get("split_ratio")
+            )
+            if split_ratio:
+                asset["split_ratio"] = split_ratio
+                asset["split_input_count"] = split_inputs
+                asset["split_output_count"] = split_outputs
+            else:
+                asset["split_input_count"] = max(0, _as_int(asset.get("split_input_count")))
+                asset["split_output_count"] = max(0, _as_int(asset.get("split_output_count")))
+        else:
+            asset["split_input_count"] = 0
+            asset["split_output_count"] = 0
         asset["frequencies"] = _normalise_string_list(asset.get("frequencies", []))
         asset["power_input_w"] = max(0.0, _as_float(asset.get("power_input_w")))
         asset["poe_budget_w"] = max(0.0, _as_float(asset.get("poe_budget_w")))
@@ -182,6 +213,15 @@ def ensure_network_schema(data: dict) -> dict:
         asset["connections_in"] = max(0, _as_int(asset.get("connections_in")))
         asset["connections_out"] = max(0, _as_int(asset.get("connections_out")))
         asset["uplink_ports"] = max(0, _as_int(asset.get("uplink_ports")))
+        if asset["asset_type"] == "fibre_splitter" and asset["split_input_count"] > 0:
+            asset["connections_in"] = asset["split_input_count"]
+            asset["connections_out"] = asset["split_output_count"]
+            asset["number_of_ports"] = (
+                asset["split_input_count"] + asset["split_output_count"]
+            )
+            asset["input_connection_type"] = "fibre"
+            asset["output_connection_type"] = "fibre"
+            asset["uplink_connection_type"] = "fibre"
         asset["supports_stacking"] = bool(asset.get("supports_stacking", False))
         asset["max_stack_members"] = max(1, _as_int(asset.get("max_stack_members"), 1))
         if not asset["supports_stacking"]:
@@ -206,36 +246,41 @@ def ensure_network_schema(data: dict) -> dict:
             value = _text(asset.get(field)).lower() or default
             asset[field] = value if value in NETWORK_MEDIA else default
         asset.setdefault("notes", "")
-        # Structured physical port definitions supersede the legacy aggregate
-        # counters while retaining those counters for backwards compatibility.
-        raw_port_definitions = asset.get("port_definitions", [])
-        if not isinstance(raw_port_definitions, list):
-            raw_port_definitions = []
-        port_definitions = []
-        for row in raw_port_definitions:
-            if not isinstance(row, dict):
-                continue
-            port_type = _text(row.get("port_type")).lower() or "other"
-            port_use = _text(row.get("port_use")).lower() or "other"
-            port_definitions.append({
-                "port_type": port_type if port_type in NETWORK_PORT_TYPES else "other",
-                "port_count": max(0, _as_int(row.get("port_count"))),
-                "port_use": port_use if port_use in NETWORK_PORT_USES else "other",
-                "name_prefix": _text(row.get("name_prefix")),
-                "explicit_names": [
-                    _text(value)
-                    for value in row.get("explicit_names", [])
-                    if _text(value)
-                ] if isinstance(row.get("explicit_names", []), list) else [],
-            })
-        port_definitions = [row for row in port_definitions if row["port_count"] > 0]
-        if not port_definitions and asset["number_of_ports"] > 0:
-            default_type = "pon" if asset["asset_type"] in {"optical_line_terminal", "optical_network_terminal"} else ("lc" if asset["asset_type"] == "fibre_splitter" or asset.get("patch_panel_type") == "fibre" else "rj45")
-            default_use = "patch" if asset["asset_type"] == "patch_panel" else ("pon" if default_type == "pon" else "client")
-            port_definitions = [{"port_type": default_type, "port_count": asset["number_of_ports"], "port_use": default_use, "name_prefix": ""}]
-        asset["port_definitions"] = port_definitions
-        if port_definitions:
-            asset["number_of_ports"] = sum(row["port_count"] for row in port_definitions)
+
+    # Recover planner-owned PoLAN placement rows if an older save path kept
+    # generated instances but omitted their generated locations.  The instance
+    # already carries the authoritative floor and coordinates, so recreating
+    # AUTO-POLAN locations is deterministic and avoids false validation errors.
+    existing_location_names = {
+        _text(item.get("name"))
+        for item in data.get("locations", [])
+        if isinstance(item, dict) and _text(item.get("name"))
+    }
+    for instance in data.get("network_asset_instances", []):
+        if not isinstance(instance, dict):
+            continue
+        location_name = _text(instance.get("location_name"))
+        if (
+            not location_name
+            or not location_name.startswith("AUTO-POLAN-")
+            or location_name in existing_location_names
+        ):
+            continue
+        data["locations"].append(
+            {
+                "name": location_name,
+                "floor": _as_int(instance.get("floor")),
+                "x": _as_float(instance.get("x")),
+                "y": _as_float(instance.get("y")),
+                "kind": "polan",
+                "department_id": "",
+                "department_ids": [],
+                "anchor_point_name": _text(instance.get("route_anchor")),
+                "auto_network_location": True,
+                "recovered_from_instance": True,
+            }
+        )
+        existing_location_names.add(location_name)
 
     locations = {
         _text(item.get("name")): item
@@ -539,15 +584,18 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             "fibre",
         }:
             messages.append(f"Patch panel {asset_id} must specify copper or fibre.")
-        if asset_type == "fibre_splitter" and not _text(asset.get("split_ratio")):
-            messages.append(f"Fibre splitter {asset_id} requires a split ratio.")
-        for row_index, row in enumerate(asset.get("port_definitions", []), start=1):
-            if _text(row.get("port_type")) not in NETWORK_PORT_TYPES:
-                messages.append(f"Network asset {asset_id} port row {row_index} has an unsupported port type.")
-            if _text(row.get("port_use")) not in NETWORK_PORT_USES:
-                messages.append(f"Network asset {asset_id} port row {row_index} has an unsupported port use.")
-            if _as_int(row.get("port_count")) <= 0:
-                messages.append(f"Network asset {asset_id} port row {row_index} must have a positive port count.")
+        if asset_type == "fibre_splitter":
+            split_ratio, split_inputs, split_outputs = _normalise_split_ratio(
+                asset.get("split_ratio")
+            )
+            if not split_ratio:
+                messages.append(
+                    f"Fibre splitter {asset_id} requires a valid 1:x or 2:x split ratio."
+                )
+            elif split_inputs not in {1, 2} or split_outputs < 1:
+                messages.append(
+                    f"Fibre splitter {asset_id} has an unsupported split ratio {asset.get('split_ratio')!r}."
+                )
         if asset_type == "wireless_access_point" and not asset.get("frequencies"):
             messages.append(
                 f"Wireless access point {asset_id} requires at least one frequency."
@@ -586,7 +634,7 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             return max(1, allowance) * stack_members
         return max(0, _as_int(asset.get("rack_units"), 1))
 
-    rack_groups: Dict[tuple[int, str, str], List[tuple[str, int, int, str]]] = {}
+    rack_groups: Dict[tuple[int, str, str], List[tuple[str, int, int]]] = {}
     rack_sizes: Dict[tuple[int, str, str], int] = {}
     default_rack_size = max(
         1, _as_int(data.get("network_settings", {}).get("default_rack_size_u"), 42)
@@ -609,9 +657,7 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         if used_u <= 0:
             continue
         end_u = start_u + used_u - 1
-        rack_groups.setdefault(key, []).append(
-            (instance_id, start_u, end_u, _text(instance.get("shared_rack_unit_group")))
-        )
+        rack_groups.setdefault(key, []).append((instance_id, start_u, end_u))
         explicit_size = _as_int(instance.get("rack_size_u"))
         if explicit_size > 0:
             rack_sizes[key] = max(rack_sizes.get(key, 0), explicit_size)
@@ -620,25 +666,22 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         capacity = rack_sizes.get(key, default_rack_size)
         floor, location, rack = key
         rack_label = f"{location or 'Floor ' + str(floor)} / {rack}"
-        for instance_id, start_u, end_u, _shared_group in rows:
+        for instance_id, start_u, end_u in rows:
             if end_u > capacity:
                 messages.append(
                     f"Rack {rack_label} capacity is {capacity}U but {instance_id} occupies U{start_u}-U{end_u}."
                 )
         ordered = sorted(rows, key=lambda row: (row[1], row[2], row[0]))
-        for index, (instance_id, start_u, end_u, shared_group) in enumerate(ordered):
-            for other_id, other_start, other_end, other_shared_group in ordered[index + 1 :]:
+        for index, (instance_id, start_u, end_u) in enumerate(ordered):
+            for other_id, other_start, other_end in ordered[index + 1 :]:
                 if other_start > end_u:
                     break
                 if other_end >= start_u:
-                    if shared_group and shared_group == other_shared_group:
-                        continue
                     messages.append(
                         f"Rack {rack_label} has overlapping rack units: {instance_id} U{start_u}-U{end_u} and {other_id} U{other_start}-U{other_end}."
                     )
 
     used_endpoints: set[tuple[str, str]] = set()
-    used_endpoint_segments: Dict[tuple[str, str], set[str]] = {}
     for connection in data.get("network_connections", []):
         if not isinstance(connection, dict):
             continue
@@ -667,23 +710,11 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                 )
                 continue
             endpoint = (instance_id, port)
-            segment = _text(connection.get("physical_segment")).lower() or "direct"
-            existing_segments = used_endpoint_segments.setdefault(endpoint, set())
-            instance = instances_by_id.get(instance_id, {})
-            endpoint_asset = assets_by_id.get(_text(instance.get("asset_id")), {})
-            is_patch_panel = _text(endpoint_asset.get("asset_type")) == "patch_panel"
-            valid_patch_pair = (
-                is_patch_panel
-                and segment in {"backbone", "patch_lead"}
-                and segment not in existing_segments
-                and existing_segments.issubset({"backbone", "patch_lead"})
-            )
-            if instance_id and endpoint in used_endpoints and not valid_patch_pair:
+            if instance_id and endpoint in used_endpoints:
                 messages.append(
                     f"Network endpoint {instance_id}:{port} is used by more than one connection."
                 )
             used_endpoints.add(endpoint)
-            existing_segments.add(segment)
         for vlan_id in connection.get("vlan_ids", []):
             if _text(vlan_id) not in vlan_record_ids:
                 messages.append(

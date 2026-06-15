@@ -941,7 +941,47 @@ class DesignBuilder:
         return location
 
     def commit(self) -> None:
-        self.data.setdefault("locations", []).extend(self.locations)
+        # Commit generated locations before instances.  Older save paths and
+        # interrupted planner runs could retain instances while losing their
+        # AUTO-POLAN location rows, which then caused validation failures.
+        locations = self.data.setdefault("locations", [])
+        existing_location_names = {
+            _text(item.get("name"))
+            for item in locations
+            if isinstance(item, dict) and _text(item.get("name"))
+        }
+        for location in self.locations:
+            name = _text(location.get("name"))
+            if name and name not in existing_location_names:
+                locations.append(location)
+                existing_location_names.add(name)
+
+        # Defensive recovery: every generated instance must have a persisted
+        # location row.  Reconstruct only planner-owned AUTO-POLAN locations;
+        # manual location references remain subject to normal validation.
+        for instance in self.instances:
+            location_name = _text(instance.get("location_name"))
+            if (
+                location_name
+                and location_name.startswith("AUTO-POLAN-")
+                and location_name not in existing_location_names
+            ):
+                locations.append(
+                    {
+                        "name": location_name,
+                        "floor": _int(instance.get("floor")),
+                        "x": round(_float(instance.get("x")), 3),
+                        "y": round(_float(instance.get("y")), 3),
+                        "kind": "polan",
+                        "department_id": "",
+                        "department_ids": [],
+                        "anchor_point_name": _text(instance.get("route_anchor")),
+                        "auto_network_location": True,
+                        "recovered_from_instance": True,
+                    }
+                )
+                existing_location_names.add(location_name)
+
         self.data.setdefault("network_asset_instances", []).extend(self.instances)
         self.data.setdefault("network_connections", []).extend(self.connections)
         self.data.setdefault("network_endpoint_assignments", []).extend(
@@ -1519,34 +1559,7 @@ def _protected_splitter_asset(builder: DesignBuilder, base_asset: dict) -> dict:
     asset["name"] = f"Protected {base_asset.get('name', 'PoLAN splitter')}"
     output_count = _split_ratio_outputs(base_asset)
     asset["connections_in"] = 2
-    asset["connections_out"] = output_count
-    asset["uplink_ports"] = 0
-    asset["number_of_ports"] = output_count + 2
-    # Replace the inherited single-input definition.  Protected splitters have
-    # exactly two feeder inputs and one output bank; retaining the base
-    # splitter row created duplicate Input-A/Input-B and In-1 ports.
-    asset["port_definitions"] = [
-        {
-            "port_type": "lc",
-            "port_count": 1,
-            "port_use": "input",
-            "name_prefix": "Input-A",
-            "explicit_names": ["Input-A"],
-        },
-        {
-            "port_type": "lc",
-            "port_count": 1,
-            "port_use": "input",
-            "name_prefix": "Input-B",
-            "explicit_names": ["Input-B"],
-        },
-        {
-            "port_type": "lc",
-            "port_count": output_count,
-            "port_use": "output",
-            "name_prefix": "Output",
-        },
-    ]
+    asset["number_of_ports"] = _split_ratio_outputs(base_asset) + 2
     asset["notes"] = (
         _text(base_asset.get("notes"))
         + " Auto-generated 2:N protected splitter/coupler for primary and standby OLT feeder inputs."
