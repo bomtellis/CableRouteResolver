@@ -1814,12 +1814,12 @@ class NetworkTopologyDialog(QDialog):
         )
 
     def _is_active_topology_device(self, node_id: str) -> bool:
-        """Return True only for devices that belong in the logical network hierarchy.
+        """Return True for logical topology devices and fibre splitters.
 
-        Rack support, passive optical/copper components and power equipment stay
-        available to rack and switch-port views, but are deliberately excluded
-        from the overview topology because they add large numbers of cards and
-        links without representing another logical network tier.
+        Fibre splitters are passive, but they are an essential logical stage in
+        a PoLAN hierarchy and therefore remain visible between the OLT and ONTs.
+        Rack support, patching, cable-management and power equipment remain
+        available only to rack and port views.
         """
         node = self.model.nodes.get(node_id)
         if node is None:
@@ -1831,14 +1831,20 @@ class NetworkTopologyDialog(QDialog):
         role = _text(node.role).lower()
         name = _text(node.name).lower()
 
+        # Splitters are the one passive component deliberately retained in the
+        # logical topology because they define the OLT-to-ONT fan-out.  Test for
+        # them before applying the generic passive-component filters.
+        if asset_type == "fibre_splitter" or "splitter" in role:
+            return True
+
         passive_or_power_tokens = (
-            "patch", "splitter", "coupler", "adapter", "splice",
+            "patch", "coupler", "adapter", "splice",
             "cable management", "cable-management", "cable manager",
             "ups", "pdu", "power distribution", "power supply",
             "battery", "rectifier", "shelf", "blanking panel",
         )
         if asset_type in {
-            "patch_panel", "fibre_splitter", "cable_management",
+            "patch_panel", "cable_management",
             "cable_manager", "ups", "pdu", "power_device",
         }:
             return False
