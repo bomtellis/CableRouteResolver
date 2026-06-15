@@ -117,6 +117,36 @@ def _network_pick_radius(editor) -> float:
     return max(0.25, 12.0 / scale)
 
 
+def _is_active_main_graph_asset(asset: dict, instance: Optional[dict] = None) -> bool:
+    asset_type = _text(asset.get("asset_type")).lower()
+    asset_name = _text(asset.get("name")).lower()
+    role = _text((instance or {}).get("design_role")).lower()
+    passive_or_power_tokens = (
+        "patch", "splitter", "coupler", "adapter", "splice",
+        "cable management", "cable-management", "cable manager",
+        "ups", "pdu", "power distribution", "power supply",
+        "battery", "rectifier", "shelf", "blanking panel",
+    )
+    if asset_type in {
+        "patch_panel", "fibre_splitter", "cable_management",
+        "cable_manager", "ups", "pdu", "power_device",
+    }:
+        return False
+    if any(token in asset_name or token in role for token in passive_or_power_tokens):
+        return False
+    if asset_type in {
+        "network_router", "firewall", "network_switch",
+        "wireless_access_point", "optical_line_terminal",
+        "optical_network_terminal",
+    }:
+        return True
+    return any(token in role for token in (
+        "core", "distribution", "aggregation", "access",
+        "gateway", "router", "firewall", "olt", "ont",
+        "wireless", "client",
+    ))
+
+
 def _find_network_instance(editor, x: float, y: float) -> Optional[str]:
     """Find a selectable main-canvas network instance, excluding patch panels."""
     ensure_network_schema(editor.store.data)
@@ -134,11 +164,7 @@ def _find_network_instance(editor, x: float, y: float) -> Optional[str]:
         asset = assets.get(_text(instance.get("asset_id")), {})
         asset_type = _text(asset.get("asset_type")).lower()
         asset_name = _text(asset.get("name")).lower()
-        if (
-            asset_type in {"patch_panel", "cable_management", "cable_manager"}
-            or "cable management" in asset_name
-            or "cable-management" in asset_name
-        ):
+        if not _is_active_main_graph_asset(asset, instance):
             continue
         dx = float(instance.get("x", 0.0)) - float(x)
         dy = float(instance.get("y", 0.0)) - float(y)
@@ -1009,11 +1035,7 @@ def _refresh_network_search(editor) -> None:
         asset = assets.get(_text(instance.get("asset_id")), {})
         asset_type = _text(asset.get("asset_type")).lower()
         asset_name = _text(asset.get("name")).lower()
-        if (
-            asset_type in {"patch_panel", "cable_management", "cable_manager"}
-            or "cable management" in asset_name
-            or "cable-management" in asset_name
-        ):
+        if not _is_active_main_graph_asset(asset, instance):
             continue
         label = (
             f"{instance_id} - {_text(instance.get('name')) or instance_id} | "

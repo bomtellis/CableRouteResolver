@@ -687,17 +687,35 @@ class GpuDxfGraphView(QOpenGLWidget):
             if isinstance(item, dict) and str(item.get("id", "")).strip()
         }
 
-        def is_hidden_rack_component(instance: dict) -> bool:
+        def is_active_graph_device(instance: dict) -> bool:
             asset = assets.get(str(instance.get("asset_id", "")).strip(), {})
             asset_type = str(asset.get("asset_type", "")).strip().lower()
             asset_name = str(asset.get("name", "")).strip().lower()
             role = str(instance.get("design_role", "")).strip().lower()
-            return (
-                asset_type in {"patch_panel", "cable_management", "cable_manager"}
-                or role in {"cable_management", "cable_manager"}
-                or "cable management" in asset_name
-                or "cable-management" in asset_name
+            passive_or_power_tokens = (
+                "patch", "splitter", "coupler", "adapter", "splice",
+                "cable management", "cable-management", "cable manager",
+                "ups", "pdu", "power distribution", "power supply",
+                "battery", "rectifier", "shelf", "blanking panel",
             )
+            if asset_type in {
+                "patch_panel", "fibre_splitter", "cable_management",
+                "cable_manager", "ups", "pdu", "power_device",
+            }:
+                return False
+            if any(token in asset_name or token in role for token in passive_or_power_tokens):
+                return False
+            if asset_type in {
+                "network_router", "firewall", "network_switch",
+                "wireless_access_point", "optical_line_terminal",
+                "optical_network_terminal",
+            }:
+                return True
+            return any(token in role for token in (
+                "core", "distribution", "aggregation", "access",
+                "gateway", "router", "firewall", "olt", "ont",
+                "wireless", "client",
+            ))
 
         all_points = self.store.all_points() if hasattr(self.store, "all_points") else {}
         display_positions = self._network_display_positions(floor_instances, assets)
@@ -737,7 +755,7 @@ class GpuDxfGraphView(QOpenGLWidget):
                 # Patch panels are physical rack components and are deliberately
                 # omitted from the main spatial graph, including their terminating
                 # link segments. They remain available in rack views and reports.
-                if is_hidden_rack_component(source) or is_hidden_rack_component(target):
+                if not is_active_graph_device(source) or not is_active_graph_device(target):
                     continue
                 route_records = [
                     all_points[name]
@@ -775,7 +793,7 @@ class GpuDxfGraphView(QOpenGLWidget):
                 # Network switches remain part of the installed design and their
                 # links are still drawn, but the switch symbols and labels are
                 # intentionally hidden from the main floor graph view.
-                if asset_type in {"network_switch", "patch_panel", "cable_management", "cable_manager"}:
+                if asset_type == "network_switch" or not is_active_graph_device(instance):
                     continue
                 display_x, display_y = display_positions.get(
                     str(instance_id),

@@ -1764,8 +1764,54 @@ class NetworkTopologyDialog(QDialog):
             or "cable-management" in name
         )
 
+    def _is_active_topology_device(self, node_id: str) -> bool:
+        """Return True only for devices that belong in the logical network hierarchy.
+
+        Rack support, passive optical/copper components and power equipment stay
+        available to rack and switch-port views, but are deliberately excluded
+        from the overview topology because they add large numbers of cards and
+        links without representing another logical network tier.
+        """
+        node = self.model.nodes.get(node_id)
+        if node is None:
+            return False
+        if node.pseudo or node.asset_type in {"site_group", "client_group", "client_device"}:
+            return True
+
+        asset_type = _text(node.asset_type).lower()
+        role = _text(node.role).lower()
+        name = _text(node.name).lower()
+
+        passive_or_power_tokens = (
+            "patch", "splitter", "coupler", "adapter", "splice",
+            "cable management", "cable-management", "cable manager",
+            "ups", "pdu", "power distribution", "power supply",
+            "battery", "rectifier", "shelf", "blanking panel",
+        )
+        if asset_type in {
+            "patch_panel", "fibre_splitter", "cable_management",
+            "cable_manager", "ups", "pdu", "power_device",
+        }:
+            return False
+        if any(token in name or token in role for token in passive_or_power_tokens):
+            return False
+
+        if asset_type in {
+            "network_router", "firewall", "network_switch",
+            "wireless_access_point", "optical_line_terminal",
+            "optical_network_terminal",
+        }:
+            return True
+
+        logical_role_tokens = (
+            "core", "distribution", "aggregation", "access",
+            "gateway", "router", "firewall", "olt", "ont",
+            "wireless", "client",
+        )
+        return any(token in role for token in logical_role_tokens)
+
     def _is_hidden_logical_component(self, node_id: str) -> bool:
-        return self._is_patch_panel(node_id) or self._is_cable_management(node_id)
+        return not self._is_active_topology_device(node_id)
 
     def _children_for(self, node_id: str) -> List[str]:
         if self.rack_focus is None and self.switch_port_focus is None:
