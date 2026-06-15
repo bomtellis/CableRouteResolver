@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 import math
+import re
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
@@ -97,12 +98,72 @@ def _expanded_asset_ports(asset: dict) -> List[dict]:
     for row in _asset_port_definitions(asset):
         port_type = _text(row.get("port_type")).lower() or "other"
         port_use = _text(row.get("port_use")).lower() or "other"
+        explicit_names = [
+            _text(value) for value in row.get("explicit_names", []) if _text(value)
+        ] if isinstance(row.get("explicit_names", []), list) else []
+        count = max(0, _int(row.get("port_count")))
+        if explicit_names:
+            for name in explicit_names[:count]:
+                result.append({"name": name, "port_type": port_type, "port_use": port_use})
+            count -= min(count, len(explicit_names))
         prefix = _text(row.get("name_prefix")) or ({"pon":"PON", "sfp":"SFP", "sfp+":"SFP+", "qsfp":"QSFP", "qsfp28":"QSFP28", "lc":"LC", "sc":"SC", "mpo":"MPO", "rj45":""}.get(port_type, port_type.upper()))
-        for _ in range(max(0, _int(row.get("port_count")))):
+        for _ in range(count):
             counters[prefix] += 1
-            name = f"{prefix}-{counters[prefix]}" if prefix else str(counters[prefix])
+            # A one-port row whose prefix is already a complete physical name
+            # should not be rendered as e.g. Input-A-1.
+            name = prefix if count == 1 and not counters[prefix] > 1 and prefix.lower().startswith("input-") else (f"{prefix}-{counters[prefix]}" if prefix else str(counters[prefix]))
             result.append({"name": name, "port_type": port_type, "port_use": port_use})
     return result
+
+
+def _canonical_port_name(asset: dict, observed_name: str, defined_ports: Sequence[dict]) -> str:
+    """Map legacy/generated aliases onto the declared physical port list.
+
+    Device views previously unioned observed connection labels with declared
+    ports.  Names such as ``1`` versus ``Gi-1`` or ``In-1`` versus ``Input-A``
+    therefore created extra physical sockets.  This function resolves those
+    aliases without inventing additional ports.
+    """
+    observed = _text(observed_name)
+    if not observed or observed == "Unspecified" or not defined_ports:
+        return observed
+    by_lower = {_text(row.get("name")).lower(): _text(row.get("name")) for row in defined_ports}
+    exact = by_lower.get(observed.lower())
+    if exact:
+        return exact
+
+    lowered = observed.lower()
+    match = re.search(r"(\d+)(?!.*\d)", lowered)
+    ordinal = int(match.group(1)) if match else 1
+    wanted_use = ""
+    wanted_type = ""
+    if lowered.startswith(("input", "in-", "in ")):
+        wanted_use = "input"
+    elif lowered.startswith(("output", "out-", "out ")):
+        wanted_use = "output"
+    elif "uplink" in lowered:
+        wanted_use = "uplink"
+    elif "pon" in lowered:
+        wanted_type = "pon"
+    elif any(token in lowered for token in ("sfp", "qsfp")):
+        wanted_type = "qsfp" if "qsfp" in lowered else "sfp"
+
+    candidates = list(defined_ports)
+    if wanted_use:
+        filtered = [row for row in candidates if _text(row.get("port_use")).lower() == wanted_use]
+        if filtered:
+            candidates = filtered
+    if wanted_type:
+        filtered = [row for row in candidates if wanted_type in _text(row.get("port_type")).lower()]
+        if filtered:
+            candidates = filtered
+    if not wanted_use and not wanted_type and lowered.isdigit():
+        filtered = [row for row in candidates if _text(row.get("port_use")).lower() in {"client", "downlink", "patch", "output"}]
+        if filtered:
+            candidates = filtered
+    if 1 <= ordinal <= len(candidates):
+        return _text(candidates[ordinal - 1].get("name"))
+    return observed
 
 def _port_definition_for_name(asset: dict, port_name: str) -> dict:
     target = _text(port_name).lower()
@@ -1182,6 +1243,106 @@ class SwitchFrontPanelItem(QGraphicsObject):
             self.activated.emit(self.node.node_id)
             event.accept()
             return
+        super().mousePressEvent(event)
+
+
+class SplitterFrontPanelItem(QGraphicsObject):
+    """Dedicated 1U optical splitter face with a central prism."""
+    activated = Signal(str)
+    portActivated = Signal(str)
+
+    def __init__(self, node: TopologyNode, port_nodes: Sequence[TopologyNode], width: float, height: float):
+        super().__init__()
+        self.node = node
+        self.port_nodes = list(port_nodes)
+        self._width = float(width)
+        self._height = max(40.0, float(height))
+        self._port_rects: Dict[str, QRectF] = {}
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setAcceptHoverEvents(True)
+        self._build_port_rects()
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(0.0, 0.0, self._width, self._height)
+
+    def _build_port_rects(self) -> None:
+        self._port_rects.clear()
+        inputs = [p for p in self.port_nodes if _text(p.details.get("port_use")).lower() == "input"]
+        outputs = [p for p in self.port_nodes if _text(p.details.get("port_use")).lower() == "output"]
+        others = [p for p in self.port_nodes if p not in inputs and p not in outputs]
+        outputs.extend(others)
+        port_w = max(7.0, min(13.0, self._width * 0.026))
+        port_h = max(6.0, min(11.0, self._height * 0.24))
+        left_x = self._width * 0.10
+        input_gap = max(5.0, port_h * 0.55)
+        input_block_h = len(inputs) * port_h + max(0, len(inputs)-1) * input_gap
+        iy = (self._height - input_block_h) / 2.0
+        for p in inputs:
+            self._port_rects[p.node_id] = QRectF(left_x, iy, port_w, port_h)
+            iy += port_h + input_gap
+        right_left = self._width * 0.60
+        right_width = self._width * 0.32
+        gap_x = max(2.0, port_w * 0.30)
+        gap_y = max(2.0, port_h * 0.30)
+        per_row = max(1, int((right_width + gap_x) // (port_w + gap_x)))
+        rows = max(1, math.ceil(len(outputs) / per_row))
+        total_h = rows * port_h + max(0, rows-1) * gap_y
+        oy = max(16.0, (self._height - total_h) / 2.0)
+        for i, p in enumerate(outputs):
+            row, col = divmod(i, per_row)
+            x = right_left + col * (port_w + gap_x)
+            y = oy + row * (port_h + gap_y)
+            self._port_rects[p.node_id] = QRectF(x, y, port_w, port_h)
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:
+        rect = self.boundingRect()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(QPen(QColor('#8fc7ff') if self.isSelected() else QColor('#71808b'), 1.4))
+        painter.setBrush(QColor('#222d35'))
+        painter.drawRoundedRect(rect.adjusted(1,1,-1,-1), 4, 4)
+        painter.setFont(QFont('Arial', 7, QFont.Bold))
+        painter.setPen(QColor('#dce5ea'))
+        painter.drawText(QRectF(8, 2, rect.width()-16, 13), Qt.AlignCenter, self.node.name)
+
+        # Optical prism separating protected feeder inputs from the output bank.
+        cx = rect.width() * 0.47
+        cy = rect.height() * 0.56
+        prism = QPainterPath()
+        prism.moveTo(cx - 24, cy - 22)
+        prism.lineTo(cx + 25, cy)
+        prism.lineTo(cx - 24, cy + 22)
+        prism.closeSubpath()
+        painter.setPen(QPen(QColor('#9ac7ff'), 1.4))
+        painter.setBrush(QColor('#405d79'))
+        painter.drawPath(prism)
+        painter.setPen(QColor('#bcdcff'))
+        painter.setFont(QFont('Arial', 6, QFont.Bold))
+        painter.drawText(QRectF(cx-22, cy-7, 40, 14), Qt.AlignCenter, 'OPTICAL')
+
+        for port_node in self.port_nodes:
+            pr = self._port_rects.get(port_node.node_id)
+            if pr is None:
+                continue
+            occupied = bool(port_node.details.get('occupied'))
+            fill = QColor('#c94c4c') if occupied else QColor('#41a85f')
+            painter.setPen(QPen(fill.darker(170), 0.8))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(pr, 1.2, 1.2)
+            painter.setBrush(fill.darker(145))
+            painter.drawEllipse(pr.adjusted(pr.width()*0.27, pr.height()*0.20, -pr.width()*0.27, -pr.height()*0.20))
+            painter.setPen(QColor('#dce5ea'))
+            painter.setFont(QFont('Arial', 5))
+            label = _text(port_node.details.get('port_name'))
+            painter.drawText(QRectF(pr.left()-16, pr.bottom()+1, pr.width()+32, 9), Qt.AlignHCenter|Qt.AlignTop, label)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            for node_id, rect in self._port_rects.items():
+                if rect.adjusted(-2,-2,2,2).contains(event.pos()):
+                    self.portActivated.emit(node_id)
+                    event.accept(); return
+            self.activated.emit(self.node.node_id)
+            event.accept(); return
         super().mousePressEvent(event)
 
 
@@ -2328,6 +2489,17 @@ class NetworkTopologyDialog(QDialog):
                 port = edge.target_port or "Unspecified"
                 peer = self.model.nodes.get(edge.source_id)
                 records[port].append(peer.name if peer else edge.source_id)
+        device = self.model.nodes.get(device_id)
+        defined_ports = _expanded_asset_ports(device.asset) if device is not None else []
+        if defined_ports:
+            canonical_records: Dict[str, List[str]] = defaultdict(list)
+            canonical_poe: Dict[str, float] = defaultdict(float)
+            for port_name, values in records.items():
+                canonical = _canonical_port_name(device.asset, port_name, defined_ports)
+                canonical_records[canonical].extend(values)
+                canonical_poe[canonical] += poe_by_port.get(port_name, 0.0)
+            records = canonical_records
+            poe_by_port = canonical_poe
         # Trace details are intentionally calculated only when a user selects
         # a port. Eagerly tracing every port on every rack device would undo the
         # topology loading-performance improvements on large projects.
@@ -3329,7 +3501,11 @@ class NetworkTopologyDialog(QDialog):
                 units = max(1, self._node_rack_units(switch_id))
                 panel_width = 965.2
                 panel_height = max(88.9, units * 88.9)
-                item = SwitchFrontPanelItem(node, port_nodes, panel_width, panel_height)
+                item = (
+                    SplitterFrontPanelItem(node, port_nodes, panel_width, 88.9)
+                    if node.asset_type == "fibre_splitter"
+                    else SwitchFrontPanelItem(node, port_nodes, panel_width, panel_height)
+                )
                 item.setPos(positions[switch_id])
                 item.setZValue(1.0)
                 item.activated.connect(self._card_activated)
@@ -3367,12 +3543,16 @@ class NetworkTopologyDialog(QDialog):
                         equipment_height = units * 44.45 - 4.0
                         display_units = units
                     port_nodes = self._rack_port_nodes(node_id)
-                    item = RackEquipmentItem(
-                        node,
-                        equipment_width,
-                        equipment_height,
-                        display_units,
-                        port_nodes,
+                    item = (
+                        SplitterFrontPanelItem(node, port_nodes, equipment_width, 44.45 - 4.0)
+                        if node.asset_type == "fibre_splitter"
+                        else RackEquipmentItem(
+                            node,
+                            equipment_width,
+                            equipment_height,
+                            display_units,
+                            port_nodes,
+                        )
                     )
                 else:
                     children = self._children_for(node_id)
@@ -3383,7 +3563,7 @@ class NetworkTopologyDialog(QDialog):
                 item.setPos(positions[node_id])
                 item.setZValue(1.0)
                 item.activated.connect(self._card_activated)
-                if isinstance(item, RackEquipmentItem):
+                if isinstance(item, (RackEquipmentItem, SplitterFrontPanelItem)):
                     item.portActivated.connect(self._card_activated)
                 item.branchToggleRequested.connect(self._card_double_clicked)
                 self.scene.addItem(item)

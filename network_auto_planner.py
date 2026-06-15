@@ -1517,8 +1517,36 @@ def _protected_splitter_asset(builder: DesignBuilder, base_asset: dict) -> dict:
     asset = deepcopy(base_asset)
     asset["id"] = existing_id
     asset["name"] = f"Protected {base_asset.get('name', 'PoLAN splitter')}"
+    output_count = _split_ratio_outputs(base_asset)
     asset["connections_in"] = 2
-    asset["number_of_ports"] = _split_ratio_outputs(base_asset) + 2
+    asset["connections_out"] = output_count
+    asset["uplink_ports"] = 0
+    asset["number_of_ports"] = output_count + 2
+    # Replace the inherited single-input definition.  Protected splitters have
+    # exactly two feeder inputs and one output bank; retaining the base
+    # splitter row created duplicate Input-A/Input-B and In-1 ports.
+    asset["port_definitions"] = [
+        {
+            "port_type": "lc",
+            "port_count": 1,
+            "port_use": "input",
+            "name_prefix": "Input-A",
+            "explicit_names": ["Input-A"],
+        },
+        {
+            "port_type": "lc",
+            "port_count": 1,
+            "port_use": "input",
+            "name_prefix": "Input-B",
+            "explicit_names": ["Input-B"],
+        },
+        {
+            "port_type": "lc",
+            "port_count": output_count,
+            "port_use": "output",
+            "name_prefix": "Output",
+        },
+    ]
     asset["notes"] = (
         _text(base_asset.get("notes"))
         + " Auto-generated 2:N protected splitter/coupler for primary and standby OLT feeder inputs."

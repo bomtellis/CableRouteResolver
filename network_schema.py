@@ -222,6 +222,11 @@ def ensure_network_schema(data: dict) -> dict:
                 "port_count": max(0, _as_int(row.get("port_count"))),
                 "port_use": port_use if port_use in NETWORK_PORT_USES else "other",
                 "name_prefix": _text(row.get("name_prefix")),
+                "explicit_names": [
+                    _text(value)
+                    for value in row.get("explicit_names", [])
+                    if _text(value)
+                ] if isinstance(row.get("explicit_names", []), list) else [],
             })
         port_definitions = [row for row in port_definitions if row["port_count"] > 0]
         if not port_definitions and asset["number_of_ports"] > 0:
