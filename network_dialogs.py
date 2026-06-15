@@ -233,6 +233,15 @@ class NetworkAssetEditorDialog(QDialog):
             )
         )
 
+        self.olt_units_per_u_spin = QSpinBox()
+        self.olt_units_per_u_spin.setRange(1, 32)
+        self.olt_units_per_u_spin.setValue(
+            max(1, int(self.asset.get("olt_units_per_rack_unit", 1) or 1))
+        )
+        self.olt_units_per_u_spin.setToolTip(
+            "Number of separate functional OLT units that this model can mount within one physical rack unit."
+        )
+
         self.notes_edit = QTextEdit(_text(self.asset.get("notes")))
         self.notes_edit.setMinimumHeight(90)
 
@@ -258,6 +267,7 @@ class NetworkAssetEditorDialog(QDialog):
         form.addRow("Uplink connection type", self.uplink_type_combo)
         form.addRow("Rack spaces", self.rack_units_spin)
         form.addRow("Switch rack allowance", self.switch_rack_allowance_spin)
+        form.addRow("OLT units per rack unit", self.olt_units_per_u_spin)
         form.addRow("Notes", self.notes_edit)
 
         self.asset_type_combo.currentIndexChanged.connect(self._update_visibility)
@@ -282,6 +292,7 @@ class NetworkAssetEditorDialog(QDialog):
         self.supports_stacking_check.setEnabled(asset_type == "network_switch")
         self.max_stack_members_spin.setEnabled(stacking_enabled)
         self.switch_rack_allowance_spin.setEnabled(asset_type == "network_switch")
+        self.olt_units_per_u_spin.setEnabled(asset_type == "optical_line_terminal")
 
     def _frequencies(self) -> List[str]:
         result = []
@@ -362,6 +373,11 @@ class NetworkAssetEditorDialog(QDialog):
                 int(self.switch_rack_allowance_spin.value())
                 if asset_type == "network_switch"
                 else 0
+            ),
+            "olt_units_per_rack_unit": (
+                int(self.olt_units_per_u_spin.value())
+                if asset_type == "optical_line_terminal"
+                else 1
             ),
             "notes": self.notes_edit.toPlainText().strip(),
         }
@@ -1045,6 +1061,7 @@ class NetworkPlannerDialog(QDialog):
                 "PoE W",
                 "Rack U",
                 "Switch U",
+                "OLT units/U",
             ]
         )
         self.instances_tab = _CrudTab(
@@ -1191,6 +1208,7 @@ class NetworkPlannerDialog(QDialog):
                     item.get("poe_budget_w", 0),
                     item.get("rack_units", 0),
                     item.get("switch_rack_unit_allowance", 0),
+                    item.get("olt_units_per_rack_unit", 1),
                 ]
                 for item in self._items("network_assets")
             ]

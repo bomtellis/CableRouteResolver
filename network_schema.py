@@ -176,6 +176,11 @@ def ensure_network_schema(data: dict) -> dict:
         if not asset["supports_stacking"]:
             asset["max_stack_members"] = 1
         asset["rack_units"] = max(0, _as_int(asset.get("rack_units"), 1))
+        asset["olt_units_per_rack_unit"] = max(
+            1, _as_int(asset.get("olt_units_per_rack_unit"), 1)
+        )
+        if asset["asset_type"] != "optical_line_terminal":
+            asset["olt_units_per_rack_unit"] = 1
         asset["switch_rack_unit_allowance"] = max(
             0,
             _as_int(asset.get("switch_rack_unit_allowance"), asset["rack_units"] or 1),
@@ -504,7 +509,7 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             return max(1, allowance) * stack_members
         return max(0, _as_int(asset.get("rack_units"), 1))
 
-    rack_groups: Dict[tuple[int, str, str], List[tuple[str, int, int]]] = {}
+    rack_groups: Dict[tuple[int, str, str], List[tuple[str, int, int, str]]] = {}
     rack_sizes: Dict[tuple[int, str, str], int] = {}
     default_rack_size = max(
         1, _as_int(data.get("network_settings", {}).get("default_rack_size_u"), 42)
@@ -527,7 +532,9 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         if used_u <= 0:
             continue
         end_u = start_u + used_u - 1
-        rack_groups.setdefault(key, []).append((instance_id, start_u, end_u))
+        rack_groups.setdefault(key, []).append(
+            (instance_id, start_u, end_u, _text(instance.get("shared_rack_unit_group")))
+        )
         explicit_size = _as_int(instance.get("rack_size_u"))
         if explicit_size > 0:
             rack_sizes[key] = max(rack_sizes.get(key, 0), explicit_size)
@@ -536,17 +543,19 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         capacity = rack_sizes.get(key, default_rack_size)
         floor, location, rack = key
         rack_label = f"{location or 'Floor ' + str(floor)} / {rack}"
-        for instance_id, start_u, end_u in rows:
+        for instance_id, start_u, end_u, _shared_group in rows:
             if end_u > capacity:
                 messages.append(
                     f"Rack {rack_label} capacity is {capacity}U but {instance_id} occupies U{start_u}-U{end_u}."
                 )
         ordered = sorted(rows, key=lambda row: (row[1], row[2], row[0]))
-        for index, (instance_id, start_u, end_u) in enumerate(ordered):
-            for other_id, other_start, other_end in ordered[index + 1 :]:
+        for index, (instance_id, start_u, end_u, shared_group) in enumerate(ordered):
+            for other_id, other_start, other_end, other_shared_group in ordered[index + 1 :]:
                 if other_start > end_u:
                     break
                 if other_end >= start_u:
+                    if shared_group and shared_group == other_shared_group:
+                        continue
                     messages.append(
                         f"Rack {rack_label} has overlapping rack units: {instance_id} U{start_u}-U{end_u} and {other_id} U{other_start}-U{other_end}."
                     )

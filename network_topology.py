@@ -2308,7 +2308,14 @@ class NetworkTopologyDialog(QDialog):
             top_u = min(capacity, start_u + units - 1)
             y = rack_top + (capacity - top_u) * unit_pitch
             rack_left = rack_x_by_name.get(rack_name, rack_left_start)
-            positions[node_id] = QPointF(rack_left + 18.0, y + 2.0)
+            shared_capacity = max(1, _int(node.instance.get("shared_rack_unit_capacity"), 1))
+            shared_position = max(1, _int(node.instance.get("shared_rack_unit_position"), 1))
+            if _text(node.instance.get("shared_rack_unit_group")) and shared_capacity > 1:
+                face_width = (482.6 - 8.0) / shared_capacity
+                x = rack_left + 18.0 + (shared_position - 1) * face_width
+            else:
+                x = rack_left + 18.0
+            positions[node_id] = QPointF(x, y + 2.0)
         return positions
 
     def _layout_switch_port_visible(self, visible_ids: Sequence[str]) -> Dict[str, QPointF]:
@@ -2730,7 +2737,10 @@ class NetworkTopologyDialog(QDialog):
     def _card_rect(self, node_id: str, positions: Dict[str, QPointF]) -> QRectF:
         pos = positions[node_id]
         if self.rack_focus is not None and self.switch_port_focus is None:
-            return QRectF(pos.x(), pos.y(), 482.6, max(1, self._node_rack_units(node_id)) * 44.45 - 4.0)
+            node = self._node_for(node_id)
+            shared_capacity = max(1, _int(node.instance.get("shared_rack_unit_capacity"), 1)) if node is not None else 1
+            width = (482.6 - 8.0) / shared_capacity if shared_capacity > 1 else 482.6
+            return QRectF(pos.x(), pos.y(), width, max(1, self._node_rack_units(node_id)) * 44.45 - 4.0)
         if self.switch_port_focus is not None and node_id == _text(self.switch_port_focus):
             units = max(1, self._node_rack_units(node_id))
             return QRectF(pos.x(), pos.y(), 965.2, max(88.9, units * 88.9))

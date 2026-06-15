@@ -1994,16 +1994,122 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             )
 
 
+def _support_rack_asset(
+    builder: DesignBuilder,
+    *,
+    asset_id: str,
+    name: str,
+    asset_type: str,
+    rack_units: int,
+    notes: str,
+) -> dict:
+    """Return an existing support asset or create a conservative generated one."""
+    for asset in builder.data.get("network_assets", []):
+        if _text(asset.get("id")) == asset_id:
+            return asset
+    asset = {
+        "id": asset_id,
+        "name": name,
+        "asset_type": asset_type,
+        "number_of_ports": 0,
+        "connections_in": 0,
+        "connections_out": 0,
+        "rack_units": max(1, int(rack_units)),
+        "power_input_w": 0.0,
+        "notes": notes,
+        "auto_network_asset": True,
+    }
+    builder.data.setdefault("network_assets", []).append(asset)
+    builder.asset_ids.add(asset_id)
+    return asset
+
+
+def _ups_asset(builder: DesignBuilder) -> dict:
+    candidates = [
+        asset
+        for asset in builder.data.get("network_assets", [])
+        if isinstance(asset, dict)
+        and _asset_type(asset) in {"ups", "rack_ups", "uninterruptible_power_supply"}
+        and _int(asset.get("rack_units"), 0) > 0
+    ]
+    if candidates:
+        return min(
+            candidates,
+            key=lambda asset: (
+                max(1, _int(asset.get("rack_units"), 1)),
+                _text(asset.get("id")),
+            ),
+        )
+    builder.warnings.append(
+        "No rack UPS asset was available; a conservative 2U rack UPS was generated automatically."
+    )
+    return _support_rack_asset(
+        builder,
+        asset_id="AUTO-RACK-UPS-2U",
+        name="2U rack UPS",
+        asset_type="ups",
+        rack_units=2,
+        notes="Automatically generated dual-UPS rack allowance.",
+    )
+
+
+def _cable_manager_asset(builder: DesignBuilder) -> dict:
+    candidates = [
+        asset
+        for asset in builder.data.get("network_assets", [])
+        if isinstance(asset, dict)
+        and (
+            _asset_type(asset) in {"cable_management", "cable_manager"}
+            or "cable management" in _text(asset.get("name")).lower()
+        )
+        and _int(asset.get("rack_units"), 0) > 0
+    ]
+    if candidates:
+        return min(
+            candidates,
+            key=lambda asset: (
+                max(1, _int(asset.get("rack_units"), 1)),
+                _text(asset.get("id")),
+            ),
+        )
+    return _support_rack_asset(
+        builder,
+        asset_id="AUTO-CABLE-MANAGER-1U",
+        name="1U horizontal cable management loop",
+        asset_type="cable_management",
+        rack_units=1,
+        notes="Automatically generated 1U horizontal cable-management allowance.",
+    )
+
+
 def _repack_generated_racks(builder: DesignBuilder) -> None:
-    """Pack all generated rack equipment per location without exceeding rack capacity."""
+    """Pack generated equipment with patch panels high and dual UPS low.
+
+    Every rack containing powered equipment receives two UPS units separated by
+    an unused 1U ventilation/service gap.  Each fibre patch panel receives a 1U
+    horizontal cable manager immediately below it.  Patch-panel assemblies are
+    packed downwards from the top of the rack; powered equipment and UPS support
+    are packed upwards from the bottom.
+    """
     assets = {
         _text(row.get("id")): row
         for row in builder.data.get("network_assets", [])
         if isinstance(row, dict) and _text(row.get("id"))
     }
     rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
+    ups_asset = _ups_asset(builder)
+    manager_asset = _cable_manager_asset(builder)
+    assets[_text(ups_asset.get("id"))] = ups_asset
+    assets[_text(manager_asset.get("id"))] = manager_asset
+    ups_u = max(1, _int(ups_asset.get("rack_units"), 2))
+    manager_u = 1
+    ups_reserved_u = (ups_u * 2) + 1
+
     groups: Dict[Tuple[int, str], List[dict]] = defaultdict(list)
-    for instance in builder.instances:
+    for instance in list(builder.instances):
+        role = _text(instance.get("design_role"))
+        if role in {"rack_ups", "cable_management"}:
+            continue
         asset = assets.get(_text(instance.get("asset_id")), {})
         units = _rack_units_for_asset(
             asset,
@@ -2014,36 +2120,200 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
         if units <= 0:
             continue
         instance["_calculated_rack_units"] = units
+        instance["_powered_rack_item"] = _float(asset.get("power_input_w"), 0.0) > 0.0
         groups[(_int(instance.get("floor")), _text(instance.get("location_name")))].append(instance)
 
-    role_order = {
-        "fibre_patch_panel": 0,
-        "olt_primary": 1,
-        "olt_secondary": 2,
-        "core_switch": 3,
-        "access_switch": 4,
+    locations = {
+        _text(row.get("name")): row
+        for row in builder.data.get("locations", [])
+        if isinstance(row, dict) and _text(row.get("name"))
     }
-    for (_floor, location_name), items in sorted(groups.items()):
-        items.sort(key=lambda row: (role_order.get(_text(row.get("design_role")), 50), _text(row.get("name")), _text(row.get("id"))))
-        rack_index = 1
-        next_u = 1
-        for instance in items:
-            units = max(1, _int(instance.pop("_calculated_rack_units", 1), 1))
+
+    for (floor, location_name), items in sorted(groups.items()):
+        location = locations.get(location_name) or {
+            "name": location_name,
+            "floor": floor,
+            "x": 0.0,
+            "y": 0.0,
+        }
+        patch_items = [row for row in items if _text(row.get("design_role")) == "fibre_patch_panel"]
+        equipment_items = [row for row in items if _text(row.get("design_role")) != "fibre_patch_panel"]
+        equipment_items.sort(
+            key=lambda row: (
+                0 if bool(row.get("_powered_rack_item")) else 1,
+                _text(row.get("design_role")),
+                _text(row.get("name")),
+                _text(row.get("id")),
+            )
+        )
+        patch_items.sort(key=lambda row: (_text(row.get("name")), _text(row.get("id"))))
+
+        racks: List[dict] = []
+
+        def new_rack() -> dict:
+            rack = {
+                "index": len(racks) + 1,
+                "bottom_next": 1,
+                "top_next": rack_size_u,
+                "powered": False,
+                "ups_added": False,
+                "items": [],
+            }
+            racks.append(rack)
+            return rack
+
+        def rack_name(rack: dict) -> str:
+            return (
+                f"AUTO-RACK-{location_name}"
+                if rack["index"] == 1
+                else f"AUTO-RACK-{location_name}-{rack['index']}"
+            )
+
+        def ensure_ups(rack: dict) -> None:
+            if rack["ups_added"]:
+                return
+            if rack["bottom_next"] + ups_reserved_u - 1 > rack["top_next"]:
+                raise NetworkPlanningError(
+                    f"A {rack_size_u}U rack at {location_name} cannot accommodate the required dual UPS allowance."
+                )
+            first_start = rack["bottom_next"]
+            second_start = first_start + ups_u + 1
+            for number, start_u in ((1, first_start), (2, second_start)):
+                ups = builder.add_instance(
+                    ups_asset,
+                    f"AUTO {location_name} Rack {rack['index']} UPS {number}",
+                    location,
+                    "rack_ups",
+                    rack_name=rack_name(rack),
+                    rack_start_u=start_u,
+                    rack_size_u=rack_size_u,
+                    route_anchor=location_name,
+                    ups_pair_number=number,
+                )
+                rack["items"].append(ups)
+            rack["bottom_next"] = second_start + ups_u
+            rack["powered"] = True
+            rack["ups_added"] = True
+
+        # Pack active/passive equipment upwards from the bottom. Powered items
+        # reserve the dual-UPS zone before they are placed. OLT models may define
+        # ``olt_units_per_rack_unit`` so several independent functional OLT
+        # instances share one physical 1U mounting position.
+        shared_olt_slots: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
+
+        for instance in equipment_items:
+            asset = assets.get(_text(instance.get("asset_id")), {})
+            units = max(1, _int(instance.get("_calculated_rack_units"), 1))
+            powered = bool(instance.get("_powered_rack_item"))
+            is_olt = _asset_type(asset) == "optical_line_terminal"
+            units_per_u = (
+                max(1, _int(asset.get("olt_units_per_rack_unit"), 1))
+                if is_olt and units == 1
+                else 1
+            )
+
             if units > rack_size_u:
                 raise NetworkPlanningError(
                     f"{instance.get('name') or instance.get('id')} requires {units}U and cannot fit in a {rack_size_u}U rack."
                 )
-            if next_u + units - 1 > rack_size_u:
-                rack_index += 1
-                next_u = 1
-            instance["rack_name"] = (
-                f"AUTO-RACK-{location_name}"
-                if rack_index == 1
-                else f"AUTO-RACK-{location_name}-{rack_index}"
-            )
-            instance["rack_start_u"] = next_u
+
+            # Reuse a partially occupied shared OLT slot before consuming more U.
+            if units_per_u > 1:
+                slot_key = (_text(instance.get("asset_id")), _text(instance.get("olt_side")))
+                reusable = None
+                for slot in shared_olt_slots.get(slot_key, []):
+                    if slot["count"] < slot["capacity"]:
+                        reusable = slot
+                        break
+                if reusable is not None:
+                    reusable["count"] += 1
+                    instance["rack_name"] = rack_name(reusable["rack"])
+                    instance["rack_start_u"] = reusable["start_u"]
+                    instance["rack_size_u"] = rack_size_u
+                    instance["shared_rack_unit_group"] = reusable["group"]
+                    instance["shared_rack_unit_position"] = reusable["count"]
+                    instance["shared_rack_unit_capacity"] = reusable["capacity"]
+                    reusable["rack"]["items"].append(instance)
+                    continue
+
+            selected = None
+            for rack in racks:
+                prospective_bottom = rack["bottom_next"]
+                if powered and not rack["ups_added"]:
+                    prospective_bottom += ups_reserved_u
+                if prospective_bottom + units - 1 <= rack["top_next"]:
+                    selected = rack
+                    break
+            if selected is None:
+                selected = new_rack()
+            if powered:
+                ensure_ups(selected)
+            if selected["bottom_next"] + units - 1 > selected["top_next"]:
+                selected = new_rack()
+                if powered:
+                    ensure_ups(selected)
+
+            start_u = selected["bottom_next"]
+            instance["rack_name"] = rack_name(selected)
+            instance["rack_start_u"] = start_u
             instance["rack_size_u"] = rack_size_u
-            next_u += units
+            selected["bottom_next"] += units
+            selected["items"].append(instance)
+
+            if units_per_u > 1:
+                group_id = f"AUTO-OLT-SHARED-{location_name}-{selected['index']}-{start_u}-{_text(instance.get('asset_id'))}"
+                instance["shared_rack_unit_group"] = group_id
+                instance["shared_rack_unit_position"] = 1
+                instance["shared_rack_unit_capacity"] = units_per_u
+                slot_key = (_text(instance.get("asset_id")), _text(instance.get("olt_side")))
+                shared_olt_slots[slot_key].append(
+                    {
+                        "rack": selected,
+                        "start_u": start_u,
+                        "group": group_id,
+                        "count": 1,
+                        "capacity": units_per_u,
+                    }
+                )
+
+        # Pack each fibre patch panel with a 1U manager directly below it,
+        # starting at the top of the first rack and spilling into more racks.
+        for panel_index, instance in enumerate(patch_items, start=1):
+            panel_u = max(1, _int(instance.get("_calculated_rack_units"), 1))
+            assembly_u = panel_u + manager_u
+            selected = None
+            for rack in racks:
+                if rack["top_next"] - assembly_u + 1 >= rack["bottom_next"]:
+                    selected = rack
+                    break
+            if selected is None:
+                selected = new_rack()
+            panel_start = selected["top_next"] - panel_u + 1
+            manager_start = panel_start - manager_u
+            if manager_start < selected["bottom_next"]:
+                selected = new_rack()
+                panel_start = selected["top_next"] - panel_u + 1
+                manager_start = panel_start - manager_u
+            instance["rack_name"] = rack_name(selected)
+            instance["rack_start_u"] = panel_start
+            instance["rack_size_u"] = rack_size_u
+            manager = builder.add_instance(
+                manager_asset,
+                f"AUTO {location_name} Fibre Cable Manager {panel_index}",
+                location,
+                "cable_management",
+                rack_name=rack_name(selected),
+                rack_start_u=manager_start,
+                rack_size_u=rack_size_u,
+                route_anchor=location_name,
+                associated_patch_panel_id=_text(instance.get("id")),
+            )
+            selected["top_next"] = manager_start - 1
+            selected["items"].extend([manager, instance])
+
+        for instance in items:
+            instance.pop("_calculated_rack_units", None)
+            instance.pop("_powered_rack_item", None)
 
 def generate_network_design(data: dict, technology: Optional[str] = None) -> dict:
     """Generate and install an optimised network design into ``data``.
