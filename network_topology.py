@@ -1614,9 +1614,387 @@ class NetworkTopologyDialog(QDialog):
             place(root_id, 0, cursor_y)
             cursor_y += heights[root_id] + self.ROOT_GAP
         self._pack_layered_topology(visible_ids, positions)
-        self._separate_overlapping_cards(visible_ids, positions)
+        self._space_recursive_subtrees(visible_ids, positions)
         self._recenter_group_nodes(visible_ids, positions)
         return positions
+
+
+    def _space_recursive_subtrees(
+        self, visible_ids: Sequence[str], positions: Dict[str, QPointF]
+    ) -> None:
+        """Allocate a distinct vertical band to every visible child subtree.
+
+        A child's band is the larger of its own rendered card height and the
+        combined height required by all of its descendants.  Sibling bands are
+        then stacked without overlap and each parent is centred on the complete
+        span of its children.  Consequently, opening children-of-children grows
+        the ancestor branch and the whole topology instead of squeezing deeper
+        columns into an independently centred layer.
+        """
+
+        visible_set = {node_id for node_id in visible_ids if node_id in positions}
+        if not visible_set:
+            return
+
+        child_cache: Dict[str, List[str]] = {}
+
+        def children_for(node_id: str) -> List[str]:
+            cached = child_cache.get(node_id)
+            if cached is not None:
+                return cached
+            rows = [
+                child_id
+                for child_id in self._children_for(node_id)
+                if child_id in visible_set
+                and self.visible_parent.get(child_id) == node_id
+            ]
+            rows.sort(
+                key=lambda child_id: (
+                    positions[child_id].y(),
+                    self._node_for(child_id).name.lower()
+                    if self._node_for(child_id) is not None
+                    else child_id.lower(),
+                )
+            )
+            child_cache[node_id] = rows
+            return rows
+
+        def sibling_gap(parent_id: str, child_ids: Sequence[str]) -> float:
+            parent_layer = self._topology_layer(parent_id)
+            child_layers = [self._topology_layer(child_id) for child_id in child_ids]
+            deepest = max(child_layers, default=parent_layer)
+            base = 72.0
+            if parent_layer >= 2 or deepest >= 3:
+                base = 96.0
+            if deepest >= 4:
+                base = 118.0
+            if len(child_ids) >= 6:
+                base += 18.0
+            if len(child_ids) >= 12:
+                base += 24.0
+            return base
+
+        band_height: Dict[str, float] = {}
+        visiting: set[str] = set()
+
+        def measure(node_id: str) -> float:
+            if node_id in band_height:
+                return band_height[node_id]
+            if node_id in visiting:
+                # Defensive guard for malformed cyclic topology data.
+                return self._node_card_height(node_id)
+            visiting.add(node_id)
+            child_ids = children_for(node_id)
+            own_height = self._node_card_height(node_id)
+            if child_ids:
+                gap = sibling_gap(node_id, child_ids)
+                descendants_height = (
+                    sum(measure(child_id) for child_id in child_ids)
+                    + gap * max(0, len(child_ids) - 1)
+                )
+                value = max(own_height, descendants_height)
+            else:
+                value = own_height
+            visiting.discard(node_id)
+            band_height[node_id] = value
+            return value
+
+        roots = [
+            node_id
+            for node_id in self.model.roots
+            if node_id in visible_set
+            and self.visible_parent.get(node_id) not in visible_set
+        ]
+        # Include filtered/orphaned branches whose parent is not currently shown.
+        for node_id in visible_ids:
+            if node_id not in visible_set or node_id in roots:
+                continue
+            parent_id = self.visible_parent.get(node_id)
+            if parent_id not in visible_set:
+                roots.append(node_id)
+
+        roots.sort(
+            key=lambda node_id: (
+                positions[node_id].y(),
+                self._node_for(node_id).name.lower()
+                if self._node_for(node_id) is not None
+                else node_id.lower(),
+            )
+        )
+        for root_id in roots:
+            measure(root_id)
+
+        def place(node_id: str, band_top: float) -> None:
+            node_band = band_height.get(node_id, self._node_card_height(node_id))
+            own_height = self._node_card_height(node_id)
+            positions[node_id] = QPointF(
+                positions[node_id].x(),
+                band_top + (node_band - own_height) / 2.0,
+            )
+            child_ids = children_for(node_id)
+            if not child_ids:
+                return
+            gap = sibling_gap(node_id, child_ids)
+            child_total = (
+                sum(band_height[child_id] for child_id in child_ids)
+                + gap * max(0, len(child_ids) - 1)
+            )
+            cursor = band_top + max(0.0, (node_band - child_total) / 2.0)
+            for child_id in child_ids:
+                place(child_id, cursor)
+                cursor += band_height[child_id] + gap
+
+        root_gap = max(140.0, self.ROOT_GAP)
+        total_height = (
+            sum(band_height[root_id] for root_id in roots)
+            + root_gap * max(0, len(roots) - 1)
+        )
+        cursor = -total_height / 2.0
+        for root_id in roots:
+            place(root_id, cursor)
+            cursor += band_height[root_id] + root_gap
+
+        # Rebuild layer bounds from the actual recursive positions so fitting and
+        # layer backgrounds expand with the deepest visible descendant branch.
+        if hasattr(self, "_layer_bounds"):
+            by_layer: Dict[int, List[str]] = defaultdict(list)
+            for node_id in visible_set:
+                node = self._node_for(node_id)
+                if node is None:
+                    continue
+                by_layer[self._topology_layer(node_id)].append(node_id)
+            for layer, node_ids in by_layer.items():
+                left = min(positions[node_id].x() for node_id in node_ids)
+                right = max(positions[node_id].x() + self.CARD_W for node_id in node_ids)
+                top = min(positions[node_id].y() for node_id in node_ids)
+                bottom = max(
+                    positions[node_id].y() + self._node_card_height(node_id)
+                    for node_id in node_ids
+                )
+                self._layer_bounds[layer] = QRectF(
+                    left, top, max(self.CARD_W, right - left), max(self.CARD_H, bottom - top)
+                )
+
+
+    def _align_upstream_to_downstream(
+        self, visible_ids: Sequence[str], positions: Dict[str, QPointF]
+    ) -> None:
+        """Centre upstream cards on the vertical span of their visible descendants.
+
+        The layered packer gives each layer an independent top-to-bottom order.
+        That is compact, but it can bunch OLT/core/distribution rows together even
+        when one device feeds a much larger downstream branch.  This pass derives
+        each upstream card's preferred Y position from the complete visible
+        downstream subtree, then resolves collisions within that layer while
+        preserving the downstream order.
+        """
+
+        visible_set = set(visible_ids)
+        real_ids = [
+            node_id
+            for node_id in visible_ids
+            if node_id in positions
+            and self._node_for(node_id) is not None
+            and not self._node_for(node_id).pseudo
+        ]
+        if not real_ids:
+            return
+
+        child_cache: Dict[str, List[str]] = {}
+
+        def visible_children(node_id: str) -> List[str]:
+            cached = child_cache.get(node_id)
+            if cached is not None:
+                return cached
+            children = [
+                child_id
+                for child_id in self._children_for(node_id)
+                if child_id in visible_set
+                and child_id in positions
+                and self.visible_parent.get(child_id) == node_id
+            ]
+            child_cache[node_id] = children
+            return children
+
+        span_cache: Dict[str, Tuple[float, float]] = {}
+
+        def subtree_span(node_id: str) -> Tuple[float, float]:
+            cached = span_cache.get(node_id)
+            if cached is not None:
+                return cached
+            children = visible_children(node_id)
+            if not children:
+                top = positions[node_id].y()
+                span = (top, top + self._node_card_height(node_id))
+                span_cache[node_id] = span
+                return span
+            child_spans = [subtree_span(child_id) for child_id in children]
+            span = (
+                min(value[0] for value in child_spans),
+                max(value[1] for value in child_spans),
+            )
+            span_cache[node_id] = span
+            return span
+
+        preferred_top: Dict[str, float] = {}
+        for node_id in real_ids:
+            children = visible_children(node_id)
+            if not children:
+                preferred_top[node_id] = positions[node_id].y()
+                continue
+            top, bottom = subtree_span(node_id)
+            preferred_top[node_id] = (top + bottom - self._node_card_height(node_id)) / 2.0
+
+        # Work from the deepest upstream layer back towards the root so a
+        # distribution row follows its access/ONT branch and an OLT/core row
+        # subsequently follows the already-spaced distribution rows.
+        by_layer: Dict[int, List[str]] = defaultdict(list)
+        for node_id in real_ids:
+            layer = self._topology_layer(node_id)
+            if layer < 4:
+                by_layer[layer].append(node_id)
+
+        min_gap = 54.0
+        for layer in sorted(by_layer, reverse=True):
+            ordered = sorted(
+                by_layer[layer],
+                key=lambda node_id: (
+                    preferred_top.get(node_id, positions[node_id].y()),
+                    positions[node_id].y(),
+                    self._node_for(node_id).name.lower(),
+                ),
+            )
+            if not ordered:
+                continue
+
+            placed_tops: Dict[str, float] = {}
+            cursor_bottom: Optional[float] = None
+            for node_id in ordered:
+                target_top = preferred_top.get(node_id, positions[node_id].y())
+                if cursor_bottom is not None:
+                    target_top = max(target_top, cursor_bottom + min_gap)
+                placed_tops[node_id] = target_top
+                cursor_bottom = target_top + self._node_card_height(node_id)
+
+            # Pull the whole layer back towards its preferred centre when the
+            # forward collision pass introduced avoidable downward drift.
+            first_id = ordered[0]
+            last_id = ordered[-1]
+            actual_centre = (
+                placed_tops[first_id]
+                + placed_tops[last_id]
+                + self._node_card_height(last_id)
+            ) / 2.0
+            preferred_centre = (
+                preferred_top.get(first_id, placed_tops[first_id])
+                + preferred_top.get(last_id, placed_tops[last_id])
+                + self._node_card_height(last_id)
+            ) / 2.0
+            shift = preferred_centre - actual_centre
+            for node_id in ordered:
+                positions[node_id] = QPointF(
+                    positions[node_id].x(), placed_tops[node_id] + shift
+                )
+
+            # Rebuild spans so the next upstream layer uses the corrected rows.
+            span_cache.clear()
+            for node_id in real_ids:
+                children = visible_children(node_id)
+                if children:
+                    top, bottom = subtree_span(node_id)
+                    preferred_top[node_id] = (
+                        top + bottom - self._node_card_height(node_id)
+                    ) / 2.0
+                else:
+                    preferred_top[node_id] = positions[node_id].y()
+
+    def _centralise_layers_by_height(
+        self, visible_ids: Sequence[str], positions: Dict[str, QPointF]
+    ) -> None:
+        """Centre every topology layer in one shared vertical drawing span.
+
+        The topology remains left-to-right along the X axis.  Within each X-axis
+        layer, cards are ordered by their downstream-derived position and the
+        common available height is divided evenly between them.  Real rendered
+        card heights are used, including logical-stack cards, so tall elements
+        reserve more space and the layer remains visually centred.
+        """
+
+        by_layer: Dict[int, List[str]] = defaultdict(list)
+        for node_id in visible_ids:
+            if node_id not in positions:
+                continue
+            node = self._node_for(node_id)
+            if node is None or node.pseudo:
+                continue
+            by_layer[self._topology_layer(node_id)].append(node_id)
+
+        if not by_layer:
+            return
+
+        layer_gap_min = 54.0
+        layer_heights: Dict[int, float] = {}
+
+        def minimum_gap_for_layer(layer: int, node_ids: Sequence[str]) -> float:
+            base = {0: 70.0, 1: 82.0, 2: 108.0, 3: 126.0, 4: 108.0, 5: 78.0}.get(layer, layer_gap_min)
+            max_children = max(
+                (
+                    len([
+                        child_id
+                        for child_id in self._children_for(node_id)
+                        if child_id in positions and self.visible_parent.get(child_id) == node_id
+                    ])
+                    for node_id in node_ids
+                ),
+                default=0,
+            )
+            # Expanding a busy branch reserves additional row separation before
+            # the cards are centred across the common layer height.
+            return base + min(150.0, max_children * 12.0)
+        ordered_layers: Dict[int, List[str]] = {}
+
+        for layer, node_ids in by_layer.items():
+            ordered = sorted(
+                node_ids,
+                key=lambda node_id: (
+                    positions[node_id].y(),
+                    self._node_for(node_id).name.lower(),
+                ),
+            )
+            ordered_layers[layer] = ordered
+            total_cards = sum(self._node_card_height(node_id) for node_id in ordered)
+            adaptive_gap = minimum_gap_for_layer(layer, ordered)
+            layer_heights[layer] = total_cards + adaptive_gap * max(0, len(ordered) - 1)
+
+        shared_height = max(layer_heights.values())
+        # Give sparse layers enough breathing room to divide the drawing height
+        # evenly rather than collapsing into a tight group at the centre.
+        shared_height = max(shared_height, self.CARD_H * 2.0)
+        shared_top = -shared_height / 2.0
+
+        for layer, ordered in ordered_layers.items():
+            if not ordered:
+                continue
+            total_cards = sum(self._node_card_height(node_id) for node_id in ordered)
+            if len(ordered) > 1:
+                even_gap = max(
+                    minimum_gap_for_layer(layer, ordered),
+                    (shared_height - total_cards) / float(len(ordered) - 1),
+                )
+            else:
+                even_gap = 0.0
+
+            occupied_height = total_cards + even_gap * max(0, len(ordered) - 1)
+            cursor_y = shared_top + (shared_height - occupied_height) / 2.0
+            for node_id in ordered:
+                positions[node_id] = QPointF(positions[node_id].x(), cursor_y)
+                cursor_y += self._node_card_height(node_id) + even_gap
+
+            if hasattr(self, "_layer_bounds") and layer in self._layer_bounds:
+                rect = self._layer_bounds[layer]
+                self._layer_bounds[layer] = QRectF(
+                    rect.x(), shared_top, rect.width(), shared_height
+                )
 
     def _layout_rack_visible(self, visible_ids: Sequence[str]) -> Dict[str, QPointF]:
         self._layer_bounds = {}
@@ -1657,21 +2035,47 @@ class NetworkTopologyDialog(QDialog):
         return positions
 
     def _topology_layer(self, node_id: str) -> int:
+        """Return the fixed left-to-right visual column for a node.
+
+        PoLAN needs one more visual stage than a traditional LAN.  Splitters and
+        access switches remain in the access column, ONTs/downstream network
+        devices are placed in their own column, and endpoint groups occupy the
+        final client column.  Keeping these stages separate prevents expanded
+        splitter branches from being drawn on top of the access layer.
+        """
         node = self._node_for(node_id)
         if node is None:
             return 9
         if node.asset_type == "site_group":
             return 0
-        if node.asset_type == "client_group":
+        if node.asset_type in {"client_group", "client_device"}:
+            return 5
+
+        role = _text(node.role).lower()
+        asset_type = _text(node.asset_type).lower()
+        if asset_type in {"firewall", "network_router"} or any(
+            word in role for word in ("gateway", "router", "firewall", "core", "aggregation")
+        ):
+            return 1
+        if "distribution" in role or asset_type == "optical_line_terminal" or role.startswith("olt_"):
+            return 2
+        if asset_type in {"fibre_splitter", "patch_panel"} or "splitter" in role:
+            return 3
+        if asset_type == "network_switch" or "access_switch" in role:
+            return 3
+        if asset_type in {"optical_network_terminal", "wireless_access_point"} or role == "ont":
             return 4
+
         rank = self.model._hierarchy_rank(node_id)
         if rank <= 1:
             return 1
         if rank == 2:
             return 2
-        if rank <= 5:
+        if rank <= 4:
             return 3
-        return 4
+        if rank <= 6:
+            return 4
+        return 5
 
     def _pack_layered_topology(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         self._layer_bounds: Dict[int, QRectF] = {}
@@ -1685,7 +2089,7 @@ class NetworkTopologyDialog(QDialog):
             node = self._node_for(node_id)
             if node is None or node_id not in positions:
                 continue
-            if node.pseudo and node.asset_type != "site_group":
+            if node.pseudo and node.asset_type not in {"site_group", "client_group"}:
                 pseudo_ids.append(node_id)
                 continue
             rack = _text(node.instance.get("rack_name"))
@@ -1696,6 +2100,26 @@ class NetworkTopologyDialog(QDialog):
             return
 
         layer_gap = 420.0
+
+        # Extra horizontal room is reserved around the distribution/access
+        # drill-down.  The allowance grows with the number of visible elements
+        # in the downstream layer so opening a large splitter branch cannot
+        # force cards and link labels into the neighbouring column.
+        layer_item_counts = {
+            layer: sum(len(node_ids) for node_ids in groups.values())
+            for layer, groups in grouped.items()
+        }
+
+        def gap_after(layer: int) -> float:
+            next_count = layer_item_counts.get(layer + 1, 0)
+            expansion_allowance = min(300.0, max(0, next_count - 1) * 14.0)
+            if layer == 2:
+                return 520.0 + expansion_allowance
+            if layer == 3:
+                return 560.0 + expansion_allowance
+            if layer == 4:
+                return 480.0 + expansion_allowance
+            return layer_gap + min(160.0, expansion_allowance)
         bus_lane_h = 96.0
         group_gap_y = 150.0
         # Distribution devices (including OLTs) are stacked vertically so each
@@ -1728,7 +2152,7 @@ class NetworkTopologyDialog(QDialog):
         cursor_x = 0.0
         for layer in all_layers:
             column_lefts[layer] = cursor_x
-            cursor_x += column_widths[layer] + layer_gap
+            cursor_x += column_widths[layer] + gap_after(layer)
         access_layer = 3 if 3 in column_lefts else max(all_layers)
         self._main_bus_column_x = column_lefts[access_layer] - 116.0
         self._failover_bus_column_x = column_lefts[access_layer] - 78.0
@@ -1777,8 +2201,15 @@ class NetworkTopologyDialog(QDialog):
                 max(self.CARD_H, group_top - group_gap_y),
             )
 
-        for index, node_id in enumerate(pseudo_ids):
-            positions[node_id] = QPointF(column_lefts.get(4, cursor_x), index * (self.CARD_H + group_gap_y))
+        pseudo_by_layer: Dict[int, List[str]] = defaultdict(list)
+        for node_id in pseudo_ids:
+            pseudo_by_layer[self._topology_layer(node_id)].append(node_id)
+        for layer, node_ids in pseudo_by_layer.items():
+            left = column_lefts.get(layer, cursor_x)
+            for index, node_id in enumerate(node_ids):
+                positions[node_id] = QPointF(
+                    left, index * (self.CARD_H + group_gap_y)
+                )
 
     def _stack_same_rack_logical_stacks(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         grouped: Dict[Tuple[str, Tuple[int, str, str]], List[str]] = defaultdict(list)
@@ -1980,8 +2411,9 @@ class NetworkTopologyDialog(QDialog):
             0: "Site",
             1: "Core layer",
             2: "Distribution layer",
-            3: "Access layer",
-            4: "Client devices",
+            3: "Access / splitter layer",
+            4: "Downstream devices",
+            5: "Client devices",
         }
         layer_rects: Dict[int, QRectF] = {}
         for node_id in visible_ids:
@@ -2334,7 +2766,10 @@ class NetworkTopologyDialog(QDialog):
             if target_pos is None:
                 continue
             bus = self._bus_for_node(target_id, failover=True)
-            endpoint = bus[0] if bus else QPointF(target_pos.x() + self.CARD_W / 2.0, target_pos.y() + self._node_card_height(target_id) / 2.0)
+            endpoint = bus[0] if bus else QPointF(
+                target_pos.x() + self.CARD_W / 2.0,
+                self._incoming_fibre_connection_y(target_id, positions, edge, cross_link=True),
+            )
             endpoints.append((target_id, endpoint, edge))
         endpoints.sort(key=lambda item: (item[1].y(), item[1].x()))
         if len(endpoints) < 2:
@@ -2380,6 +2815,59 @@ class NetworkTopologyDialog(QDialog):
 
         self._add_vertical_link_rail(start, endpoints, QColor("#a76a42"), z_value=-0.82, cross_link=True, rail_x=rail_x)
 
+
+    def _incoming_fibre_connection_y(
+        self,
+        node_id: str,
+        positions: Dict[str, QPointF],
+        edge: Optional[TopologyEdge],
+        cross_link: bool = False,
+    ) -> float:
+        """Return an evenly spaced vertical connection point for fibre inputs.
+
+        Primary and failover fibres often terminate on the same splitter or
+        distribution card.  Using the card centre for both makes the final
+        horizontal sections overlap.  Reserve one vertical slot per visible
+        incoming fibre and centre the slots around the card midpoint.
+        """
+        pos = positions[node_id]
+        card_height = self._node_card_height(node_id)
+        centre_y = pos.y() + card_height / 2.0
+        if edge is None or _text(edge.medium).lower() != "fibre":
+            return centre_y
+
+        incoming = []
+        visible_ids = set(positions)
+        for candidate in self.model.edges:
+            if candidate.target_id != node_id:
+                continue
+            if candidate.source_id not in visible_ids:
+                continue
+            if _text(candidate.medium).lower() != "fibre":
+                continue
+            standby = bool(
+                candidate.standby
+                or candidate.redundancy_role.lower() in {"secondary", "standby"}
+            )
+            incoming.append((1 if standby else 0, candidate.edge_id, candidate))
+
+        if len(incoming) <= 1:
+            return centre_y
+
+        incoming.sort(key=lambda row: (row[0], row[1]))
+        selected_index = 0
+        for index, (_standby, _edge_id, candidate) in enumerate(incoming):
+            if candidate.edge_id == edge.edge_id:
+                selected_index = index
+                break
+
+        # Fit all connection points inside the card with a sensible maximum
+        # pitch.  Two fibres therefore sit evenly above and below centre.
+        usable_height = max(8.0, card_height - 20.0)
+        pitch = min(18.0, usable_height / max(1, len(incoming) - 1))
+        first_y = centre_y - pitch * (len(incoming) - 1) / 2.0
+        return first_y + selected_index * pitch
+
     def _add_link(
         self,
         source_id: str,
@@ -2394,7 +2882,10 @@ class NetworkTopologyDialog(QDialog):
         target_bus = self._bus_for_node(target_id, failover=cross_link)
         if cross_link:
             source_center = QPointF(source_pos.x() + self.CARD_W / 2.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
-            target_center = QPointF(target_pos.x() + self.CARD_W / 2.0, target_pos.y() + self._node_card_height(target_id) / 2.0)
+            target_center = QPointF(
+                target_pos.x() + self.CARD_W / 2.0,
+                self._incoming_fibre_connection_y(target_id, positions, edge, cross_link=True),
+            )
             if target_center.x() >= source_center.x():
                 start = QPointF(source_pos.x() + self.CARD_W + 8.0, source_center.y())
                 end = QPointF(target_pos.x() - 8.0, target_center.y())
@@ -2403,7 +2894,10 @@ class NetworkTopologyDialog(QDialog):
                 end = QPointF(target_pos.x() + self.CARD_W + 8.0, target_center.y())
         else:
             start = QPointF(source_pos.x() + self.CARD_W, source_pos.y() + self._node_card_height(source_id) / 2.0)
-            end = QPointF(target_pos.x(), target_pos.y() + self._node_card_height(target_id) / 2.0)
+            end = QPointF(
+                target_pos.x(),
+                self._incoming_fibre_connection_y(target_id, positions, edge, cross_link=False),
+            )
         if target_bus is not None and not client_link:
             bus_anchor, bus_left, bus_right = target_bus
             target_right_of_source = bus_anchor.x() >= start.x()
@@ -2459,8 +2953,24 @@ class NetworkTopologyDialog(QDialog):
         self.scene.addItem(path_item)
 
         if edge and self.show_link_labels_check.isChecked() and not client_link:
-            point = path.pointAtPercent(0.50)
-            self._add_link_label(edge.label, colour, point)
+            # Keep cable-length labels on a horizontal section of the
+            # orthogonal topology link. Using pointAtPercent(0.50) can place
+            # the label on the vertical riser when cards have different Y positions.
+            if cross_link:
+                first_length = abs(control_x - start.x())
+                last_length = abs(end.x() - control_x)
+                if last_length >= first_length:
+                    label_point = QPointF((control_x + end.x()) / 2.0, end.y())
+                else:
+                    label_point = QPointF((start.x() + control_x) / 2.0, start.y())
+            else:
+                first_length = abs(mid_x - start.x())
+                last_length = abs(end.x() - mid_x)
+                if last_length >= first_length:
+                    label_point = QPointF((mid_x + end.x()) / 2.0, end.y())
+                else:
+                    label_point = QPointF((start.x() + mid_x) / 2.0, start.y())
+            self._add_link_label(edge.label, colour, label_point)
 
     def _card_activated(self, node_id: str) -> None:
         item = self.node_items.get(node_id)
