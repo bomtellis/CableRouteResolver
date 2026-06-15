@@ -1678,16 +1678,21 @@ class NetworkTopologyDialog(QDialog):
         key = self.rack_focus
         if key is None:
             return visible
-        floor, location, rack = key
+        floor, location, _selected_rack = key
+        # A rack view represents the equipment room/location, not just one rack.
+        # Include every physical rack at the same floor/location so additional
+        # racks are visible side by side rather than appearing to overflow the
+        # selected rack.
         rack_nodes = [
             node_id
             for node_id, node in self.model.nodes.items()
             if not node.pseudo
             and node.floor == floor
             and node.location_name == location
-            and _text(node.instance.get("rack_name")) == rack
+            and _text(node.instance.get("rack_name"))
         ]
         rack_nodes.sort(key=lambda node_id: (
+            _text(self._node_for(node_id).instance.get("rack_name")) if self._node_for(node_id) else "",
             max(1, _int(self._node_for(node_id).instance.get("rack_start_u"), 1)) if self._node_for(node_id) else 1,
             self._node_for(node_id).name.lower() if self._node_for(node_id) else node_id,
         ))
@@ -2277,20 +2282,33 @@ class NetworkTopologyDialog(QDialog):
         key = self.rack_focus
         if key is None:
             return positions
-        capacity = self._rack_capacity_for_key(key)
-        rack_x = 120.0
+        floor, location, _selected_rack = key
+        rack_names = self._rack_names_for_location(floor, location)
+        rack_left_start = 92.0
+        rack_width = 518.6
+        rack_gap = 90.0
         rack_top = 90.0
-        # One scene unit per millimetre: 1U = 44.45 mm and usable rack width = 482.6 mm.
         unit_pitch = 44.45
+        rack_x_by_name = {
+            rack_name: rack_left_start + index * (rack_width + rack_gap)
+            for index, rack_name in enumerate(rack_names)
+        }
         for node_id in visible_ids:
             node = self._node_for(node_id)
             if node is None:
                 continue
+            rack_name = _text(node.instance.get("rack_name"))
+            rack_key = (floor, location, rack_name)
+            capacity = self._rack_capacity_for_key(rack_key)
             start_u = max(1, _int(node.instance.get("rack_start_u"), 1))
             units = max(1, self._node_rack_units(node_id))
+            # Invalid legacy placements are kept visible but constrained to the
+            # rack drawing. New auto-planned equipment is prevented from creating
+            # these positions by network_auto_planner.py.
             top_u = min(capacity, start_u + units - 1)
             y = rack_top + (capacity - top_u) * unit_pitch
-            positions[node_id] = QPointF(rack_x + 18.0, y + 2.0)
+            rack_left = rack_x_by_name.get(rack_name, rack_left_start)
+            positions[node_id] = QPointF(rack_left + 18.0, y + 2.0)
         return positions
 
     def _layout_switch_port_visible(self, visible_ids: Sequence[str]) -> Dict[str, QPointF]:
@@ -2787,6 +2805,17 @@ class NetworkTopologyDialog(QDialog):
             return max(1, allowance) * members
         return max(0, _int(node.asset.get("rack_units"), 1))
 
+    def _rack_names_for_location(self, floor: int, location: str) -> List[str]:
+        names = {
+            _text(node.instance.get("rack_name"))
+            for node in self.model.nodes.values()
+            if not node.pseudo
+            and node.floor == int(floor)
+            and node.location_name == location
+            and _text(node.instance.get("rack_name"))
+        }
+        return sorted(names, key=lambda value: value.lower())
+
     def _rack_capacity_for_key(self, key: Tuple[int, str, str]) -> int:
         default_capacity = max(1, _int(self.data.get("network_settings", {}).get("default_rack_size_u"), 42))
         explicit_capacity = 0
@@ -2813,41 +2842,62 @@ class NetworkTopologyDialog(QDialog):
         key = self.rack_focus
         if key is None:
             return
-        capacity = self._rack_capacity_for_key(key)
-        rack_left = 92.0
+        floor, location, selected_rack = key
+        rack_names = self._rack_names_for_location(floor, location)
+        if not rack_names:
+            rack_names = [selected_rack]
+        rack_left_start = 92.0
         rack_top = 90.0
         rack_width = 518.6
+        rack_gap = 90.0
         unit_pitch = 44.45
-        rack_height = capacity * unit_pitch
-        frame_path = QPainterPath()
-        frame_path.addRoundedRect(QRectF(rack_left, rack_top, rack_width, rack_height), 8.0, 8.0)
-        frame = QGraphicsPathItem(frame_path)
-        frame.setPen(QPen(QColor("#5d6b76"), 2.0))
-        frame.setBrush(QBrush(QColor("#141c23")))
-        frame.setZValue(-2.0)
-        self.scene.addItem(frame)
-        for u in range(1, capacity + 1):
-            y = rack_top + (capacity - u) * unit_pitch
-            line = QPainterPath(QPointF(rack_left, y))
-            line.lineTo(QPointF(rack_left + rack_width, y))
-            item = QGraphicsPathItem(line)
-            item.setPen(QPen(QColor("#2f3b45"), 0.8))
-            item.setZValue(-1.8)
-            self.scene.addItem(item)
-            label = QGraphicsSimpleTextItem(f"{u}U")
-            label.setFont(QFont("Arial", 8))
-            label.setBrush(QBrush(QColor("#8997a2")))
-            label.setPos(rack_left - 36.0, y + 7.0)
-            label.setZValue(-1.0)
-            self.scene.addItem(label)
-        title = QGraphicsSimpleTextItem(f"Rack elevation — {self._rack_label(key)} ({capacity}U)")
-        font = QFont("Arial", 12)
-        font.setBold(True)
-        title.setFont(font)
-        title.setBrush(QBrush(QColor("#e5edf2")))
-        title.setPos(rack_left, rack_top - 42.0)
-        title.setZValue(-1.0)
-        self.scene.addItem(title)
+
+        for rack_index, rack_name in enumerate(rack_names):
+            rack_key = (floor, location, rack_name)
+            capacity = self._rack_capacity_for_key(rack_key)
+            rack_left = rack_left_start + rack_index * (rack_width + rack_gap)
+            rack_height = capacity * unit_pitch
+            frame_path = QPainterPath()
+            frame_path.addRoundedRect(QRectF(rack_left, rack_top, rack_width, rack_height), 8.0, 8.0)
+            frame = QGraphicsPathItem(frame_path)
+            frame.setPen(QPen(QColor("#7f95a5") if rack_name == selected_rack else QColor("#5d6b76"), 2.4 if rack_name == selected_rack else 2.0))
+            frame.setBrush(QBrush(QColor("#141c23")))
+            frame.setZValue(-2.0)
+            self.scene.addItem(frame)
+            for u in range(1, capacity + 1):
+                y = rack_top + (capacity - u) * unit_pitch
+                line = QPainterPath(QPointF(rack_left, y))
+                line.lineTo(QPointF(rack_left + rack_width, y))
+                item = QGraphicsPathItem(line)
+                item.setPen(QPen(QColor("#2f3b45"), 0.8))
+                item.setZValue(-1.8)
+                self.scene.addItem(item)
+                label = QGraphicsSimpleTextItem(f"{u}U")
+                label.setFont(QFont("Arial", 8))
+                label.setBrush(QBrush(QColor("#8997a2")))
+                label.setPos(rack_left - 36.0, y + 7.0)
+                label.setZValue(-1.0)
+                self.scene.addItem(label)
+            used = self._rack_used_for_key(rack_key)
+            title = QGraphicsSimpleTextItem(f"{rack_name} — {used}/{capacity}U")
+            font = QFont("Arial", 12)
+            font.setBold(True)
+            title.setFont(font)
+            title.setBrush(QBrush(QColor("#e5edf2")))
+            title.setPos(rack_left, rack_top - 42.0)
+            title.setZValue(-1.0)
+            self.scene.addItem(title)
+
+        room_title = QGraphicsSimpleTextItem(
+            f"Rack elevation — {location or 'Unassigned location'} ({len(rack_names)} rack{'s' if len(rack_names) != 1 else ''})"
+        )
+        room_font = QFont("Arial", 14)
+        room_font.setBold(True)
+        room_title.setFont(room_font)
+        room_title.setBrush(QBrush(QColor("#ffffff")))
+        room_title.setPos(rack_left_start, 24.0)
+        room_title.setZValue(-1.0)
+        self.scene.addItem(room_title)
 
     def _add_location_groups(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         grouped: Dict[Tuple[int, str, str], List[str]] = defaultdict(list)

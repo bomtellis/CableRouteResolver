@@ -1165,10 +1165,18 @@ def _traditional_design(
         index = 0
         while index < len(mix):
             asset = mix[index]
+            per_member_rack_u = max(1, _rack_units_for_asset(asset, 1))
             max_stack_members = (
                 max(1, _int(asset.get("max_stack_members"), 1))
                 if bool(asset.get("supports_stacking"))
                 else 1
+            )
+            # A logical stack must fit completely inside one physical rack.
+            # Limit stack size by the available rack height so a generated stack
+            # can never overflow into a non-existent U position.
+            max_stack_members = min(
+                max_stack_members,
+                max(1, rack_size_u // per_member_rack_u),
             )
             group_end = index + 1
             while (
@@ -1186,6 +1194,16 @@ def _traditional_design(
                 if is_stack
                 else f"AUTO {room_name} Access Switch {switch_number}"
             )
+            rack_u = _rack_units_for_asset(asset, member_count)
+            if rack_u > rack_size_u:
+                raise NetworkPlanningError(
+                    f"{instance_name} requires {rack_u}U but the configured rack size is "
+                    f"only {rack_size_u}U. Reduce the stack size or increase default_rack_size_u."
+                )
+            if next_rack_u + rack_u - 1 > rack_size_u:
+                rack_index += 1
+                next_rack_u = 1
+
             instance = builder.add_instance(
                 asset,
                 instance_name,
@@ -1209,12 +1227,6 @@ def _traditional_design(
                     "Cisco StackWise stacking cables" if is_stack else ""
                 ),
             )
-            rack_u = _rack_units_for_asset(asset, member_count)
-            if next_rack_u + rack_u - 1 > rack_size_u and next_rack_u > 1:
-                rack_index += 1
-                next_rack_u = 1
-                instance["rack_name"] = f"AUTO-RACK-{room_name}-{rack_index}"
-                instance["rack_start_u"] = next_rack_u
             instance["rack_size_u"] = rack_size_u
             for member_offset, assigned in enumerate(group_assignments, start=1):
                 for port_number, item in enumerate(assigned, start=1):
@@ -1878,6 +1890,161 @@ def _polan_design(
     _build_core_layer(builder, leaves_by_root, roots, spare_fraction)
 
 
+
+def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
+    """Return a usable fibre patch panel, creating a conservative 24-port 1U model when absent."""
+    candidates = _candidate_assets(
+        builder.data,
+        "patch_panel",
+        lambda asset: _text(asset.get("patch_panel_type")).lower() == "fibre"
+        and max(_int(asset.get("number_of_ports")), _int(asset.get("connections_in")), _int(asset.get("connections_out"))) > 0,
+    )
+    if candidates:
+        return min(
+            candidates,
+            key=lambda asset: (
+                max(1, _int(asset.get("rack_units"), 1)),
+                -max(_int(asset.get("number_of_ports")), _int(asset.get("connections_in")), _int(asset.get("connections_out"))),
+                _text(asset.get("id")),
+            ),
+        )
+
+    asset_id = "AUTO-FIBRE-PATCH-PANEL-24"
+    for asset in builder.data.get("network_assets", []):
+        if _text(asset.get("id")) == asset_id:
+            return asset
+    asset = {
+        "id": asset_id,
+        "name": "24-port OS2 fibre patch panel",
+        "asset_type": "patch_panel",
+        "patch_panel_type": "fibre",
+        "number_of_ports": 24,
+        "connections_in": 24,
+        "connections_out": 24,
+        "input_connection_type": "fibre",
+        "output_connection_type": "fibre",
+        "rack_units": 1,
+        "power_input_w": 0.0,
+        "notes": "Automatically generated fibre patch-panel allowance.",
+        "auto_network_asset": True,
+    }
+    builder.data.setdefault("network_assets", []).append(asset)
+    builder.asset_ids.add(asset_id)
+    builder.warnings.append(
+        "No fibre patch-panel asset was available; a 24-port 1U OS2 patch panel was generated automatically."
+    )
+    return asset
+
+
+def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -> None:
+    """Add rack-space allowance for every rack-side fibre termination."""
+    instance_by_id = {_text(row.get("id")): row for row in builder.instances}
+    terminations: Dict[Tuple[int, str], int] = defaultdict(int)
+
+    for connection in builder.connections:
+        if _text(connection.get("medium")).lower() != "fibre":
+            continue
+        fibres = max(1, _int(connection.get("fibre_count"), 1))
+        for endpoint_field in ("from_instance_id", "to_instance_id"):
+            instance = instance_by_id.get(_text(connection.get(endpoint_field)))
+            if not instance:
+                continue
+            location_name = _text(instance.get("location_name"))
+            if not location_name:
+                continue
+            terminations[(_int(instance.get("floor")), location_name)] += fibres
+
+    if not terminations:
+        return
+
+    asset = _fibre_patch_panel_asset(builder)
+    capacity = max(
+        1,
+        _int(asset.get("number_of_ports")),
+        _int(asset.get("connections_in")),
+        _int(asset.get("connections_out")),
+    )
+    locations = {
+        _text(row.get("name")): row
+        for row in builder.data.get("locations", [])
+        if isinstance(row, dict) and _text(row.get("name"))
+    }
+
+    for (floor, location_name), used_terminations in sorted(terminations.items()):
+        required = max(1, int(math.ceil(used_terminations * (1.0 + spare_fraction))))
+        panel_count = max(1, int(math.ceil(required / capacity)))
+        location = locations.get(location_name)
+        if location is None:
+            location = {"name": location_name, "floor": floor, "x": 0.0, "y": 0.0}
+        for index in range(panel_count):
+            first_port = index * capacity + 1
+            last_port = min(required, (index + 1) * capacity)
+            builder.add_instance(
+                asset,
+                f"AUTO {location_name} Fibre Patch Panel {index + 1}",
+                location,
+                "fibre_patch_panel",
+                rack_name="",
+                rack_start_u=0,
+                rack_size_u=max(1, _int(builder.settings.get("default_rack_size_u"), 42)),
+                route_anchor=location_name,
+                termination_count=max(0, min(capacity, used_terminations - index * capacity)),
+                reserved_port_count=max(0, last_port - first_port + 1),
+                port_range=f"{first_port}-{last_port}",
+            )
+
+
+def _repack_generated_racks(builder: DesignBuilder) -> None:
+    """Pack all generated rack equipment per location without exceeding rack capacity."""
+    assets = {
+        _text(row.get("id")): row
+        for row in builder.data.get("network_assets", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
+    groups: Dict[Tuple[int, str], List[dict]] = defaultdict(list)
+    for instance in builder.instances:
+        asset = assets.get(_text(instance.get("asset_id")), {})
+        units = _rack_units_for_asset(
+            asset,
+            max(1, _int(instance.get("stack_member_count"), 1))
+            if bool(instance.get("logical_stack"))
+            else 1,
+        )
+        if units <= 0:
+            continue
+        instance["_calculated_rack_units"] = units
+        groups[(_int(instance.get("floor")), _text(instance.get("location_name")))].append(instance)
+
+    role_order = {
+        "fibre_patch_panel": 0,
+        "olt_primary": 1,
+        "olt_secondary": 2,
+        "core_switch": 3,
+        "access_switch": 4,
+    }
+    for (_floor, location_name), items in sorted(groups.items()):
+        items.sort(key=lambda row: (role_order.get(_text(row.get("design_role")), 50), _text(row.get("name")), _text(row.get("id"))))
+        rack_index = 1
+        next_u = 1
+        for instance in items:
+            units = max(1, _int(instance.pop("_calculated_rack_units", 1), 1))
+            if units > rack_size_u:
+                raise NetworkPlanningError(
+                    f"{instance.get('name') or instance.get('id')} requires {units}U and cannot fit in a {rack_size_u}U rack."
+                )
+            if next_u + units - 1 > rack_size_u:
+                rack_index += 1
+                next_u = 1
+            instance["rack_name"] = (
+                f"AUTO-RACK-{location_name}"
+                if rack_index == 1
+                else f"AUTO-RACK-{location_name}-{rack_index}"
+            )
+            instance["rack_start_u"] = next_u
+            instance["rack_size_u"] = rack_size_u
+            next_u += units
+
 def generate_network_design(data: dict, technology: Optional[str] = None) -> dict:
     """Generate and install an optimised network design into ``data``.
 
@@ -1951,6 +2118,13 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         _traditional_design(builder, endpoints, spare_fraction)
     else:
         _polan_design(builder, endpoints, spare_fraction)
+
+    # Fibre terminations require physical patch-panel capacity and rack space.
+    # Repack the complete generated equipment set afterwards so OLTs, cores and
+    # panels share the location racks without ever exceeding the configured U.
+    _install_fibre_patch_panels(builder, spare_fraction)
+    _repack_generated_racks(builder)
+
     _assert_generated_capacity(builder, spare_fraction)
     builder.commit()
 
