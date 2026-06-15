@@ -968,11 +968,15 @@ class TopologyGraphicsView(QGraphicsView):
         self.setRenderHints(
             QPainter.Antialiasing
             | QPainter.TextAntialiasing
-            | QPainter.SmoothPixmapTransform
         )
 
-        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        # Updating the whole viewport on every pan/selection is expensive on
+        # large topologies.  Restrict repaints to changed item bounds and cache
+        # the static background instead.
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self.setOptimizationFlag(QGraphicsView.DontSavePainterState, True)
+        self.setOptimizationFlag(QGraphicsView.DontAdjustForAntialiasing, True)
+        self.setCacheMode(QGraphicsView.CacheBackground)
 
         self.setTransformationAnchor(QGraphicsView.NoAnchor)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
@@ -1237,6 +1241,7 @@ class NetworkTopologyDialog(QDialog):
         self.switch_port_focus: Optional[str] = None
         self._rack_client_nodes_by_id: Dict[str, TopologyNode] = {}
         self._switch_port_nodes_by_id: Dict[str, TopologyNode] = {}
+        self._visible_synthetic_edges: Dict[str, TopologyEdge] = {}
 
         self.setWindowTitle("Network Topology")
         self.setWindowFlag(Qt.Window, True)
@@ -1346,6 +1351,14 @@ class NetworkTopologyDialog(QDialog):
         self.show_clients_check.setToolTip("Show department endpoint groups beneath their serving switch or ONT")
         self.show_clients_check.toggled.connect(lambda _checked: self.rebuild_scene(fit=False))
         layout.addWidget(self.show_clients_check)
+
+        self.show_patch_panels_check = QCheckBox("Patch panels")
+        self.show_patch_panels_check.setChecked(False)
+        self.show_patch_panels_check.setToolTip(
+            "Show fibre/copper patch panels in the logical topology. Patch panels remain visible in rack view when this is off."
+        )
+        self.show_patch_panels_check.toggled.connect(lambda _checked: self.rebuild_scene(fit=False))
+        layout.addWidget(self.show_patch_panels_check)
 
         self.show_redundant_check = QCheckBox("Failover links")
         self.show_redundant_check.setChecked(True)
@@ -1584,11 +1597,80 @@ class NetworkTopologyDialog(QDialog):
         # Keep ancestors visible when any descendant is on the selected floor.
         return any(self._node_matches_floor(child_id, floor) for child_id in self.model.children.get(node_id, []))
 
+    def _patch_panels_visible(self) -> bool:
+        return bool(getattr(self, "show_patch_panels_check", None) and self.show_patch_panels_check.isChecked())
+
+    def _is_patch_panel(self, node_id: str) -> bool:
+        node = self.model.nodes.get(node_id)
+        return bool(node is not None and node.asset_type == "patch_panel")
+
     def _children_for(self, node_id: str) -> List[str]:
         children = list(self.model.children.get(node_id, []))
+        if not self._patch_panels_visible() and self.rack_focus is None and self.switch_port_focus is None:
+            flattened: List[str] = []
+            pending = list(children)
+            seen: Set[str] = set()
+            while pending:
+                child_id = pending.pop(0)
+                if child_id in seen:
+                    continue
+                seen.add(child_id)
+                if self._is_patch_panel(child_id):
+                    pending[0:0] = list(self.model.children.get(child_id, []))
+                    continue
+                flattened.append(child_id)
+            children = flattened
         if self.show_clients_check.isChecked():
             children.extend(node.node_id for node in self.model.client_groups.get(node_id, []))
         return children
+
+    def _visible_edge_between(self, parent_id: str, child_id: str) -> str:
+        """Return an edge id, collapsing any hidden patch-panel chain."""
+        direct_id = self.model.parent_edge.get(child_id, "")
+        direct_parent = self.model.parent.get(child_id, "")
+        if direct_parent == parent_id:
+            return direct_id
+        if self._patch_panels_visible():
+            return direct_id
+
+        chain: List[TopologyEdge] = []
+        cursor = child_id
+        guard = 0
+        while cursor and cursor != parent_id and guard <= len(self.model.nodes):
+            edge_id = self.model.parent_edge.get(cursor, "")
+            edge = self.model.edges_by_id.get(edge_id)
+            if edge is not None:
+                chain.append(edge)
+            cursor = self.model.parent.get(cursor, "")
+            guard += 1
+        if cursor != parent_id or not chain:
+            return direct_id
+        if len(chain) == 1:
+            return chain[0].edge_id
+
+        synthetic_id = f"collapsed::{'::'.join(edge.edge_id for edge in reversed(chain))}"
+        if synthetic_id not in self._visible_synthetic_edges:
+            ordered = list(reversed(chain))
+            first = ordered[0]
+            last = ordered[-1]
+            medium = "fibre" if any(edge.medium == "fibre" for edge in ordered) else first.medium
+            self._visible_synthetic_edges[synthetic_id] = TopologyEdge(
+                edge_id=synthetic_id,
+                source_id=parent_id,
+                target_id=child_id,
+                medium=medium,
+                source_port=first.source_port,
+                target_port=last.target_port,
+                length_m=sum(edge.length_m for edge in ordered),
+                standby=any(edge.standby for edge in ordered),
+                redundancy_role=next((edge.redundancy_role for edge in ordered if edge.redundancy_role), ""),
+                protection_group=next((edge.protection_group for edge in ordered if edge.protection_group), ""),
+                connection={"collapsed_patch_panel_path": [edge.edge_id for edge in ordered]},
+            )
+        return synthetic_id
+
+    def _edge_by_id(self, edge_id: str) -> Optional[TopologyEdge]:
+        return self.model.edges_by_id.get(edge_id) or self._visible_synthetic_edges.get(edge_id)
 
     def _node_for(self, node_id: str) -> Optional[TopologyNode]:
         if node_id in self.model.nodes:
@@ -1645,6 +1727,7 @@ class NetworkTopologyDialog(QDialog):
         visible: List[str] = []
         self.visible_parent.clear()
         self.visible_parent_edge.clear()
+        self._visible_synthetic_edges.clear()
 
         def visit(node_id: str, parent_id: str = "", parent_edge: str = "") -> None:
             node = self._node_for(node_id)
@@ -1663,7 +1746,7 @@ class NetworkTopologyDialog(QDialog):
                 if child_id.startswith("client::"):
                     visit(child_id, node_id, "")
                     continue
-                edge_id = self.model.parent_edge.get(child_id, "")
+                edge_id = self._visible_edge_between(node_id, child_id)
                 visit(child_id, node_id, edge_id)
 
         for root_id in self.model.roots:
@@ -2621,7 +2704,7 @@ class NetworkTopologyDialog(QDialog):
                 self._add_link_rail(parent_id, child_ids, positions)
                 continue
             child_id = child_ids[0]
-            edge = None if child_id.startswith("client::") else self.model.edges_by_id.get(self.visible_parent_edge.get(child_id, ""))
+            edge = None if child_id.startswith("client::") else self._edge_by_id(self.visible_parent_edge.get(child_id, ""))
             self._add_link(parent_id, child_id, positions, edge, client_link=child_id.startswith("client::"))
 
         if self.show_redundant_check.isChecked() and self.rack_focus is None and self.switch_port_focus is None:
@@ -2715,9 +2798,15 @@ class NetworkTopologyDialog(QDialog):
                 f"Rack view: {equipment_count:,} installed equipment items shown at their rack U positions"
                 " · Double-click a switch for its port view · Use the breadcrumb to return · Drag to pan · Wheel to zoom"
             )
+        hidden_patch_panels = (
+            sum(1 for node in self.model.nodes.values() if node.asset_type == "patch_panel")
+            if not self._patch_panels_visible()
+            else 0
+        )
         return (
             f"Showing {sum(1 for node in self.visible_nodes.values() if not node.pseudo):,} of "
             f"{sum(1 for node in self.model.nodes.values() if not node.pseudo):,} network assets"
+            + (f" · {hidden_patch_panels:,} patch panels collapsed" if hidden_patch_panels else "")
             + (f" on Floor {self._selected_floor()}" if self._selected_floor() is not None else "")
             + " · Double-click a rack switch to drill into its rack · Drag to pan · Wheel to zoom"
         )
@@ -3058,7 +3147,7 @@ class NetworkTopologyDialog(QDialog):
                 target_pos = positions.get(child_id)
                 if target_pos is None:
                     continue
-                edge = None if child_id.startswith("client::") else self.model.edges_by_id.get(self.visible_parent_edge.get(child_id, ""))
+                edge = None if child_id.startswith("client::") else self._edge_by_id(self.visible_parent_edge.get(child_id, ""))
                 bus = self._bus_for_node(child_id)
                 endpoint = bus[0] if bus else QPointF(target_pos.x(), target_pos.y() + self._node_card_height(child_id) / 2.0)
                 endpoints.append((child_id, endpoint, edge))

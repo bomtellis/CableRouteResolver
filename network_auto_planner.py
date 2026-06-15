@@ -95,16 +95,49 @@ def _distance(a: dict, b: dict, floor_height_m: float = 4.0) -> float:
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 
 
+def _parse_split_outputs(value) -> int:
+    """Return the output side of a split-ratio value such as ``1:32``."""
+    text = _text(value)
+    if not text:
+        return 0
+    if ":" in text:
+        text = text.rsplit(":", 1)[1]
+    try:
+        return max(0, int(float(text)))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _split_ratio_outputs(asset: dict) -> int:
-    ratio = _text(asset.get("split_ratio"))
-    if ":" in ratio:
-        try:
-            return max(0, int(ratio.split(":", 1)[1]))
-        except ValueError:
-            pass
+    """Return the physical output capacity of a passive fibre splitter."""
+    parsed = _parse_split_outputs(asset.get("split_ratio"))
+    if parsed > 0:
+        return parsed
     return max(
         0, _int(asset.get("connections_out")), _int(asset.get("number_of_ports")) - 1
     )
+
+
+def _olt_supported_split_outputs(asset: dict) -> int:
+    """Return the maximum ONTs supported per OLT PON port.
+
+    OLT ``number_of_ports``/``connections_out`` describe the number of PON
+    interfaces and must not be interpreted as the optical split ratio.  A
+    value of zero means the library does not declare a per-PON split limit.
+    """
+    for field_name in (
+        "max_split_ratio",
+        "supported_split_ratio",
+        "pon_split_ratio",
+        "split_ratio",
+        "max_onts_per_pon",
+        "max_ont_per_pon",
+        "onts_per_pon",
+    ):
+        parsed = _parse_split_outputs(asset.get(field_name))
+        if parsed > 0:
+            return parsed
+    return 0
 
 
 def _asset_type(asset: dict) -> str:
@@ -1536,15 +1569,42 @@ def _polan_design(
         raise NetworkPlanningError(
             "No OLT with a defined PON-port count exists in the network asset library."
         )
-    olt_max_split = max(_split_ratio_outputs(asset) for asset in olt_candidates)
+    declared_olt_split_limits = [
+        _olt_supported_split_outputs(asset)
+        for asset in olt_candidates
+        if _olt_supported_split_outputs(asset) > 0
+    ]
+    olt_max_split = max(declared_olt_split_limits, default=0)
     splitter_candidates = _candidate_assets(
         builder.data,
         "fibre_splitter",
-        lambda asset: 0 < _split_ratio_outputs(asset) <= max(1, olt_max_split),
+        lambda asset: (
+            _split_ratio_outputs(asset) > 0
+            and (olt_max_split <= 0 or _split_ratio_outputs(asset) <= olt_max_split)
+        ),
     )
     if not splitter_candidates:
+        available_ratios = sorted(
+            {
+                _split_ratio_outputs(asset)
+                for asset in _candidate_assets(builder.data, "fibre_splitter")
+                if _split_ratio_outputs(asset) > 0
+            }
+        )
+        if not available_ratios:
+            raise NetworkPlanningError(
+                "No fibre splitter with a valid output split ratio exists in the network asset library."
+            )
         raise NetworkPlanningError(
-            "No fibre splitter compatible with the available OLT split ratio exists."
+            "No fibre splitter is compatible with the declared OLT per-PON split limit "
+            f"of 1:{olt_max_split}. Available splitter ratios: "
+            + ", ".join(f"1:{value}" for value in available_ratios)
+            + ". Update the OLT supported split-ratio field or add a compatible splitter."
+        )
+    if olt_max_split <= 0:
+        builder.warnings.append(
+            "The OLT asset library does not declare a maximum ONT split ratio per PON port; "
+            "splitter compatibility was therefore based on available splitter definitions."
         )
 
     largest_splitter = max(splitter_candidates, key=_split_ratio_outputs)
@@ -1789,11 +1849,16 @@ def _polan_design(
         )
 
     required_pon_ports = len(splitter_records)
+    required_split_capacity = max(
+        record["split_capacity"] for record in splitter_records
+    )
     eligible_olts = [
         asset
         for asset in olt_candidates
-        if _split_ratio_outputs(asset)
-        >= max(record["split_capacity"] for record in splitter_records)
+        if (
+            _olt_supported_split_outputs(asset) <= 0
+            or _olt_supported_split_outputs(asset) >= required_split_capacity
+        )
     ]
     if not eligible_olts:
         raise NetworkPlanningError(

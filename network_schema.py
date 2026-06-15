@@ -164,6 +164,7 @@ def ensure_network_schema(data: dict) -> dict:
         asset.setdefault("model", "")
         asset.setdefault("patch_panel_type", "")
         asset.setdefault("split_ratio", "")
+        asset.setdefault("max_split_ratio", "")
         asset["frequencies"] = _normalise_string_list(asset.get("frequencies", []))
         asset["power_input_w"] = max(0.0, _as_float(asset.get("power_input_w")))
         asset["poe_budget_w"] = max(0.0, _as_float(asset.get("poe_budget_w")))

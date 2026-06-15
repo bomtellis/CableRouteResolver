@@ -126,6 +126,18 @@ class NetworkAssetEditorDialog(QDialog):
         self.split_ratio_combo.addItems(SPLIT_RATIOS)
         _set_combo_text(self.split_ratio_combo, _text(self.asset.get("split_ratio")))
 
+        self.olt_max_split_ratio_combo = QComboBox()
+        self.olt_max_split_ratio_combo.setEditable(True)
+        self.olt_max_split_ratio_combo.addItems(SPLIT_RATIOS)
+        _set_combo_text(
+            self.olt_max_split_ratio_combo,
+            _text(self.asset.get("max_split_ratio")),
+        )
+        self.olt_max_split_ratio_combo.setToolTip(
+            "Maximum passive optical split supported per OLT PON port, for example 1:32. "
+            "Leave blank when the manufacturer limit is not known."
+        )
+
         self.frequencies_list = QListWidget()
         self.frequencies_list.setSelectionMode(QAbstractItemView.NoSelection)
         selected_frequencies = {
@@ -252,6 +264,7 @@ class NetworkAssetEditorDialog(QDialog):
         form.addRow("Model", self.model_edit)
         form.addRow("Patch panel medium", self.patch_panel_type_combo)
         form.addRow("Fibre split ratio", self.split_ratio_combo)
+        form.addRow("OLT maximum split ratio", self.olt_max_split_ratio_combo)
         form.addRow("Wireless frequencies", self.frequencies_list)
         form.addRow("Additional frequencies", self.additional_frequencies_edit)
         form.addRow("Power input", self.power_input_spin)
@@ -283,6 +296,9 @@ class NetworkAssetEditorDialog(QDialog):
         asset_type = _text(self.asset_type_combo.currentData())
         self.patch_panel_type_combo.setEnabled(asset_type == "patch_panel")
         self.split_ratio_combo.setEnabled(asset_type == "fibre_splitter")
+        self.olt_max_split_ratio_combo.setEnabled(
+            asset_type == "optical_line_terminal"
+        )
         enabled_frequencies = asset_type == "wireless_access_point"
         self.frequencies_list.setEnabled(enabled_frequencies)
         self.additional_frequencies_edit.setEnabled(enabled_frequencies)
@@ -346,6 +362,11 @@ class NetworkAssetEditorDialog(QDialog):
             "split_ratio": (
                 self.split_ratio_combo.currentText().strip()
                 if asset_type == "fibre_splitter"
+                else ""
+            ),
+            "max_split_ratio": (
+                self.olt_max_split_ratio_combo.currentText().strip()
+                if asset_type == "optical_line_terminal"
                 else ""
             ),
             "frequencies": frequencies if asset_type == "wireless_access_point" else [],
