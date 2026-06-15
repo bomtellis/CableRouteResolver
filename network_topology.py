@@ -3002,8 +3002,11 @@ class NetworkTopologyDialog(QDialog):
             column_lefts[layer] = cursor_x
             cursor_x += column_widths[layer] + gap_after(layer)
         access_layer = 3 if 3 in column_lefts else max(all_layers)
-        self._main_bus_column_x = column_lefts[access_layer] - 116.0
-        self._failover_bus_column_x = column_lefts[access_layer] - 78.0
+        # Reserve distinct X-axis routing lanes.  Primary fibre uses the lane
+        # nearest the access layer; failover fibre uses a separate lane further
+        # upstream so the blue solid and orange dashed trunks never overlap.
+        self._main_bus_column_x = column_lefts[access_layer] - 170.0
+        self._failover_bus_column_x = column_lefts[access_layer] - 310.0
 
         for layer in all_layers:
             group_top = 0.0
@@ -3179,16 +3182,19 @@ class NetworkTopologyDialog(QDialog):
             self._add_link(parent_id, child_id, positions, edge, client_link=child_id.startswith("client::"))
 
         if self.show_redundant_check.isChecked() and self.rack_focus is None and self.switch_port_focus is None:
-            cross_by_source: Dict[str, List[Tuple[str, TopologyEdge]]] = defaultdict(list)
+            failover_groups: Dict[str, List[Tuple[str, str, TopologyEdge]]] = defaultdict(list)
             for edge in visible_cross_edges:
                 if edge.source_id in positions and edge.target_id in positions:
                     source_id, target_id = self._cross_link_origin_target(edge)
-                    cross_by_source[source_id].append((target_id, edge))
-            for source_id, targets in cross_by_source.items():
-                if len(targets) >= 2:
-                    self._add_cross_link_rail(source_id, targets, positions)
+                    failover_groups[self._failover_group_key(edge, source_id)].append(
+                        (source_id, target_id, edge)
+                    )
+            for rows in failover_groups.values():
+                unique_sources = {source_id for source_id, _target_id, _edge in rows}
+                if len(rows) >= 2 and len(unique_sources) >= 1:
+                    self._add_shared_failover_trunk(rows, positions)
                     continue
-                target_id, edge = targets[0]
+                source_id, target_id, edge = rows[0]
                 self._add_link(source_id, target_id, positions, edge, cross_link=True)
 
         if self.switch_port_focus is not None:
@@ -3597,6 +3603,44 @@ class NetworkTopologyDialog(QDialog):
             return QColor("#d68f52")
         return self._link_colour(medium or (edge.medium if edge else ""))
 
+    def _link_label_required_span(self, edge: Optional[TopologyEdge]) -> float:
+        """Return the horizontal branch length needed to show a full link label."""
+        if edge is None:
+            return 0.0
+        font = QFont("Arial", 7)
+        width = float(QFontMetrics(font).horizontalAdvance(edge.label) + 34)
+        return min(520.0, max(150.0, width + 24.0))
+
+    @staticmethod
+    def _failover_group_key(edge: TopologyEdge, source_id: str) -> str:
+        group = _text(edge.protection_group)
+        return group or f"source::{source_id}"
+
+    def _primary_fibre_lane_x(self, bus_left: float, required_span: float) -> float:
+        """Return the dedicated X lane for primary fibre trunks."""
+        preferred = (
+            self._main_bus_column_x
+            if self._main_bus_column_x is not None
+            else bus_left - 170.0
+        )
+        return min(preferred, bus_left - required_span - 34.0)
+
+    def _failover_fibre_lane_x(self, bus_left: float, required_span: float) -> float:
+        """Return a failover lane kept clear of the primary fibre lane."""
+        primary_lane = self._primary_fibre_lane_x(bus_left, required_span)
+        preferred = (
+            self._failover_bus_column_x
+            if self._failover_bus_column_x is not None
+            else primary_lane - 140.0
+        )
+        # Keep at least 120 scene units between the two vertical trunks.  This
+        # remains true when a long label pushes the primary lane further left.
+        return min(
+            preferred,
+            primary_lane - 120.0,
+            bus_left - required_span - 154.0,
+        )
+
     def _add_link_label(self, text: str, colour: QColor, point: QPointF) -> None:
         if not text:
             return
@@ -3693,7 +3737,12 @@ class NetworkTopologyDialog(QDialog):
             if len(bus_endpoints) == len(endpoints):
                 bus_left = min(self._bus_for_node(child_id)[1] for child_id, _point, _edge in endpoints)
                 bus_y = min(point.y() for _child_id, point, _edge in endpoints)
-                entry_x = self._main_bus_column_x if self._main_bus_column_x is not None else bus_left - 42.0
+                required_span = max(
+                    self._link_label_required_span(edge)
+                    for _child_id, _point, edge in endpoints
+                    if edge is not None
+                )
+                entry_x = self._primary_fibre_lane_x(bus_left, required_span)
                 trunk_colour = QColor("#60717f")
                 trunk_pen = QPen(trunk_colour, 2.0)
                 trunk = QPainterPath(source_start)
@@ -3712,7 +3761,7 @@ class NetworkTopologyDialog(QDialog):
                         z_value=-0.80 if failover else -0.95,
                     )
                     if edge and self.show_link_labels_check.isChecked():
-                        self._add_link_label(edge.label, colour, QPointF((entry_x + end.x()) / 2.0, end.y()))
+                        self._add_link_label(edge.label, colour, QPointF((entry_x + end.x()) / 2.0, end.y() - 14.0))
                 continue
 
             rail_x = min(point.x() for _child_id, point, _edge in endpoints) - 52.0
@@ -3906,6 +3955,89 @@ class NetworkTopologyDialog(QDialog):
             return edge.target_id, edge.source_id
         return edge.source_id, edge.target_id
 
+    def _add_shared_failover_trunk(
+        self,
+        rows: Sequence[Tuple[str, str, TopologyEdge]],
+        positions: Dict[str, QPointF],
+    ) -> None:
+        """Draw one common orange dashed trunk for a protected failover group."""
+        valid = [row for row in rows if row[0] in positions and row[1] in positions]
+        if not valid:
+            return
+
+        colour = QColor("#d68f52")
+        sources = sorted({source_id for source_id, _target_id, _edge in valid})
+        target_rows: List[Tuple[str, QPointF, TopologyEdge]] = []
+        for _source_id, target_id, edge in valid:
+            target_pos = positions[target_id]
+            bus = self._bus_for_node(target_id, failover=True)
+            point = bus[0] if bus else QPointF(
+                target_pos.x(),
+                self._incoming_fibre_connection_y(target_id, positions, edge, cross_link=True),
+            )
+            target_rows.append((target_id, point, edge))
+
+        all_target_x = [point.x() for _target_id, point, _edge in target_rows]
+        min_target_x = min(all_target_x)
+        max_label_span = max(self._link_label_required_span(edge) for _t, _p, edge in target_rows)
+        trunk_x = self._failover_fibre_lane_x(
+            min_target_x,
+            max(150.0, max_label_span + 38.0),
+        )
+
+        y_values: List[float] = []
+        source_points: List[Tuple[str, QPointF]] = []
+        for source_id in sources:
+            source_pos = positions[source_id]
+            point = QPointF(
+                source_pos.x() + self.CARD_W,
+                source_pos.y() + self._node_card_height(source_id) / 2.0,
+            )
+            source_points.append((source_id, point))
+            y_values.append(point.y())
+        y_values.extend(point.y() for _target_id, point, _edge in target_rows)
+
+        trunk = QPainterPath(QPointF(trunk_x, min(y_values)))
+        trunk.lineTo(QPointF(trunk_x, max(y_values)))
+        trunk_item = QGraphicsPathItem(trunk)
+        trunk_item.setPen(QPen(colour, 2.2, Qt.DashLine))
+        trunk_item.setZValue(-0.84)
+        self.scene.addItem(trunk_item)
+
+        # Join every standby source to the same vertical trunk.
+        for _source_id, source_point in source_points:
+            branch = QPainterPath(source_point)
+            branch.lineTo(QPointF(trunk_x, source_point.y()))
+            item = QGraphicsPathItem(branch)
+            item.setPen(QPen(colour, 2.0, Qt.DashLine))
+            item.setZValue(-0.83)
+            self.scene.addItem(item)
+
+        # Join every protected branch from the common trunk to its destination.
+        for target_id, target_point, edge in target_rows:
+            bus = self._bus_for_node(target_id, failover=True)
+            required = self._link_label_required_span(edge)
+            branch_end_x = target_point.x()
+            if branch_end_x - trunk_x < required:
+                # Route left first to create a dedicated horizontal label section.
+                label_lane_x = branch_end_x - required
+                branch = QPainterPath(QPointF(trunk_x, target_point.y()))
+                branch.lineTo(QPointF(label_lane_x, target_point.y()))
+                branch.lineTo(target_point)
+                label_point = QPointF((label_lane_x + branch_end_x) / 2.0, target_point.y() - 14.0)
+            else:
+                branch = QPainterPath(QPointF(trunk_x, target_point.y()))
+                branch.lineTo(target_point)
+                label_point = QPointF((trunk_x + branch_end_x) / 2.0, target_point.y() - 14.0)
+            item = QGraphicsPathItem(branch)
+            item.setPen(QPen(colour, 2.0, Qt.DashLine))
+            item.setZValue(-0.82)
+            self.scene.addItem(item)
+            if bus is not None:
+                self._add_bus_drop(target_id, positions, colour, failover=True, z_value=-0.8)
+            if self.show_link_labels_check.isChecked():
+                self._add_link_label(edge.label, colour, label_point)
+
     def _add_cross_link_rail(
         self,
         source_id: str,
@@ -3938,7 +4070,11 @@ class NetworkTopologyDialog(QDialog):
             bus_y = min(point.y() for _target_id, point, _edge in endpoints)
             source_start = QPointF(source_pos.x() + self.CARD_W + 8.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
             if source_start.x() <= bus_left:
-                entry_x = self._failover_bus_column_x if self._failover_bus_column_x is not None else bus_left - 68.0
+                required_span = max(
+                    self._link_label_required_span(edge)
+                    for _target_id, _point, edge in endpoints
+                )
+                entry_x = self._failover_fibre_lane_x(bus_left, required_span)
                 bus_entry_x = bus_left
             else:
                 entry_x = bus_right + 68.0
@@ -3954,7 +4090,7 @@ class NetworkTopologyDialog(QDialog):
             for target_id, end, edge in endpoints:
                 self._add_bus_drop(target_id, positions, QColor("#d68f52"), failover=True, z_value=-0.8)
                 if self.show_link_labels_check.isChecked():
-                    self._add_link_label(edge.label, QColor("#d68f52"), QPointF((entry_x + end.x()) / 2.0, end.y()))
+                    self._add_link_label(edge.label, QColor("#d68f52"), QPointF((entry_x + end.x()) / 2.0, end.y() - 14.0))
             return
 
         average_target_x = sum(point.x() for _target_id, point, _edge in endpoints) / len(endpoints)
@@ -4056,12 +4192,16 @@ class NetworkTopologyDialog(QDialog):
         if target_bus is not None and not client_link:
             bus_anchor, bus_left, bus_right = target_bus
             target_right_of_source = bus_anchor.x() >= start.x()
-            if failover_style and self._failover_bus_column_x is not None and target_right_of_source:
-                entry_x = self._failover_bus_column_x
-            elif not failover_style and self._main_bus_column_x is not None and target_right_of_source:
-                entry_x = self._main_bus_column_x
+            required_span = self._link_label_required_span(edge)
+            if target_right_of_source and failover_style:
+                entry_x = self._failover_fibre_lane_x(bus_left, required_span)
+            elif target_right_of_source:
+                entry_x = self._primary_fibre_lane_x(bus_left, required_span)
             else:
-                entry_x = bus_left - 42.0 if target_right_of_source else bus_right + 42.0
+                # Right-to-left links use mirrored, independently separated
+                # lanes on the far side of the destination bus.
+                primary_right = bus_right + required_span + 34.0
+                entry_x = primary_right + (120.0 if failover_style else 0.0)
             bus_entry_x = bus_left if target_right_of_source else bus_right
             path = QPainterPath(start)
             path.lineTo(QPointF(entry_x, start.y()))
@@ -4080,7 +4220,7 @@ class NetworkTopologyDialog(QDialog):
             self.scene.addItem(path_item)
             self._add_bus_drop(target_id, positions, colour, failover=failover_style, z_value=-0.95 if not failover_style else -0.8)
             if edge and self.show_link_labels_check.isChecked():
-                self._add_link_label(edge.label, colour, QPointF((entry_x + bus_anchor.x()) / 2.0, bus_anchor.y()))
+                self._add_link_label(edge.label, colour, QPointF((entry_x + bus_anchor.x()) / 2.0, bus_anchor.y() - (14.0 if failover_style else 12.0)))
             return
         path = QPainterPath(start)
         if failover_style:
