@@ -43,6 +43,9 @@ from network_dialogs import (
 )
 from network_reports import write_network_schedules
 from network_topology import NetworkTopologyDialog
+from network_physical_fibre import PhysicalFibreTopologyDialog
+from network_fibre_dialogs import FibreNodeEditorDialog
+from network_services import circuit_trace, ensure_physical_fibre_for_design, generate_ip_address_plan
 from network_schema import (
     ensure_network_schema,
     find_nearest_network_instance,
@@ -77,12 +80,14 @@ def _install_location_types() -> None:
                 return
             current = combo.currentText()
             existing = {combo.itemText(index) for index in range(combo.count())}
-            for value in ("mer", "polan"):
+            for value in ("mer", "polan", "telco_pop", "external_network", "fibre_joint"):
                 if value not in existing:
                     combo.addItem(value)
             combo.setToolTip(
                 "location = general room; comms_room = conventional telecoms room; "
-                "mer = Main Equipment Room/network root; polan = passive optical LAN location"
+                "mer = Main Equipment Room/network root; polan = passive optical LAN location; "
+                "telco_pop = carrier point of presence; external_network = peering demarcation; "
+                "fibre_joint = physical fibre joint location"
             )
             index = combo.findText(current)
             if index >= 0:
@@ -137,13 +142,13 @@ def _is_active_main_graph_asset(asset: dict, instance: Optional[dict] = None) ->
     if asset_type in {
         "network_router", "firewall", "network_switch",
         "wireless_access_point", "optical_line_terminal",
-        "optical_network_terminal",
+        "optical_network_terminal", "telco_pop", "external_network",
     }:
         return True
     return any(token in role for token in (
         "core", "distribution", "aggregation", "access",
         "gateway", "router", "firewall", "olt", "ont",
-        "wireless", "client",
+        "wireless", "client", "telco", "peering", "external",
     ))
 
 
@@ -356,6 +361,12 @@ def _open_network_planner(editor) -> None:
             "network_redundancy_groups",
             "network_vlans",
             "network_routes",
+            "network_ip_allocations",
+            "network_external_networks",
+            "network_fibre_cables",
+            "network_fibre_nodes",
+            "network_fibre_splices",
+            "network_patch_leads",
             "network_design_summary",
         ):
             editor.store.data[key] = deepcopy(
@@ -375,14 +386,14 @@ def _open_network_planner(editor) -> None:
 
 
 def _open_network_topology(editor) -> None:
-    """Open the read-only network hierarchy and connection diagram."""
+    """Open the editable logical network hierarchy and rack/device views."""
     ensure_network_schema(editor.store.data)
     windows = getattr(editor, "_network_topology_windows", None)
     if windows is None:
         windows = []
         editor._network_topology_windows = windows
 
-    dialog = NetworkTopologyDialog(editor, editor.store.data)
+    dialog = NetworkTopologyDialog(editor, editor.store.data, on_change=lambda payload: _apply_network_payload(editor, payload))
     windows.append(dialog)
     editor._network_topology_dialog = dialog
 
@@ -394,6 +405,77 @@ def _open_network_topology(editor) -> None:
 
     dialog.destroyed.connect(forget_window)
     dialog.showMaximized()
+
+
+def _apply_network_payload(editor, payload: dict) -> None:
+    """Apply edits made in topology/rack/fibre dialogs and refresh the plan."""
+    _safe_push_undo(editor, "Edit network topology")
+    for key in (
+        "network_settings", "network_assets", "network_asset_instances",
+        "network_connections", "network_endpoint_assignments", "network_patch_leads",
+        "network_redundancy_groups", "network_vlans", "network_routes",
+        "network_ip_allocations", "network_external_networks",
+        "network_fibre_cables", "network_fibre_nodes", "network_fibre_splices",
+        "network_design_summary",
+    ):
+        if key in payload:
+            editor.store.data[key] = deepcopy(payload[key])
+    ensure_network_schema(editor.store.data)
+    editor.refresh_canvas()
+
+
+def _open_physical_fibre_topology(editor, connection_id: str = "") -> None:
+    """Open the floor-aware physical fibre overlay and splice editor."""
+    ensure_network_schema(editor.store.data)
+    windows = getattr(editor, "_physical_fibre_windows", None)
+    if windows is None:
+        windows = []
+        editor._physical_fibre_windows = windows
+    dialog = PhysicalFibreTopologyDialog(
+        editor,
+        editor.store.data,
+        on_change=lambda payload: _apply_network_payload(editor, payload),
+        initial_trace_connection_id=connection_id,
+    )
+    windows.append(dialog)
+    editor._physical_fibre_dialog = dialog
+
+    def forget_window() -> None:
+        if dialog in windows:
+            windows.remove(dialog)
+        if getattr(editor, "_physical_fibre_dialog", None) is dialog:
+            editor._physical_fibre_dialog = windows[-1] if windows else None
+
+    dialog.destroyed.connect(forget_window)
+    dialog.showMaximized()
+
+
+def _generate_network_ip_plan(editor) -> None:
+    ensure_network_schema(editor.store.data)
+    try:
+        result = generate_ip_address_plan(editor.store.data)
+    except Exception as exc:
+        QMessageBox.critical(editor, "IP address plan", str(exc))
+        return
+    editor.refresh_canvas()
+    QMessageBox.information(
+        editor,
+        "IP address plan",
+        f"Generated {result.get('vlan_count', 0)} VLAN subnet(s), "
+        f"{result.get('management_allocations', 0)} management addresses and router interfaces.",
+    )
+
+
+def _synchronise_physical_fibre(editor) -> None:
+    ensure_network_schema(editor.store.data)
+    summary = ensure_physical_fibre_for_design(editor.store.data, replace_auto=False)
+    editor.refresh_canvas()
+    QMessageBox.information(
+        editor,
+        "Physical fibre layer",
+        f"Synchronised {summary.get('cable_count', 0)} routed fibre cable(s) and "
+        f"{summary.get('node_count', 0)} passive fibre node(s).",
+    )
 
 
 def _export_network_schedules(editor) -> None:
@@ -495,6 +577,10 @@ def _add_network_layer_action(editor) -> None:
                     editor, "show_network_connections_check", editor.show_network_check
                 ),
             ),
+            (
+                "Physical Fibre",
+                getattr(editor, "show_physical_fibre_check", editor.show_network_check),
+            ),
         ):
             action = QAction(label, menu)
             action.setCheckable(True)
@@ -532,6 +618,14 @@ def _augment_network_ui(editor) -> None:
     editor.show_network_connections_check = QCheckBox("Network links")
     editor.show_network_connections_check.setChecked(True)
     editor.show_network_connections_check.toggled.connect(editor.refresh_canvas)
+    editor.show_physical_fibre_check = QCheckBox("Physical fibre layer")
+    editor.show_physical_fibre_check.setChecked(
+        bool(editor.store.data.get("network_settings", {}).get("physical_fibre_layer", {}).get("visible", True))
+    )
+    editor.show_physical_fibre_check.toggled.connect(
+        lambda checked: editor.store.data.setdefault("network_settings", {}).setdefault("physical_fibre_layer", {}).__setitem__("visible", bool(checked))
+    )
+    editor.show_physical_fibre_check.toggled.connect(editor.refresh_canvas)
 
     ribbon = editor.findChild(QTabWidget, "AeroRibbon")
     if ribbon is not None:
@@ -555,6 +649,7 @@ def _augment_network_ui(editor) -> None:
         technology_layout.addWidget(editor.show_network_check)
         technology_layout.addWidget(editor.show_network_assets_check)
         technology_layout.addWidget(editor.show_network_connections_check)
+        technology_layout.addWidget(editor.show_physical_fibre_check)
         layout.addWidget(technology_box)
 
         def button(text: str, handler, tooltip: str = "") -> QPushButton:
@@ -569,9 +664,16 @@ def _augment_network_ui(editor) -> None:
         management_layout.setContentsMargins(4, 4, 4, 4)
         management_layout.addWidget(
             button(
-                "Topology",
+                "Logical Topology",
                 lambda: _open_network_topology(editor),
-                "Show the network hierarchy and connection diagram",
+                "Edit the logical network hierarchy, racks, devices and patching",
+            )
+        )
+        management_layout.addWidget(
+            button(
+                "Physical Fibre",
+                lambda: _open_physical_fibre_topology(editor),
+                "Edit floor-routed fibre cables, enclosures, cassettes, joints and core splices",
             )
         )
         management_layout.addWidget(
@@ -579,6 +681,12 @@ def _augment_network_ui(editor) -> None:
         )
         management_layout.addWidget(
             button("Validate Network", lambda: _validate_network(editor))
+        )
+        management_layout.addWidget(
+            button("Sync Fibre Routes", lambda: _synchronise_physical_fibre(editor))
+        )
+        management_layout.addWidget(
+            button("Generate IP Plan", lambda: _generate_network_ip_plan(editor))
         )
         management_layout.addWidget(
             button("Export Schedules", lambda: _export_network_schedules(editor))
@@ -602,6 +710,13 @@ def _augment_network_ui(editor) -> None:
             button(
                 "Connect Assets",
                 lambda: _set_network_mode(editor, "network_connection"),
+            )
+        )
+        placement_layout.addWidget(
+            button(
+                "Place Fibre Node",
+                lambda: _set_network_mode(editor, "fibre_node"),
+                "Place a splice enclosure, cassette, joint, handhole, chamber or termination on the physical fibre layer",
             )
         )
         location_row = QHBoxLayout()
@@ -653,11 +768,11 @@ def _add_network_location(editor, kind: str, x: float, y: float) -> None:
         for item in editor.store.data.get("locations", [])
         if _text(item.get("kind")).lower() == kind
     ]
-    prefix = "MER" if kind == "mer" else "POLAN"
+    prefix = {"mer": "MER", "polan": "POLAN", "telco_pop": "TELCO-POP", "external_network": "EXT-NET", "fibre_joint": "FIBRE-JOINT"}.get(kind, kind.upper())
     default_name = f"{prefix}-{len(existing) + 1}"
     name, ok = QInputDialog.getText(
         editor,
-        "Main Equipment Room" if kind == "mer" else "PoLAN location",
+        {"mer": "Main Equipment Room", "polan": "PoLAN location", "telco_pop": "Telecommunications Point of Presence", "external_network": "External Network Demarcation", "fibre_joint": "Fibre Joint Location"}.get(kind, "Network location"),
         "Location name:",
         text=default_name,
     )
@@ -677,6 +792,29 @@ def _add_network_location(editor, kind: str, x: float, y: float) -> None:
     editor.refresh_canvas()
     if hasattr(editor, "set_status"):
         editor.set_status(f"Added {prefix} location {name}")
+
+
+def _place_fibre_node(editor, x: float, y: float) -> None:
+    """Place a passive physical-fibre object on the current DXF floor."""
+    ensure_network_schema(editor.store.data)
+    dialog = FibreNodeEditorDialog(
+        editor,
+        nodes=editor.store.data.get("network_fibre_nodes", []),
+        instances=editor.store.data.get("network_asset_instances", []),
+        locations=editor.store.data.get("locations", []),
+        suggested_id=next_network_id(editor.store.data.get("network_fibre_nodes", []), "FN"),
+        default_floor=int(editor.floor_spin.value()),
+        default_x=float(x),
+        default_y=float(y),
+    )
+    if dialog.exec() != QDialog.Accepted or not dialog.result:
+        return
+    _safe_push_undo(editor, "Place physical fibre node")
+    editor.store.data.setdefault("network_fibre_nodes", []).append(dialog.result)
+    editor.selected_point_name = dialog.result["id"]
+    editor.refresh_canvas()
+    if hasattr(editor, "set_status"):
+        editor.set_status(f"Added physical fibre node {dialog.result['id']} on floor {dialog.result['floor']}")
 
 
 def _place_or_select_network_asset(editor, x: float, y: float) -> None:
@@ -967,6 +1105,15 @@ def _delete_network_connection(editor, connection_id: str) -> None:
         for item in editor.store.data.get("network_connections", [])
         if _text(item.get("id")) != connection_id
     ]
+    editor.store.data["network_patch_leads"] = [
+        item for item in editor.store.data.get("network_patch_leads", [])
+        if _text(item.get("connection_id")) != connection_id
+    ]
+    for cable in editor.store.data.get("network_fibre_cables", []):
+        cable["logical_connection_ids"] = [
+            value for value in cable.get("logical_connection_ids", [])
+            if _text(value) != connection_id
+        ]
     editor.selected_point_name = None
     editor.refresh_canvas()
 
@@ -988,10 +1135,25 @@ def _show_network_connection_context_menu(editor, event, connection_id: str) -> 
     editor.selected_point_name = connection_id
     editor.refresh_canvas()
     menu = QMenu(editor)
+    trace_action = menu.addAction("Trace circuit")
+    physical_action = menu.addAction("Open in physical fibre map")
+    menu.addSeparator()
     edit_action = menu.addAction("Edit network connection")
     delete_action = menu.addAction("Delete network connection")
     action = menu.exec(event.globalPosition().toPoint())
-    if action == edit_action:
+    if action == trace_action:
+        trace = circuit_trace(editor.store.data, connection_id)
+        editor._network_trace = trace
+        if hasattr(editor, "set_status"):
+            editor.set_status(
+                f"Circuit {connection_id}: {len(trace.get('instance_ids', []))} devices, "
+                f"{len(trace.get('patch_lead_ids', []))} patch leads, "
+                f"{len(trace.get('fibre_cable_ids', []))} physical fibre cables"
+            )
+        _open_network_topology(editor)
+    elif action == physical_action:
+        _open_physical_fibre_topology(editor, connection_id)
+    elif action == edit_action:
         _edit_network_connection(editor, connection_id)
     elif action == delete_action:
         _delete_network_connection(editor, connection_id)
@@ -1125,6 +1287,8 @@ def install_network_planning(editor_class) -> None:
                 ("network_connection", "Net Link", "edge"),
                 ("mer_location", "MER", "location"),
                 ("polan_location", "PoLAN", "location"),
+                ("telco_pop_location", "Telco PoP", "location"),
+                ("fibre_node", "Fibre Node", "location"),
             ]
             rows.extend(row for row in additions if row[0] not in existing)
             return rows
@@ -1139,6 +1303,8 @@ def install_network_planning(editor_class) -> None:
         self._network_drag_location_name = None
         self._network_planner_dialog = None
         self._network_topology_dialog = None
+        self._physical_fibre_dialog = None
+        self._physical_fibre_windows = []
         _augment_network_ui(self)
         self.refresh_canvas()
 
@@ -1183,15 +1349,25 @@ def install_network_planning(editor_class) -> None:
                         )
                     except RuntimeError:
                         show_network_connections = show_network
+                fibre_control = getattr(self, "show_physical_fibre_check", None)
+                show_physical_fibre = bool(
+                    fibre_control.isChecked() if fibre_control is not None else
+                    self.store.data.get("network_settings", {}).get("physical_fibre_layer", {}).get("visible", True)
+                )
                 canvas.set_visible_layers(
                     show_network=show_network,
                     show_network_assets=show_network_assets,
                     show_network_connections=show_network_connections,
+                    show_physical_fibre=show_physical_fibre,
                 )
             except TypeError:
                 # The extension package includes a renderer with this argument;
                 # this fallback keeps older custom renderers usable.
                 setattr(canvas, "show_network", show_network)
+                setattr(canvas, "show_physical_fibre", bool(
+                    getattr(self, "show_physical_fibre_check", None).isChecked()
+                    if getattr(self, "show_physical_fibre_check", None) is not None else True
+                ))
                 canvas.update()
         _refresh_network_search(self)
         return result
@@ -1206,6 +1382,12 @@ def install_network_planning(editor_class) -> None:
             return
         if mode == "polan_location":
             _add_network_location(self, "polan", x, y)
+            return
+        if mode == "telco_pop_location":
+            _add_network_location(self, "telco_pop", x, y)
+            return
+        if mode == "fibre_node":
+            _place_fibre_node(self, x, y)
             return
         if mode == "network_select":
             _begin_network_selection(self, x, y)
@@ -1353,13 +1535,14 @@ def install_network_planning(editor_class) -> None:
 
         def visible_wrapper(self, point):
             kind = _text((point or {}).get("kind")).lower()
-            if kind in {"mer", "polan"}:
+            if kind in {"mer", "polan", "telco_pop", "external_network", "fibre_joint"}:
                 return self.show_locations_check.isChecked()
             return original_visible(self, point)
 
         editor_class._is_point_kind_visible = visible_wrapper
 
     editor_class.open_network_topology = _open_network_topology
+    editor_class.open_physical_fibre_topology = _open_physical_fibre_topology
     editor_class.open_network_planner = _open_network_planner
     editor_class.export_network_schedules = _export_network_schedules
     editor_class.validate_network_plan = _validate_network

@@ -21,6 +21,7 @@ from network_schema import (
     ensure_network_schema,
     normalise_layer_connection_rules,
 )
+from network_services import ensure_physical_fibre_for_design
 
 
 class NetworkPlanningError(RuntimeError):
@@ -275,6 +276,50 @@ class RoutingGraph:
                     )
                     self.graph[a_name].append((b_name, weight))
                     self.graph[b_name].append((a_name, weight))
+
+        # Existing project connections are part of the routing graph where both
+        # endpoints are known points.  This preserves user-drawn spurs between
+        # rooms/data points and the corridor network.
+        for connection in self.data.get("connections", []):
+            if not isinstance(connection, dict):
+                continue
+            a_name = _text(connection.get("from"))
+            b_name = _text(connection.get("to"))
+            a = self.points.get(a_name)
+            b = self.points.get(b_name)
+            if not a or not b or a_name == b_name:
+                continue
+            explicit = _float(
+                connection.get("length_m", connection.get("length", 0.0)), 0.0
+            )
+            weight = explicit if explicit > 0.0 else _distance(a, b, self.floor_height_m)
+            if not any(neighbour == b_name for neighbour, _weight in self.graph[a_name]):
+                self.graph[a_name].append((b_name, weight))
+                self.graph[b_name].append((a_name, weight))
+
+        # Locations and data points commonly sit beside, rather than directly
+        # on, a corridor node.  Attach every unconnected endpoint to its nearest
+        # same-floor corridor/transition point so fibre and copper routes follow
+        # the established graph instead of falling back to a straight A-B line.
+        route_nodes_by_floor: Dict[int, List[str]] = defaultdict(list)
+        for point_name, point in self.points.items():
+            if _text(point.get("kind")).lower() in {"corridor_node", "transition_node"}:
+                route_nodes_by_floor[_int(point.get("floor"))].append(point_name)
+        for point_name, point in list(self.points.items()):
+            if _text(point.get("kind")).lower() in {"corridor_node", "transition_node"}:
+                continue
+            if self.graph.get(point_name):
+                continue
+            candidates = route_nodes_by_floor.get(_int(point.get("floor")), [])
+            if not candidates:
+                continue
+            nearest_name = min(
+                candidates,
+                key=lambda candidate: _distance(point, self.points[candidate], self.floor_height_m),
+            )
+            weight = _distance(point, self.points[nearest_name], self.floor_height_m)
+            self.graph[point_name].append((nearest_name, weight))
+            self.graph[nearest_name].append((point_name, weight))
 
     def _tree(self, source: str) -> Tuple[Dict[str, float], Dict[str, str]]:
         source = _text(source)
@@ -728,6 +773,18 @@ def _clear_previous_auto_design(data: dict) -> None:
     data["network_redundancy_groups"] = [
         item
         for item in data.get("network_redundancy_groups", [])
+        if not bool(item.get("auto_generated"))
+    ]
+    data["network_fibre_cables"] = [
+        item for item in data.get("network_fibre_cables", [])
+        if not bool(item.get("auto_generated"))
+    ]
+    data["network_fibre_nodes"] = [
+        item for item in data.get("network_fibre_nodes", [])
+        if not bool(item.get("auto_generated"))
+    ]
+    data["network_fibre_splices"] = [
+        item for item in data.get("network_fibre_splices", [])
         if not bool(item.get("auto_generated"))
     ]
 
@@ -3333,6 +3390,7 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
 
     _assert_generated_capacity(builder, spare_fraction)
     builder.commit()
+    physical_fibre_summary = ensure_physical_fibre_for_design(data, replace_auto=False)
 
     assets_by_id = {
         _text(item.get("id")): item
@@ -3397,6 +3455,9 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         "component_counts": dict(sorted(role_counts.items())),
         "estimated_copper_length_m": round(builder.total_copper_m, 3),
         "estimated_fibre_length_m": round(builder.total_fibre_m, 3),
+        "physical_fibre_cables": physical_fibre_summary.get("cable_count", 0),
+        "physical_fibre_nodes": physical_fibre_summary.get("node_count", 0),
+        "physical_fibre_layer": deepcopy(settings.get("physical_fibre_layer", {})),
         "polan_max_ont_copper_m": _float(settings.get("polan_max_ont_copper_m"), 30.0),
         "polan_max_onts_per_splitter": _int(
             settings.get("polan_max_onts_per_splitter"), 16

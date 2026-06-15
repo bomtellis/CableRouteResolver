@@ -1,14 +1,15 @@
 """ Network topology view for CableRouteResolver.
 
-The view is deliberately read-only: network placement and connection editing remain
-in the main graph.  This module turns the installed network records into a
-hierarchical topology with expandable branches, redundant/failover links,
-endpoint groups, utilisation indicators, and a device details panel.
+The view is an editable logical network workspace. It turns installed network
+records into a hierarchical topology with expandable branches, redundant and
+failover links, endpoint groups, utilisation indicators, rack elevations and
+device port views. Passive fibre plant remains in the linked physical-fibre map.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from copy import deepcopy
 from dataclasses import dataclass, field
 import math
 import re
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -50,7 +52,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from network_schema import ensure_network_schema
+from network_schema import ensure_network_schema, next_network_id
+from network_services import circuit_trace
+from network_dialogs import NetworkConnectionEditorDialog, NetworkInstanceEditorDialog
+from network_fibre_dialogs import PatchLeadEditorDialog
 
 
 def _text(value) -> str:
@@ -193,7 +198,7 @@ def _port_group_sort_key(port: dict, fallback_name: str = "") -> Tuple[int, int,
 def _role_rank(role: str, asset_type: str) -> int:
     role = role.lower()
     asset_type = asset_type.lower()
-    if asset_type in {"firewall", "network_router"} or any(word in role for word in ("gateway", "router", "firewall")):
+    if asset_type in {"firewall", "network_router", "telco_pop", "external_network"} or any(word in role for word in ("gateway", "router", "firewall", "telco", "peering", "external")):
         return 0
     if "core" in role:
         return 1
@@ -220,6 +225,8 @@ def _type_label(asset_type: str, role: str) -> str:
         "network_router": "Router",
         "firewall": "Firewall",
         "wireless_access_point": "Wireless access point",
+        "telco_pop": "Telecommunications PoP",
+        "external_network": "External network",
         "optical_line_terminal": "Optical line terminal",
         "optical_network_terminal": "Optical network terminal",
         "client_group": "Endpoint group",
@@ -253,6 +260,8 @@ def _icon_text(asset_type: str, role: str) -> str:
         "optical_network_terminal": "ONT",
         "fibre_splitter": "SPL",
         "wireless_access_point": "AP",
+        "telco_pop": "PoP",
+        "external_network": "EXT",
         "patch_panel": "PP",
         "client_group": "CL",
         "client_device": "END",
@@ -693,6 +702,7 @@ class TopologyModel:
 class TopologyCardItem(QGraphicsObject):
     activated = Signal(str)
     branchToggleRequested = Signal(str)
+    contextRequested = Signal(str, object)
 
     WIDTH = 232.0
     HEIGHT = 98.0
@@ -813,6 +823,8 @@ class TopologyCardItem(QGraphicsObject):
             "fibre_splitter": QColor("#6e5c97"),
             "wireless_access_point": QColor("#9c6a31"),
             "patch_panel": QColor("#53616d"),
+            "telco_pop": QColor("#7b5d9d"),
+            "external_network": QColor("#73528f"),
             "client_group": QColor("#48515a"),
             "client_device": QColor("#52606b"),
             "site_group": QColor("#3f596f"),
@@ -951,6 +963,10 @@ class TopologyCardItem(QGraphicsObject):
 
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event) -> None:  # noqa: ANN001
+        self.contextRequested.emit(self.node.node_id, event.screenPos())
+        event.accept()
+
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
         self.branchToggleRequested.emit(self.node.node_id)
         event.accept()
@@ -960,6 +976,8 @@ class RackEquipmentItem(QGraphicsObject):
     activated = Signal(str)
     branchToggleRequested = Signal(str)
     portActivated = Signal(str)
+    contextRequested = Signal(str, object)
+    portContextRequested = Signal(str, object)
 
     def __init__(
         self,
@@ -1086,7 +1104,7 @@ class RackEquipmentItem(QGraphicsObject):
             if port_rect is None:
                 continue
             occupied = bool(port_node.details.get('occupied'))
-            fill = QColor('#c94c4c') if occupied else QColor('#41a85f')
+            fill = QColor('#ff8a24') if bool(port_node.details.get('traced')) else (QColor('#c94c4c') if occupied else QColor('#41a85f'))
             kind = self._port_kind(port_node.details.get('port_type') or port_node.details.get('port_name', ''))
             painter.setPen(QPen(fill.darker(175), max(0.6, port_rect.width() * 0.06)))
             painter.setBrush(fill)
@@ -1139,6 +1157,16 @@ class RackEquipmentItem(QGraphicsObject):
             return
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event) -> None:
+        point = event.pos()
+        for node_id, rect in self._port_rects.items():
+            if rect.adjusted(-1.5, -1.5, 1.5, 1.5).contains(point):
+                self.portContextRequested.emit(node_id, event.screenPos())
+                event.accept()
+                return
+        self.contextRequested.emit(self.node.node_id, event.screenPos())
+        event.accept()
+
     def mouseDoubleClickEvent(self, event) -> None:
         self.branchToggleRequested.emit(self.node.node_id)
         event.accept()
@@ -1147,6 +1175,8 @@ class RackEquipmentItem(QGraphicsObject):
 class SwitchFrontPanelItem(QGraphicsObject):
     activated = Signal(str)
     portActivated = Signal(str)
+    contextRequested = Signal(str, object)
+    portContextRequested = Signal(str, object)
 
     def __init__(self, node: TopologyNode, port_nodes: Sequence[TopologyNode], width: float, height: float):
         super().__init__()
@@ -1232,7 +1262,7 @@ class SwitchFrontPanelItem(QGraphicsObject):
             if port_rect is None:
                 continue
             occupied = bool(port_node.details.get('occupied'))
-            fill = QColor('#c94c4c') if occupied else QColor('#41a85f')
+            fill = QColor('#ff8a24') if bool(port_node.details.get('traced')) else (QColor('#c94c4c') if occupied else QColor('#41a85f'))
             kind = self._port_kind(port_node.details.get('port_type') or port_node.details.get('port_name', ''))
             painter.setPen(QPen(fill.darker(170), 1.2 if kind in {'sfp','qsfp','mpo'} else 1.0))
             painter.setBrush(fill)
@@ -1268,11 +1298,23 @@ class SwitchFrontPanelItem(QGraphicsObject):
             return
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event) -> None:
+        point = event.pos()
+        for node_id, rect in self._port_rects.items():
+            if rect.adjusted(-2, -2, 2, 2).contains(point):
+                self.portContextRequested.emit(node_id, event.screenPos())
+                event.accept()
+                return
+        self.contextRequested.emit(self.node.node_id, event.screenPos())
+        event.accept()
+
 
 class SplitterFrontPanelItem(QGraphicsObject):
     """Dedicated 1U optical splitter face with a central prism."""
     activated = Signal(str)
     portActivated = Signal(str)
+    contextRequested = Signal(str, object)
+    portContextRequested = Signal(str, object)
 
     def __init__(self, node: TopologyNode, port_nodes: Sequence[TopologyNode], width: float, height: float):
         super().__init__()
@@ -1358,7 +1400,7 @@ class SplitterFrontPanelItem(QGraphicsObject):
             if pr is None:
                 continue
             occupied = bool(port_node.details.get('occupied'))
-            fill = QColor('#c94c4c') if occupied else QColor('#41a85f')
+            fill = QColor('#ff8a24') if bool(port_node.details.get('traced')) else (QColor('#c94c4c') if occupied else QColor('#41a85f'))
             painter.setPen(QPen(fill.darker(170), 0.8))
             painter.setBrush(fill)
             painter.drawRoundedRect(pr, 1.2, 1.2)
@@ -1379,11 +1421,51 @@ class SplitterFrontPanelItem(QGraphicsObject):
             event.accept(); return
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event) -> None:
+        for node_id, rect in self._port_rects.items():
+            if rect.adjusted(-2, -2, 2, 2).contains(event.pos()):
+                self.portContextRequested.emit(node_id, event.screenPos())
+                event.accept()
+                return
+        self.contextRequested.emit(self.node.node_id, event.screenPos())
+        event.accept()
+
+
+class InteractiveLinkItem(QGraphicsPathItem):
+    """Topology path that exposes logical-link actions on right click."""
+    def __init__(self, path: QPainterPath, edge_id: str = "", context_callback=None):
+        super().__init__(path)
+        self.edge_id = _text(edge_id)
+        self.context_callback = context_callback
+        self.setAcceptHoverEvents(True)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: ANN001
+        if self.edge_id and callable(self.context_callback):
+            self.context_callback(self.edge_id, event.screenPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
+    def hoverEnterEvent(self, event) -> None:  # noqa: ANN001
+        pen = self.pen()
+        pen.setWidthF(max(3.5, pen.widthF() + 1.2))
+        self.setPen(pen)
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event) -> None:  # noqa: ANN001
+        pen = self.pen()
+        pen.setWidthF(max(1.0, pen.widthF() - 1.2))
+        self.setPen(pen)
+        super().hoverLeaveEvent(event)
+
 
 class LinkLabelItem(QGraphicsObject):
-    def __init__(self, text: str, colour: QColor, parent: Optional[QGraphicsItem] = None):
+    contextRequested = Signal(str, object)
+
+    def __init__(self, text: str, colour: QColor, edge_id: str = "", parent: Optional[QGraphicsItem] = None):
         super().__init__(parent)
         self.text = text
+        self.edge_id = _text(edge_id)
         self.colour = colour
         self.font = QFont("Arial", 7)
         metrics = QFontMetrics(self.font)
@@ -1405,6 +1487,13 @@ class LinkLabelItem(QGraphicsObject):
         painter.setFont(self.font)
         painter.setPen(self.colour.lighter(145))
         painter.drawText(self.boundingRect().adjusted(7.0, 0.0, -7.0, 0.0), Qt.AlignCenter, self.text)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: ANN001
+        if self.edge_id:
+            self.contextRequested.emit(self.edge_id, event.screenPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
 
 class TopologyGraphicsView(QGraphicsView):
@@ -1663,7 +1752,7 @@ class TopologyGraphicsView(QGraphicsView):
 
 
 class NetworkTopologyDialog(QDialog):
-    """Read-only topology hierarchy inspired by the UniFi Network topology view."""
+    """Editable logical topology, rack elevation and device-port workspace."""
 
     CARD_W = TopologyCardItem.WIDTH
     CARD_H = TopologyCardItem.HEIGHT
@@ -1681,9 +1770,22 @@ class NetworkTopologyDialog(QDialog):
     # additional vertical rows.
     FLOOR_ROW_MAX_WIDTH = 2600.0
 
-    def __init__(self, parent: Optional[QWidget], data: dict):
+    def __init__(
+        self,
+        parent: Optional[QWidget],
+        data: dict,
+        on_change: Optional[Callable[[dict], None]] = None,
+        initial_trace_connection_id: str = "",
+    ):
         super().__init__(parent)
         self.data = data
+        self.on_change = on_change
+        self.trace = circuit_trace(self.data, initial_trace_connection_id) if initial_trace_connection_id else {}
+        self.trace_connection_ids: Set[str] = set(self.trace.get("connection_ids", []))
+        self.trace_instance_ids: Set[str] = set(self.trace.get("instance_ids", []))
+        self.trace_patch_lead_ids: Set[str] = set(self.trace.get("patch_lead_ids", []))
+        self.trace_fibre_cable_ids: Set[str] = set(self.trace.get("fibre_cable_ids", []))
+        self.trace_splice_ids: Set[str] = set(self.trace.get("splice_ids", []))
         ensure_network_schema(self.data)
         self.model = TopologyModel(self.data)
         self.explicit_expanded: Set[str] = set()
@@ -1705,7 +1807,7 @@ class NetworkTopologyDialog(QDialog):
         self._logical_children_cache: Dict[str, Tuple[str, ...]] = {}
         self._collapsed_edge_cache: Dict[Tuple[str, str], TopologyEdge] = {}
 
-        self.setWindowTitle("Network Topology")
+        self.setWindowTitle("Network Topology Editor")
         self.setWindowFlag(Qt.Window, True)
         self.setWindowFlag(Qt.WindowMinMaxButtonsHint, True)
         self.setWindowModality(Qt.NonModal)
@@ -1824,6 +1926,27 @@ class NetworkTopologyDialog(QDialog):
         self.show_link_labels_check.setChecked(True)
         self.show_link_labels_check.toggled.connect(lambda _checked: self.rebuild_scene(fit=False))
         layout.addWidget(self.show_link_labels_check)
+
+        add_device_button = QPushButton("Add device")
+        add_device_button.setToolTip("Install a network asset and add it to the topology")
+        add_device_button.clicked.connect(self._add_device)
+        layout.addWidget(add_device_button)
+
+        add_link_button = QPushButton("Add link")
+        add_link_button.setToolTip("Create a logical connection between installed network assets")
+        add_link_button.clicked.connect(self._add_connection)
+        layout.addWidget(add_link_button)
+
+        physical_button = QPushButton("Physical fibre")
+        physical_button.setToolTip("Open the separate floor-routed fibre, splice and joint map")
+        physical_button.clicked.connect(self._open_physical_fibre)
+        layout.addWidget(physical_button)
+
+        self.clear_trace_button = QPushButton("Clear trace")
+        self.clear_trace_button.setToolTip("Clear the orange circuit trace")
+        self.clear_trace_button.clicked.connect(self._clear_trace)
+        self.clear_trace_button.setVisible(bool(self.trace_connection_ids))
+        layout.addWidget(self.clear_trace_button)
 
         overview_button = QPushButton("Overview")
         overview_button.setToolTip("Collapse dense branches to the default overview")
@@ -2405,6 +2528,8 @@ class NetworkTopologyDialog(QDialog):
             "wireless_access_point",
             "patch_panel",
             "fibre_splitter",
+            "telco_pop",
+            "external_network",
         }
 
     def _passive_patch_description(self, node: TopologyNode) -> str:
@@ -2502,6 +2627,22 @@ class NetworkTopologyDialog(QDialog):
             "connection_paths": paths,
         }
 
+    def _port_is_traced(self, instance_id: str, port_name: str) -> bool:
+        target_port = _text(port_name)
+        for connection in self.data.get("network_connections", []):
+            connection_id = _text(connection.get("id"))
+            parent_id = _text(connection.get("parent_logical_connection_id"))
+            if connection_id not in self.trace_connection_ids and parent_id not in self.trace_connection_ids:
+                continue
+            if _text(connection.get("from_instance_id")) == instance_id and _text(connection.get("from_port")) == target_port:
+                return True
+            if _text(connection.get("to_instance_id")) == instance_id and _text(connection.get("to_port")) == target_port:
+                return True
+        for lead in self.data.get("network_patch_leads", []):
+            if _text(lead.get("id")) in self.trace_patch_lead_ids and _text(lead.get("instance_id")) == instance_id and _text(lead.get("port")) == target_port:
+                return True
+        return False
+
     def _device_port_records(self, device_id: str) -> Tuple[Dict[str, List[str]], Dict[str, float], Dict[str, dict]]:
         records: Dict[str, List[str]] = defaultdict(list)
         poe_by_port: Dict[str, float] = defaultdict(float)
@@ -2589,6 +2730,7 @@ class NetworkTopologyDialog(QDialog):
                     "port_use": _port_definition_for_name(switch.asset, port).get("port_use", "other"),
                     "connected_devices": connected,
                     "occupied": occupied,
+                    "traced": self._port_is_traced(switch_id, port),
                     **port_traces.get(port, {}),
                 },
             )
@@ -2640,6 +2782,7 @@ class NetworkTopologyDialog(QDialog):
                     "port_use": _port_definition_for_name(device.asset, port).get("port_use", "other"),
                     "connected_devices": connected,
                     "occupied": bool(connected),
+                    "traced": self._port_is_traced(device_id, port),
                     **port_traces.get(port, {}),
                 },
             )
@@ -3544,6 +3687,8 @@ class NetworkTopologyDialog(QDialog):
                 item.setZValue(1.0)
                 item.activated.connect(self._card_activated)
                 item.portActivated.connect(self._card_activated)
+                item.contextRequested.connect(self._node_context_menu)
+                item.portContextRequested.connect(self._port_context_menu)
                 self.scene.addItem(item)
                 self.node_items[switch_id] = item
                 for port_node in port_nodes:
@@ -3596,9 +3741,14 @@ class NetworkTopologyDialog(QDialog):
                     item = TopologyCardItem(node, hidden, has_children, expanded)
                 item.setPos(positions[node_id])
                 item.setZValue(1.0)
+                if node_id in self.trace_instance_ids and hasattr(item, "set_search_match"):
+                    item.set_search_match(True)
                 item.activated.connect(self._card_activated)
+                if hasattr(item, "contextRequested"):
+                    item.contextRequested.connect(self._node_context_menu)
                 if isinstance(item, (RackEquipmentItem, SplitterFrontPanelItem)):
                     item.portActivated.connect(self._card_activated)
+                    item.portContextRequested.connect(self._port_context_menu)
                 item.branchToggleRequested.connect(self._card_double_clicked)
                 self.scene.addItem(item)
                 self.node_items[node_id] = item
@@ -3940,6 +4090,10 @@ class NetworkTopologyDialog(QDialog):
         )
 
     def _edge_colour(self, edge: Optional[TopologyEdge], medium: str = "") -> QColor:
+        if edge is not None:
+            parent_id = _text(edge.connection.get("parent_logical_connection_id"))
+            if edge.edge_id in self.trace_connection_ids or parent_id in self.trace_connection_ids:
+                return QColor("#ff8a24")
         if self._edge_is_failover(edge):
             return QColor("#d68f52")
         return self._link_colour(medium or (edge.medium if edge else ""))
@@ -3982,10 +4136,12 @@ class NetworkTopologyDialog(QDialog):
             bus_left - required_span - 154.0,
         )
 
-    def _add_link_label(self, text: str, colour: QColor, point: QPointF) -> None:
+    def _add_link_label(self, text: str, colour: QColor, point: QPointF, edge: Optional[TopologyEdge] = None) -> None:
         if not text:
             return
-        label = LinkLabelItem(text, colour)
+        edge_id = edge.edge_id if edge is not None else ""
+        label = LinkLabelItem(text, colour, edge_id=edge_id)
+        label.contextRequested.connect(self._edge_context_menu)
         # Keep failover labels clear of the primary fibre label and bus line.
         if "failover" in text.lower() or "standby" in text.lower():
             point = QPointF(point.x(), point.y() - 14.0)
@@ -4102,7 +4258,7 @@ class NetworkTopologyDialog(QDialog):
                         z_value=-0.80 if failover else -0.95,
                     )
                     if edge and self.show_link_labels_check.isChecked():
-                        self._add_link_label(edge.label, colour, QPointF((entry_x + end.x()) / 2.0, end.y() - 14.0))
+                        self._add_link_label(edge.label, colour, QPointF((entry_x + end.x()) / 2.0, end.y() - 14.0), edge)
                 continue
 
             rail_x = min(point.x() for _child_id, point, _edge in endpoints) - 52.0
@@ -4124,18 +4280,19 @@ class NetworkTopologyDialog(QDialog):
                 client_link = child_id.startswith("client::")
                 medium = edge.medium if edge else ("virtual" if client_link else "copper")
                 standby = self._edge_is_failover(edge)
-                colour = QColor("#d68f52") if standby else self._link_colour(medium)
-                pen = QPen(colour, 2.0 if not client_link else 1.3)
+                colour = self._edge_colour(edge, medium) if edge else (QColor("#d68f52") if standby else self._link_colour(medium))
+                traced = bool(edge and (edge.edge_id in self.trace_connection_ids or _text(edge.connection.get("parent_logical_connection_id")) in self.trace_connection_ids))
+                pen = QPen(colour, 3.4 if traced else (2.0 if not client_link else 1.3))
                 if standby or client_link:
                     pen.setStyle(Qt.DashLine)
                 branch = QPainterPath(QPointF(rail_x, end.y()))
                 branch.lineTo(end)
-                branch_item = QGraphicsPathItem(branch)
+                branch_item = InteractiveLinkItem(branch, edge.edge_id if edge else "", self._edge_context_menu)
                 branch_item.setPen(pen)
                 branch_item.setZValue(-0.95)
                 self.scene.addItem(branch_item)
                 if edge and self.show_link_labels_check.isChecked() and not client_link:
-                    self._add_link_label(edge.label, colour, QPointF((rail_x + end.x()) / 2.0, end.y()))
+                    self._add_link_label(edge.label, colour, QPointF((rail_x + end.x()) / 2.0, end.y()), edge)
 
     def _add_vertical_link_rail(
         self,
@@ -4168,19 +4325,20 @@ class NetworkTopologyDialog(QDialog):
             client_link = child_id.startswith("client::")
             medium = edge.medium if edge else ("virtual" if client_link else "copper")
             standby = cross_link or self._edge_is_failover(edge)
-            colour = QColor("#d68f52") if standby else self._link_colour(medium)
-            pen = QPen(colour, 2.0 if not client_link else 1.3)
+            colour = self._edge_colour(edge, medium) if edge else (QColor("#d68f52") if standby else self._link_colour(medium))
+            traced = bool(edge and (edge.edge_id in self.trace_connection_ids or _text(edge.connection.get("parent_logical_connection_id")) in self.trace_connection_ids))
+            pen = QPen(colour, 3.4 if traced else (2.0 if not client_link else 1.3))
             if standby or client_link or cross_link:
                 pen.setStyle(Qt.DashLine)
             branch_y = end.y()
             branch = QPainterPath(QPointF(rail_x, branch_y))
             branch.lineTo(end)
-            branch_item = QGraphicsPathItem(branch)
+            branch_item = InteractiveLinkItem(branch, edge.edge_id if edge else "", self._edge_context_menu)
             branch_item.setPen(pen)
             branch_item.setZValue(z_value + 0.05)
             self.scene.addItem(branch_item)
             if edge and self.show_link_labels_check.isChecked() and not client_link:
-                self._add_link_label(edge.label, colour, QPointF((rail_x + end.x()) / 2.0, branch_y))
+                self._add_link_label(edge.label, colour, QPointF((rail_x + end.x()) / 2.0, branch_y), edge)
 
     def _active_descendants_for_hidden(
         self, node_id: str, positions: Dict[str, QPointF]
@@ -4377,7 +4535,7 @@ class NetworkTopologyDialog(QDialog):
             if bus is not None:
                 self._add_bus_drop(target_id, positions, colour, failover=True, z_value=-0.8)
             if self.show_link_labels_check.isChecked():
-                self._add_link_label(edge.label, colour, label_point)
+                self._add_link_label(edge.label, colour, label_point, edge)
 
     def _add_cross_link_rail(
         self,
@@ -4431,7 +4589,7 @@ class NetworkTopologyDialog(QDialog):
             for target_id, end, edge in endpoints:
                 self._add_bus_drop(target_id, positions, QColor("#d68f52"), failover=True, z_value=-0.8)
                 if self.show_link_labels_check.isChecked():
-                    self._add_link_label(edge.label, QColor("#d68f52"), QPointF((entry_x + end.x()) / 2.0, end.y() - 14.0))
+                    self._add_link_label(edge.label, QColor("#d68f52"), QPointF((entry_x + end.x()) / 2.0, end.y() - 14.0), edge)
             return
 
         average_target_x = sum(point.x() for _target_id, point, _edge in endpoints) / len(endpoints)
@@ -4551,17 +4709,17 @@ class NetworkTopologyDialog(QDialog):
 
             medium = edge.medium if edge else "fibre"
             standby = cross_link or self._edge_is_failover(edge)
-            colour = QColor("#d68f52") if standby else self._link_colour(medium)
-            pen = QPen(colour, 2.0)
+            colour = self._edge_colour(edge, medium)
+            pen = QPen(colour, 3.4 if edge and (edge.edge_id in self.trace_connection_ids or _text(edge.connection.get("parent_logical_connection_id")) in self.trace_connection_ids) else 2.0)
             if failover_style:
                 pen.setStyle(Qt.DashLine)
-            path_item = QGraphicsPathItem(path)
+            path_item = InteractiveLinkItem(path, edge.edge_id if edge else "", self._edge_context_menu)
             path_item.setPen(pen)
             path_item.setZValue(-1.0 if not failover_style else -0.8)
             self.scene.addItem(path_item)
             self._add_bus_drop(target_id, positions, colour, failover=failover_style, z_value=-0.95 if not failover_style else -0.8)
             if edge and self.show_link_labels_check.isChecked():
-                self._add_link_label(edge.label, colour, QPointF((entry_x + bus_anchor.x()) / 2.0, bus_anchor.y() - (14.0 if failover_style else 12.0)))
+                self._add_link_label(edge.label, colour, QPointF((entry_x + bus_anchor.x()) / 2.0, bus_anchor.y() - (14.0 if failover_style else 12.0)), edge)
             return
         path = QPainterPath(start)
         if failover_style:
@@ -4578,11 +4736,12 @@ class NetworkTopologyDialog(QDialog):
             path.lineTo(end)
 
         medium = edge.medium if edge else ("virtual" if client_link else "copper")
-        colour = QColor("#d68f52") if failover_style else self._link_colour(medium)
-        pen = QPen(colour, 2.0 if not client_link else 1.3)
+        colour = self._edge_colour(edge, medium) if edge is not None else (QColor("#d68f52") if failover_style else self._link_colour(medium))
+        traced = bool(edge and (edge.edge_id in self.trace_connection_ids or _text(edge.connection.get("parent_logical_connection_id")) in self.trace_connection_ids))
+        pen = QPen(colour, 3.4 if traced else (2.0 if not client_link else 1.3))
         if failover_style or client_link:
             pen.setStyle(Qt.DashLine)
-        path_item = QGraphicsPathItem(path)
+        path_item = InteractiveLinkItem(path, edge.edge_id if edge else "", self._edge_context_menu)
         path_item.setPen(pen)
         path_item.setZValue(-1.0 if not failover_style else -0.8)
         self.scene.addItem(path_item)
@@ -4605,7 +4764,7 @@ class NetworkTopologyDialog(QDialog):
                     label_point = QPointF((mid_x + end.x()) / 2.0, end.y())
                 else:
                     label_point = QPointF((start.x() + mid_x) / 2.0, start.y())
-            self._add_link_label(edge.label, colour, label_point)
+            self._add_link_label(edge.label, colour, label_point, edge)
 
     def _card_activated(self, node_id: str) -> None:
         item = self.node_items.get(node_id)
@@ -4732,6 +4891,314 @@ class NetworkTopologyDialog(QDialog):
         self.explicit_expanded.clear()
         self.explicit_collapsed.clear()
         self.rebuild_scene(fit=True)
+
+    def _commit_changes(self, refresh: bool = True) -> None:
+        ensure_network_schema(self.data)
+        if callable(self.on_change):
+            self.on_change(deepcopy(self.data))
+        if refresh:
+            self.refresh_from_data()
+
+    def _add_device(self, default_location: str = "", default_rack: str = "") -> None:
+        dialog = NetworkInstanceEditorDialog(
+            self,
+            assets=self.data.get("network_assets", []),
+            locations=self.data.get("locations", []),
+            suggested_id=next_network_id(self.data.get("network_asset_instances", []), "NI"),
+        )
+        if default_location:
+            index = dialog.location_combo.findData(default_location)
+            if index >= 0:
+                dialog.location_combo.setCurrentIndex(index)
+        if default_rack:
+            dialog.rack_name_edit.setText(default_rack)
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self.data.setdefault("network_asset_instances", []).append(dialog.result)
+            self._commit_changes()
+
+    def _edit_device(self, instance_id: str) -> None:
+        rows = self.data.get("network_asset_instances", [])
+        index = next((i for i, row in enumerate(rows) if _text(row.get("id")) == instance_id), -1)
+        if index < 0:
+            return
+        current = rows[index]
+        dialog = NetworkInstanceEditorDialog(
+            self, current, self.data.get("network_assets", []), self.data.get("locations", []), instance_id
+        )
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+        new_id = _text(dialog.result.get("id"))
+        if new_id != instance_id and any(_text(row.get("id")) == new_id for row in rows):
+            QMessageBox.critical(self, "Duplicate ID", f"Network instance {new_id} already exists.")
+            return
+        rows[index] = dialog.result
+        if new_id != instance_id:
+            for connection in self.data.get("network_connections", []):
+                if _text(connection.get("from_instance_id")) == instance_id:
+                    connection["from_instance_id"] = new_id
+                if _text(connection.get("to_instance_id")) == instance_id:
+                    connection["to_instance_id"] = new_id
+            for lead in self.data.get("network_patch_leads", []):
+                if _text(lead.get("instance_id")) == instance_id:
+                    lead["instance_id"] = new_id
+                if _text(lead.get("peer_instance_id")) == instance_id:
+                    lead["peer_instance_id"] = new_id
+            for node in self.data.get("network_fibre_nodes", []):
+                if _text(node.get("linked_instance_id")) == instance_id:
+                    node["linked_instance_id"] = new_id
+        self._commit_changes()
+
+    def _delete_device(self, instance_id: str) -> None:
+        if QMessageBox.question(
+            self, "Delete installed network asset",
+            f"Delete {instance_id}, its logical connections, patch cables and linked physical fibre terminations?"
+        ) != QMessageBox.Yes:
+            return
+        connection_ids = {
+            _text(row.get("id")) for row in self.data.get("network_connections", [])
+            if _text(row.get("from_instance_id")) == instance_id or _text(row.get("to_instance_id")) == instance_id
+        }
+        self.data["network_asset_instances"] = [row for row in self.data.get("network_asset_instances", []) if _text(row.get("id")) != instance_id]
+        self.data["network_connections"] = [row for row in self.data.get("network_connections", []) if _text(row.get("id")) not in connection_ids]
+        self.data["network_patch_leads"] = [row for row in self.data.get("network_patch_leads", []) if _text(row.get("instance_id")) != instance_id and _text(row.get("peer_instance_id")) != instance_id and _text(row.get("connection_id")) not in connection_ids]
+        self.data["network_endpoint_assignments"] = [row for row in self.data.get("network_endpoint_assignments", []) if _text(row.get("network_instance_id")) != instance_id]
+        node_ids = {_text(row.get("id")) for row in self.data.get("network_fibre_nodes", []) if _text(row.get("linked_instance_id")) == instance_id}
+        self.data["network_fibre_nodes"] = [row for row in self.data.get("network_fibre_nodes", []) if _text(row.get("id")) not in node_ids]
+        self.data["network_fibre_splices"] = [row for row in self.data.get("network_fibre_splices", []) if _text(row.get("node_id")) not in node_ids and _text(row.get("cassette_id")) not in node_ids]
+        for cable in self.data.get("network_fibre_cables", []):
+            cable["logical_connection_ids"] = [value for value in cable.get("logical_connection_ids", []) if _text(value) not in connection_ids]
+        self._commit_changes()
+
+    def _add_connection(self, default_from: str = "", default_to: str = "") -> None:
+        if len(self.data.get("network_asset_instances", [])) < 2:
+            QMessageBox.information(self, "Network connection", "Install at least two network assets first.")
+            return
+        dialog = NetworkConnectionEditorDialog(
+            self,
+            instances=self.data.get("network_asset_instances", []),
+            vlans=self.data.get("network_vlans", []),
+            route_profiles=list(self.data.get("route_profiles", {}).keys()),
+            suggested_id=next_network_id(self.data.get("network_connections", []), "NC"),
+            default_from=default_from,
+            default_to=default_to,
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self.data.setdefault("network_connections", []).append(dialog.result)
+            self._commit_changes()
+
+    def _edit_connection(self, connection_id: str) -> None:
+        rows = self.data.get("network_connections", [])
+        index = next((i for i, row in enumerate(rows) if _text(row.get("id")) == connection_id), -1)
+        if index < 0:
+            return
+        dialog = NetworkConnectionEditorDialog(
+            self, rows[index], self.data.get("network_asset_instances", []), self.data.get("network_vlans", []),
+            list(self.data.get("route_profiles", {}).keys()), connection_id
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            rows[index] = dialog.result
+            self._commit_changes()
+
+    def _delete_connection(self, connection_id: str) -> None:
+        if QMessageBox.question(self, "Delete network connection", f"Delete {connection_id} and its patch leads?") != QMessageBox.Yes:
+            return
+        self.data["network_connections"] = [row for row in self.data.get("network_connections", []) if _text(row.get("id")) != connection_id]
+        self.data["network_patch_leads"] = [row for row in self.data.get("network_patch_leads", []) if _text(row.get("connection_id")) != connection_id]
+        for cable in self.data.get("network_fibre_cables", []):
+            cable["logical_connection_ids"] = [value for value in cable.get("logical_connection_ids", []) if _text(value) != connection_id]
+        self._commit_changes()
+
+    def _trace_circuit(self, connection_id: str) -> None:
+        self.trace = circuit_trace(self.data, connection_id)
+        self.trace_connection_ids = set(self.trace.get("connection_ids", []))
+        self.trace_instance_ids = set(self.trace.get("instance_ids", []))
+        self.trace_patch_lead_ids = set(self.trace.get("patch_lead_ids", []))
+        self.trace_fibre_cable_ids = set(self.trace.get("fibre_cable_ids", []))
+        self.trace_splice_ids = set(self.trace.get("splice_ids", []))
+        self.clear_trace_button.setVisible(bool(self.trace_connection_ids))
+        self.rebuild_scene(fit=False)
+        self.status_label.setText(
+            f"Circuit trace: {len(self.trace_connection_ids)} logical link(s), "
+            f"{len(self.trace_patch_lead_ids)} patch lead(s), {len(self.trace_fibre_cable_ids)} fibre cable(s)"
+        )
+
+    def _clear_trace(self) -> None:
+        self.trace = {}
+        self.trace_connection_ids.clear(); self.trace_instance_ids.clear(); self.trace_patch_lead_ids.clear(); self.trace_fibre_cable_ids.clear(); self.trace_splice_ids.clear()
+        self.clear_trace_button.hide()
+        self.rebuild_scene(fit=False)
+
+    def _open_physical_fibre(self, connection_id: str = "") -> None:
+        from network_physical_fibre import PhysicalFibreTopologyDialog
+        windows = getattr(self, "_physical_fibre_windows", None)
+        if windows is None:
+            windows = []
+            self._physical_fibre_windows = windows
+        dialog = PhysicalFibreTopologyDialog(
+            self, self.data, on_change=lambda payload: self._apply_external_payload(payload),
+            initial_trace_connection_id=connection_id,
+        )
+        windows.append(dialog)
+        dialog.destroyed.connect(lambda: windows.remove(dialog) if dialog in windows else None)
+        dialog.showMaximized()
+
+    def _apply_external_payload(self, payload: dict) -> None:
+        for key in (
+            "network_settings", "network_assets", "network_asset_instances", "network_connections",
+            "network_endpoint_assignments", "network_patch_leads", "network_redundancy_groups",
+            "network_vlans", "network_routes", "network_ip_allocations", "network_external_networks",
+            "network_fibre_cables", "network_fibre_nodes", "network_fibre_splices", "network_design_summary",
+        ):
+            if key in payload:
+                self.data[key] = deepcopy(payload[key])
+        self._commit_changes()
+
+    def _rack_units_for_instance(self, instance: dict) -> int:
+        asset = next((row for row in self.data.get("network_assets", []) if _text(row.get("id")) == _text(instance.get("asset_id"))), {})
+        members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+        if _text(asset.get("asset_type")) == "network_switch":
+            return max(1, _int(asset.get("switch_rack_unit_allowance"), _int(asset.get("rack_units"), 1))) * members
+        return max(1, _int(asset.get("rack_units"), 1))
+
+    def _rack_free_start(self, location_name: str, rack_name: str, units: int, preferred: int = 1, exclude_id: str = "") -> int:
+        capacity = max(1, _int(self.data.get("network_settings", {}).get("default_rack_size_u"), 42))
+        occupied = []
+        for row in self.data.get("network_asset_instances", []):
+            if _text(row.get("id")) == exclude_id or _text(row.get("location_name")) != location_name or _text(row.get("rack_name")) != rack_name:
+                continue
+            start = max(1, _int(row.get("rack_start_u"), 1)); occupied.append((start, start + self._rack_units_for_instance(row) - 1))
+        for start in list(range(max(1, preferred), capacity - units + 2)) + list(range(1, max(1, preferred))):
+            end = start + units - 1
+            if not any(start <= other_end and end >= other_start for other_start, other_end in occupied):
+                return start
+        return 0
+
+    def _move_rack_item(self, instance_id: str, delta_u: int = 0, rack_delta: int = 0) -> None:
+        instance = next((row for row in self.data.get("network_asset_instances", []) if _text(row.get("id")) == instance_id), None)
+        if not instance:
+            return
+        location = _text(instance.get("location_name")); rack = _text(instance.get("rack_name")); units = self._rack_units_for_instance(instance)
+        if rack_delta:
+            racks = sorted({_text(row.get("rack_name")) for row in self.data.get("network_asset_instances", []) if _text(row.get("location_name")) == location and _text(row.get("rack_name"))})
+            if rack not in racks:
+                racks.append(rack); racks.sort()
+            index = racks.index(rack) if rack in racks else 0
+            target_index = index + rack_delta
+            if target_index < 0:
+                QMessageBox.information(self, "Move rack equipment", "This is already the first cabinet in the location.")
+                return
+            if target_index >= len(racks):
+                base = rack.rsplit("-", 1)[0] if rack else f"RACK-{location}"
+                candidate = f"{base}-{len(racks) + 1}"
+                while candidate in racks:
+                    candidate += "-N"
+                racks.append(candidate)
+            target_rack = racks[target_index]
+            start = self._rack_free_start(location, target_rack, units, max(1, _int(instance.get("rack_start_u"), 1)), instance_id)
+            if not start:
+                QMessageBox.warning(self, "Move rack equipment", f"No {units}U space is available in {target_rack}.")
+                return
+            instance["rack_name"] = target_rack; instance["rack_start_u"] = start
+        else:
+            target = max(1, _int(instance.get("rack_start_u"), 1) + delta_u)
+            free = self._rack_free_start(location, rack, units, target, instance_id)
+            if free != target:
+                QMessageBox.warning(self, "Move rack equipment", f"U{target}-U{target + units - 1} is occupied or outside the rack.")
+                return
+            instance["rack_start_u"] = target
+        self._commit_changes()
+        self.rack_focus = (instance.get("floor", 0), location, _text(instance.get("rack_name")))
+        self.rebuild_scene(fit=False)
+
+    def _node_context_menu(self, node_id: str, screen_pos) -> None:
+        node = self.model.nodes.get(node_id)
+        if node is None or node.pseudo:
+            return
+        menu = QMenu(self)
+        edit = menu.addAction("Edit installed element")
+        connect = menu.addAction("Add logical connection from this element")
+        physical = menu.addAction("Open linked physical fibre")
+        if self.rack_focus is not None:
+            menu.addSeparator()
+            up = menu.addAction("Move up 1U")
+            down = menu.addAction("Move down 1U")
+            previous_rack = menu.addAction("Move to previous cabinet")
+            next_rack = menu.addAction("Move to next cabinet")
+            add_to_rack = menu.addAction("Add equipment to this location/rack")
+        else:
+            up = down = previous_rack = next_rack = add_to_rack = None
+        menu.addSeparator(); delete = menu.addAction("Delete installed element")
+        action = menu.exec(screen_pos)
+        if action == edit:
+            self._edit_device(node_id)
+        elif action == connect:
+            self._add_connection(default_from=node_id)
+        elif action == physical:
+            connection = next((edge.edge_id for edge in self.model.edges if edge.source_id == node_id or edge.target_id == node_id), "")
+            self._open_physical_fibre(connection)
+        elif action == up:
+            self._move_rack_item(node_id, delta_u=1)
+        elif action == down:
+            self._move_rack_item(node_id, delta_u=-1)
+        elif action == previous_rack:
+            self._move_rack_item(node_id, rack_delta=-1)
+        elif action == next_rack:
+            self._move_rack_item(node_id, rack_delta=1)
+        elif action == add_to_rack:
+            self._add_device(node.location_name, _text(node.instance.get("rack_name")))
+        elif action == delete:
+            self._delete_device(node_id)
+
+    def _edge_context_menu(self, edge_id: str, screen_pos) -> None:
+        edge = self._edge_by_id(edge_id)
+        if edge is None:
+            return
+        logical_id = _text(edge.connection.get("parent_logical_connection_id")) or edge.edge_id
+        menu = QMenu(self)
+        trace = menu.addAction("Trace circuit")
+        physical = menu.addAction("Open in physical fibre map")
+        menu.addSeparator(); edit = menu.addAction("Edit connection"); delete = menu.addAction("Delete connection")
+        action = menu.exec(screen_pos)
+        if action == trace:
+            self._trace_circuit(logical_id)
+        elif action == physical:
+            self._open_physical_fibre(logical_id)
+        elif action == edit:
+            self._edit_connection(logical_id)
+        elif action == delete:
+            self._delete_connection(logical_id)
+
+    def _port_context_menu(self, port_node_id: str, screen_pos) -> None:
+        port_node = self._node_for(port_node_id)
+        if port_node is None:
+            return
+        instance_id = _text(port_node.details.get("parent_instance_id")); port = _text(port_node.details.get("port_name"))
+        leads = [row for row in self.data.get("network_patch_leads", []) if _text(row.get("instance_id")) == instance_id and _text(row.get("port")) == port]
+        connections = [row for row in self.data.get("network_connections", []) if (_text(row.get("from_instance_id")) == instance_id and _text(row.get("from_port")) == port) or (_text(row.get("to_instance_id")) == instance_id and _text(row.get("to_port")) == port)]
+        menu = QMenu(self)
+        add_patch = menu.addAction("Add patch cable")
+        edit_patch = menu.addAction("Edit patch cable") if leads else None
+        remove_patch = menu.addAction("Remove patch cable") if leads else None
+        add_connection = menu.addAction("Add logical connection from this port")
+        trace = menu.addAction("Trace circuit") if connections else None
+        action = menu.exec(screen_pos)
+        if action == add_patch:
+            dialog = PatchLeadEditorDialog(self, instances=self.data.get("network_asset_instances", []), suggested_id=next_network_id(self.data.get("network_patch_leads", []), "PL"), default_instance_id=instance_id, default_port=port)
+            if dialog.exec() == QDialog.Accepted and dialog.result:
+                self.data.setdefault("network_patch_leads", []).append(dialog.result); self._commit_changes()
+        elif edit_patch is not None and action == edit_patch:
+            lead = leads[0]; rows = self.data.get("network_patch_leads", []); index = rows.index(lead)
+            dialog = PatchLeadEditorDialog(self, lead, self.data.get("network_asset_instances", []), _text(lead.get("id")))
+            if dialog.exec() == QDialog.Accepted and dialog.result:
+                rows[index] = dialog.result; self._commit_changes()
+        elif remove_patch is not None and action == remove_patch:
+            lead_ids = {_text(row.get("id")) for row in leads}
+            self.data["network_patch_leads"] = [row for row in self.data.get("network_patch_leads", []) if _text(row.get("id")) not in lead_ids]
+            self._commit_changes()
+        elif action == add_connection:
+            self._add_connection(default_from=instance_id)
+        elif trace is not None and action == trace:
+            self._trace_circuit(_text(connections[0].get("id")))
 
     def _apply_search_highlight(self, text: str) -> None:
         query = _text(text).lower()

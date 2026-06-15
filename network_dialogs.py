@@ -43,6 +43,8 @@ NETWORK_ASSET_TYPES = [
     ("pdu", "Power distribution unit (PDU)"),
     ("power_device", "Power device"),
     ("cable_management", "Cable management"),
+    ("telco_pop", "Telecommunications point of presence"),
+    ("external_network", "External / partner network"),
     ("other", "Other"),
 ]
 
@@ -60,6 +62,11 @@ PORT_TYPE_OPTIONS = ["rj45", "sfp", "sfp+", "qsfp", "qsfp28", "pon", "lc", "sc",
 PORT_USE_OPTIONS = ["input", "output", "uplink", "downlink", "management", "console", "pon", "client", "patch", "stacking", "power", "spare", "other"]
 
 from network_auto_planner import NetworkPlanningError, generate_network_design
+from network_services import cable_core_statistics, ensure_physical_fibre_for_design, generate_ip_address_plan, set_core_status_from_splices
+from network_fibre_dialogs import (
+    ExternalNetworkEditorDialog, FibreCableEditorDialog, FibreNodeEditorDialog,
+    FibreSpliceEditorDialog, PatchLeadEditorDialog,
+)
 from network_schema import (
     default_layer_connection_rules,
     normalise_layer_connection_rules,
@@ -922,7 +929,12 @@ class VlanEditorDialog(QDialog):
         self.vlan_id_spin.setValue(int(self.vlan.get("vlan_id", 1) or 1))
         self.name_edit = QLineEdit(_text(self.vlan.get("name")))
         self.purpose_edit = QLineEdit(_text(self.vlan.get("purpose")))
+        self.requested_hosts_spin = QSpinBox()
+        self.requested_hosts_spin.setRange(2, 16_777_214)
+        self.requested_hosts_spin.setValue(max(2, int(self.vlan.get("requested_hosts", 254) or 254)))
         self.subnet_edit = QLineEdit(_text(self.vlan.get("subnet")))
+        self.subnet_mask_edit = QLineEdit(_text(self.vlan.get("subnet_mask")))
+        self.subnet_mask_edit.setReadOnly(True)
         self.gateway_edit = QLineEdit(_text(self.vlan.get("gateway")))
         self.dhcp_scope_edit = QLineEdit(_text(self.vlan.get("dhcp_scope")))
         self.security_zone_edit = QLineEdit(_text(self.vlan.get("security_zone")))
@@ -932,7 +944,9 @@ class VlanEditorDialog(QDialog):
             ("VLAN ID", self.vlan_id_spin),
             ("Name", self.name_edit),
             ("Purpose", self.purpose_edit),
+            ("Requested hosts", self.requested_hosts_spin),
             ("Subnet", self.subnet_edit),
+            ("Subnet mask", self.subnet_mask_edit),
             ("Gateway", self.gateway_edit),
             ("DHCP scope", self.dhcp_scope_edit),
             ("Security zone", self.security_zone_edit),
@@ -955,7 +969,10 @@ class VlanEditorDialog(QDialog):
             "vlan_id": int(self.vlan_id_spin.value()),
             "name": self.name_edit.text().strip(),
             "purpose": self.purpose_edit.text().strip(),
+            "requested_hosts": int(self.requested_hosts_spin.value()),
             "subnet": self.subnet_edit.text().strip(),
+            "subnet_mask": self.subnet_mask_edit.text().strip(),
+            "prefix_length": int(self.vlan.get("prefix_length", 0) or 0),
             "gateway": self.gateway_edit.text().strip(),
             "dhcp_scope": self.dhcp_scope_edit.text().strip(),
             "security_zone": self.security_zone_edit.text().strip(),
@@ -1190,6 +1207,34 @@ class NetworkPlannerDialog(QDialog):
             int(settings.get("default_rack_size_u", 42) or 42)
         )
 
+        self.default_fibre_core_count_spin = QSpinBox()
+        self.default_fibre_core_count_spin.setRange(2, 6912)
+        self.default_fibre_core_count_spin.setValue(
+            int(settings.get("default_fibre_core_count", 12) or 12)
+        )
+        self.default_fibre_core_count_spin.setToolTip(
+            "Default sheath core count used when logical fibre links are converted into physical routed cables."
+        )
+
+        self.ip_plan_base_edit = QLineEdit(
+            _text(settings.get("ip_plan_base_cidr")) or "10.0.0.0/8"
+        )
+        self.ip_plan_base_edit.setToolTip(
+            "IPv4 supernet used by the automatic VLAN, gateway and management-address generator."
+        )
+
+        self.sync_physical_fibre_button = QPushButton("Synchronise Physical Fibre Layer")
+        self.sync_physical_fibre_button.setToolTip(
+            "Create or refresh routed physical fibre cables, terminations and cassettes from logical fibre connections."
+        )
+        self.sync_physical_fibre_button.clicked.connect(self.sync_physical_fibre_layer)
+
+        self.generate_ip_plan_button = QPushButton("Generate IP Address Plan")
+        self.generate_ip_plan_button.setToolTip(
+            "Allocate VLAN subnets, masks, gateways, router interfaces and device management addresses."
+        )
+        self.generate_ip_plan_button.clicked.connect(self.generate_ip_plan)
+
         self.olt_failover_check = QCheckBox(
             "Provide standby OLT failover for each protected splitter"
         )
@@ -1242,9 +1287,13 @@ class NetworkPlannerDialog(QDialog):
             "PoLAN maximum splitter-to-ONT route", self.polan_max_splitter_route_spin
         )
         settings_layout.addRow("Default rack cabinet size", self.default_rack_size_spin)
+        settings_layout.addRow("Default physical fibre core count", self.default_fibre_core_count_spin)
+        settings_layout.addRow("IP planning base CIDR", self.ip_plan_base_edit)
         settings_layout.addRow("", self.redundant_core_check)
         settings_layout.addRow("", self.olt_failover_check)
         settings_layout.addRow("", self.auto_design_button)
+        settings_layout.addRow("", self.sync_physical_fibre_button)
+        settings_layout.addRow("", self.generate_ip_plan_button)
         settings_layout.addRow("", self.clear_installed_button)
         settings_layout.addRow("", self.visual_edit_button)
         settings_layout.addRow("", info)
@@ -1369,12 +1418,39 @@ class NetworkPlannerDialog(QDialog):
                 "Policy",
             ]
         )
+        self.patch_leads_tab = _CrudTab(
+            ["ID", "Device", "Port", "Peer", "Peer port", "Endpoint", "Medium", "Length m", "Logical link"]
+        )
+        self.fibre_nodes_tab = _CrudTab(
+            ["ID", "Name", "Type", "Location", "Floor", "Rack", "Parent", "Capacity", "Drawing layer"]
+        )
+        self.fibre_cables_tab = _CrudTab(
+            ["ID", "Name", "From", "To", "Type", "Cores", "Used", "Dark", "Length m", "Route", "Layer"]
+        )
+        self.fibre_splices_tab = _CrudTab(
+            ["ID", "Node", "Cassette", "Incoming cable", "Core", "Outgoing cable", "Core", "Type", "Circuit", "Loss dB"]
+        )
+        self.external_networks_tab = _CrudTab(
+            ["ID", "Name", "Type", "Provider", "ASN", "Location", "Demarcation", "Prefixes", "Peers"]
+        )
+        self.ip_allocations_tab = _CrudTab(
+            ["ID", "Instance", "VLAN", "Address", "Prefix", "Gateway", "Purpose"]
+        )
+        self.ip_allocations_tab.add_button.setText("Generate plan")
+        self.ip_allocations_tab.edit_button.setEnabled(False)
+        self.ip_allocations_tab.delete_button.setText("Clear generated")
 
         self.tabs.addTab(self.assets_tab, "Asset Library")
         self.tabs.addTab(self.instances_tab, "Installed Assets")
         self.tabs.addTab(self.connections_tab, "Connections")
+        self.tabs.addTab(self.patch_leads_tab, "Patch Cables")
+        self.tabs.addTab(self.fibre_nodes_tab, "Fibre Nodes")
+        self.tabs.addTab(self.fibre_cables_tab, "Fibre Cables")
+        self.tabs.addTab(self.fibre_splices_tab, "Fibre Splices")
+        self.tabs.addTab(self.external_networks_tab, "External Networks")
         self.tabs.addTab(self.vlans_tab, "VLANs")
         self.tabs.addTab(self.routes_tab, "Routing")
+        self.tabs.addTab(self.ip_allocations_tab, "IP Addresses")
 
         self.summary_text = QTextEdit()
         self.summary_text.setReadOnly(True)
@@ -1404,6 +1480,29 @@ class NetworkPlannerDialog(QDialog):
         self.routes_tab.edit_button.clicked.connect(self.edit_route)
         self.routes_tab.delete_button.clicked.connect(self.delete_route)
         self.routes_tab.edit_requested = self.edit_route
+
+        self.patch_leads_tab.add_button.clicked.connect(self.add_patch_lead)
+        self.patch_leads_tab.edit_button.clicked.connect(self.edit_patch_lead)
+        self.patch_leads_tab.delete_button.clicked.connect(self.delete_patch_lead)
+        self.patch_leads_tab.edit_requested = self.edit_patch_lead
+        self.fibre_nodes_tab.add_button.clicked.connect(self.add_fibre_node)
+        self.fibre_nodes_tab.edit_button.clicked.connect(self.edit_fibre_node)
+        self.fibre_nodes_tab.delete_button.clicked.connect(self.delete_fibre_node)
+        self.fibre_nodes_tab.edit_requested = self.edit_fibre_node
+        self.fibre_cables_tab.add_button.clicked.connect(self.add_fibre_cable)
+        self.fibre_cables_tab.edit_button.clicked.connect(self.edit_fibre_cable)
+        self.fibre_cables_tab.delete_button.clicked.connect(self.delete_fibre_cable)
+        self.fibre_cables_tab.edit_requested = self.edit_fibre_cable
+        self.fibre_splices_tab.add_button.clicked.connect(self.add_fibre_splice)
+        self.fibre_splices_tab.edit_button.clicked.connect(self.edit_fibre_splice)
+        self.fibre_splices_tab.delete_button.clicked.connect(self.delete_fibre_splice)
+        self.fibre_splices_tab.edit_requested = self.edit_fibre_splice
+        self.external_networks_tab.add_button.clicked.connect(self.add_external_network)
+        self.external_networks_tab.edit_button.clicked.connect(self.edit_external_network)
+        self.external_networks_tab.delete_button.clicked.connect(self.delete_external_network)
+        self.external_networks_tab.edit_requested = self.edit_external_network
+        self.ip_allocations_tab.add_button.clicked.connect(self.generate_ip_plan)
+        self.ip_allocations_tab.delete_button.clicked.connect(self.clear_ip_plan)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close)
         buttons.button(QDialogButtonBox.Save).clicked.connect(self.save)
@@ -1455,6 +1554,50 @@ class NetworkPlannerDialog(QDialog):
             for assignment in self._items("network_endpoint_assignments"):
                 if _text(assignment.get("network_instance_id")) == old_id:
                     assignment["network_instance_id"] = new_id
+            for lead in self._items("network_patch_leads"):
+                if _text(lead.get("instance_id")) == old_id:
+                    lead["instance_id"] = new_id
+                if _text(lead.get("peer_instance_id")) == old_id:
+                    lead["peer_instance_id"] = new_id
+            for cable in self._items("network_fibre_cables"):
+                if _text(cable.get("from_instance_id")) == old_id:
+                    cable["from_instance_id"] = new_id
+                if _text(cable.get("to_instance_id")) == old_id:
+                    cable["to_instance_id"] = new_id
+            for node in self._items("network_fibre_nodes"):
+                if _text(node.get("linked_instance_id")) == old_id:
+                    node["linked_instance_id"] = new_id
+            for allocation in self._items("network_ip_allocations"):
+                if _text(allocation.get("instance_id")) == old_id:
+                    allocation["instance_id"] = new_id
+            for external in self._items("network_external_networks"):
+                if _text(external.get("demarcation_instance_id")) == old_id:
+                    external["demarcation_instance_id"] = new_id
+                external["peer_instance_ids"] = [new_id if _text(v) == old_id else v for v in external.get("peer_instance_ids", [])]
+        elif key == "network_connections":
+            for lead in self._items("network_patch_leads"):
+                if _text(lead.get("connection_id")) == old_id:
+                    lead["connection_id"] = new_id
+            for cable in self._items("network_fibre_cables"):
+                cable["logical_connection_ids"] = [new_id if _text(v) == old_id else v for v in cable.get("logical_connection_ids", [])]
+            for splice in self._items("network_fibre_splices"):
+                if _text(splice.get("circuit_id")) == old_id:
+                    splice["circuit_id"] = new_id
+        elif key == "network_fibre_cables":
+            for splice in self._items("network_fibre_splices"):
+                if _text(splice.get("incoming_cable_id")) == old_id:
+                    splice["incoming_cable_id"] = new_id
+                if _text(splice.get("outgoing_cable_id")) == old_id:
+                    splice["outgoing_cable_id"] = new_id
+        elif key == "network_fibre_nodes":
+            for node in self._items("network_fibre_nodes"):
+                if _text(node.get("parent_node_id")) == old_id:
+                    node["parent_node_id"] = new_id
+            for splice in self._items("network_fibre_splices"):
+                if _text(splice.get("node_id")) == old_id:
+                    splice["node_id"] = new_id
+                if _text(splice.get("cassette_id")) == old_id:
+                    splice["cassette_id"] = new_id
         elif key == "network_vlans":
             for connection in self._items("network_connections"):
                 connection["vlan_ids"] = [
@@ -1464,6 +1607,9 @@ class NetworkPlannerDialog(QDialog):
             for route in self._items("network_routes"):
                 if _text(route.get("vlan_id")) == old_id:
                     route["vlan_id"] = new_id
+            for allocation in self._items("network_ip_allocations"):
+                if _text(allocation.get("vlan_id")) == old_id:
+                    allocation["vlan_id"] = new_id
 
     def refresh_tables(self) -> None:
         self.assets_tab.set_rows(
@@ -1536,18 +1682,52 @@ class NetworkPlannerDialog(QDialog):
         self.routes_tab.set_rows(
             [
                 [
-                    item.get("id", ""),
-                    item.get("source", ""),
-                    item.get("destination", ""),
-                    item.get("vlan_id", ""),
-                    item.get("protocol", ""),
-                    item.get("next_hop", ""),
-                    item.get("metric", 0),
-                    item.get("firewall_policy", ""),
+                    item.get("id", ""), item.get("source", ""), item.get("destination", ""),
+                    item.get("vlan_id", ""), item.get("protocol", ""), item.get("next_hop", ""),
+                    item.get("metric", 0), item.get("firewall_policy", ""),
                 ]
                 for item in self._items("network_routes")
             ]
         )
+        self.patch_leads_tab.set_rows([
+            [item.get("id",""), item.get("instance_id",""), item.get("port",""),
+             item.get("peer_instance_id",""), item.get("peer_port",""), item.get("endpoint_name",""),
+             item.get("medium",""), item.get("length_m",0), item.get("connection_id","")]
+            for item in self._items("network_patch_leads")
+        ])
+        self.fibre_nodes_tab.set_rows([
+            [item.get("id",""), item.get("name",""), item.get("node_type",""), item.get("location_name",""),
+             item.get("floor",0), item.get("rack_name",""), item.get("parent_node_id",""),
+             item.get("splice_capacity", item.get("cassette_capacity",0)), item.get("drawing_layer","")]
+            for item in self._items("network_fibre_nodes")
+        ])
+        fibre_cable_rows = []
+        for item in self._items("network_fibre_cables"):
+            stats = cable_core_statistics(item)
+            fibre_cable_rows.append([
+                item.get("id",""), item.get("name",""), item.get("from_instance_id","") or item.get("from_location",""),
+                item.get("to_instance_id","") or item.get("to_location",""), item.get("cable_type",""),
+                item.get("core_count",0), stats.get("used",0), stats.get("dark",0), item.get("length_m",0),
+                " -> ".join(str(v) for v in item.get("route_path",[]) if _text(v)), item.get("drawing_layer","")
+            ])
+        self.fibre_cables_tab.set_rows(fibre_cable_rows)
+        self.fibre_splices_tab.set_rows([
+            [item.get("id",""), item.get("node_id",""), item.get("cassette_id",""),
+             item.get("incoming_cable_id",""), item.get("incoming_core",1), item.get("outgoing_cable_id",""),
+             item.get("outgoing_core",1), item.get("splice_type",""), item.get("circuit_id",""), item.get("loss_db",0.0)]
+            for item in self._items("network_fibre_splices")
+        ])
+        self.external_networks_tab.set_rows([
+            [item.get("id",""), item.get("name",""), item.get("network_type",""), item.get("provider",""),
+             item.get("asn",""), item.get("location_name",""), item.get("demarcation_instance_id",""),
+             ", ".join(item.get("prefixes",[])), ", ".join(item.get("peer_instance_ids",[]))]
+            for item in self._items("network_external_networks")
+        ])
+        self.ip_allocations_tab.set_rows([
+            [item.get("id",""), item.get("instance_id",""), item.get("vlan_id",""), item.get("address",""),
+             item.get("prefix_length",0), item.get("gateway",""), item.get("purpose","")]
+            for item in self._items("network_ip_allocations")
+        ])
         self._refresh_design_summary()
 
     @staticmethod
@@ -1689,6 +1869,8 @@ class NetworkPlannerDialog(QDialog):
             self.polan_max_splitter_route_spin.value()
         )
         settings["default_rack_size_u"] = int(self.default_rack_size_spin.value())
+        settings["default_fibre_core_count"] = int(self.default_fibre_core_count_spin.value())
+        settings["ip_plan_base_cidr"] = self.ip_plan_base_edit.text().strip() or "10.0.0.0/8"
         settings["polan_olt_failover"] = self.olt_failover_check.isChecked()
 
     def _refresh_design_summary(self) -> None:
@@ -1788,9 +1970,13 @@ class NetworkPlannerDialog(QDialog):
         connection_count = len(self.data.get("network_connections", []))
         assignment_count = len(self.data.get("network_endpoint_assignments", []))
         redundancy_count = len(self.data.get("network_redundancy_groups", []))
+        patch_lead_count = len(self.data.get("network_patch_leads", []))
+        fibre_cable_count = len(self.data.get("network_fibre_cables", []))
+        fibre_node_count = len(self.data.get("network_fibre_nodes", []))
+        fibre_splice_count = len(self.data.get("network_fibre_splices", []))
 
         if not any(
-            (instance_count, connection_count, assignment_count, redundancy_count)
+            (instance_count, connection_count, assignment_count, redundancy_count, patch_lead_count, fibre_cable_count, fibre_node_count, fibre_splice_count)
         ):
             QMessageBox.information(
                 self,
@@ -1824,6 +2010,11 @@ class NetworkPlannerDialog(QDialog):
         self.data["network_connections"] = []
         self.data["network_endpoint_assignments"] = []
         self.data["network_redundancy_groups"] = []
+        self.data["network_patch_leads"] = []
+        self.data["network_fibre_cables"] = []
+        self.data["network_fibre_nodes"] = []
+        self.data["network_fibre_splices"] = []
+        self.data["network_ip_allocations"] = []
         self.data["network_design_summary"] = {}
 
         self.refresh_tables()
@@ -2060,6 +2251,154 @@ class NetworkPlannerDialog(QDialog):
         ):
             self._items("network_routes").pop(index)
             self.refresh_tables()
+
+    def sync_physical_fibre_layer(self) -> None:
+        self._sync_planner_settings()
+        summary = ensure_physical_fibre_for_design(self.data, replace_auto=False)
+        self.refresh_tables()
+        QMessageBox.information(
+            self,
+            "Physical fibre layer",
+            f"Physical fibre synchronised. {summary.get('cable_count', 0)} cable records and "
+            f"{summary.get('node_count', 0)} passive node records are now linked to the logical design.",
+        )
+
+    def generate_ip_plan(self) -> None:
+        self._sync_planner_settings()
+        try:
+            result = generate_ip_address_plan(
+                self.data, self.ip_plan_base_edit.text().strip()
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "IP address plan", str(exc))
+            return
+        self.refresh_tables()
+        QMessageBox.information(
+            self,
+            "IP address plan",
+            f"Generated {result.get('vlan_count', 0)} VLAN subnet(s), "
+            f"{result.get('management_allocations', 0)} management address(es), and router interfaces "
+            f"on {result.get('router_instance_id') or 'the selected gateway device'}.",
+        )
+
+    def clear_ip_plan(self) -> None:
+        if QMessageBox.question(self, "Clear generated IP plan", "Clear generated device IP allocations and router interfaces?") != QMessageBox.Yes:
+            return
+        self.data["network_ip_allocations"] = [
+            row for row in self._items("network_ip_allocations")
+            if not bool(row.get("auto_generated", False))
+        ]
+        for instance in self._items("network_asset_instances"):
+            instance.pop("router_ip_addresses", None)
+            if _text(instance.get("management_vlan")):
+                instance["management_ip"] = ""
+                instance["management_vlan"] = ""
+        self.refresh_tables()
+
+    def add_patch_lead(self) -> None:
+        dialog = PatchLeadEditorDialog(
+            self, instances=self._items("network_asset_instances"),
+            suggested_id=_next_id(self._items("network_patch_leads"), "PL")
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self._replace_or_append("network_patch_leads", -1, dialog.result)
+
+    def edit_patch_lead(self) -> None:
+        index, item = self._selected(self.patch_leads_tab, "network_patch_leads")
+        if item is None: return
+        dialog = PatchLeadEditorDialog(self, item, self._items("network_asset_instances"), _text(item.get("id")))
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self._replace_or_append("network_patch_leads", index, dialog.result)
+
+    def delete_patch_lead(self) -> None:
+        index, item = self._selected(self.patch_leads_tab, "network_patch_leads")
+        if item is not None and QMessageBox.question(self, "Delete patch cable", f"Delete {_text(item.get('id'))}?") == QMessageBox.Yes:
+            self._items("network_patch_leads").pop(index); self.refresh_tables()
+
+    def add_fibre_node(self) -> None:
+        dialog = FibreNodeEditorDialog(
+            self, nodes=self._items("network_fibre_nodes"), instances=self._items("network_asset_instances"),
+            locations=self.data.get("locations", []), suggested_id=_next_id(self._items("network_fibre_nodes"), "FN")
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self._replace_or_append("network_fibre_nodes", -1, dialog.result)
+
+    def edit_fibre_node(self) -> None:
+        index, item = self._selected(self.fibre_nodes_tab, "network_fibre_nodes")
+        if item is None: return
+        dialog = FibreNodeEditorDialog(self, item, self._items("network_fibre_nodes"), self._items("network_asset_instances"), self.data.get("locations", []), _text(item.get("id")))
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self._replace_or_append("network_fibre_nodes", index, dialog.result)
+
+    def delete_fibre_node(self) -> None:
+        index, item = self._selected(self.fibre_nodes_tab, "network_fibre_nodes")
+        if item is None: return
+        node_id = _text(item.get("id"))
+        if QMessageBox.question(self, "Delete fibre node", f"Delete {node_id} and its splice records?") != QMessageBox.Yes: return
+        self._items("network_fibre_nodes").pop(index)
+        self.data["network_fibre_splices"] = [s for s in self._items("network_fibre_splices") if _text(s.get("node_id")) != node_id and _text(s.get("cassette_id")) != node_id]
+        self.refresh_tables()
+
+    def add_fibre_cable(self) -> None:
+        dialog = FibreCableEditorDialog(self, instances=self._items("network_asset_instances"), suggested_id=_next_id(self._items("network_fibre_cables"), "FOC"))
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self._replace_or_append("network_fibre_cables", -1, dialog.result)
+
+    def edit_fibre_cable(self) -> None:
+        index, item = self._selected(self.fibre_cables_tab, "network_fibre_cables")
+        if item is None: return
+        dialog = FibreCableEditorDialog(self, item, self._items("network_asset_instances"), _text(item.get("id")))
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self._replace_or_append("network_fibre_cables", index, dialog.result)
+
+    def delete_fibre_cable(self) -> None:
+        index, item = self._selected(self.fibre_cables_tab, "network_fibre_cables")
+        if item is None: return
+        cable_id = _text(item.get("id"))
+        if QMessageBox.question(self, "Delete fibre cable", f"Delete {cable_id} and all splices using it?") != QMessageBox.Yes: return
+        self._items("network_fibre_cables").pop(index)
+        self.data["network_fibre_splices"] = [s for s in self._items("network_fibre_splices") if _text(s.get("incoming_cable_id")) != cable_id and _text(s.get("outgoing_cable_id")) != cable_id]
+        self.refresh_tables()
+
+    def add_fibre_splice(self) -> None:
+        if len(self._items("network_fibre_cables")) < 2:
+            QMessageBox.information(self, "Fibre splice", "Create at least two physical fibre cables first.")
+            return
+        dialog = FibreSpliceEditorDialog(self, nodes=self._items("network_fibre_nodes"), cables=self._items("network_fibre_cables"), suggested_id=_next_id(self._items("network_fibre_splices"), "FS"))
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self._replace_or_append("network_fibre_splices", -1, dialog.result); set_core_status_from_splices(self.data)
+
+    def edit_fibre_splice(self) -> None:
+        index, item = self._selected(self.fibre_splices_tab, "network_fibre_splices")
+        if item is None: return
+        dialog = FibreSpliceEditorDialog(self, item, self._items("network_fibre_nodes"), self._items("network_fibre_cables"), _text(item.get("id")))
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self._replace_or_append("network_fibre_splices", index, dialog.result); set_core_status_from_splices(self.data)
+
+    def delete_fibre_splice(self) -> None:
+        index, item = self._selected(self.fibre_splices_tab, "network_fibre_splices")
+        if item is not None and QMessageBox.question(self, "Delete fibre splice", f"Delete {_text(item.get('id'))}?") == QMessageBox.Yes:
+            splice_id = _text(item.get("id")); self._items("network_fibre_splices").pop(index)
+            for cable in self._items("network_fibre_cables"):
+                cable["splice_ids"] = [v for v in cable.get("splice_ids", []) if _text(v) != splice_id]
+            self.refresh_tables()
+
+    def add_external_network(self) -> None:
+        dialog = ExternalNetworkEditorDialog(self, instances=self._items("network_asset_instances"), locations=self.data.get("locations", []), suggested_id=_next_id(self._items("network_external_networks"), "EXT"))
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self._replace_or_append("network_external_networks", -1, dialog.result)
+
+    def edit_external_network(self) -> None:
+        index, item = self._selected(self.external_networks_tab, "network_external_networks")
+        if item is None: return
+        dialog = ExternalNetworkEditorDialog(self, item, self._items("network_asset_instances"), self.data.get("locations", []), _text(item.get("id")))
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self._replace_or_append("network_external_networks", index, dialog.result)
+
+    def delete_external_network(self) -> None:
+        index, item = self._selected(self.external_networks_tab, "network_external_networks")
+        if item is not None and QMessageBox.question(self, "Delete external network", f"Delete {_text(item.get('id'))}?") == QMessageBox.Yes:
+            self._items("network_external_networks").pop(index); self.refresh_tables()
 
     def save(self) -> None:
         self._sync_planner_settings()

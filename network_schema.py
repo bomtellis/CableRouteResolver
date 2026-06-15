@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import ipaddress
 from typing import Dict, Iterable, List, Optional
+
+from network_services import FIBRE_COLOURS, build_fibre_cores, fibre_layer_defaults, set_core_status_from_splices
 
 NETWORK_DEFAULTS = {
     "network_settings": {
@@ -22,6 +25,9 @@ NETWORK_DEFAULTS = {
         "default_poe_power_w": 0.0,
         "poe_power_defaults": {},
         "default_rack_size_u": 42,
+        "default_fibre_core_count": 12,
+        "ip_plan_base_cidr": "10.0.0.0/8",
+        "physical_fibre_layer": fibre_layer_defaults(),
     },
     "network_assets": [],
     "network_asset_instances": [],
@@ -31,6 +37,11 @@ NETWORK_DEFAULTS = {
     "network_redundancy_groups": [],
     "network_vlans": [],
     "network_routes": [],
+    "network_ip_allocations": [],
+    "network_external_networks": [],
+    "network_fibre_cables": [],
+    "network_fibre_nodes": [],
+    "network_fibre_splices": [],
     "network_design_summary": {},
 }
 
@@ -48,12 +59,14 @@ NETWORK_ASSET_TYPES = {
     "power_device",
     "cable_management",
     "cable_manager",
+    "telco_pop",
+    "external_network",
     "other",
 }
 
 NETWORK_MEDIA = {"copper", "fibre", "wireless", "virtual", "stacking", "none"}
 NETWORK_CONNECTION_ROLES = {"input", "output", "uplink"}
-NETWORK_LOCATION_TYPES = {"mer", "polan"}
+NETWORK_LOCATION_TYPES = {"mer", "polan", "telco_pop", "external_network", "fibre_joint"}
 
 NETWORK_PORT_TYPES = {"rj45", "sfp", "sfp+", "qsfp", "qsfp28", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"}
 NETWORK_PORT_USES = {"input", "output", "uplink", "downlink", "management", "console", "pon", "client", "patch", "stacking", "power", "spare", "other"}
@@ -267,6 +280,9 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("default_poe_power_w", 0.0)
     settings.setdefault("poe_power_defaults", {})
     settings.setdefault("default_rack_size_u", 42)
+    settings.setdefault("default_fibre_core_count", 12)
+    settings.setdefault("ip_plan_base_cidr", "10.0.0.0/8")
+    settings.setdefault("physical_fibre_layer", fibre_layer_defaults())
     technology = _text(settings.get("technology")) or "Traditional"
     settings["technology"] = "PoLAN" if technology.lower() == "polan" else "Traditional"
     settings["expected_mer_count"] = max(
@@ -308,6 +324,18 @@ def ensure_network_schema(data: dict) -> dict:
     settings["default_rack_size_u"] = max(
         1, _as_int(settings.get("default_rack_size_u"), 42)
     )
+    settings["default_fibre_core_count"] = max(2, _as_int(settings.get("default_fibre_core_count"), 12))
+    settings["ip_plan_base_cidr"] = _text(settings.get("ip_plan_base_cidr")) or "10.0.0.0/8"
+    layer_settings = settings.get("physical_fibre_layer")
+    if not isinstance(layer_settings, dict):
+        layer_settings = {}
+    merged_layer_settings = fibre_layer_defaults()
+    merged_layer_settings.update(layer_settings)
+    for flag in ("visible", "show_base_graph", "show_route_nodes", "show_core_counts", "show_dark_fibre", "show_splice_labels"):
+        merged_layer_settings[flag] = bool(merged_layer_settings.get(flag, True))
+    for field in ("name", "dxf_layer_prefix", "cable_layer", "node_layer", "splice_layer", "label_layer"):
+        merged_layer_settings[field] = _text(merged_layer_settings.get(field)) or fibre_layer_defaults()[field]
+    settings["physical_fibre_layer"] = merged_layer_settings
     if not isinstance(settings.get("poe_power_defaults"), dict):
         settings["poe_power_defaults"] = {}
 
@@ -320,6 +348,11 @@ def ensure_network_schema(data: dict) -> dict:
         "network_redundancy_groups",
         "network_vlans",
         "network_routes",
+        "network_ip_allocations",
+        "network_external_networks",
+        "network_fibre_cables",
+        "network_fibre_nodes",
+        "network_fibre_splices",
     ):
         if not isinstance(data.get(key), list):
             data[key] = []
@@ -560,6 +593,9 @@ def ensure_network_schema(data: dict) -> dict:
             instance["stack_interconnect_medium"] = "stacking"
         instance.setdefault("stack_interconnect_specification", "")
         instance.setdefault("notes", "")
+        instance.setdefault("external_network_id", "")
+        if not isinstance(instance.get("router_ip_addresses"), list):
+            instance["router_ip_addresses"] = []
 
     for connection in data["network_connections"]:
         if not isinstance(connection, dict):
@@ -669,12 +705,17 @@ def ensure_network_schema(data: dict) -> dict:
             "name",
             "purpose",
             "subnet",
+            "subnet_mask",
             "gateway",
             "dhcp_scope",
+            "dhcp_start",
+            "dhcp_end",
             "security_zone",
             "notes",
         ):
             vlan.setdefault(field, "")
+        vlan["requested_hosts"] = max(2, _as_int(vlan.get("requested_hosts"), 254))
+        vlan["prefix_length"] = max(0, min(32, _as_int(vlan.get("prefix_length"), 0)))
 
     for route in data["network_routes"]:
         if not isinstance(route, dict):
@@ -691,7 +732,72 @@ def ensure_network_schema(data: dict) -> dict:
         ):
             route.setdefault(field, "")
         route["metric"] = max(0, _as_int(route.get("metric")))
+        route["auto_generated"] = bool(route.get("auto_generated", False))
 
+    for allocation in data["network_ip_allocations"]:
+        if not isinstance(allocation, dict):
+            continue
+        for field in ("id", "instance_id", "vlan_id", "address", "gateway", "purpose", "notes"):
+            allocation.setdefault(field, "")
+        allocation["prefix_length"] = max(0, min(32, _as_int(allocation.get("prefix_length"), 0)))
+        allocation["auto_generated"] = bool(allocation.get("auto_generated", False))
+
+    for external in data["network_external_networks"]:
+        if not isinstance(external, dict):
+            continue
+        for field in ("id", "name", "network_type", "provider", "asn", "location_name", "demarcation_instance_id", "notes"):
+            external.setdefault(field, "")
+        external["prefixes"] = _normalise_string_list(external.get("prefixes", []))
+        external["peer_instance_ids"] = _normalise_string_list(external.get("peer_instance_ids", []))
+
+    for node in data["network_fibre_nodes"]:
+        if not isinstance(node, dict):
+            continue
+        for field in ("id", "name", "node_type", "location_name", "rack_name", "parent_node_id", "linked_instance_id", "drawing_layer", "symbol", "label", "notes"):
+            node.setdefault(field, "")
+        node["floor"] = _as_int(node.get("floor"))
+        node["x"] = _as_float(node.get("x"))
+        node["y"] = _as_float(node.get("y"))
+        node["rack_start_u"] = max(0, _as_int(node.get("rack_start_u")))
+        node["rack_units"] = max(0, _as_int(node.get("rack_units"), 1))
+        node["cassette_capacity"] = max(0, _as_int(node.get("cassette_capacity"), 12))
+        node["splice_capacity"] = max(0, _as_int(node.get("splice_capacity"), node["cassette_capacity"]))
+        node["drawing_layer"] = _text(node.get("drawing_layer")) or settings["physical_fibre_layer"]["node_layer"]
+        node["symbol"] = _text(node.get("symbol")) or node.get("node_type", "fibre_joint")
+        node["label"] = _text(node.get("label")) or _text(node.get("name"))
+        node["auto_generated"] = bool(node.get("auto_generated", False))
+
+    for cable in data["network_fibre_cables"]:
+        if not isinstance(cable, dict):
+            continue
+        for field in ("id", "name", "cable_type", "from_instance_id", "from_port", "to_instance_id", "to_port", "from_location", "to_location", "installation_status", "owner", "drawing_layer", "sheath_colour", "label", "notes"):
+            cable.setdefault(field, "")
+        cable["route_path"] = _normalise_string_list(cable.get("route_path", []))
+        cable["logical_connection_ids"] = _normalise_string_list(cable.get("logical_connection_ids", []))
+        cable["splice_ids"] = _normalise_string_list(cable.get("splice_ids", []))
+        cable["length_m"] = max(0.0, _as_float(cable.get("length_m")))
+        cable["slack_length_m"] = max(0.0, _as_float(cable.get("slack_length_m")))
+        cable["diameter_mm"] = max(0.0, _as_float(cable.get("diameter_mm")))
+        cable["drawing_layer"] = _text(cable.get("drawing_layer")) or settings["physical_fibre_layer"]["cable_layer"]
+        cable["sheath_colour"] = _text(cable.get("sheath_colour")) or "Black"
+        cable["label"] = _text(cable.get("label")) or _text(cable.get("name"))
+        cable["core_count"] = max(1, _as_int(cable.get("core_count"), settings["default_fibre_core_count"]))
+        cable["cores"] = build_fibre_cores(cable["core_count"], 0, "", cable.get("cores", []))
+        cable["auto_generated"] = bool(cable.get("auto_generated", False))
+
+    for splice in data["network_fibre_splices"]:
+        if not isinstance(splice, dict):
+            continue
+        for field in ("id", "node_id", "cassette_id", "incoming_cable_id", "outgoing_cable_id", "splice_type", "circuit_id", "drawing_layer", "label", "loss_db", "notes"):
+            splice.setdefault(field, "")
+        splice["incoming_core"] = max(1, _as_int(splice.get("incoming_core"), 1))
+        splice["outgoing_core"] = max(1, _as_int(splice.get("outgoing_core"), 1))
+        splice["loss_db"] = max(0.0, _as_float(splice.get("loss_db"), 0.1))
+        splice["drawing_layer"] = _text(splice.get("drawing_layer")) or settings["physical_fibre_layer"]["splice_layer"]
+        splice["label"] = _text(splice.get("label")) or _text(splice.get("id"))
+        splice["auto_generated"] = bool(splice.get("auto_generated", False))
+
+    set_core_status_from_splices(data)
     return data
 
 
@@ -791,6 +897,11 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     validate_unique_id("network_redundancy_groups", "Network redundancy group")
     vlan_record_ids = validate_unique_id("network_vlans", "VLAN record")
     validate_unique_id("network_routes", "Network route")
+    validate_unique_id("network_ip_allocations", "IP allocation")
+    validate_unique_id("network_external_networks", "External network")
+    fibre_cable_ids = validate_unique_id("network_fibre_cables", "Fibre cable")
+    fibre_node_ids = validate_unique_id("network_fibre_nodes", "Fibre node")
+    fibre_splice_ids = validate_unique_id("network_fibre_splices", "Fibre splice")
 
     locations = {
         _text(item.get("name")): item
@@ -1110,6 +1221,113 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                     "provide two different upstream core sources."
                 )
 
+    for external in data.get("network_external_networks", []):
+        if not isinstance(external, dict):
+            continue
+        external_id = _text(external.get("id")) or "(unnamed)"
+        demarcation = _text(external.get("demarcation_instance_id"))
+        if demarcation and demarcation not in instance_ids:
+            messages.append(f"External network {external_id} references missing demarcation instance {demarcation!r}.")
+        for peer_id in external.get("peer_instance_ids", []):
+            if _text(peer_id) not in instance_ids:
+                messages.append(f"External network {external_id} references missing peering instance {_text(peer_id)!r}.")
+        for prefix in external.get("prefixes", []):
+            try:
+                ipaddress.ip_network(_text(prefix), strict=False)
+            except ValueError:
+                messages.append(f"External network {external_id} contains invalid prefix {_text(prefix)!r}.")
+
+    allocated_addresses: set[str] = set()
+    for allocation in data.get("network_ip_allocations", []):
+        if not isinstance(allocation, dict):
+            continue
+        allocation_id = _text(allocation.get("id")) or "(unnamed)"
+        instance_id = _text(allocation.get("instance_id"))
+        vlan_id = _text(allocation.get("vlan_id"))
+        if instance_id and instance_id not in instance_ids:
+            messages.append(f"IP allocation {allocation_id} references missing instance {instance_id!r}.")
+        if vlan_id and vlan_id not in vlan_record_ids:
+            messages.append(f"IP allocation {allocation_id} references missing VLAN {vlan_id!r}.")
+        address = _text(allocation.get("address"))
+        if address:
+            try:
+                ipaddress.ip_address(address)
+            except ValueError:
+                messages.append(f"IP allocation {allocation_id} has invalid address {address!r}.")
+            if address in allocated_addresses:
+                messages.append(f"IP address {address} is allocated more than once.")
+            allocated_addresses.add(address)
+
+    for cable in data.get("network_fibre_cables", []):
+        if not isinstance(cable, dict):
+            continue
+        cable_id = _text(cable.get("id")) or "(unnamed)"
+        core_count = _as_int(cable.get("core_count"))
+        cores = [row for row in cable.get("cores", []) if isinstance(row, dict)]
+        if core_count < 1:
+            messages.append(f"Fibre cable {cable_id} must contain at least one core.")
+        if len(cores) != core_count:
+            messages.append(f"Fibre cable {cable_id} declares {core_count} cores but contains {len(cores)} core records.")
+        if not cable.get("route_path"):
+            messages.append(f"Advisory: fibre cable {cable_id} has no graph route path.")
+        if not _text(cable.get("drawing_layer")):
+            messages.append(f"Fibre cable {cable_id} has no physical drawing layer.")
+        for field in ("from_instance_id", "to_instance_id"):
+            endpoint_id = _text(cable.get(field))
+            if endpoint_id and endpoint_id not in instance_ids:
+                messages.append(f"Fibre cable {cable_id} references missing endpoint instance {endpoint_id!r}.")
+        for logical_id in cable.get("logical_connection_ids", []):
+            if _text(logical_id) not in connection_ids:
+                messages.append(f"Fibre cable {cable_id} references missing logical connection {_text(logical_id)!r}.")
+        numbers = [_as_int(row.get("number")) for row in cores]
+        if len(numbers) != len(set(numbers)):
+            messages.append(f"Fibre cable {cable_id} contains duplicate core numbers.")
+
+    for node in data.get("network_fibre_nodes", []):
+        if not isinstance(node, dict):
+            continue
+        node_id = _text(node.get("id")) or "(unnamed)"
+        node_type = _text(node.get("node_type")).lower()
+        if node_type not in {"splice_enclosure", "splice_cassette", "fibre_joint", "termination", "handhole", "chamber"}:
+            messages.append(f"Fibre node {node_id} has unsupported type {node_type!r}.")
+        parent = _text(node.get("parent_node_id"))
+        if parent and parent not in fibre_node_ids:
+            messages.append(f"Fibre node {node_id} references missing parent node {parent!r}.")
+        linked_instance = _text(node.get("linked_instance_id"))
+        if linked_instance and linked_instance not in instance_ids:
+            messages.append(f"Fibre node {node_id} references missing linked network instance {linked_instance!r}.")
+        location_name = _text(node.get("location_name"))
+        if location_name and location_name not in locations:
+            messages.append(f"Fibre node {node_id} references missing location {location_name!r}.")
+        if not _text(node.get("drawing_layer")):
+            messages.append(f"Fibre node {node_id} has no physical drawing layer.")
+        splice_capacity = _as_int(node.get("splice_capacity", node.get("cassette_capacity")))
+        used_splices = sum(
+            1 for splice in data.get("network_fibre_splices", [])
+            if _text(splice.get("node_id")) == node_id or _text(splice.get("cassette_id")) == node_id
+        )
+        if splice_capacity and used_splices > splice_capacity:
+            messages.append(f"Fibre node {node_id} contains {used_splices} splices but has capacity for only {splice_capacity}.")
+
+    cable_by_id = {_text(row.get("id")): row for row in data.get("network_fibre_cables", []) if isinstance(row, dict)}
+    for splice in data.get("network_fibre_splices", []):
+        if not isinstance(splice, dict):
+            continue
+        splice_id = _text(splice.get("id")) or "(unnamed)"
+        node_id = _text(splice.get("node_id"))
+        if node_id and node_id not in fibre_node_ids:
+            messages.append(f"Fibre splice {splice_id} references missing fibre node {node_id!r}.")
+        incoming = cable_by_id.get(_text(splice.get("incoming_cable_id")))
+        outgoing = cable_by_id.get(_text(splice.get("outgoing_cable_id")))
+        if incoming is None:
+            messages.append(f"Fibre splice {splice_id} references a missing incoming cable.")
+        elif _as_int(splice.get("incoming_core")) > _as_int(incoming.get("core_count")):
+            messages.append(f"Fibre splice {splice_id} incoming core exceeds cable capacity.")
+        if outgoing is None:
+            messages.append(f"Fibre splice {splice_id} references a missing outgoing cable.")
+        elif _as_int(splice.get("outgoing_core")) > _as_int(outgoing.get("core_count")):
+            messages.append(f"Fibre splice {splice_id} outgoing core exceeds cable capacity.")
+
     vlan_numbers: set[int] = set()
     for vlan in data.get("network_vlans", []):
         if not isinstance(vlan, dict):
@@ -1122,6 +1340,15 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         elif number in vlan_numbers:
             messages.append(f"VLAN number {number} is duplicated.")
         vlan_numbers.add(number)
+        subnet = _text(vlan.get("subnet"))
+        if subnet:
+            try:
+                network = ipaddress.ip_network(subnet, strict=False)
+                gateway = _text(vlan.get("gateway"))
+                if gateway and ipaddress.ip_address(gateway) not in network:
+                    messages.append(f"VLAN {_text(vlan.get('id')) or '(unnamed)'} gateway {gateway} is outside subnet {network}.")
+            except ValueError:
+                messages.append(f"VLAN {_text(vlan.get('id')) or '(unnamed)'} has invalid subnet {subnet!r}.")
 
     if include_advisories:
         mer_locations = [
