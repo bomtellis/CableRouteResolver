@@ -2116,197 +2116,233 @@ def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
 
 
 def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -> None:
-    """Install fibre patch panels only where a fibre link crosses rack boundaries.
+    """Install rack fibre panels without changing the logical topology.
 
-    Physical rules:
-
-    * Equipment in the same cabinet/rack is connected directly with a patch lead.
-    * Equipment in different cabinets/racks at the same location is connected
-      through a fibre patch panel in each cabinet/rack.
-    * Equipment in different locations is connected through a fibre patch panel
-      in each endpoint cabinet/rack.
-    * PoLAN links involving a fibre splitter are never rewritten, preserving the
-      required OLT -> splitter -> ONT hierarchy.
-
-    For an eligible cross-rack link, the original routed connection becomes the
-    panel-to-panel backbone. Two short equipment-to-panel connections and their
-    patch leads are then added at the endpoints.
+    The original active-device connection remains the authoritative logical
+    topology link.  Separate hidden physical connections model the equipment
+    patch leads and the panel-to-panel backbone.  Fibre links within one rack
+    remain direct and do not require patch panels.
     """
     instance_by_id = {_text(row.get("id")): row for row in builder.instances}
 
     def endpoint_asset_type(connection: dict, field: str) -> str:
         instance = instance_by_id.get(_text(connection.get(field)))
-        if instance is None:
-            return ""
-        return _asset_type(builder._asset_for_instance(instance))
+        return _asset_type(builder._asset_for_instance(instance)) if instance else ""
 
     def rack_key(instance: dict) -> Tuple[int, str, str]:
-        """Return the physical cabinet identity used for patching decisions."""
         return (
             _int(instance.get("floor")),
             _text(instance.get("location_name")),
             _text(instance.get("rack_name")),
         )
 
-    def same_rack(a: dict, b: dict) -> bool:
-        return rack_key(a) == rack_key(b)
-
-    # Splitter feeder/distribution links remain untouched. Of the remaining
-    # fibre links, only those crossing a physical rack boundary need panels.
-    original_connections: List[dict] = []
+    eligible: List[dict] = []
     for row in list(builder.connections):
         if _text(row.get("medium")).lower() != "fibre":
+            continue
+        if bool(row.get("physical_connection")):
             continue
         if endpoint_asset_type(row, "from_instance_id") == "fibre_splitter":
             continue
         if endpoint_asset_type(row, "to_instance_id") == "fibre_splitter":
             continue
-        from_instance = instance_by_id.get(_text(row.get("from_instance_id")))
-        to_instance = instance_by_id.get(_text(row.get("to_instance_id")))
-        if from_instance is None or to_instance is None:
+        a = instance_by_id.get(_text(row.get("from_instance_id")))
+        b = instance_by_id.get(_text(row.get("to_instance_id")))
+        if not a or not b:
             continue
-        if same_rack(from_instance, to_instance):
-            # The direct connection and its generated endpoint patch leads are
-            # already the correct physical representation for adjacent devices.
+        if rack_key(a) == rack_key(b):
             row["physical_segment"] = "intra_rack"
             continue
-        original_connections.append(row)
+        row["logical_topology"] = True
+        eligible.append(row)
 
-    if not original_connections:
+    if not eligible:
         return
 
     terminations: Dict[Tuple[int, str, str], int] = defaultdict(int)
-    for connection in original_connections:
+    for connection in eligible:
         fibres = max(1, _int(connection.get("fibre_count"), 1))
-        for endpoint_field in ("from_instance_id", "to_instance_id"):
-            instance = instance_by_id.get(_text(connection.get(endpoint_field)))
-            if instance is not None:
+        for field in ("from_instance_id", "to_instance_id"):
+            instance = instance_by_id.get(_text(connection.get(field)))
+            if instance:
                 terminations[rack_key(instance)] += fibres
 
-    if not terminations:
-        return
-
-    asset = _fibre_patch_panel_asset(builder)
+    panel_asset = _fibre_patch_panel_asset(builder)
     capacity = max(
         1,
-        _int(asset.get("number_of_ports")),
-        _int(asset.get("connections_in")),
-        _int(asset.get("connections_out")),
+        _int(panel_asset.get("number_of_ports")),
+        _int(panel_asset.get("connections_in")),
+        _int(panel_asset.get("connections_out")),
     )
     locations = {
         _text(row.get("name")): row
         for row in builder.data.get("locations", [])
         if isinstance(row, dict) and _text(row.get("name"))
     }
-
     panels_by_rack: Dict[Tuple[int, str, str], List[dict]] = defaultdict(list)
-    for (floor, location_name, rack_name), used_terminations in sorted(terminations.items()):
-        required = max(1, int(math.ceil(used_terminations * (1.0 + spare_fraction))))
-        panel_count = max(1, int(math.ceil(required / capacity)))
+    for key, used in sorted(terminations.items()):
+        floor, location_name, rack_name = key
+        required = max(1, int(math.ceil(used * (1.0 + spare_fraction))))
+        count_needed = max(1, int(math.ceil(required / capacity)))
         location = locations.get(location_name) or {
-            "name": location_name,
-            "floor": floor,
-            "x": 0.0,
-            "y": 0.0,
+            "name": location_name, "floor": floor, "x": 0.0, "y": 0.0
         }
-        cabinet_label = rack_name or "Unassigned rack"
-        for index in range(panel_count):
-            first_port = index * capacity + 1
-            last_port = min(required, (index + 1) * capacity)
+        for index in range(count_needed):
             panel = builder.add_instance(
-                asset,
-                f"AUTO {location_name} {cabinet_label} Fibre Patch Panel {index + 1}",
+                panel_asset,
+                f"AUTO {location_name} {rack_name or 'Rack'} Fibre Patch Panel {index + 1}",
                 location,
                 "fibre_patch_panel",
                 rack_name=rack_name,
+                target_rack_name=rack_name,
                 rack_start_u=0,
                 rack_size_u=max(1, _int(builder.settings.get("default_rack_size_u"), 42)),
                 route_anchor=location_name,
-                termination_count=max(0, min(capacity, used_terminations - index * capacity)),
-                reserved_port_count=max(0, last_port - first_port + 1),
-                port_range=f"{first_port}-{last_port}",
+                termination_count=max(0, min(capacity, used - index * capacity)),
                 cabinet_patch_panel=True,
             )
-            panels_by_rack[(floor, location_name, rack_name)].append(panel)
+            panels_by_rack[key].append(panel)
             instance_by_id[_text(panel.get("id"))] = panel
 
     next_port: Dict[Tuple[int, str, str], int] = defaultdict(int)
 
-    def allocate_panel_port(instance: dict) -> Tuple[dict, str]:
+    def allocate(instance: dict) -> Tuple[dict, str]:
         key = rack_key(instance)
-        panels = panels_by_rack.get(key, [])
-        if not panels:
-            location = key[1] or "the selected location"
-            rack = key[2] or "the unassigned rack"
-            raise NetworkPlanningError(
-                f"No fibre patch panel was generated for {location} / {rack}."
-            )
         index = next_port[key]
         panel_index, port_index = divmod(index, capacity)
+        panels = panels_by_rack.get(key, [])
         if panel_index >= len(panels):
-            location = key[1] or "the selected location"
-            rack = key[2] or "the unassigned rack"
             raise NetworkPlanningError(
-                f"Fibre patch-panel capacity was exceeded for {location} / {rack}."
+                f"Fibre patch-panel capacity was exceeded for {key[1]} / {key[2] or 'unassigned rack'}."
             )
         next_port[key] += 1
         return panels[panel_index], f"LC-{port_index + 1}"
 
-    # Remove direct endpoint patch leads only for links that are being replaced
-    # by a panel-to-panel backbone. Intra-rack leads are deliberately retained.
-    original_ids = {_text(row.get("id")) for row in original_connections}
-    builder.patch_leads[:] = [
-        lead
-        for lead in builder.patch_leads
-        if _text(lead.get("connection_id")) not in original_ids
-    ]
-
-    for connection in original_connections:
-        from_instance = instance_by_id.get(_text(connection.get("from_instance_id")))
-        to_instance = instance_by_id.get(_text(connection.get("to_instance_id")))
-        if from_instance is None or to_instance is None:
+    for logical in eligible:
+        a = instance_by_id.get(_text(logical.get("from_instance_id")))
+        b = instance_by_id.get(_text(logical.get("to_instance_id")))
+        if not a or not b:
             continue
-
-        original_from_port = _text(connection.get("from_port"))
-        original_to_port = _text(connection.get("to_port"))
-        from_panel, from_panel_port = allocate_panel_port(from_instance)
-        to_panel, to_panel_port = allocate_panel_port(to_instance)
-
-        # Preserve the routed cable, distance, failover role and protection
-        # metadata on the permanent panel-to-panel backbone record.
-        connection["from_instance_id"] = _text(from_panel.get("id"))
-        connection["from_port"] = from_panel_port
-        connection["to_instance_id"] = _text(to_panel.get("id"))
-        connection["to_port"] = to_panel_port
-        connection["connection_role"] = "output"
-        connection["physical_segment"] = "backbone"
-        connection["notes"] = (
-            _text(connection.get("notes"))
-            + " Routed backbone terminated on cabinet fibre patch panels."
-        ).strip()
-
+        a_panel, a_panel_port = allocate(a)
+        b_panel, b_panel_port = allocate(b)
+        parent_id = _text(logical.get("id"))
+        common = {
+            "generate_patch_leads": False,
+            "topology_hidden": True,
+            "physical_connection": True,
+            "parent_logical_connection_id": parent_id,
+            "fibre_count": max(1, _int(logical.get("fibre_count"), 1)),
+        }
         builder.add_connection(
-            from_instance,
-            original_from_port,
-            from_panel,
-            from_panel_port,
-            "fibre",
-            generate_patch_leads=True,
-            physical_segment="patch_lead",
-            parent_backbone_connection_id=_text(connection.get("id")),
-            fibre_count=1,
+            a, _text(logical.get("from_port")), a_panel, a_panel_port, "fibre",
+            physical_segment="fibre_patch_cable", cable_specification="OS2 fibre patch lead",
+            **common,
         )
+        backbone = builder.add_connection(
+            a_panel, a_panel_port, b_panel, b_panel_port, "fibre",
+            _text(a.get("route_anchor")) or _text(a.get("location_name")),
+            _text(b.get("route_anchor")) or _text(b.get("location_name")),
+            physical_segment="fibre_backbone", **common,
+        )
+        # Preserve the logical link's route metrics on the permanent backbone.
+        backbone["route_path"] = list(logical.get("route_path", []))
+        backbone["length_m"] = _float(logical.get("length_m"))
+        backbone["redundancy_role"] = _text(logical.get("redundancy_role"))
+        backbone["protection_group"] = _text(logical.get("protection_group"))
         builder.add_connection(
-            to_panel,
-            to_panel_port,
-            to_instance,
-            original_to_port,
-            "fibre",
-            generate_patch_leads=True,
-            physical_segment="patch_lead",
-            parent_backbone_connection_id=_text(connection.get("id")),
-            fibre_count=1,
+            b_panel, b_panel_port, b, _text(logical.get("to_port")), "fibre",
+            physical_segment="fibre_patch_cable", cable_specification="OS2 fibre patch lead",
+            **common,
         )
+
+
+def _copper_patch_panel_asset(builder: DesignBuilder) -> dict:
+    candidates = _candidate_assets(
+        builder.data,
+        "patch_panel",
+        lambda asset: _text(asset.get("patch_panel_type")).lower() == "copper"
+        and _int(asset.get("number_of_ports")) > 0,
+    )
+    if candidates:
+        return min(candidates, key=lambda a: (max(1, _int(a.get("rack_units"), 1)), -_int(a.get("number_of_ports")), _text(a.get("id"))))
+    asset = {
+        "id": "AUTO-COPPER-PATCH-PANEL-48",
+        "name": "48-port Category 6A patch panel",
+        "asset_type": "patch_panel",
+        "patch_panel_type": "copper",
+        "number_of_ports": 48,
+        "connections_in": 48,
+        "connections_out": 48,
+        "port_definitions": [{"port_type": "rj45", "port_count": 48, "port_use": "patch", "name_prefix": "Port"}],
+        "input_connection_type": "copper",
+        "output_connection_type": "copper",
+        "rack_units": 1,
+        "power_input_w": 0.0,
+        "notes": "Automatically generated copper patch-panel allowance.",
+        "auto_network_asset": True,
+    }
+    builder.data.setdefault("network_assets", []).append(asset)
+    builder.asset_ids.add(asset["id"])
+    return asset
+
+
+def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) -> None:
+    """Provide copper panels and hidden patch-cable connections for access switches."""
+    assignments_by_instance: Dict[str, List[dict]] = defaultdict(list)
+    for assignment in builder.assignments:
+        instance_id = _text(assignment.get("network_instance_id"))
+        if instance_id:
+            assignments_by_instance[instance_id].append(assignment)
+    if not assignments_by_instance:
+        return
+    instance_by_id = {_text(row.get("id")): row for row in builder.instances}
+    locations = {_text(row.get("name")): row for row in builder.data.get("locations", []) if isinstance(row, dict)}
+    panel_asset = _copper_patch_panel_asset(builder)
+    capacity = max(1, _int(panel_asset.get("number_of_ports"), 48))
+    for instance_id, assignments in sorted(assignments_by_instance.items()):
+        switch = instance_by_id.get(instance_id)
+        if not switch:
+            continue
+        asset = builder._asset_for_instance(switch)
+        if _asset_type(asset) != "network_switch":
+            continue
+        required = max(1, int(math.ceil(len(assignments) * (1.0 + spare_fraction))))
+        panel_count = max(1, int(math.ceil(required / capacity)))
+        location_name = _text(switch.get("location_name"))
+        location = locations.get(location_name) or {
+            "name": location_name, "floor": _int(switch.get("floor")), "x": _float(switch.get("x")), "y": _float(switch.get("y"))
+        }
+        panels = []
+        for index in range(panel_count):
+            panel = builder.add_instance(
+                panel_asset,
+                f"AUTO {location_name} Copper Patch Panel {instance_id} {index + 1}",
+                location,
+                "copper_patch_panel",
+                rack_name=_text(switch.get("rack_name")),
+                target_rack_name=_text(switch.get("rack_name")),
+                rack_start_u=0,
+                rack_size_u=max(1, _int(builder.settings.get("default_rack_size_u"), 42)),
+                route_anchor=location_name,
+                associated_switch_id=instance_id,
+            )
+            panels.append(panel)
+        for index, assignment in enumerate(assignments):
+            panel, port_index = panels[index // capacity], (index % capacity) + 1
+            builder.add_connection(
+                switch,
+                _text(assignment.get("network_port")),
+                panel,
+                f"Port-{port_index}",
+                "copper",
+                generate_patch_leads=False,
+                topology_hidden=True,
+                physical_connection=True,
+                physical_segment="copper_patch_cable",
+                assignment_id=_text(assignment.get("id")),
+                cable_specification="Category 6A copper patch lead",
+                length_m=2.0,
+            )
 
 
 def _support_rack_asset(
@@ -2398,13 +2434,13 @@ def _cable_manager_asset(builder: DesignBuilder) -> dict:
 
 
 def _repack_generated_racks(builder: DesignBuilder) -> None:
-    """Pack generated equipment with patch panels high and dual UPS low.
+    """Arrange generated rack equipment using physical cabling conventions.
 
-    Every rack containing powered equipment receives two UPS units separated by
-    an unused 1U ventilation/service gap.  Each fibre patch panel receives a 1U
-    horizontal cable manager immediately below it.  Patch-panel assemblies are
-    packed downwards from the top of the rack; powered equipment and UPS support
-    are packed upwards from the bottom.
+    Fibre patch panels are placed at the top of their serving rack. Copper
+    patch panels are placed immediately above a cable manager and their
+    associated switch. Powered racks receive a dual-UPS allowance at the
+    bottom. Rack support assets are real installed instances and therefore
+    appear in the rack elevation, but remain absent from logical topology.
     """
     assets = {
         _text(row.get("id")): row
@@ -2417,8 +2453,8 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
     assets[_text(ups_asset.get("id"))] = ups_asset
     assets[_text(manager_asset.get("id"))] = manager_asset
     ups_u = max(1, _int(ups_asset.get("rack_units"), 2))
-    manager_u = 1
-    ups_reserved_u = (ups_u * 2) + 1
+    manager_u = max(1, _int(manager_asset.get("rack_units"), 1))
+    ups_reserved_u = ups_u * 2 + 1
 
     groups: Dict[Tuple[int, str], List[dict]] = defaultdict(list)
     for instance in list(builder.instances):
@@ -2429,8 +2465,7 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
         units = _rack_units_for_asset(
             asset,
             max(1, _int(instance.get("stack_member_count"), 1))
-            if bool(instance.get("logical_stack"))
-            else 1,
+            if bool(instance.get("logical_stack")) else 1,
         )
         if units <= 0:
             continue
@@ -2446,189 +2481,145 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
 
     for (floor, location_name), items in sorted(groups.items()):
         location = locations.get(location_name) or {
-            "name": location_name,
-            "floor": floor,
-            "x": 0.0,
-            "y": 0.0,
+            "name": location_name, "floor": floor, "x": 0.0, "y": 0.0
         }
-        patch_items = [row for row in items if _text(row.get("design_role")) == "fibre_patch_panel"]
-        equipment_items = [row for row in items if _text(row.get("design_role")) != "fibre_patch_panel"]
-        equipment_items.sort(
-            key=lambda row: (
-                0 if bool(row.get("_powered_rack_item")) else 1,
-                _text(row.get("design_role")),
-                _text(row.get("name")),
-                _text(row.get("id")),
-            )
-        )
-        patch_items.sort(key=lambda row: (_text(row.get("name")), _text(row.get("id"))))
+        fibre_panels = [i for i in items if _text(i.get("design_role")) == "fibre_patch_panel"]
+        copper_panels = [i for i in items if _text(i.get("design_role")) == "copper_patch_panel"]
+        equipment = [i for i in items if i not in fibre_panels and i not in copper_panels]
+        copper_by_switch: Dict[str, List[dict]] = defaultdict(list)
+        for panel in copper_panels:
+            copper_by_switch[_text(panel.get("associated_switch_id"))].append(panel)
 
         racks: List[dict] = []
+        rack_by_name: Dict[str, dict] = {}
 
-        def new_rack() -> dict:
-            rack = {
-                "index": len(racks) + 1,
-                "bottom_next": 1,
-                "top_next": rack_size_u,
-                "powered": False,
-                "ups_added": False,
-                "items": [],
-            }
-            racks.append(rack)
-            return rack
-
-        def rack_name(rack: dict) -> str:
-            return (
-                f"AUTO-RACK-{location_name}"
-                if rack["index"] == 1
-                else f"AUTO-RACK-{location_name}-{rack['index']}"
+        def create_rack(preferred_name: str = "") -> dict:
+            index = len(racks) + 1
+            name = preferred_name or (
+                f"AUTO-RACK-{location_name}" if index == 1 else f"AUTO-RACK-{location_name}-{index}"
             )
+            if name in rack_by_name:
+                return rack_by_name[name]
+            rack = {"index": index, "name": name, "bottom_next": 1, "top_next": rack_size_u, "ups_added": False}
+            racks.append(rack)
+            rack_by_name[name] = rack
+            return rack
 
         def ensure_ups(rack: dict) -> None:
             if rack["ups_added"]:
                 return
             if rack["bottom_next"] + ups_reserved_u - 1 > rack["top_next"]:
-                raise NetworkPlanningError(
-                    f"A {rack_size_u}U rack at {location_name} cannot accommodate the required dual UPS allowance."
-                )
-            first_start = rack["bottom_next"]
-            second_start = first_start + ups_u + 1
-            for number, start_u in ((1, first_start), (2, second_start)):
-                ups = builder.add_instance(
+                raise NetworkPlanningError(f"A {rack_size_u}U rack at {location_name} cannot accommodate the dual UPS allowance.")
+            first = rack["bottom_next"]
+            second = first + ups_u + 1
+            for number, start_u in ((1, first), (2, second)):
+                builder.add_instance(
                     ups_asset,
-                    f"AUTO {location_name} Rack {rack['index']} UPS {number}",
+                    f"AUTO {location_name} {rack['name']} UPS {number}",
                     location,
                     "rack_ups",
-                    rack_name=rack_name(rack),
-                    rack_start_u=start_u,
-                    rack_size_u=rack_size_u,
-                    route_anchor=location_name,
+                    rack_name=rack["name"], rack_start_u=start_u,
+                    rack_size_u=rack_size_u, route_anchor=location_name,
                     ups_pair_number=number,
                 )
-                rack["items"].append(ups)
-            rack["bottom_next"] = second_start + ups_u
-            rack["powered"] = True
+            rack["bottom_next"] = second + ups_u
             rack["ups_added"] = True
 
-        # Pack active/passive equipment upwards from the bottom. Powered items
-        # reserve the dual-UPS zone before they are placed. OLT models may define
-        # ``olt_units_per_rack_unit`` so several independent functional OLT
-        # instances share one physical 1U mounting position.
-        shared_olt_slots: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
+        def choose_bottom(units: int, powered: bool, preferred: str = "") -> dict:
+            candidates = []
+            if preferred:
+                candidates.append(create_rack(preferred))
+            candidates.extend(r for r in racks if r not in candidates)
+            for rack in candidates:
+                prospective = rack["bottom_next"] + (ups_reserved_u if powered and not rack["ups_added"] else 0)
+                if prospective + units - 1 <= rack["top_next"]:
+                    return rack
+            return create_rack()
 
-        for instance in equipment_items:
+        def place_bottom(instance: dict, rack: dict, units: int, powered: bool = False) -> None:
+            if powered:
+                ensure_ups(rack)
+            if rack["bottom_next"] + units - 1 > rack["top_next"]:
+                raise NetworkPlanningError(f"Rack {rack['name']} at {location_name} has insufficient free rack units.")
+            instance["rack_name"] = rack["name"]
+            instance["rack_start_u"] = rack["bottom_next"]
+            instance["rack_size_u"] = rack_size_u
+            rack["bottom_next"] += units
+
+        equipment.sort(key=lambda i: (_text(i.get("target_rack_name") or i.get("rack_name")), _text(i.get("design_role")), _text(i.get("name"))))
+        for instance in equipment:
             asset = assets.get(_text(instance.get("asset_id")), {})
             units = max(1, _int(instance.get("_calculated_rack_units"), 1))
             powered = bool(instance.get("_powered_rack_item"))
-            is_olt = _asset_type(asset) == "optical_line_terminal"
-            units_per_u = (
-                max(1, _int(asset.get("olt_units_per_rack_unit"), 1))
-                if is_olt and units == 1
-                else 1
+            preferred = _text(instance.get("target_rack_name") or instance.get("rack_name"))
+            assembly_extra = 0
+            panels = copper_by_switch.get(_text(instance.get("id")), [])
+            if panels:
+                assembly_extra = sum(max(1, _int(p.get("_calculated_rack_units"), 1)) + manager_u for p in panels)
+            rack = choose_bottom(units + assembly_extra, powered, preferred)
+            place_bottom(instance, rack, units, powered)
+            # Bottom-to-top order is switch, cable manager, copper patch panel;
+            # therefore the rack elevation reads panel / manager / switch.
+            for panel_index, panel in enumerate(panels, start=1):
+                manager = builder.add_instance(
+                    manager_asset,
+                    f"AUTO {location_name} Copper Cable Manager {instance.get('id')} {panel_index}",
+                    location,
+                    "cable_management",
+                    rack_name=rack["name"], rack_start_u=rack["bottom_next"],
+                    rack_size_u=rack_size_u, route_anchor=location_name,
+                    associated_patch_panel_id=_text(panel.get("id")),
+                    associated_switch_id=_text(instance.get("id")),
+                )
+                rack["bottom_next"] += manager_u
+                panel_u = max(1, _int(panel.get("_calculated_rack_units"), 1))
+                place_bottom(panel, rack, panel_u, False)
+
+        # Any unassociated copper panels are still installed with a manager.
+        associated_ids = {id(p) for rows in copper_by_switch.values() for p in rows}
+        for panel in copper_panels:
+            if id(panel) in associated_ids:
+                continue
+            panel_u = max(1, _int(panel.get("_calculated_rack_units"), 1))
+            rack = choose_bottom(panel_u + manager_u, False, _text(panel.get("target_rack_name")))
+            builder.add_instance(
+                manager_asset, f"AUTO {location_name} Copper Cable Manager {_text(panel.get('id'))}",
+                location, "cable_management", rack_name=rack["name"],
+                rack_start_u=rack["bottom_next"], rack_size_u=rack_size_u,
+                route_anchor=location_name, associated_patch_panel_id=_text(panel.get("id")),
             )
+            rack["bottom_next"] += manager_u
+            place_bottom(panel, rack, panel_u, False)
 
-            if units > rack_size_u:
-                raise NetworkPlanningError(
-                    f"{instance.get('name') or instance.get('id')} requires {units}U and cannot fit in a {rack_size_u}U rack."
-                )
-
-            # Reuse a partially occupied shared OLT slot before consuming more U.
-            if units_per_u > 1:
-                slot_key = (_text(instance.get("asset_id")), _text(instance.get("olt_side")))
-                reusable = None
-                for slot in shared_olt_slots.get(slot_key, []):
-                    if slot["count"] < slot["capacity"]:
-                        reusable = slot
-                        break
-                if reusable is not None:
-                    reusable["count"] += 1
-                    instance["rack_name"] = rack_name(reusable["rack"])
-                    instance["rack_start_u"] = reusable["start_u"]
-                    instance["rack_size_u"] = rack_size_u
-                    instance["shared_rack_unit_group"] = reusable["group"]
-                    instance["shared_rack_unit_position"] = reusable["count"]
-                    instance["shared_rack_unit_capacity"] = reusable["capacity"]
-                    reusable["rack"]["items"].append(instance)
-                    continue
-
-            selected = None
-            for rack in racks:
-                prospective_bottom = rack["bottom_next"]
-                if powered and not rack["ups_added"]:
-                    prospective_bottom += ups_reserved_u
-                if prospective_bottom + units - 1 <= rack["top_next"]:
-                    selected = rack
-                    break
-            if selected is None:
-                selected = new_rack()
-            if powered:
-                ensure_ups(selected)
-            if selected["bottom_next"] + units - 1 > selected["top_next"]:
-                selected = new_rack()
-                if powered:
-                    ensure_ups(selected)
-
-            start_u = selected["bottom_next"]
-            instance["rack_name"] = rack_name(selected)
-            instance["rack_start_u"] = start_u
-            instance["rack_size_u"] = rack_size_u
-            selected["bottom_next"] += units
-            selected["items"].append(instance)
-
-            if units_per_u > 1:
-                group_id = f"AUTO-OLT-SHARED-{location_name}-{selected['index']}-{start_u}-{_text(instance.get('asset_id'))}"
-                instance["shared_rack_unit_group"] = group_id
-                instance["shared_rack_unit_position"] = 1
-                instance["shared_rack_unit_capacity"] = units_per_u
-                slot_key = (_text(instance.get("asset_id")), _text(instance.get("olt_side")))
-                shared_olt_slots[slot_key].append(
-                    {
-                        "rack": selected,
-                        "start_u": start_u,
-                        "group": group_id,
-                        "count": 1,
-                        "capacity": units_per_u,
-                    }
-                )
-
-        # Pack each fibre patch panel with a 1U manager directly below it,
-        # starting at the top of the first rack and spilling into more racks.
-        for panel_index, instance in enumerate(patch_items, start=1):
-            panel_u = max(1, _int(instance.get("_calculated_rack_units"), 1))
-            assembly_u = panel_u + manager_u
-            selected = None
-            for rack in racks:
-                if rack["top_next"] - assembly_u + 1 >= rack["bottom_next"]:
-                    selected = rack
-                    break
-            if selected is None:
-                selected = new_rack()
-            panel_start = selected["top_next"] - panel_u + 1
+        # Fibre panels are always mounted at the top of their intended rack,
+        # with a horizontal manager directly beneath each panel.
+        fibre_panels.sort(key=lambda p: (_text(p.get("target_rack_name")), _text(p.get("name"))))
+        for index, panel in enumerate(fibre_panels, start=1):
+            preferred = _text(panel.get("target_rack_name") or panel.get("rack_name"))
+            rack = create_rack(preferred) if preferred else (racks[0] if racks else create_rack())
+            panel_u = max(1, _int(panel.get("_calculated_rack_units"), 1))
+            if rack["top_next"] - panel_u - manager_u + 1 < rack["bottom_next"]:
+                rack = create_rack()
+            panel_start = rack["top_next"] - panel_u + 1
             manager_start = panel_start - manager_u
-            if manager_start < selected["bottom_next"]:
-                selected = new_rack()
-                panel_start = selected["top_next"] - panel_u + 1
-                manager_start = panel_start - manager_u
-            instance["rack_name"] = rack_name(selected)
-            instance["rack_start_u"] = panel_start
-            instance["rack_size_u"] = rack_size_u
-            manager = builder.add_instance(
+            panel["rack_name"] = rack["name"]
+            panel["rack_start_u"] = panel_start
+            panel["rack_size_u"] = rack_size_u
+            builder.add_instance(
                 manager_asset,
-                f"AUTO {location_name} Fibre Cable Manager {panel_index}",
+                f"AUTO {location_name} Fibre Cable Manager {index}",
                 location,
                 "cable_management",
-                rack_name=rack_name(selected),
-                rack_start_u=manager_start,
-                rack_size_u=rack_size_u,
-                route_anchor=location_name,
-                associated_patch_panel_id=_text(instance.get("id")),
+                rack_name=rack["name"], rack_start_u=manager_start,
+                rack_size_u=rack_size_u, route_anchor=location_name,
+                associated_patch_panel_id=_text(panel.get("id")),
             )
-            selected["top_next"] = manager_start - 1
-            selected["items"].extend([manager, instance])
+            rack["top_next"] = manager_start - 1
 
         for instance in items:
             instance.pop("_calculated_rack_units", None)
             instance.pop("_powered_rack_item", None)
+
 
 def generate_network_design(data: dict, technology: Optional[str] = None) -> dict:
     """Generate and install an optimised network design into ``data``.
@@ -2707,6 +2698,7 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
     # Fibre terminations require physical patch-panel capacity and rack space.
     # Repack the complete generated equipment set afterwards so OLTs, cores and
     # panels share the location racks without ever exceeding the configured U.
+    _install_copper_patch_panels(builder, spare_fraction)
     _install_fibre_patch_panels(builder, spare_fraction)
     _repack_generated_racks(builder)
 

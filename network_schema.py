@@ -430,6 +430,10 @@ def ensure_network_schema(data: dict) -> dict:
             connection.get("route_path", [])
         )
         connection.setdefault("notes", "")
+        connection["topology_hidden"] = bool(connection.get("topology_hidden", False))
+        connection["physical_connection"] = bool(connection.get("physical_connection", False))
+        connection.setdefault("physical_segment", "")
+        connection.setdefault("parent_logical_connection_id", "")
 
     for assignment in data["network_endpoint_assignments"]:
         if not isinstance(assignment, dict):
@@ -756,6 +760,7 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         if not isinstance(connection, dict):
             continue
         connection_id = _text(connection.get("id")) or "(unnamed)"
+        is_physical_hidden = bool(connection.get("topology_hidden")) or bool(connection.get("physical_connection"))
         from_id = _text(connection.get("from_instance_id"))
         to_id = _text(connection.get("to_instance_id"))
         if from_id not in instance_ids:
@@ -780,11 +785,16 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                 )
                 continue
             endpoint = (instance_id, port)
-            if instance_id and endpoint in used_endpoints:
-                messages.append(
-                    f"Network endpoint {instance_id}:{port} is used by more than one connection."
-                )
-            used_endpoints.add(endpoint)
+            # A logical link and its hidden physical patching legitimately use
+            # the same active-device port. Physical front/back panel
+            # terminations are also represented separately, so only logical
+            # topology connections participate in duplicate-endpoint checks.
+            if not is_physical_hidden:
+                if instance_id and endpoint in used_endpoints:
+                    messages.append(
+                        f"Network endpoint {instance_id}:{port} is used by more than one connection."
+                    )
+                used_endpoints.add(endpoint)
         for vlan_id in connection.get("vlan_ids", []):
             if _text(vlan_id) not in vlan_record_ids:
                 messages.append(

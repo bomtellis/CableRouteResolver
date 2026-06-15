@@ -406,6 +406,11 @@ class TopologyModel:
         for connection in self.data.get("network_connections", []):
             if not isinstance(connection, dict):
                 continue
+            # Physical patch cables and panel backbones are retained in the
+            # data model and rack/port views, but must not alter the logical
+            # topology between active devices.
+            if bool(connection.get("topology_hidden")) or bool(connection.get("physical_connection")):
+                continue
             source_id = _text(connection.get("from_instance_id"))
             target_id = _text(connection.get("to_instance_id"))
             if not source_id or not target_id or source_id == target_id:
