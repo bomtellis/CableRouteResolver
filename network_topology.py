@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStyle,
+    QStyleOptionGraphicsItem,
     QSplitter,
     QToolButton,
     QVBoxLayout,
@@ -268,6 +269,7 @@ class TopologyModel:
         self.tree_edge_ids: Set[str] = set()
         self.client_groups: Dict[str, List[TopologyNode]] = defaultdict(list)
         self._descendant_cache: Dict[str, int] = {}
+        self._cross_edges_cache: Optional[List[TopologyEdge]] = None
         self._build()
 
     def _build(self) -> None:
@@ -541,7 +543,11 @@ class TopologyModel:
         return total
 
     def cross_edges(self) -> List[TopologyEdge]:
-        return [edge for edge in self.edges if edge.edge_id not in self.tree_edge_ids]
+        if self._cross_edges_cache is None:
+            self._cross_edges_cache = [
+                edge for edge in self.edges if edge.edge_id not in self.tree_edge_ids
+            ]
+        return self._cross_edges_cache
 
 
 class TopologyCardItem(QGraphicsObject):
@@ -636,6 +642,26 @@ class TopologyCardItem(QGraphicsObject):
         painter.setPen(QPen(border, 2.0 if selected or self.search_match else 1.0))
         painter.setBrush(QBrush(fill))
         painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 12.0, 12.0)
+
+        # Large plans are normally opened at a very small scale. Drawing every
+        # label, icon glyph and utilisation statistic at that scale creates a
+        # large amount of text rasterisation work even though none of it is
+        # readable. Keep only the card silhouette and status colour until the
+        # user zooms in.
+        lod = QStyleOptionGraphicsItem.levelOfDetailFromTransform(
+            painter.worldTransform()
+        )
+        if lod < 0.12:
+            state_colour = {
+                "online": QColor("#55c98c"),
+                "warning": QColor("#f3b84b"),
+                "error": QColor("#ec6b65"),
+                "offline": QColor("#7d8791"),
+            }[self.node.state]
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(state_colour)
+            painter.drawRect(QRectF(4.0, 4.0, 7.0, max(5.0, rect.height() - 8.0)))
+            return
 
         icon_rect = QRectF(12.0, 14.0, 46.0, 46.0)
         icon_fill = {
@@ -1107,6 +1133,7 @@ class TopologyGraphicsView(QGraphicsView):
         self._navigation_margin = 5000.0
         self._min_zoom = 0.005
         self._max_zoom = 8.0
+        self._normal_render_hints = self.renderHints()
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         position = event.position().toPoint()
@@ -1143,6 +1170,8 @@ class TopologyGraphicsView(QGraphicsView):
             self._panning = False
             self._pan_button = Qt.NoButton
             self.viewport().unsetCursor()
+            self.setRenderHints(self._normal_render_hints)
+            self.viewport().update()
             event.accept()
             return
 
@@ -1153,6 +1182,8 @@ class TopologyGraphicsView(QGraphicsView):
             self._panning = False
             self._pan_button = Qt.NoButton
             self.viewport().unsetCursor()
+            self.setRenderHints(self._normal_render_hints)
+            self.viewport().update()
 
         super().leaveEvent(event)
 
@@ -1224,6 +1255,10 @@ class TopologyGraphicsView(QGraphicsView):
     def _start_pan(self, event, button) -> None:  # noqa: ANN001
         self._panning = True
         self._pan_button = button
+        # Text antialiasing across hundreds or thousands of cards is expensive
+        # while the viewport is moving. Restore full quality immediately when
+        # the drag ends.
+        self.setRenderHints(QPainter.RenderHints())
         self._pan_start = event.position().toPoint()
         self.viewport().setCursor(Qt.ClosedHandCursor)
         self.viewport().setFocus()
@@ -1348,6 +1383,9 @@ class NetworkTopologyDialog(QDialog):
         self._rack_port_nodes_by_id: Dict[str, TopologyNode] = {}
         self._switch_port_nodes_by_id: Dict[str, TopologyNode] = {}
         self._visible_synthetic_edges: Dict[str, TopologyEdge] = {}
+        self._floor_match_cache: Dict[Tuple[str, int], bool] = {}
+        self._logical_children_cache: Dict[str, Tuple[str, ...]] = {}
+        self._collapsed_edge_cache: Dict[Tuple[str, str], TopologyEdge] = {}
 
         self.setWindowTitle("Network Topology")
         self.setWindowFlag(Qt.Window, True)
@@ -1687,13 +1725,21 @@ class NetworkTopologyDialog(QDialog):
     def _node_matches_floor(self, node_id: str, floor: Optional[int]) -> bool:
         if floor is None:
             return True
+        cache_key = (node_id, int(floor))
+        cached = self._floor_match_cache.get(cache_key)
+        if cached is not None:
+            return cached
         node = self.model.nodes.get(node_id)
-        if node is None:
-            return True
-        if node.floor == floor:
+        if node is None or node.floor == floor:
+            self._floor_match_cache[cache_key] = True
             return True
         # Keep ancestors visible when any descendant is on the selected floor.
-        return any(self._node_matches_floor(child_id, floor) for child_id in self.model.children.get(node_id, []))
+        result = any(
+            self._node_matches_floor(child_id, floor)
+            for child_id in self.model.children.get(node_id, [])
+        )
+        self._floor_match_cache[cache_key] = result
+        return result
 
     def _patch_panels_visible(self) -> bool:
         # Patch panels are physical rack components, not logical topology nodes.
@@ -1704,24 +1750,50 @@ class NetworkTopologyDialog(QDialog):
         node = self.model.nodes.get(node_id)
         return bool(node is not None and node.asset_type == "patch_panel")
 
+    def _is_cable_management(self, node_id: str) -> bool:
+        node = self.model.nodes.get(node_id)
+        if node is None:
+            return False
+        asset_type = _text(node.asset_type).lower()
+        role = _text(node.role).lower()
+        name = _text(node.name).lower()
+        return (
+            asset_type in {"cable_management", "cable_manager"}
+            or role in {"cable_management", "cable_manager"}
+            or "cable management" in name
+            or "cable-management" in name
+        )
+
+    def _is_hidden_logical_component(self, node_id: str) -> bool:
+        return self._is_patch_panel(node_id) or self._is_cable_management(node_id)
+
     def _children_for(self, node_id: str) -> List[str]:
-        children = list(self.model.children.get(node_id, []))
-        if not self._patch_panels_visible() and self.rack_focus is None and self.switch_port_focus is None:
-            flattened: List[str] = []
-            pending = list(children)
-            seen: Set[str] = set()
-            while pending:
-                child_id = pending.pop(0)
-                if child_id in seen:
-                    continue
-                seen.add(child_id)
-                if self._is_patch_panel(child_id):
-                    pending[0:0] = list(self.model.children.get(child_id, []))
-                    continue
-                flattened.append(child_id)
-            children = flattened
+        if self.rack_focus is None and self.switch_port_focus is None:
+            cached = self._logical_children_cache.get(node_id)
+            if cached is None:
+                flattened: List[str] = []
+                pending = deque(self.model.children.get(node_id, []))
+                seen: Set[str] = set()
+                while pending:
+                    child_id = pending.popleft()
+                    if child_id in seen:
+                        continue
+                    seen.add(child_id)
+                    if self._is_hidden_logical_component(child_id):
+                        pending.extendleft(
+                            reversed(self.model.children.get(child_id, []))
+                        )
+                        continue
+                    flattened.append(child_id)
+                cached = tuple(flattened)
+                self._logical_children_cache[node_id] = cached
+            children = list(cached)
+        else:
+            children = list(self.model.children.get(node_id, []))
         if self.show_clients_check.isChecked():
-            children.extend(node.node_id for node in self.model.client_groups.get(node_id, []))
+            children.extend(
+                node.node_id for node in self.model.client_groups.get(node_id, [])
+            )
         return children
 
     def _visible_edge_between(self, parent_id: str, child_id: str) -> str:
@@ -1748,13 +1820,21 @@ class NetworkTopologyDialog(QDialog):
         if len(chain) == 1:
             return chain[0].edge_id
 
-        synthetic_id = f"collapsed::{'::'.join(edge.edge_id for edge in reversed(chain))}"
-        if synthetic_id not in self._visible_synthetic_edges:
+        cache_key = (parent_id, child_id)
+        cached_edge = self._collapsed_edge_cache.get(cache_key)
+        if cached_edge is None:
             ordered = list(reversed(chain))
             first = ordered[0]
             last = ordered[-1]
-            medium = "fibre" if any(edge.medium == "fibre" for edge in ordered) else first.medium
-            self._visible_synthetic_edges[synthetic_id] = TopologyEdge(
+            medium = (
+                "fibre"
+                if any(edge.medium == "fibre" for edge in ordered)
+                else first.medium
+            )
+            synthetic_id = (
+                f"collapsed::{'::'.join(edge.edge_id for edge in ordered)}"
+            )
+            cached_edge = TopologyEdge(
                 edge_id=synthetic_id,
                 source_id=parent_id,
                 target_id=child_id,
@@ -1763,11 +1843,21 @@ class NetworkTopologyDialog(QDialog):
                 target_port=last.target_port,
                 length_m=sum(edge.length_m for edge in ordered),
                 standby=any(edge.standby for edge in ordered),
-                redundancy_role=next((edge.redundancy_role for edge in ordered if edge.redundancy_role), ""),
-                protection_group=next((edge.protection_group for edge in ordered if edge.protection_group), ""),
-                connection={"collapsed_patch_panel_path": [edge.edge_id for edge in ordered]},
+                redundancy_role=next(
+                    (edge.redundancy_role for edge in ordered if edge.redundancy_role),
+                    "",
+                ),
+                protection_group=next(
+                    (edge.protection_group for edge in ordered if edge.protection_group),
+                    "",
+                ),
+                connection={
+                    "collapsed_patch_panel_path": [edge.edge_id for edge in ordered]
+                },
             )
-        return synthetic_id
+            self._collapsed_edge_cache[cache_key] = cached_edge
+        self._visible_synthetic_edges[cached_edge.edge_id] = cached_edge
+        return cached_edge.edge_id
 
     def _edge_by_id(self, edge_id: str) -> Optional[TopologyEdge]:
         return self.model.edges_by_id.get(edge_id) or self._visible_synthetic_edges.get(edge_id)
@@ -1801,12 +1891,20 @@ class NetworkTopologyDialog(QDialog):
         if node is not None:
             if node.asset_type == "site_group":
                 return True
+            # Automatically opening every OLT, core or distribution fan-out is
+            # the main cause of very large projects creating thousands of
+            # QGraphicsItems during dialog construction. Preserve the overview
+            # behaviour for modest branches, but leave dense branches collapsed
+            # until the user explicitly opens them.
             if node.asset_type in {"firewall", "network_router"}:
-                return True
+                return len(children) <= 12 and descendants <= 160
             if "core" in node.role or "distribution" in node.role:
-                return True
-            if node.asset_type == "optical_line_terminal" or node.role.startswith("olt_"):
-                return True
+                return len(children) <= 16 and descendants <= 240
+            if (
+                node.asset_type == "optical_line_terminal"
+                or node.role.startswith("olt_")
+            ):
+                return len(children) <= 16 and descendants <= 240
         return len(children) <= 6 and descendants <= 32
 
     def _hidden_descendants(self, node_id: str) -> int:
@@ -1834,6 +1932,10 @@ class NetworkTopologyDialog(QDialog):
         def visit(node_id: str, parent_id: str = "", parent_edge: str = "") -> None:
             node = self._node_for(node_id)
             if node is None:
+                return
+            if self._is_hidden_logical_component(node_id):
+                for child_id in self.model.children.get(node_id, []):
+                    visit(child_id, parent_id, parent_edge)
                 return
             if not node.pseudo and not self._node_matches_floor(node_id, floor):
                 return
@@ -2996,10 +3098,21 @@ class NetworkTopologyDialog(QDialog):
             if not self._patch_panels_visible()
             else 0
         )
+        hidden_cable_management = sum(
+            1
+            for node in self.model.nodes.values()
+            if (
+                _text(node.asset_type).lower() in {"cable_management", "cable_manager"}
+                or _text(node.role).lower() in {"cable_management", "cable_manager"}
+                or "cable management" in _text(node.name).lower()
+                or "cable-management" in _text(node.name).lower()
+            )
+        )
         return (
             f"Showing {sum(1 for node in self.visible_nodes.values() if not node.pseudo):,} of "
             f"{sum(1 for node in self.model.nodes.values() if not node.pseudo):,} network assets"
             + (f" · {hidden_patch_panels:,} patch panels omitted from topology" if hidden_patch_panels else "")
+            + (f" · {hidden_cable_management:,} cable-management items omitted from topology" if hidden_cable_management else "")
             + (f" on Floor {self._selected_floor()}" if self._selected_floor() is not None else "")
             + " · Double-click a rack switch to drill into its rack · Drag to pan · Wheel to zoom"
         )
@@ -3842,6 +3955,9 @@ class NetworkTopologyDialog(QDialog):
     def refresh_from_data(self) -> None:
         ensure_network_schema(self.data)
         self.model = TopologyModel(self.data)
+        self._floor_match_cache.clear()
+        self._logical_children_cache.clear()
+        self._collapsed_edge_cache.clear()
         self.explicit_expanded.clear()
         self.explicit_collapsed.clear()
         self.rebuild_scene(fit=True)

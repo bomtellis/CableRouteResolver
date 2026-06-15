@@ -132,7 +132,13 @@ def _find_network_instance(editor, x: float, y: float) -> Optional[str]:
     best_distance = float(radius)
     for instance_id, instance in network_instances_for_floor(data, floor).items():
         asset = assets.get(_text(instance.get("asset_id")), {})
-        if _text(asset.get("asset_type")).lower() == "patch_panel":
+        asset_type = _text(asset.get("asset_type")).lower()
+        asset_name = _text(asset.get("name")).lower()
+        if (
+            asset_type in {"patch_panel", "cable_management", "cable_manager"}
+            or "cable management" in asset_name
+            or "cable-management" in asset_name
+        ):
             continue
         dx = float(instance.get("x", 0.0)) - float(x)
         dy = float(instance.get("y", 0.0)) - float(y)
@@ -1001,7 +1007,13 @@ def _refresh_network_search(editor) -> None:
     for instance in editor.store.data.get("network_asset_instances", []):
         instance_id = _text(instance.get("id"))
         asset = assets.get(_text(instance.get("asset_id")), {})
-        if _text(asset.get("asset_type")).lower() == "patch_panel":
+        asset_type = _text(asset.get("asset_type")).lower()
+        asset_name = _text(asset.get("name")).lower()
+        if (
+            asset_type in {"patch_panel", "cable_management", "cable_manager"}
+            or "cable management" in asset_name
+            or "cable-management" in asset_name
+        ):
             continue
         label = (
             f"{instance_id} - {_text(instance.get('name')) or instance_id} | "

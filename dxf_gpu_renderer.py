@@ -316,7 +316,13 @@ class GpuDxfGraphView(QOpenGLWidget):
             }
             for instance_id, instance in self._network_instances_for_floor().items():
                 asset = assets.get(str(instance.get("asset_id", "")).strip(), {})
-                if str(asset.get("asset_type", "")).strip().lower() == "patch_panel":
+                asset_type = str(asset.get("asset_type", "")).strip().lower()
+                asset_name = str(asset.get("name", "")).strip().lower()
+                if (
+                    asset_type in {"patch_panel", "cable_management", "cable_manager"}
+                    or "cable management" in asset_name
+                    or "cable-management" in asset_name
+                ):
                     continue
                 d = math.hypot(
                     float(instance.get("x", 0.0)) - x,
@@ -681,9 +687,17 @@ class GpuDxfGraphView(QOpenGLWidget):
             if isinstance(item, dict) and str(item.get("id", "")).strip()
         }
 
-        def is_patch_panel(instance: dict) -> bool:
+        def is_hidden_rack_component(instance: dict) -> bool:
             asset = assets.get(str(instance.get("asset_id", "")).strip(), {})
-            return str(asset.get("asset_type", "")).strip().lower() == "patch_panel"
+            asset_type = str(asset.get("asset_type", "")).strip().lower()
+            asset_name = str(asset.get("name", "")).strip().lower()
+            role = str(instance.get("design_role", "")).strip().lower()
+            return (
+                asset_type in {"patch_panel", "cable_management", "cable_manager"}
+                or role in {"cable_management", "cable_manager"}
+                or "cable management" in asset_name
+                or "cable-management" in asset_name
+            )
 
         all_points = self.store.all_points() if hasattr(self.store, "all_points") else {}
         display_positions = self._network_display_positions(floor_instances, assets)
@@ -723,7 +737,7 @@ class GpuDxfGraphView(QOpenGLWidget):
                 # Patch panels are physical rack components and are deliberately
                 # omitted from the main spatial graph, including their terminating
                 # link segments. They remain available in rack views and reports.
-                if is_patch_panel(source) or is_patch_panel(target):
+                if is_hidden_rack_component(source) or is_hidden_rack_component(target):
                     continue
                 route_records = [
                     all_points[name]
@@ -761,7 +775,7 @@ class GpuDxfGraphView(QOpenGLWidget):
                 # Network switches remain part of the installed design and their
                 # links are still drawn, but the switch symbols and labels are
                 # intentionally hidden from the main floor graph view.
-                if asset_type in {"network_switch", "patch_panel"}:
+                if asset_type in {"network_switch", "patch_panel", "cable_management", "cable_manager"}:
                     continue
                 display_x, display_y = display_positions.get(
                     str(instance_id),
@@ -937,11 +951,24 @@ class GpuDxfGraphView(QOpenGLWidget):
             visible_instances = [
                 instance
                 for instance in network_instances.values()
-                if str(
+                if (
+                    str(
+                        assets.get(str(instance.get("asset_id", "")).strip(), {}).get(
+                            "asset_type", ""
+                        )
+                    ).strip().lower()
+                    not in {"patch_panel", "cable_management", "cable_manager"}
+                )
+                and "cable management" not in str(
                     assets.get(str(instance.get("asset_id", "")).strip(), {}).get(
-                        "asset_type", ""
+                        "name", ""
                     )
-                ).strip().lower() != "patch_panel"
+                ).strip().lower()
+                and "cable-management" not in str(
+                    assets.get(str(instance.get("asset_id", "")).strip(), {}).get(
+                        "name", ""
+                    )
+                ).strip().lower()
             ]
             if visible_instances:
                 xs = [float(p.get("x", 0.0)) for p in visible_instances]
