@@ -49,7 +49,11 @@ NETWORK_ASSET_TYPES = [
 CONNECTION_MEDIA = ["copper", "fibre", "wireless", "virtual", "stacking", "none"]
 CONNECTION_ROLES = ["input", "output", "uplink"]
 PATCH_PANEL_TYPES = ["", "copper", "fibre"]
-SPLIT_RATIOS = ["", "1:2", "1:4", "1:8", "1:16", "1:32", "1:64", "1:128"]
+SPLIT_RATIOS = [
+    "",
+    "1:2", "1:4", "1:8", "1:16", "1:32", "1:64", "1:128",
+    "2:2", "2:4", "2:8", "2:16", "2:32", "2:64", "2:128",
+]
 FREQUENCY_OPTIONS = ["2.4 GHz", "5 GHz", "6 GHz", "60 GHz", "868 MHz", "433 MHz"]
 NETWORK_TECHNOLOGIES = ["Traditional", "PoLAN"]
 PORT_TYPE_OPTIONS = ["rj45", "sfp", "sfp+", "qsfp", "qsfp28", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"]
@@ -61,6 +65,24 @@ from network_auto_planner import NetworkPlanningError, generate_network_design
 def _text(value) -> str:
     return str(value if value is not None else "").strip()
 
+
+
+
+def _normalise_split_ratio(value: str) -> tuple[str, int, int]:
+    """Normalise 1:x and 2:x splitter ratios entered as :, x or ×."""
+    text = _text(value).lower().replace("×", ":").replace("x", ":")
+    text = "".join(text.split())
+    if ":" not in text:
+        return "", 0, 0
+    left, right = text.split(":", 1)
+    try:
+        inputs = int(left)
+        outputs = int(right)
+    except (TypeError, ValueError):
+        return "", 0, 0
+    if inputs not in {1, 2} or outputs < 1:
+        return "", 0, 0
+    return f"{inputs}:{outputs}", inputs, outputs
 
 def _csv_list(text: str) -> List[str]:
     result = []
@@ -431,15 +453,40 @@ class NetworkAssetEditorDialog(QDialog):
         if not name:
             QMessageBox.critical(self, "Invalid asset", "Asset name is required.")
             return
-        if (
-            asset_type == "fibre_splitter"
-            and not self.split_ratio_combo.currentText().strip()
-        ):
-            QMessageBox.critical(
-                self, "Invalid asset", "A fibre splitter requires a split ratio."
+        split_ratio = ""
+        split_inputs = 0
+        split_outputs = 0
+        if asset_type == "fibre_splitter":
+            split_ratio, split_inputs, split_outputs = _normalise_split_ratio(
+                self.split_ratio_combo.currentText()
             )
-            return
+            if not split_ratio:
+                QMessageBox.critical(
+                    self,
+                    "Invalid asset",
+                    "A fibre splitter requires a valid 1:x or 2:x split ratio.",
+                )
+                return
+            self.split_ratio_combo.setEditText(split_ratio)
+
         port_definitions = self._port_definitions()
+        if asset_type == "fibre_splitter":
+            input_names = ["Input-1"] if split_inputs == 1 else ["Input-A", "Input-B"]
+            port_definitions = [
+                {
+                    "port_type": "lc",
+                    "port_count": split_inputs,
+                    "port_use": "input",
+                    "name_prefix": "Input",
+                    "explicit_names": input_names,
+                },
+                {
+                    "port_type": "lc",
+                    "port_count": split_outputs,
+                    "port_use": "output",
+                    "name_prefix": "Output",
+                },
+            ]
         portless_asset_types = {"ups", "pdu", "power_device", "cable_management"}
         if not port_definitions and asset_type not in portless_asset_types:
             QMessageBox.critical(
@@ -466,11 +513,7 @@ class NetworkAssetEditorDialog(QDialog):
                 if asset_type == "patch_panel"
                 else ""
             ),
-            "split_ratio": (
-                self.split_ratio_combo.currentText().strip()
-                if asset_type == "fibre_splitter"
-                else ""
-            ),
+            "split_ratio": split_ratio if asset_type == "fibre_splitter" else "",
             "max_split_ratio": (
                 self.olt_max_split_ratio_combo.currentText().strip()
                 if asset_type == "optical_line_terminal"
@@ -481,8 +524,14 @@ class NetworkAssetEditorDialog(QDialog):
             "poe_budget_w": float(self.poe_budget_spin.value()),
             "port_definitions": port_definitions,
             "number_of_ports": sum(row["port_count"] for row in port_definitions),
-            "connections_in": int(self.connections_in_spin.value()),
-            "connections_out": int(self.connections_out_spin.value()),
+            "connections_in": (
+                split_inputs if asset_type == "fibre_splitter"
+                else int(self.connections_in_spin.value())
+            ),
+            "connections_out": (
+                split_outputs if asset_type == "fibre_splitter"
+                else int(self.connections_out_spin.value())
+            ),
             "uplink_ports": int(self.uplink_ports_spin.value()),
             "supports_stacking": bool(
                 asset_type == "network_switch"

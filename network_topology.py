@@ -1308,9 +1308,11 @@ class SplitterFrontPanelItem(QGraphicsObject):
         cx = rect.width() * 0.47
         cy = rect.height() * 0.56
         prism = QPainterPath()
-        prism.moveTo(cx - 24, cy - 22)
-        prism.lineTo(cx + 25, cy)
-        prism.lineTo(cx - 24, cy + 22)
+        # Tip faces the feeder/input bank on the left; the broad face opens
+        # toward the output bank on the right.
+        prism.moveTo(cx + 24, cy - 22)
+        prism.lineTo(cx - 25, cy)
+        prism.lineTo(cx + 24, cy + 22)
         prism.closeSubpath()
         painter.setPen(QPen(QColor('#9ac7ff'), 1.4))
         painter.setBrush(QColor('#405d79'))

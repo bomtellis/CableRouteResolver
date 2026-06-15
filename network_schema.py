@@ -247,6 +247,76 @@ def ensure_network_schema(data: dict) -> dict:
             asset[field] = value if value in NETWORK_MEDIA else default
         asset.setdefault("notes", "")
 
+        # Structured physical ports are authoritative. Fibre splitters use a
+        # canonical input/output layout so observed connection aliases never
+        # create duplicate sockets in rack or device views.
+        raw_port_definitions = asset.get("port_definitions", [])
+        if not isinstance(raw_port_definitions, list):
+            raw_port_definitions = []
+        port_definitions = []
+        for row in raw_port_definitions:
+            if not isinstance(row, dict):
+                continue
+            port_type = _text(row.get("port_type")).lower() or "other"
+            port_use = _text(row.get("port_use")).lower() or "other"
+            names = row.get("explicit_names", [])
+            if not isinstance(names, list):
+                names = []
+            port_definitions.append(
+                {
+                    "port_type": port_type if port_type in NETWORK_PORT_TYPES else "other",
+                    "port_count": max(0, _as_int(row.get("port_count"))),
+                    "port_use": port_use if port_use in NETWORK_PORT_USES else "other",
+                    "name_prefix": _text(row.get("name_prefix")),
+                    "explicit_names": [_text(value) for value in names if _text(value)],
+                }
+            )
+        port_definitions = [row for row in port_definitions if row["port_count"] > 0]
+
+        if asset["asset_type"] == "fibre_splitter" and asset["split_input_count"] > 0:
+            input_names = (
+                ["Input-1"]
+                if asset["split_input_count"] == 1
+                else ["Input-A", "Input-B"]
+            )
+            port_definitions = [
+                {
+                    "port_type": "lc",
+                    "port_count": asset["split_input_count"],
+                    "port_use": "input",
+                    "name_prefix": "Input",
+                    "explicit_names": input_names,
+                },
+                {
+                    "port_type": "lc",
+                    "port_count": asset["split_output_count"],
+                    "port_use": "output",
+                    "name_prefix": "Output",
+                    "explicit_names": [],
+                },
+            ]
+        elif not port_definitions and asset["number_of_ports"] > 0:
+            default_type = (
+                "pon"
+                if asset["asset_type"] in {"optical_line_terminal", "optical_network_terminal"}
+                else "lc"
+                if asset.get("patch_panel_type") == "fibre"
+                else "rj45"
+            )
+            default_use = "patch" if asset["asset_type"] == "patch_panel" else "client"
+            port_definitions = [
+                {
+                    "port_type": default_type,
+                    "port_count": asset["number_of_ports"],
+                    "port_use": default_use,
+                    "name_prefix": "",
+                    "explicit_names": [],
+                }
+            ]
+        asset["port_definitions"] = port_definitions
+        if port_definitions:
+            asset["number_of_ports"] = sum(row["port_count"] for row in port_definitions)
+
     # Recover planner-owned PoLAN placement rows if an older save path kept
     # generated instances but omitted their generated locations.  The instance
     # already carries the authoritative floor and coordinates, so recreating

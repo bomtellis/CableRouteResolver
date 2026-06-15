@@ -1558,8 +1558,31 @@ def _protected_splitter_asset(builder: DesignBuilder, base_asset: dict) -> dict:
     asset["id"] = existing_id
     asset["name"] = f"Protected {base_asset.get('name', 'PoLAN splitter')}"
     output_count = _split_ratio_outputs(base_asset)
+    asset["split_ratio"] = f"2:{output_count}"
+    asset["split_input_count"] = 2
+    asset["split_output_count"] = output_count
     asset["connections_in"] = 2
-    asset["number_of_ports"] = _split_ratio_outputs(base_asset) + 2
+    asset["connections_out"] = output_count
+    asset["number_of_ports"] = output_count + 2
+    asset["input_connection_type"] = "fibre"
+    asset["output_connection_type"] = "fibre"
+    asset["uplink_connection_type"] = "fibre"
+    asset["port_definitions"] = [
+        {
+            "port_type": "lc",
+            "port_count": 2,
+            "port_use": "input",
+            "name_prefix": "Input",
+            "explicit_names": ["Input-A", "Input-B"],
+        },
+        {
+            "port_type": "lc",
+            "port_count": output_count,
+            "port_use": "output",
+            "name_prefix": "Output",
+            "explicit_names": [],
+        },
+    ]
     asset["notes"] = (
         _text(base_asset.get("notes"))
         + " Auto-generated 2:N protected splitter/coupler for primary and standby OLT feeder inputs."
