@@ -17,7 +17,10 @@ import math
 import os
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from network_schema import ensure_network_schema
+from network_schema import (
+    ensure_network_schema,
+    normalise_layer_connection_rules,
+)
 
 
 class NetworkPlanningError(RuntimeError):
@@ -1025,31 +1028,670 @@ def _nearest_location(
 
 
 def _choose_core_candidates(data: dict) -> List[dict]:
-    def is_core_asset(asset: dict) -> bool:
-        name = _text(asset.get("name")).lower()
-        return (
-            _text(asset.get("output_connection_type")).lower() == "fibre"
-            or "core" in name
-            or "distribution" in name
-            or "aggregation" in name
-        )
+    def declared_layer(asset: dict) -> str:
+        return _text(
+            asset.get("network_layer") or asset.get("design_layer")
+        ).lower()
 
     def is_access_asset(asset: dict) -> bool:
         name = _text(asset.get("name")).lower()
-        return "access" in name and not any(
-            word in name for word in ("core", "distribution", "aggregation")
+        return declared_layer(asset) == "access" or (
+            "access" in name
+            and not any(
+                word in name for word in ("core", "distribution", "aggregation")
+            )
         )
+
+    explicit = _candidate_assets(
+        data,
+        "network_switch",
+        lambda asset: (
+            declared_layer(asset) == "core"
+            or "core" in _text(asset.get("name")).lower()
+        )
+        and not is_access_asset(asset),
+    )
+    if explicit:
+        return explicit
 
     candidates = _candidate_assets(
         data,
         "network_switch",
-        lambda asset: is_core_asset(asset) and not is_access_asset(asset),
+        lambda asset: (
+            _text(asset.get("output_connection_type")).lower() == "fibre"
+            or declared_layer(asset) in {"distribution", "aggregation"}
+            or any(
+                word in _text(asset.get("name")).lower()
+                for word in ("distribution", "aggregation")
+            )
+        )
+        and not is_access_asset(asset),
     )
     if not candidates:
         candidates = _candidate_assets(
             data, "network_switch", lambda asset: not is_access_asset(asset)
         )
     return candidates
+
+
+
+
+def _choose_aggregation_candidates(data: dict) -> List[dict]:
+    """Return switches suitable for the aggregation/distribution layer."""
+
+    candidates = _candidate_assets(
+        data,
+        "network_switch",
+        lambda asset: (
+            _text(
+                asset.get("network_layer") or asset.get("design_layer")
+            ).lower()
+            in {"aggregation", "distribution"}
+            or any(
+                word in _text(asset.get("name")).lower()
+                for word in ("aggregation", "distribution")
+            )
+        ),
+    )
+    return candidates or _choose_core_candidates(data)
+
+
+def _layer_rule(settings: dict, source: str, target: str) -> Optional[dict]:
+    rules = normalise_layer_connection_rules(
+        settings.get("layer_connection_rules"),
+        _text(settings.get("topology_model")) or "collapsed_core",
+        bool(settings.get("redundant_core", True)),
+        _int(settings.get("independent_link_count"), 2),
+    )
+    settings["layer_connection_rules"] = rules
+    for rule in rules:
+        if (
+            bool(rule.get("enabled", True))
+            and _text(rule.get("source_layer")).lower() == source
+            and _text(rule.get("target_layer")).lower() == target
+        ):
+            return rule
+    return None
+
+
+def _peer_port_demand(device_count: int, links_per_pair: int) -> int:
+    count = max(0, int(device_count))
+    links = max(0, int(links_per_pair))
+    if count < 2 or links <= 0:
+        return 0
+    edge_count = 1 if count == 2 else count
+    return edge_count * links * 2
+
+
+def _minimum_layer_mix(
+    candidates: Sequence[dict],
+    fixed_ports: int,
+    per_device_ports: int,
+    peer_links_per_pair: int,
+    minimum_devices: int,
+    spare_fraction: float,
+    label: str,
+) -> List[dict]:
+    """Select a layer mix while accounting for uplinks and peer interconnects."""
+
+    if not candidates:
+        raise NetworkPlanningError(
+            f"No usable {label} assets exist in the network asset library."
+        )
+    minimum_devices = max(1, int(minimum_devices or 1))
+    device_count = minimum_devices
+    selected: List[dict] = []
+    for _ in range(32):
+        required_ports = (
+            max(0, int(fixed_ports))
+            + device_count * max(0, int(per_device_ports))
+            + _peer_port_demand(device_count, peer_links_per_pair)
+        )
+        selected = _minimum_asset_mix(
+            candidates,
+            required_ports,
+            0.0,
+            spare_fraction,
+            label,
+        )
+        if len(selected) < minimum_devices:
+            padding_asset = min(
+                candidates,
+                key=lambda asset: (
+                    max(1, _rack_units_for_asset(asset, 1)),
+                    _float(asset.get("power_input_w")),
+                    -_int(asset.get("number_of_ports")),
+                    _text(asset.get("id")),
+                ),
+            )
+            selected.extend(
+                [padding_asset] * (minimum_devices - len(selected))
+            )
+        next_count = len(selected)
+        if next_count == device_count:
+            return selected
+        device_count = next_count
+    raise NetworkPlanningError(
+        f"Unable to stabilise the generated {label} device count."
+    )
+
+
+def _build_layer_instances(
+    builder: DesignBuilder,
+    assets: Sequence[dict],
+    roots: Sequence[dict],
+    layer: str,
+) -> List[dict]:
+    if not roots:
+        raise NetworkPlanningError(
+            f"No root location is available for the {layer} layer."
+        )
+    role = f"{layer}_switch"
+    label = "Aggregation" if layer == "aggregation" else "Core"
+    rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
+    instances: List[dict] = []
+    rack_next_u: Dict[str, int] = defaultdict(lambda: 1)
+    for index, asset in enumerate(assets):
+        root = roots[index % len(roots)]
+        root_name = _text(root.get("name"))
+        rack_name = f"AUTO-RACK-{root_name}"
+        rack_u = _rack_units_for_asset(asset, 1)
+        if rack_next_u[rack_name] + rack_u - 1 > rack_size_u:
+            rack_number = 2
+            while f"{rack_name}-{rack_number}" in rack_next_u:
+                rack_number += 1
+            rack_name = f"{rack_name}-{rack_number}"
+        instance = builder.add_instance(
+            asset,
+            f"AUTO {label} {index + 1}",
+            root,
+            role,
+            rack_name=rack_name,
+            rack_start_u=rack_next_u[rack_name],
+            rack_size_u=rack_size_u,
+            route_anchor=root_name,
+            network_layer=layer,
+        )
+        rack_next_u[rack_name] += rack_u
+        instances.append(instance)
+    return instances
+
+
+def _instance_total_ports(builder: DesignBuilder, instance: dict) -> int:
+    asset = builder._asset_for_instance(instance)
+    members = (
+        max(1, _int(instance.get("stack_member_count"), 1))
+        if bool(instance.get("logical_stack"))
+        else 1
+    )
+    return max(0, _int(asset.get("number_of_ports"))) * members
+
+
+def _instance_remaining_layer_ports(builder: DesignBuilder, instance: dict) -> int:
+    return max(
+        0,
+        _instance_total_ports(builder, instance)
+        - _int(instance.get("_layer_ports_used"), 0),
+    )
+
+
+def _reserve_layer_port(
+    builder: DesignBuilder, instance: dict, prefix: str
+) -> str:
+    used = _int(instance.get("_layer_ports_used"), 0)
+    capacity = _instance_total_ports(builder, instance)
+    if capacity > 0 and used >= capacity:
+        raise NetworkPlanningError(
+            f"{instance.get('name') or instance.get('id')} has no free physical port "
+            f"for the configured layer connection rules."
+        )
+    instance["_layer_ports_used"] = used + 1
+    key = f"_layer_{prefix.lower()}_ports_used"
+    ordinal = _int(instance.get(key), 0) + 1
+    instance[key] = ordinal
+    return f"{prefix}-{ordinal}"
+
+
+def _declared_uplink_capacity(builder: DesignBuilder, instance: dict) -> int:
+    asset = builder._asset_for_instance(instance)
+    members = (
+        max(1, _int(instance.get("stack_member_count"), 1))
+        if bool(instance.get("logical_stack"))
+        else 1
+    )
+    structured = sum(
+        max(0, _int(row.get("port_count")))
+        for row in asset.get("port_definitions", [])
+        if isinstance(row, dict)
+        and _text(row.get("port_use")).lower() == "uplink"
+    )
+    declared = max(structured, max(0, _int(asset.get("uplink_ports"))))
+    return declared * members
+
+
+def _reserve_target_uplink(builder: DesignBuilder, target: dict) -> str:
+    layer = _text(target.get("network_layer") or target.get("design_role")).lower()
+    if layer in {"access", "access_switch"}:
+        used = _int(target.get("_uplinks_used"), 0)
+        declared = _declared_uplink_capacity(builder, target)
+        if declared > 0 and used >= declared:
+            raise NetworkPlanningError(
+                f"{target.get('name') or target.get('id')} exposes only {declared} "
+                "uplink port(s), which is insufficient for the configured independent links."
+            )
+        target["_uplinks_used"] = used + 1
+        return f"Uplink-{used + 1}"
+    return _reserve_layer_port(builder, target, "Uplink")
+
+
+def _ordered_sources_with_capacity(
+    builder: DesignBuilder, sources: Sequence[dict], offset: int = 0
+) -> List[dict]:
+    if not sources:
+        return []
+    rotated = list(sources[offset % len(sources) :]) + list(
+        sources[: offset % len(sources)]
+    )
+    return sorted(
+        rotated,
+        key=lambda instance: (
+            -_instance_remaining_layer_ports(builder, instance),
+            _int(instance.get("_layer_ports_used"), 0),
+            _text(instance.get("id")),
+        ),
+    )
+
+
+def _select_direct_sources(
+    builder: DesignBuilder,
+    sources: Sequence[dict],
+    links: int,
+    distinct: int,
+    offset: int,
+) -> List[Tuple[dict, str]]:
+    if len(sources) < distinct:
+        raise NetworkPlanningError(
+            f"The layer rule requires {distinct} distinct source devices but only "
+            f"{len(sources)} were generated."
+        )
+    selected: List[Tuple[dict, str]] = []
+    used_ids: set[str] = set()
+    for link_index in range(links):
+        candidates = _ordered_sources_with_capacity(
+            builder, sources, offset + link_index
+        )
+        if link_index < distinct:
+            candidates = [
+                source
+                for source in candidates
+                if _text(source.get("id")) not in used_ids
+            ]
+        candidates = [
+            source
+            for source in candidates
+            if _instance_remaining_layer_ports(builder, source) > 0
+        ]
+        if not candidates:
+            raise NetworkPlanningError(
+                "The selected upstream switches do not have enough free ports for "
+                "the configured independent links."
+            )
+        source = candidates[0]
+        source_id = _text(source.get("id"))
+        used_ids.add(source_id)
+        selected.append((source, source_id))
+    return selected
+
+
+def _select_aggregation_sources(
+    builder: DesignBuilder,
+    aggregations: Sequence[dict],
+    links: int,
+    distinct: int,
+    offset: int,
+) -> List[Tuple[dict, str]]:
+    """Select aggregation links with at least two different upstream core paths."""
+
+    if len(aggregations) < distinct:
+        raise NetworkPlanningError(
+            f"The access rule requires {distinct} distinct aggregation switches but "
+            f"only {len(aggregations)} were generated."
+        )
+    required_core_diversity = min(2, distinct)
+    all_core_ids = {
+        core_id
+        for aggregation in aggregations
+        for core_id in aggregation.get("upstream_core_ids", [])
+        if _text(core_id)
+    }
+    if len(all_core_ids) < required_core_diversity:
+        raise NetworkPlanningError(
+            "Independent access links cannot be sourced through two different cores. "
+            "Increase the core count or change the Core → Aggregation rule."
+        )
+
+    rotated = list(aggregations[offset % len(aggregations) :]) + list(
+        aggregations[: offset % len(aggregations)]
+    )
+    selected: List[Tuple[dict, str]] = []
+    used_sources: set[str] = set()
+    used_cores: set[str] = set()
+
+    for link_index in range(links):
+        candidates: List[Tuple[int, int, int, str, dict, str]] = []
+        for aggregation in rotated:
+            aggregation_id = _text(aggregation.get("id"))
+            if link_index < distinct and aggregation_id in used_sources:
+                continue
+            if _instance_remaining_layer_ports(builder, aggregation) <= 0:
+                continue
+            core_ids = [
+                _text(value)
+                for value in aggregation.get("upstream_core_ids", [])
+                if _text(value)
+            ]
+            for core_id in core_ids:
+                candidates.append(
+                    (
+                        0 if core_id not in used_cores else 1,
+                        0 if aggregation_id not in used_sources else 1,
+                        -_instance_remaining_layer_ports(builder, aggregation),
+                        aggregation_id,
+                        aggregation,
+                        core_id,
+                    )
+                )
+        if not candidates:
+            raise NetworkPlanningError(
+                "The aggregation layer cannot satisfy the configured independent "
+                "access links with the available ports and source diversity."
+            )
+        candidates.sort(key=lambda row: row[:4])
+        _, _, _, _, aggregation, core_id = candidates[0]
+        selected.append((aggregation, core_id))
+        used_sources.add(_text(aggregation.get("id")))
+        used_cores.add(core_id)
+
+    if len(used_cores) < required_core_diversity:
+        raise NetworkPlanningError(
+            "The generated access links do not resolve through two different core switches."
+        )
+    return selected
+
+
+def _connect_layer_targets(
+    builder: DesignBuilder,
+    sources: Sequence[dict],
+    targets: Sequence[dict],
+    rule: dict,
+    source_layer: str,
+    target_layer: str,
+    require_core_path_diversity: bool = False,
+) -> None:
+    links = max(1, _int(rule.get("links_per_target"), 1))
+    distinct = max(
+        1,
+        min(links, _int(rule.get("minimum_distinct_sources"), 1)),
+    )
+    rule_id = _text(rule.get("id")) or f"{source_layer}_to_{target_layer}"
+    for target_index, target in enumerate(targets):
+        if require_core_path_diversity:
+            selected = _select_aggregation_sources(
+                builder, sources, links, distinct, target_index
+            )
+        else:
+            selected = _select_direct_sources(
+                builder, sources, links, distinct, target_index
+            )
+        protection_group = f"AUTO-LAYER-{target.get('id')}"
+        source_ids: List[str] = []
+        core_ids: List[str] = []
+        for link_index, (source, core_id) in enumerate(selected, start=1):
+            target_port = _reserve_target_uplink(builder, target)
+            source_port = _reserve_layer_port(builder, source, "Downlink")
+            target_anchor = _text(target.get("route_anchor")) or _text(
+                target.get("location_name")
+            )
+            source_anchor = _text(source.get("route_anchor")) or _text(
+                source.get("location_name")
+            )
+            builder.add_connection(
+                target,
+                target_port,
+                source,
+                source_port,
+                "fibre",
+                target_anchor,
+                source_anchor,
+                connection_role="uplink",
+                redundancy_role=(
+                    "primary" if link_index == 1 else f"independent-{link_index}"
+                ),
+                protection_group=protection_group,
+                layer_rule_id=rule_id,
+                source_layer=source_layer,
+                target_layer=target_layer,
+                independent_link_index=link_index,
+                source_core_instance_id=core_id,
+                fibre_count=2,
+            )
+            source_ids.append(_text(source.get("id")))
+            core_ids.append(core_id)
+            if target_layer == "aggregation":
+                upstream = target.setdefault("upstream_core_ids", [])
+                if core_id and core_id not in upstream:
+                    upstream.append(core_id)
+
+        if links > 1:
+            builder.redundancy_groups.append(
+                {
+                    "id": protection_group,
+                    "technology": builder.technology,
+                    "protected_instance_id": _text(target.get("id")),
+                    "primary_olt_instance_id": "",
+                    "secondary_olt_instance_id": "",
+                    "protection_type": "independent_layer_uplinks",
+                    "source_layer": source_layer,
+                    "target_layer": target_layer,
+                    "source_instance_ids": source_ids,
+                    "source_core_instance_ids": core_ids,
+                    "required_distinct_sources": distinct,
+                    "auto_generated": True,
+                }
+            )
+
+
+def _connect_peer_ring(
+    builder: DesignBuilder,
+    instances: Sequence[dict],
+    rule: Optional[dict],
+    layer: str,
+) -> None:
+    if rule is None or len(instances) < 2:
+        return
+    links = max(1, _int(rule.get("links_per_target"), 1))
+    if len(instances) == 2:
+        pairs = [(instances[0], instances[1])]
+    else:
+        pairs = [
+            (instances[index], instances[(index + 1) % len(instances)])
+            for index in range(len(instances))
+        ]
+    for pair_index, (left, right) in enumerate(pairs, start=1):
+        for link_index in range(1, links + 1):
+            left_port = _reserve_layer_port(builder, left, "Peer")
+            right_port = _reserve_layer_port(builder, right, "Peer")
+            left_anchor = _text(left.get("route_anchor")) or _text(
+                left.get("location_name")
+            )
+            right_anchor = _text(right.get("route_anchor")) or _text(
+                right.get("location_name")
+            )
+            builder.add_connection(
+                left,
+                left_port,
+                right,
+                right_port,
+                "fibre",
+                left_anchor,
+                right_anchor,
+                connection_role="uplink",
+                redundancy_role="cross_link",
+                protection_group=f"AUTO-{layer.upper()}-PEER-{pair_index}",
+                layer_rule_id=_text(rule.get("id")) or f"{layer}_peer",
+                source_layer=layer,
+                target_layer=layer,
+                independent_link_index=link_index,
+                fibre_count=2,
+            )
+
+
+def _build_traditional_layer_topology(
+    builder: DesignBuilder,
+    access_switches: Sequence[dict],
+    comms_rooms: Sequence[dict],
+    spare_fraction: float,
+) -> List[dict]:
+    """Build collapsed-core or three-tier active topology from layer rules."""
+
+    mer_locations = _locations_by_kind(builder.data, {"mer"})
+    if not mer_locations:
+        mer_locations = [comms_rooms[0]]
+        builder.warnings.append(
+            "No MER exists; the first comms room was used as the network root."
+        )
+    roots = list(mer_locations)
+    settings = builder.settings
+    topology_model = _text(settings.get("topology_model")).lower()
+    if topology_model not in {"collapsed_core", "three_tier"}:
+        topology_model = "collapsed_core"
+    settings["topology_model"] = topology_model
+    settings["layer_connection_rules"] = normalise_layer_connection_rules(
+        settings.get("layer_connection_rules"),
+        topology_model,
+        bool(settings.get("redundant_core", True)),
+        _int(settings.get("independent_link_count"), 2),
+    )
+
+    core_peer = _layer_rule(settings, "core", "core")
+    core_candidates = _choose_core_candidates(builder.data)
+    if not core_candidates:
+        raise NetworkPlanningError(
+            "No core switch asset is available for the configured topology."
+        )
+
+    if topology_model == "collapsed_core":
+        core_access = _layer_rule(settings, "core", "access")
+        if core_access is None:
+            raise NetworkPlanningError(
+                "Collapsed-core planning requires an enabled Core → Access layer rule."
+            )
+        core_minimum = max(
+            1,
+            _int(core_access.get("minimum_distinct_sources"), 1),
+            2 if core_peer is not None else 1,
+        )
+        core_mix = _minimum_layer_mix(
+            core_candidates,
+            len(access_switches) * _int(core_access.get("links_per_target"), 1),
+            0,
+            _int(core_peer.get("links_per_target"), 0) if core_peer else 0,
+            core_minimum,
+            spare_fraction,
+            "core switch",
+        )
+        cores = _build_layer_instances(builder, core_mix, roots, "core")
+        _connect_peer_ring(builder, cores, core_peer, "core")
+        _connect_layer_targets(
+            builder,
+            cores,
+            access_switches,
+            core_access,
+            "core",
+            "access",
+        )
+        return cores
+
+    core_aggregation = _layer_rule(settings, "core", "aggregation")
+    aggregation_access = _layer_rule(settings, "aggregation", "access")
+    aggregation_peer = _layer_rule(settings, "aggregation", "aggregation")
+    if core_aggregation is None or aggregation_access is None:
+        raise NetworkPlanningError(
+            "Three-tier planning requires enabled Core → Aggregation and "
+            "Aggregation → Access rules."
+        )
+
+    aggregation_candidates = _choose_aggregation_candidates(builder.data)
+    if not aggregation_candidates:
+        raise NetworkPlanningError(
+            "No aggregation/distribution switch asset is available for the three-tier topology."
+        )
+    aggregation_minimum = max(
+        1,
+        _int(aggregation_access.get("minimum_distinct_sources"), 1),
+        2 if aggregation_peer is not None else 1,
+    )
+    aggregation_mix = _minimum_layer_mix(
+        aggregation_candidates,
+        len(access_switches)
+        * _int(aggregation_access.get("links_per_target"), 1),
+        _int(core_aggregation.get("links_per_target"), 1),
+        (
+            _int(aggregation_peer.get("links_per_target"), 0)
+            if aggregation_peer
+            else 0
+        ),
+        aggregation_minimum,
+        spare_fraction,
+        "aggregation switch",
+    )
+    aggregations = _build_layer_instances(
+        builder, aggregation_mix, roots, "aggregation"
+    )
+
+    core_minimum = max(
+        1,
+        _int(core_aggregation.get("minimum_distinct_sources"), 1),
+        2 if core_peer is not None else 1,
+        2
+        if _int(aggregation_access.get("minimum_distinct_sources"), 1) >= 2
+        else 1,
+    )
+    core_mix = _minimum_layer_mix(
+        core_candidates,
+        len(aggregations) * _int(core_aggregation.get("links_per_target"), 1),
+        0,
+        _int(core_peer.get("links_per_target"), 0) if core_peer else 0,
+        core_minimum,
+        spare_fraction,
+        "core switch",
+    )
+    cores = _build_layer_instances(builder, core_mix, roots, "core")
+
+    _connect_peer_ring(builder, cores, core_peer, "core")
+    _connect_layer_targets(
+        builder,
+        cores,
+        aggregations,
+        core_aggregation,
+        "core",
+        "aggregation",
+    )
+    _connect_peer_ring(
+        builder, aggregations, aggregation_peer, "aggregation"
+    )
+    _connect_layer_targets(
+        builder,
+        aggregations,
+        access_switches,
+        aggregation_access,
+        "aggregation",
+        "access",
+        require_core_path_diversity=(
+            _int(aggregation_access.get("minimum_distinct_sources"), 1) >= 2
+        ),
+    )
+    return cores + aggregations
 
 
 def _rack_units_for_asset(asset: dict, member_count: int = 1) -> int:
@@ -1371,25 +2013,9 @@ def _traditional_design(
                 stack_number += 1
             index = group_end
 
-    mer_locations = _locations_by_kind(builder.data, {"mer"})
-    if not mer_locations:
-        mer_locations = [comms_rooms[0]]
-        builder.warnings.append(
-            "No MER exists; the first comms room was used as the network root."
-        )
-    redundant = bool(builder.settings.get("redundant_core", True))
-    roots_list = (
-        mer_locations[:2]
-        if redundant and len(mer_locations) >= 2
-        else mer_locations[:1]
+    _build_traditional_layer_topology(
+        builder, access_switches, comms_rooms, spare_fraction
     )
-    roots = {_text(item.get("name")): item for item in roots_list}
-    leaves_by_root = {name: list(access_switches) for name in roots}
-    if redundant and len(roots) < 2:
-        builder.warnings.append(
-            "Only one MER is available, so access-switch core uplinks are not room-diverse."
-        )
-    _build_core_layer(builder, leaves_by_root, roots, spare_fraction)
 
 
 def _fits_any_ont(
@@ -2642,6 +3268,9 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
     settings.setdefault("traditional_max_copper_m", 90.0)
     settings.setdefault("polan_max_ont_copper_m", 30.0)
     settings.setdefault("polan_olt_failover", True)
+    settings.setdefault("topology_model", "collapsed_core")
+    settings.setdefault("independent_link_count", 2)
+    settings.setdefault("layer_connection_rules", [])
     settings.setdefault("polan_max_onts_per_splitter", 16)
     settings.setdefault("polan_max_splitter_to_ont_m", 150.0)
     settings.setdefault("auto_planner_max_workers", 0)
@@ -2738,7 +3367,22 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
 
     summary = {
         "technology": technology_value,
-        "objective": "Minimum feasible component count after department-first, graph-branch-aware proximity clustering, subject to port, PoE, spare-capacity and distance constraints",
+        "topology_model": (
+            _text(settings.get("topology_model"))
+            if technology_value == "Traditional"
+            else "polan"
+        ),
+        "independent_link_count": (
+            _int(settings.get("independent_link_count"), 2)
+            if technology_value == "Traditional"
+            else 1
+        ),
+        "layer_connection_rules": (
+            deepcopy(settings.get("layer_connection_rules", []))
+            if technology_value == "Traditional"
+            else []
+        ),
+        "objective": "Minimum feasible component count after department-first, graph-branch-aware proximity clustering, subject to port, PoE, spare-capacity, distance and configured layer-diversity constraints",
         "endpoint_locations": len(endpoints),
         "required_ports": demand_ports,
         "required_poe_w": round(demand_poe, 3),

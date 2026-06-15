@@ -60,6 +60,10 @@ PORT_TYPE_OPTIONS = ["rj45", "sfp", "sfp+", "qsfp", "qsfp28", "pon", "lc", "sc",
 PORT_USE_OPTIONS = ["input", "output", "uplink", "downlink", "management", "console", "pon", "client", "patch", "stacking", "power", "spare", "other"]
 
 from network_auto_planner import NetworkPlanningError, generate_network_design
+from network_schema import (
+    default_layer_connection_rules,
+    normalise_layer_connection_rules,
+)
 
 
 def _text(value) -> str:
@@ -1111,12 +1115,30 @@ class NetworkPlannerDialog(QDialog):
         self.expected_mer_spin.setValue(
             int(self.data.get("network_settings", {}).get("expected_mer_count", 2) or 2)
         )
-        self.redundant_core_check = QCheckBox("Use redundant core / MER design")
+        self.redundant_core_check = QCheckBox("Enable redundant layer design")
         self.redundant_core_check.setChecked(
             bool(self.data.get("network_settings", {}).get("redundant_core", True))
         )
 
         settings = self.data.get("network_settings", {})
+        self.topology_model_combo = QComboBox()
+        self.topology_model_combo.addItem("Collapsed core (core + access)", "collapsed_core")
+        self.topology_model_combo.addItem("Three tier (core + aggregation + access)", "three_tier")
+        topology_index = self.topology_model_combo.findData(
+            _text(settings.get("topology_model")) or "collapsed_core"
+        )
+        if topology_index >= 0:
+            self.topology_model_combo.setCurrentIndex(topology_index)
+
+        self.independent_link_count_spin = QSpinBox()
+        self.independent_link_count_spin.setRange(1, 16)
+        self.independent_link_count_spin.setValue(
+            max(1, int(settings.get("independent_link_count", 2) or 2))
+        )
+        self.independent_link_count_spin.setToolTip(
+            "Default number of separate uplinks generated for each downstream device. "
+            "Redundant designs require at least two distinct source devices and two different core paths."
+        )
         self.spare_capacity_spin = QDoubleSpinBox()
         self.spare_capacity_spin.setRange(0.0, 100.0)
         self.spare_capacity_spin.setDecimals(1)
@@ -1202,6 +1224,10 @@ class NetworkPlannerDialog(QDialog):
         info.setWordWrap(True)
         settings_layout.addRow("Network technology", self.technology_combo)
         settings_layout.addRow("Expected MER locations", self.expected_mer_spin)
+        settings_layout.addRow("Traditional topology", self.topology_model_combo)
+        settings_layout.addRow(
+            "Independent links per target", self.independent_link_count_spin
+        )
         settings_layout.addRow("Spare port and PoE capacity", self.spare_capacity_spin)
         settings_layout.addRow(
             "Traditional maximum copper route", self.traditional_max_copper_spin
@@ -1223,6 +1249,76 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("", self.visual_edit_button)
         settings_layout.addRow("", info)
         self.tabs.addTab(settings_tab, "Settings")
+
+        layer_rules_tab = QWidget()
+        layer_rules_layout = QVBoxLayout(layer_rules_tab)
+        layer_rules_info = QLabel(
+            "Define how active network layers are connected. A peer rule links devices "
+            "within the same layer; an uplink rule defines the number of links entering "
+            "each downstream device. Minimum distinct sources prevents redundant links "
+            "from terminating on the same upstream device. Changing the topology, "
+            "redundancy or independent-link controls reloads the matching default rules; "
+            "the table can then be edited for project-specific requirements."
+        )
+        layer_rules_info.setWordWrap(True)
+        layer_rules_layout.addWidget(layer_rules_info)
+
+        profile_buttons = QHBoxLayout()
+        self.load_profile_rules_button = QPushButton("Load selected topology defaults")
+        self.load_profile_rules_button.clicked.connect(self._load_layer_profile_defaults)
+        self.add_layer_rule_button = QPushButton("Add rule")
+        self.add_layer_rule_button.clicked.connect(lambda: self._append_layer_rule_row({}))
+        self.remove_layer_rule_button = QPushButton("Remove selected rule")
+        self.remove_layer_rule_button.clicked.connect(self._remove_selected_layer_rules)
+        profile_buttons.addWidget(self.load_profile_rules_button)
+        profile_buttons.addWidget(self.add_layer_rule_button)
+        profile_buttons.addWidget(self.remove_layer_rule_button)
+        profile_buttons.addStretch(1)
+        layer_rules_layout.addLayout(profile_buttons)
+
+        self.layer_rules_table = QTableWidget(0, 4)
+        self.layer_rules_table.setHorizontalHeaderLabels(
+            ["Enabled", "Layer connection", "Links", "Minimum distinct sources"]
+        )
+        self.layer_rules_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.layer_rules_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.Stretch
+        )
+        self.layer_rules_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents
+        )
+        self.layer_rules_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeToContents
+        )
+        self.layer_rules_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.layer_rules_table.setMinimumHeight(260)
+        layer_rules_layout.addWidget(self.layer_rules_table, 1)
+
+        initial_rules = normalise_layer_connection_rules(
+            settings.get("layer_connection_rules"),
+            _text(settings.get("topology_model")) or "collapsed_core",
+            bool(settings.get("redundant_core", True)),
+            int(settings.get("independent_link_count", 2) or 2),
+        )
+        for rule in initial_rules:
+            self._append_layer_rule_row(rule)
+        self.tabs.addTab(layer_rules_tab, "Layer Rules")
+
+        self.topology_model_combo.currentIndexChanged.connect(
+            self._load_layer_profile_defaults
+        )
+        self.redundant_core_check.toggled.connect(
+            self._load_layer_profile_defaults
+        )
+        self.independent_link_count_spin.valueChanged.connect(
+            self._load_layer_profile_defaults
+        )
+        self.technology_combo.currentTextChanged.connect(
+            self._update_layer_rule_availability
+        )
+        self._update_layer_rule_availability()
 
         self.assets_tab = _CrudTab(
             [
@@ -1454,11 +1550,133 @@ class NetworkPlannerDialog(QDialog):
         )
         self._refresh_design_summary()
 
+    @staticmethod
+    def _layer_rule_pairs() -> List[Tuple[str, str, str]]:
+        return [
+            ("core", "core", "Core ↔ Core peer interconnection"),
+            ("core", "aggregation", "Core → Aggregation"),
+            ("aggregation", "aggregation", "Aggregation ↔ Aggregation peer interconnection"),
+            ("aggregation", "access", "Aggregation → Access"),
+            ("core", "access", "Core → Access"),
+        ]
+
+    def _append_layer_rule_row(self, rule: dict) -> None:
+        row = self.layer_rules_table.rowCount()
+        self.layer_rules_table.insertRow(row)
+
+        enabled_check = QCheckBox()
+        enabled_check.setChecked(bool(rule.get("enabled", True)))
+        self.layer_rules_table.setCellWidget(row, 0, enabled_check)
+
+        pair_combo = QComboBox()
+        for source, target, label in self._layer_rule_pairs():
+            pair_combo.addItem(label, (source, target))
+        wanted_pair = (
+            _text(rule.get("source_layer")).lower(),
+            _text(rule.get("target_layer")).lower(),
+        )
+        for index in range(pair_combo.count()):
+            if pair_combo.itemData(index) == wanted_pair:
+                pair_combo.setCurrentIndex(index)
+                break
+        self.layer_rules_table.setCellWidget(row, 1, pair_combo)
+
+        links_spin = QSpinBox()
+        links_spin.setRange(1, 16)
+        links_spin.setValue(max(1, int(rule.get("links_per_target", 1) or 1)))
+        self.layer_rules_table.setCellWidget(row, 2, links_spin)
+
+        distinct_spin = QSpinBox()
+        distinct_spin.setRange(1, 16)
+        distinct_spin.setValue(
+            max(1, int(rule.get("minimum_distinct_sources", 1) or 1))
+        )
+        self.layer_rules_table.setCellWidget(row, 3, distinct_spin)
+
+        def keep_distinct_valid(value: int) -> None:
+            distinct_spin.setMaximum(max(1, int(value)))
+            if distinct_spin.value() > value:
+                distinct_spin.setValue(value)
+
+        links_spin.valueChanged.connect(keep_distinct_valid)
+        keep_distinct_valid(links_spin.value())
+
+    def _layer_rules_from_table(self) -> List[dict]:
+        rows: List[dict] = []
+        for row in range(self.layer_rules_table.rowCount()):
+            enabled_check = self.layer_rules_table.cellWidget(row, 0)
+            pair_combo = self.layer_rules_table.cellWidget(row, 1)
+            links_spin = self.layer_rules_table.cellWidget(row, 2)
+            distinct_spin = self.layer_rules_table.cellWidget(row, 3)
+            pair = pair_combo.currentData() if pair_combo is not None else None
+            if not pair or len(pair) != 2:
+                continue
+            source, target = pair
+            rows.append(
+                {
+                    "id": (
+                        f"{source}_peer"
+                        if source == target
+                        else f"{source}_to_{target}"
+                    ),
+                    "source_layer": source,
+                    "target_layer": target,
+                    "links_per_target": int(links_spin.value()),
+                    "minimum_distinct_sources": int(distinct_spin.value()),
+                    "enabled": bool(enabled_check.isChecked()),
+                }
+            )
+        return rows
+
+    def _load_layer_profile_defaults(self, *_args) -> None:
+        topology_model = _text(self.topology_model_combo.currentData()) or "collapsed_core"
+        rules = default_layer_connection_rules(
+            topology_model,
+            self.redundant_core_check.isChecked(),
+            self.independent_link_count_spin.value(),
+        )
+        self.layer_rules_table.setRowCount(0)
+        for rule in rules:
+            self._append_layer_rule_row(rule)
+
+    def _remove_selected_layer_rules(self) -> None:
+        rows = sorted(
+            {index.row() for index in self.layer_rules_table.selectionModel().selectedRows()},
+            reverse=True,
+        )
+        for row in rows:
+            self.layer_rules_table.removeRow(row)
+
+    def _update_layer_rule_availability(self, *_args) -> None:
+        enabled = self.technology_combo.currentText().strip().lower() == "traditional"
+        for widget in (
+            self.topology_model_combo,
+            self.independent_link_count_spin,
+            self.redundant_core_check,
+            self.layer_rules_table,
+            self.load_profile_rules_button,
+            self.add_layer_rule_button,
+            self.remove_layer_rule_button,
+        ):
+            widget.setEnabled(enabled)
+
     def _sync_planner_settings(self) -> None:
         settings = self.data.setdefault("network_settings", {})
         settings["technology"] = self.technology_combo.currentText().strip()
         settings["expected_mer_count"] = int(self.expected_mer_spin.value())
         settings["redundant_core"] = self.redundant_core_check.isChecked()
+        settings["topology_model"] = (
+            _text(self.topology_model_combo.currentData()) or "collapsed_core"
+        )
+        settings["independent_link_count"] = int(
+            self.independent_link_count_spin.value()
+        )
+        settings["layer_connection_rules"] = normalise_layer_connection_rules(
+            self._layer_rules_from_table(),
+            settings["topology_model"],
+            settings["redundant_core"],
+            settings["independent_link_count"],
+        )
         settings["spare_capacity_percent"] = float(self.spare_capacity_spin.value())
         settings["traditional_max_copper_m"] = float(
             self.traditional_max_copper_spin.value()
@@ -1482,6 +1700,8 @@ class NetworkPlannerDialog(QDialog):
             return
         lines = [
             f"Technology: {summary.get('technology', '')}",
+            f"Topology: {summary.get('topology_model', '')}",
+            f"Independent links: {summary.get('independent_link_count', '')}",
             f"Objective: {summary.get('objective', '')}",
             "",
             f"Endpoint locations: {summary.get('endpoint_locations', 0)}",
@@ -1499,6 +1719,19 @@ class NetworkPlannerDialog(QDialog):
         ]
         for role, quantity in (summary.get("component_counts", {}) or {}).items():
             lines.append(f"  {role}: {quantity}")
+        layer_rules = summary.get("layer_connection_rules", []) or []
+        if layer_rules:
+            lines.extend(["", "Layer connection rules:"])
+            for rule in layer_rules:
+                if not rule.get("enabled", True):
+                    continue
+                source = _text(rule.get("source_layer")).title()
+                target = _text(rule.get("target_layer")).title()
+                arrow = "↔" if source == target else "→"
+                lines.append(
+                    f"  {source} {arrow} {target}: {rule.get('links_per_target', 1)} link(s), "
+                    f"minimum {rule.get('minimum_distinct_sources', 1)} distinct source(s)"
+                )
         warnings = summary.get("warnings", []) or []
         if warnings:
             lines.extend(["", "Warnings:"])

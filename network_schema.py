@@ -10,6 +10,9 @@ NETWORK_DEFAULTS = {
         "technology": "Traditional",
         "expected_mer_count": 2,
         "redundant_core": True,
+        "topology_model": "collapsed_core",
+        "independent_link_count": 2,
+        "layer_connection_rules": [],
         "spare_capacity_percent": 15.0,
         "traditional_max_copper_m": 90.0,
         "polan_max_ont_copper_m": 30.0,
@@ -54,6 +57,140 @@ NETWORK_LOCATION_TYPES = {"mer", "polan"}
 
 NETWORK_PORT_TYPES = {"rj45", "sfp", "sfp+", "qsfp", "qsfp28", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"}
 NETWORK_PORT_USES = {"input", "output", "uplink", "downlink", "management", "console", "pon", "client", "patch", "stacking", "power", "spare", "other"}
+
+
+NETWORK_TOPOLOGY_MODELS = {"collapsed_core", "three_tier"}
+NETWORK_LAYERS = {"core", "aggregation", "access"}
+NETWORK_LAYER_RULE_PAIRS = {
+    ("core", "core"),
+    ("core", "aggregation"),
+    ("aggregation", "aggregation"),
+    ("aggregation", "access"),
+    ("core", "access"),
+}
+
+
+def default_layer_connection_rules(
+    topology_model: str = "collapsed_core",
+    redundant: bool = True,
+    independent_link_count: int = 2,
+) -> List[dict]:
+    """Return deterministic defaults for the selected network hierarchy."""
+
+    model = _text(topology_model).lower()
+    if model not in NETWORK_TOPOLOGY_MODELS:
+        model = "collapsed_core"
+    redundant = bool(redundant)
+    links = max(1, _as_int(independent_link_count, 2 if redundant else 1))
+    if not redundant:
+        links = 1
+    distinct = min(2, links) if redundant else 1
+
+    if model == "three_tier":
+        rules = [
+            {
+                "id": "core_to_aggregation",
+                "source_layer": "core",
+                "target_layer": "aggregation",
+                "links_per_target": links,
+                "minimum_distinct_sources": distinct,
+                "enabled": True,
+            },
+            {
+                "id": "aggregation_to_access",
+                "source_layer": "aggregation",
+                "target_layer": "access",
+                "links_per_target": links,
+                "minimum_distinct_sources": distinct,
+                "enabled": True,
+            },
+        ]
+        if redundant:
+            rules.insert(0, {
+                "id": "core_peer",
+                "source_layer": "core",
+                "target_layer": "core",
+                "links_per_target": 1,
+                "minimum_distinct_sources": 1,
+                "enabled": True,
+            })
+            rules.insert(2, {
+                "id": "aggregation_peer",
+                "source_layer": "aggregation",
+                "target_layer": "aggregation",
+                "links_per_target": 1,
+                "minimum_distinct_sources": 1,
+                "enabled": True,
+            })
+        return rules
+
+    rules = [
+        {
+            "id": "core_to_access",
+            "source_layer": "core",
+            "target_layer": "access",
+            "links_per_target": links,
+            "minimum_distinct_sources": distinct,
+            "enabled": True,
+        }
+    ]
+    if redundant:
+        rules.insert(0, {
+            "id": "core_peer",
+            "source_layer": "core",
+            "target_layer": "core",
+            "links_per_target": 1,
+            "minimum_distinct_sources": 1,
+            "enabled": True,
+        })
+    return rules
+
+
+def normalise_layer_connection_rules(
+    rules,
+    topology_model: str = "collapsed_core",
+    redundant: bool = True,
+    independent_link_count: int = 2,
+) -> List[dict]:
+    """Normalise user-entered layer rules and discard unsupported layer pairs."""
+
+    if not isinstance(rules, list) or not rules:
+        return default_layer_connection_rules(
+            topology_model, redundant, independent_link_count
+        )
+
+    result: List[dict] = []
+    seen_ids: set[str] = set()
+    for index, row in enumerate(rules, start=1):
+        if not isinstance(row, dict):
+            continue
+        source = _text(row.get("source_layer")).lower()
+        target = _text(row.get("target_layer")).lower()
+        if (source, target) not in NETWORK_LAYER_RULE_PAIRS:
+            continue
+        links = max(1, min(16, _as_int(row.get("links_per_target"), 1)))
+        distinct = max(1, min(links, _as_int(row.get("minimum_distinct_sources"), 1)))
+        rule_id = _text(row.get("id")) or f"{source}_to_{target}"
+        if rule_id in seen_ids:
+            suffix = 2
+            while f"{rule_id}_{suffix}" in seen_ids:
+                suffix += 1
+            rule_id = f"{rule_id}_{suffix}"
+        seen_ids.add(rule_id)
+        result.append(
+            {
+                "id": rule_id,
+                "source_layer": source,
+                "target_layer": target,
+                "links_per_target": links,
+                "minimum_distinct_sources": distinct,
+                "enabled": bool(row.get("enabled", True)),
+            }
+        )
+
+    return result or default_layer_connection_rules(
+        topology_model, redundant, independent_link_count
+    )
 
 
 def _text(value) -> str:
@@ -118,6 +255,9 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("technology", "Traditional")
     settings.setdefault("expected_mer_count", 2)
     settings.setdefault("redundant_core", True)
+    settings.setdefault("topology_model", "collapsed_core")
+    settings.setdefault("independent_link_count", 2)
+    settings.setdefault("layer_connection_rules", [])
     settings.setdefault("spare_capacity_percent", 15.0)
     settings.setdefault("traditional_max_copper_m", 90.0)
     settings.setdefault("polan_max_ont_copper_m", 30.0)
@@ -133,6 +273,19 @@ def ensure_network_schema(data: dict) -> dict:
         1, _as_int(settings.get("expected_mer_count"), 2)
     )
     settings["redundant_core"] = bool(settings.get("redundant_core", True))
+    topology_model = _text(settings.get("topology_model")).lower()
+    settings["topology_model"] = (
+        topology_model if topology_model in NETWORK_TOPOLOGY_MODELS else "collapsed_core"
+    )
+    settings["independent_link_count"] = max(
+        1, min(16, _as_int(settings.get("independent_link_count"), 2))
+    )
+    settings["layer_connection_rules"] = normalise_layer_connection_rules(
+        settings.get("layer_connection_rules"),
+        settings["topology_model"],
+        settings["redundant_core"],
+        settings["independent_link_count"],
+    )
     settings["spare_capacity_percent"] = max(
         0.0, _as_float(settings.get("spare_capacity_percent"), 15.0)
     )
@@ -492,8 +645,19 @@ def ensure_network_schema(data: dict) -> dict:
             "primary_olt_instance_id",
             "secondary_olt_instance_id",
             "protection_type",
+            "source_layer",
+            "target_layer",
         ):
             group.setdefault(field, "")
+        group["source_instance_ids"] = _normalise_string_list(
+            group.get("source_instance_ids", [])
+        )
+        group["source_core_instance_ids"] = _normalise_string_list(
+            group.get("source_core_instance_ids", [])
+        )
+        group["required_distinct_sources"] = max(
+            1, _as_int(group.get("required_distinct_sources"), 1)
+        )
         group["auto_generated"] = bool(group.get("auto_generated", False))
 
     for vlan in data["network_vlans"]:
@@ -881,13 +1045,15 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         if not isinstance(group, dict):
             continue
         group_id = _text(group.get("id")) or "(unnamed)"
-        primary = _text(group.get("primary_olt_instance_id"))
-        secondary = _text(group.get("secondary_olt_instance_id"))
         protected = _text(group.get("protected_instance_id"))
         if protected not in instance_ids:
             messages.append(
                 f"Redundancy group {group_id} references missing protected instance {protected!r}."
             )
+        if _text(group.get("protection_type")) == "independent_layer_uplinks":
+            continue
+        primary = _text(group.get("primary_olt_instance_id"))
+        secondary = _text(group.get("secondary_olt_instance_id"))
         if primary not in instance_ids or secondary not in instance_ids:
             messages.append(
                 f"Redundancy group {group_id} must reference both primary and secondary OLT instances."
@@ -896,6 +1062,53 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             messages.append(
                 f"Redundancy group {group_id} uses the same OLT for primary and secondary service."
             )
+
+    settings = data.get("network_settings", {})
+    if _text(settings.get("technology")) == "Traditional":
+        topology_model = _text(settings.get("topology_model")).lower()
+        enabled_pairs = {
+            (
+                _text(rule.get("source_layer")).lower(),
+                _text(rule.get("target_layer")).lower(),
+            )
+            for rule in settings.get("layer_connection_rules", [])
+            if isinstance(rule, dict) and bool(rule.get("enabled", True))
+        }
+        if topology_model == "collapsed_core" and ("core", "access") not in enabled_pairs:
+            messages.append(
+                "Traditional collapsed-core planning requires an enabled Core → Access layer rule."
+            )
+        if topology_model == "three_tier":
+            if ("core", "aggregation") not in enabled_pairs:
+                messages.append(
+                    "Traditional three-tier planning requires an enabled Core → Aggregation layer rule."
+                )
+            if ("aggregation", "access") not in enabled_pairs:
+                messages.append(
+                    "Traditional three-tier planning requires an enabled Aggregation → Access layer rule."
+                )
+
+    for group in data.get("network_redundancy_groups", []):
+        if not isinstance(group, dict):
+            continue
+        if _text(group.get("protection_type")) != "independent_layer_uplinks":
+            continue
+        required = max(1, _as_int(group.get("required_distinct_sources"), 1))
+        source_ids = set(_normalise_string_list(group.get("source_instance_ids", [])))
+        if len(source_ids) < required:
+            messages.append(
+                f"Redundancy group {_text(group.get('id')) or '(unnamed)'} requires "
+                f"{required} distinct source devices but records only {len(source_ids)}."
+            )
+        if _text(group.get("target_layer")).lower() == "access" and required >= 2:
+            core_ids = set(
+                _normalise_string_list(group.get("source_core_instance_ids", []))
+            )
+            if len(core_ids) < 2:
+                messages.append(
+                    f"Redundancy group {_text(group.get('id')) or '(unnamed)'} does not "
+                    "provide two different upstream core sources."
+                )
 
     vlan_numbers: set[int] = set()
     for vlan in data.get("network_vlans", []):

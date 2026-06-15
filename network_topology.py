@@ -195,9 +195,9 @@ def _role_rank(role: str, asset_type: str) -> int:
     asset_type = asset_type.lower()
     if asset_type in {"firewall", "network_router"} or any(word in role for word in ("gateway", "router", "firewall")):
         return 0
-    if "core" in role or "aggregation" in role:
+    if "core" in role:
         return 1
-    if "distribution" in role:
+    if "aggregation" in role or "distribution" in role:
         return 2
     if asset_type == "optical_line_terminal" or role.startswith("olt_"):
         return 2
@@ -230,6 +230,7 @@ def _type_label(asset_type: str, role: str) -> str:
     if role:
         role_labels = {
             "core_switch": "Core switch",
+            "aggregation_switch": "Aggregation switch",
             "distribution_switch": "Distribution switch",
             "access_switch": "Access switch",
             "olt_primary": "Primary OLT",
