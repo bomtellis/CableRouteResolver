@@ -282,6 +282,15 @@ class TopologyModel:
                 assignments_by_instance[instance_id].append(assignment)
 
         connection_counts: Dict[str, int] = defaultdict(int)
+        occupied_ports_by_instance: Dict[str, Set[str]] = defaultdict(set)
+        for assignment in self.data.get("network_endpoint_assignments", []):
+            if not isinstance(assignment, dict):
+                continue
+            instance_id = _text(assignment.get("network_instance_id"))
+            network_port = _text(assignment.get("network_port"))
+            if instance_id and network_port and network_port != "0":
+                occupied_ports_by_instance[instance_id].add(network_port)
+
         for connection in self.data.get("network_connections", []):
             if not isinstance(connection, dict):
                 continue
@@ -309,6 +318,12 @@ class TopologyModel:
             self.adjacency[target_id].append((source_id, edge))
             connection_counts[source_id] += 1
             connection_counts[target_id] += 1
+            source_port = _text(connection.get("from_port"))
+            target_port = _text(connection.get("to_port"))
+            if source_port and source_port != "0":
+                occupied_ports_by_instance[source_id].add(source_port)
+            if target_port and target_port != "0":
+                occupied_ports_by_instance[target_id].add(target_port)
 
         for instance in self.data.get("network_asset_instances", []):
             if not isinstance(instance, dict):
@@ -335,8 +350,13 @@ class TopologyModel:
                 manufacturer=_text(asset.get("manufacturer")),
                 model=_text(asset.get("model")),
                 management_ip=_text(instance.get("management_ip")),
-                port_capacity=max(0, _int(asset.get("number_of_ports"))) * stack_members,
-                ports_used=len(assignments),
+                port_capacity=max(
+                    0,
+                    _int(asset.get("number_of_ports")),
+                    _int(asset.get("connections_in")) + _int(asset.get("connections_out")),
+                    _int(asset.get("connections_out")),
+                ) * stack_members,
+                ports_used=len(occupied_ports_by_instance.get(instance_id, set())),
                 poe_budget_w=max(0.0, _float(asset.get("poe_budget_w"))) * stack_members,
                 poe_used_w=sum(max(0.0, _float(item.get("poe_power_w"))) for item in assignments),
                 connection_count=connection_counts.get(instance_id, 0),
@@ -1678,7 +1698,9 @@ class NetworkTopologyDialog(QDialog):
         layer_gap = 420.0
         bus_lane_h = 96.0
         group_gap_y = 150.0
-        distribution_rows_per_column = 1
+        # Distribution devices (including OLTs) are stacked vertically so each
+        # physical device occupies its own row instead of forming one long row.
+        distribution_rows_per_column = 10_000
         distribution_row_gap = 58.0
         all_layers = sorted(grouped)
         column_widths: Dict[int, float] = {}
@@ -2143,6 +2165,31 @@ class NetworkTopologyDialog(QDialog):
     def _add_link_rail(self, source_id: str, child_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         if source_id not in positions:
             return
+
+        source_node = self._node_for(source_id)
+        # OLT and distribution outputs represent separate physical PON/uplink
+        # ports. Draw one routed link per child rather than merging all outputs
+        # into a shared rail, which made multiple devices look like one feeder.
+        if source_node is not None and (
+            source_node.asset_type == "optical_line_terminal"
+            or source_node.role.startswith("olt_")
+            or "distribution" in source_node.role
+        ):
+            for child_id in child_ids:
+                if child_id not in positions:
+                    continue
+                edge = None if child_id.startswith("client::") else self.model.edges_by_id.get(
+                    self.visible_parent_edge.get(child_id, "")
+                )
+                self._add_link(
+                    source_id,
+                    child_id,
+                    positions,
+                    edge,
+                    client_link=child_id.startswith("client::"),
+                )
+            return
+
         grouped: Dict[str, List[str]] = defaultdict(list)
         for child_id in child_ids:
             node = self._node_for(child_id)
