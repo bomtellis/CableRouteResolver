@@ -24,6 +24,7 @@ NETWORK_DEFAULTS = {
     "network_asset_instances": [],
     "network_connections": [],
     "network_endpoint_assignments": [],
+    "network_patch_leads": [],
     "network_redundancy_groups": [],
     "network_vlans": [],
     "network_routes": [],
@@ -45,6 +46,9 @@ NETWORK_ASSET_TYPES = {
 NETWORK_MEDIA = {"copper", "fibre", "wireless", "virtual", "stacking", "none"}
 NETWORK_CONNECTION_ROLES = {"input", "output", "uplink"}
 NETWORK_LOCATION_TYPES = {"mer", "polan"}
+
+NETWORK_PORT_TYPES = {"rj45", "sfp", "sfp+", "qsfp", "qsfp28", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"}
+NETWORK_PORT_USES = {"input", "output", "uplink", "downlink", "management", "console", "pon", "client", "patch", "stacking", "power", "spare", "other"}
 
 
 def _text(value) -> str:
@@ -136,6 +140,7 @@ def ensure_network_schema(data: dict) -> dict:
         "network_asset_instances",
         "network_connections",
         "network_endpoint_assignments",
+        "network_patch_leads",
         "network_redundancy_groups",
         "network_vlans",
         "network_routes",
@@ -196,6 +201,31 @@ def ensure_network_schema(data: dict) -> dict:
             value = _text(asset.get(field)).lower() or default
             asset[field] = value if value in NETWORK_MEDIA else default
         asset.setdefault("notes", "")
+        # Structured physical port definitions supersede the legacy aggregate
+        # counters while retaining those counters for backwards compatibility.
+        raw_port_definitions = asset.get("port_definitions", [])
+        if not isinstance(raw_port_definitions, list):
+            raw_port_definitions = []
+        port_definitions = []
+        for row in raw_port_definitions:
+            if not isinstance(row, dict):
+                continue
+            port_type = _text(row.get("port_type")).lower() or "other"
+            port_use = _text(row.get("port_use")).lower() or "other"
+            port_definitions.append({
+                "port_type": port_type if port_type in NETWORK_PORT_TYPES else "other",
+                "port_count": max(0, _as_int(row.get("port_count"))),
+                "port_use": port_use if port_use in NETWORK_PORT_USES else "other",
+                "name_prefix": _text(row.get("name_prefix")),
+            })
+        port_definitions = [row for row in port_definitions if row["port_count"] > 0]
+        if not port_definitions and asset["number_of_ports"] > 0:
+            default_type = "pon" if asset["asset_type"] in {"optical_line_terminal", "optical_network_terminal"} else ("lc" if asset["asset_type"] == "fibre_splitter" or asset.get("patch_panel_type") == "fibre" else "rj45")
+            default_use = "patch" if asset["asset_type"] == "patch_panel" else ("pon" if default_type == "pon" else "client")
+            port_definitions = [{"port_type": default_type, "port_count": asset["number_of_ports"], "port_use": default_use, "name_prefix": ""}]
+        asset["port_definitions"] = port_definitions
+        if port_definitions:
+            asset["number_of_ports"] = sum(row["port_count"] for row in port_definitions)
 
     locations = {
         _text(item.get("name")): item
@@ -304,6 +334,24 @@ def ensure_network_schema(data: dict) -> dict:
         assignment["vlan_ids"] = _normalise_string_list(assignment.get("vlan_ids", []))
         assignment.setdefault("technology", settings["technology"])
         assignment["auto_generated"] = bool(assignment.get("auto_generated", False))
+
+    for lead in data["network_patch_leads"]:
+        if not isinstance(lead, dict):
+            continue
+        lead.setdefault("id", "")
+        lead.setdefault("connection_id", "")
+        lead.setdefault("assignment_id", "")
+        lead.setdefault("instance_id", "")
+        lead.setdefault("port", "")
+        lead.setdefault("peer_instance_id", "")
+        lead.setdefault("peer_port", "")
+        lead.setdefault("endpoint_name", "")
+        lead.setdefault("port_type", "other")
+        lead.setdefault("port_use", "patch")
+        lead.setdefault("medium", "copper")
+        lead.setdefault("cable_specification", "")
+        lead["length_m"] = max(0.0, _as_float(lead.get("length_m"), 2.0))
+        lead["auto_generated"] = bool(lead.get("auto_generated", False))
 
     for group in data["network_redundancy_groups"]:
         if not isinstance(group, dict):
@@ -446,6 +494,7 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     instance_ids = validate_unique_id("network_asset_instances", "Network instance")
     connection_ids = validate_unique_id("network_connections", "Network connection")
     validate_unique_id("network_endpoint_assignments", "Network endpoint assignment")
+    validate_unique_id("network_patch_leads", "Network patch lead")
     validate_unique_id("network_redundancy_groups", "Network redundancy group")
     vlan_record_ids = validate_unique_id("network_vlans", "VLAN record")
     validate_unique_id("network_routes", "Network route")
@@ -472,6 +521,13 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             messages.append(f"Patch panel {asset_id} must specify copper or fibre.")
         if asset_type == "fibre_splitter" and not _text(asset.get("split_ratio")):
             messages.append(f"Fibre splitter {asset_id} requires a split ratio.")
+        for row_index, row in enumerate(asset.get("port_definitions", []), start=1):
+            if _text(row.get("port_type")) not in NETWORK_PORT_TYPES:
+                messages.append(f"Network asset {asset_id} port row {row_index} has an unsupported port type.")
+            if _text(row.get("port_use")) not in NETWORK_PORT_USES:
+                messages.append(f"Network asset {asset_id} port row {row_index} has an unsupported port use.")
+            if _as_int(row.get("port_count")) <= 0:
+                messages.append(f"Network asset {asset_id} port row {row_index} must have a positive port count.")
         if asset_type == "wireless_access_point" and not asset.get("frequencies"):
             messages.append(
                 f"Wireless access point {asset_id} requires at least one frequency."

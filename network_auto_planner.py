@@ -706,6 +706,7 @@ def _clear_previous_auto_design(data: dict) -> None:
         for item in data.get("network_connections", [])
         if not bool(item.get("auto_generated"))
     ]
+    data["network_patch_leads"] = [item for item in data.get("network_patch_leads", []) if not bool(item.get("auto_generated"))]
     data["network_endpoint_assignments"] = [
         item
         for item in data.get("network_endpoint_assignments", [])
@@ -749,6 +750,7 @@ class DesignBuilder:
             for item in data.get("network_connections", [])
             if _text(item.get("id"))
         }
+        self.patch_lead_ids = {_text(item.get("id")) for item in data.get("network_patch_leads", []) if _text(item.get("id"))}
         self.assignment_ids = {
             _text(item.get("id"))
             for item in data.get("network_endpoint_assignments", [])
@@ -763,6 +765,7 @@ class DesignBuilder:
         self.instances: List[dict] = []
         self.connections: List[dict] = []
         self.assignments: List[dict] = []
+        self.patch_leads: List[dict] = []
         self.locations: List[dict] = []
         self.redundancy_groups: List[dict] = []
         self.total_copper_m = 0.0
@@ -793,6 +796,43 @@ class DesignBuilder:
         }
         self.instances.append(instance)
         return instance
+
+    def _asset_for_instance(self, instance: dict) -> dict:
+        asset_id = _text(instance.get("asset_id"))
+        return next((row for row in self.data.get("network_assets", []) if _text(row.get("id")) == asset_id), {})
+
+    def _port_definition(self, instance: dict, port_name: str, medium: str, preferred_use: str = "") -> dict:
+        asset = self._asset_for_instance(instance)
+        rows = [row for row in asset.get("port_definitions", []) if isinstance(row, dict)]
+        if preferred_use:
+            matching = [row for row in rows if _text(row.get("port_use")).lower() == preferred_use]
+            if matching:
+                rows = matching
+        if rows:
+            return rows[0]
+        return {"port_type": "lc" if medium == "fibre" else "rj45", "port_use": preferred_use or "other"}
+
+    def add_patch_lead(self, *, connection_id: str = "", assignment_id: str = "", instance: dict, port: str, medium: str, peer_instance_id: str = "", peer_port: str = "", endpoint_name: str = "", preferred_use: str = "") -> dict:
+        definition = self._port_definition(instance, port, medium, preferred_use)
+        default_length = 2.0 if medium in {"copper", "fibre"} else 0.0
+        lead = {
+            "id": _next_identifier(self.patch_lead_ids, "AUTO-PL-"),
+            "connection_id": connection_id,
+            "assignment_id": assignment_id,
+            "instance_id": _text(instance.get("id")),
+            "port": str(port),
+            "peer_instance_id": peer_instance_id,
+            "peer_port": str(peer_port),
+            "endpoint_name": endpoint_name,
+            "port_type": _text(definition.get("port_type")) or ("lc" if medium == "fibre" else "rj45"),
+            "port_use": _text(definition.get("port_use")) or preferred_use or "patch",
+            "medium": medium,
+            "cable_specification": "OS2 fibre patch lead" if medium == "fibre" else "Category 6A copper patch lead",
+            "length_m": default_length,
+            "auto_generated": True,
+        }
+        self.patch_leads.append(lead)
+        return lead
 
     def add_connection(
         self,
@@ -835,6 +875,9 @@ class DesignBuilder:
             **extra,
         }
         self.connections.append(connection)
+        if medium in {"copper", "fibre"}:
+            self.add_patch_lead(connection_id=connection_id, instance=from_instance, port=str(from_port), medium=medium, peer_instance_id=_text(to_instance.get("id")), peer_port=str(to_port), preferred_use="uplink")
+            self.add_patch_lead(connection_id=connection_id, instance=to_instance, port=str(to_port), medium=medium, peer_instance_id=_text(from_instance.get("id")), peer_port=str(from_port), preferred_use="input")
         if medium == "fibre":
             self.total_fibre_m += length_m
         else:
@@ -873,6 +916,7 @@ class DesignBuilder:
             **extra,
         }
         self.assignments.append(assignment)
+        self.add_patch_lead(assignment_id=assignment["id"], instance=instance, port=str(port_name), medium="copper", endpoint_name=item.endpoint_name, preferred_use="client")
         self.total_copper_m += max(0.0, copper_length_m)
         return assignment
 
@@ -902,6 +946,7 @@ class DesignBuilder:
         self.data.setdefault("network_endpoint_assignments", []).extend(
             self.assignments
         )
+        self.data.setdefault("network_patch_leads", []).extend(self.patch_leads)
         self.data.setdefault("network_redundancy_groups", []).extend(
             self.redundancy_groups
         )

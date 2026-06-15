@@ -80,6 +80,41 @@ def _human_number(value: float) -> str:
     return f"{value:.1f}"
 
 
+def _asset_port_definitions(asset: dict) -> List[dict]:
+    rows = [row for row in asset.get("port_definitions", []) if isinstance(row, dict) and _int(row.get("port_count")) > 0]
+    if rows:
+        return rows
+    count = max(0, _int(asset.get("number_of_ports")))
+    if count <= 0:
+        return []
+    asset_type = _text(asset.get("asset_type")).lower()
+    port_type = "pon" if asset_type in {"optical_line_terminal", "optical_network_terminal"} else ("lc" if asset_type == "fibre_splitter" or _text(asset.get("patch_panel_type")).lower() == "fibre" else "rj45")
+    return [{"port_type": port_type, "port_count": count, "port_use": "patch" if asset_type == "patch_panel" else "client", "name_prefix": ""}]
+
+def _expanded_asset_ports(asset: dict) -> List[dict]:
+    result = []
+    counters: Dict[str, int] = defaultdict(int)
+    for row in _asset_port_definitions(asset):
+        port_type = _text(row.get("port_type")).lower() or "other"
+        port_use = _text(row.get("port_use")).lower() or "other"
+        prefix = _text(row.get("name_prefix")) or ({"pon":"PON", "sfp":"SFP", "sfp+":"SFP+", "qsfp":"QSFP", "qsfp28":"QSFP28", "lc":"LC", "sc":"SC", "mpo":"MPO", "rj45":""}.get(port_type, port_type.upper()))
+        for _ in range(max(0, _int(row.get("port_count")))):
+            counters[prefix] += 1
+            name = f"{prefix}-{counters[prefix]}" if prefix else str(counters[prefix])
+            result.append({"name": name, "port_type": port_type, "port_use": port_use})
+    return result
+
+def _port_definition_for_name(asset: dict, port_name: str) -> dict:
+    target = _text(port_name).lower()
+    ports = _expanded_asset_ports(asset)
+    for row in ports:
+        if _text(row.get("name")).lower() == target:
+            return row
+    for row in ports:
+        if _text(row.get("port_type")) in target or _text(row.get("port_use")) in target:
+            return row
+    return {"name": port_name, "port_type": "pon" if "pon" in target else ("sfp" if any(x in target for x in ("sfp","uplink","fibre","fiber")) else "rj45"), "port_use": "other"}
+
 def _role_rank(role: str, asset_type: str) -> int:
     role = role.lower()
     asset_type = asset_type.lower()
@@ -360,6 +395,7 @@ class TopologyModel:
                 model=_text(asset.get("model")),
                 management_ip=_text(instance.get("management_ip")),
                 port_capacity=max(
+                    sum(_int(row.get("port_count")) for row in _asset_port_definitions(asset)) * stack_members,
                     max(
                         0,
                         _int(asset.get("number_of_ports")),
@@ -871,7 +907,15 @@ class RackEquipmentItem(QGraphicsObject):
         value = _text(port_name).lower()
         if 'pon' in value:
             return 'pon'
-        if any(token in value for token in ('sfp', 'uplink', 'fibre', 'fiber', 'optical', 'lc', 'sc')):
+        if 'lc' in value:
+            return 'lc'
+        if 'sc' in value:
+            return 'sc'
+        if 'mpo' in value or 'mtp' in value:
+            return 'mpo'
+        if 'qsfp' in value:
+            return 'qsfp'
+        if any(token in value for token in ('sfp', 'uplink', 'fibre', 'fiber', 'optical')):
             return 'sfp'
         return 'rj45'
 
@@ -888,6 +932,10 @@ class RackEquipmentItem(QGraphicsObject):
             'rj45': (max(5.0, 15.9 * scale), max(4.5, 13.5 * scale)),
             'sfp': (max(5.0, 14.0 * scale), max(3.5, 9.0 * scale)),
             'pon': (max(5.0, 13.0 * scale), max(3.5, 8.5 * scale)),
+            'lc': (max(5.0, 12.0 * scale), max(3.5, 8.0 * scale)),
+            'sc': (max(5.0, 13.0 * scale), max(4.0, 10.0 * scale)),
+            'mpo': (max(6.0, 16.0 * scale), max(3.5, 7.0 * scale)),
+            'qsfp': (max(6.0, 18.0 * scale), max(4.0, 10.0 * scale)),
         }
         ear_w = min(15.0, self._width * 0.045)
         left = ear_w + max(4.0, 5.0 * scale)
@@ -918,7 +966,7 @@ class RackEquipmentItem(QGraphicsObject):
         y0 = top + max(0.0, (usable_h - block_h) / 2.0)
         for index, port_node in enumerate(self.port_nodes):
             row, col = divmod(index, per_row)
-            kind = self._port_kind(port_node.details.get('port_name', ''))
+            kind = self._port_kind(port_node.details.get('port_type') or port_node.details.get('port_name', ''))
             pw, ph = sizes[kind]
             x = left + col * (max_w + gap_x) + (max_w - pw) / 2.0
             y = y0 + row * (max_h + gap_y) + (max_h - ph) / 2.0
@@ -950,7 +998,7 @@ class RackEquipmentItem(QGraphicsObject):
                 continue
             occupied = bool(port_node.details.get('occupied'))
             fill = QColor('#c94c4c') if occupied else QColor('#41a85f')
-            kind = self._port_kind(port_node.details.get('port_name', ''))
+            kind = self._port_kind(port_node.details.get('port_type') or port_node.details.get('port_name', ''))
             painter.setPen(QPen(fill.darker(175), max(0.6, port_rect.width() * 0.06)))
             painter.setBrush(fill)
             if kind == 'rj45':
@@ -967,6 +1015,18 @@ class RackEquipmentItem(QGraphicsObject):
                 painter.drawRoundedRect(port_rect, port_rect.height()*0.28, port_rect.height()*0.28)
                 painter.setBrush(fill.darker(150))
                 painter.drawEllipse(port_rect.adjusted(port_rect.width()*0.27, port_rect.height()*0.22, -port_rect.width()*0.27, -port_rect.height()*0.22))
+            elif kind == 'lc':
+                painter.drawRoundedRect(port_rect, 1.0, 1.0)
+                painter.setBrush(fill.darker(150))
+                half = port_rect.width()/2.0
+                painter.drawEllipse(QRectF(port_rect.left()+half*0.15, port_rect.top()+port_rect.height()*0.2, half*0.55, port_rect.height()*0.6))
+                painter.drawEllipse(QRectF(port_rect.left()+half*1.15, port_rect.top()+port_rect.height()*0.2, half*0.55, port_rect.height()*0.6))
+            elif kind == 'sc':
+                painter.drawRect(port_rect)
+                painter.setBrush(fill.darker(150)); painter.drawEllipse(port_rect.adjusted(port_rect.width()*0.28, port_rect.height()*0.2, -port_rect.width()*0.28, -port_rect.height()*0.2))
+            elif kind in {'mpo', 'qsfp'}:
+                painter.drawRect(port_rect)
+                painter.setBrush(fill.darker(150)); painter.drawRoundedRect(port_rect.adjusted(port_rect.width()*0.12, port_rect.height()*0.25, -port_rect.width()*0.12, -port_rect.height()*0.25), 0.5, 0.5)
             else:
                 painter.drawRoundedRect(port_rect, 0.8, 0.8)
                 painter.setBrush(fill.darker(150))
@@ -1017,7 +1077,15 @@ class SwitchFrontPanelItem(QGraphicsObject):
         value = _text(port_name).lower()
         if 'pon' in value:
             return 'pon'
-        if any(token in value for token in ('sfp', 'uplink', 'fibre', 'fiber', 'optical', 'lc', 'sc')):
+        if 'lc' in value:
+            return 'lc'
+        if 'sc' in value:
+            return 'sc'
+        if 'mpo' in value or 'mtp' in value:
+            return 'mpo'
+        if 'qsfp' in value:
+            return 'qsfp'
+        if any(token in value for token in ('sfp', 'uplink', 'fibre', 'fiber', 'optical')):
             return 'sfp'
         return 'rj45'
 
@@ -1043,7 +1111,7 @@ class SwitchFrontPanelItem(QGraphicsObject):
         for index, port_node in enumerate(self.port_nodes):
             row = index // per_row
             col = index % per_row
-            kind = self._port_kind(port_node.details.get('port_name', ''))
+            kind = self._port_kind(port_node.details.get('port_type') or port_node.details.get('port_name', ''))
             pw, ph = (sfp_w, sfp_h) if kind in {'sfp', 'pon'} else (rj_w, rj_h)
             x = margin_x + col * (max_w + gap_x) + (max_w - pw) / 2.0
             y = start_y + row * row_pitch + (max(rj_h, sfp_h) - ph) / 2.0
@@ -1067,13 +1135,24 @@ class SwitchFrontPanelItem(QGraphicsObject):
                 continue
             occupied = bool(port_node.details.get('occupied'))
             fill = QColor('#c94c4c') if occupied else QColor('#41a85f')
-            painter.setPen(QPen(fill.darker(170), 1.0))
+            kind = self._port_kind(port_node.details.get('port_type') or port_node.details.get('port_name', ''))
+            painter.setPen(QPen(fill.darker(170), 1.2 if kind in {'sfp','qsfp','mpo'} else 1.0))
             painter.setBrush(fill)
-            painter.drawRoundedRect(port_rect, 1.5, 1.5)
-            # Inner opening makes the symbol read as RJ45/SFP rather than a plain block.
-            inner = port_rect.adjusted(port_rect.width()*0.18, port_rect.height()*0.22, -port_rect.width()*0.18, -port_rect.height()*0.18)
-            painter.setBrush(fill.darker(145))
-            painter.drawRect(inner)
+            if kind == 'rj45':
+                painter.drawRoundedRect(port_rect, 1.5, 1.5)
+                inner = port_rect.adjusted(port_rect.width()*0.18, port_rect.height()*0.22, -port_rect.width()*0.18, -port_rect.height()*0.18)
+                painter.setBrush(fill.darker(145)); painter.drawRect(inner)
+            elif kind == 'pon':
+                painter.drawRoundedRect(port_rect, port_rect.height()*0.3, port_rect.height()*0.3)
+                painter.setBrush(fill.darker(145)); painter.drawEllipse(port_rect.adjusted(port_rect.width()*0.28, port_rect.height()*0.2, -port_rect.width()*0.28, -port_rect.height()*0.2))
+            elif kind == 'lc':
+                painter.drawRect(port_rect); painter.setBrush(fill.darker(145))
+                painter.drawEllipse(QRectF(port_rect.left()+port_rect.width()*0.12, port_rect.top()+port_rect.height()*0.2, port_rect.width()*0.28, port_rect.height()*0.6))
+                painter.drawEllipse(QRectF(port_rect.left()+port_rect.width()*0.60, port_rect.top()+port_rect.height()*0.2, port_rect.width()*0.28, port_rect.height()*0.6))
+            elif kind == 'sc':
+                painter.drawRect(port_rect); painter.setBrush(fill.darker(145)); painter.drawEllipse(port_rect.adjusted(port_rect.width()*0.3, port_rect.height()*0.2, -port_rect.width()*0.3, -port_rect.height()*0.2))
+            else:
+                painter.drawRect(port_rect); painter.setBrush(fill.darker(145)); painter.drawRect(port_rect.adjusted(port_rect.width()*0.12, port_rect.height()*0.22, -port_rect.width()*0.12, -port_rect.height()*0.22))
             painter.setFont(QFont('Arial', 5))
             painter.setPen(QColor('#ffffff'))
             painter.drawText(port_rect.adjusted(0, -10, 0, 0), Qt.AlignHCenter|Qt.AlignTop, _text(port_node.details.get('port_name')))
@@ -1683,6 +1762,8 @@ class NetworkTopologyDialog(QDialog):
         else:
             if node.role == "switch_port":
                 self._detail_row("Port", _text(node.details.get("port_name")), True)
+                self._detail_row("Port type", _text(node.details.get("port_type")).upper())
+                self._detail_row("Port use", _text(node.details.get("port_use")).replace("_", " ").title())
                 self._detail_row("Status", "Occupied" if node.details.get("occupied") else "Available")
                 connected_devices = node.details.get("connected_devices", []) or []
                 self._detail_row("Directly connected", "\n".join(str(value) for value in connected_devices) if connected_devices else "—")
@@ -1814,12 +1895,12 @@ class NetworkTopologyDialog(QDialog):
         )
 
     def _is_active_topology_device(self, node_id: str) -> bool:
-        """Return True for logical topology devices and fibre splitters.
+        """Return True only for devices that belong in the logical network hierarchy.
 
-        Fibre splitters are passive, but they are an essential logical stage in
-        a PoLAN hierarchy and therefore remain visible between the OLT and ONTs.
-        Rack support, patching, cable-management and power equipment remain
-        available only to rack and port views.
+        Rack support, passive optical/copper components and power equipment stay
+        available to rack and switch-port views, but are deliberately excluded
+        from the overview topology because they add large numbers of cards and
+        links without representing another logical network tier.
         """
         node = self.model.nodes.get(node_id)
         if node is None:
@@ -1831,20 +1912,14 @@ class NetworkTopologyDialog(QDialog):
         role = _text(node.role).lower()
         name = _text(node.name).lower()
 
-        # Splitters are the one passive component deliberately retained in the
-        # logical topology because they define the OLT-to-ONT fan-out.  Test for
-        # them before applying the generic passive-component filters.
-        if asset_type == "fibre_splitter" or "splitter" in role:
-            return True
-
         passive_or_power_tokens = (
-            "patch", "coupler", "adapter", "splice",
+            "patch", "splitter", "coupler", "adapter", "splice",
             "cable management", "cable-management", "cable manager",
             "ups", "pdu", "power distribution", "power supply",
             "battery", "rectifier", "shelf", "blanking panel",
         )
         if asset_type in {
-            "patch_panel", "cable_management",
+            "patch_panel", "fibre_splitter", "cable_management",
             "cable_manager", "ups", "pdu", "power_device",
         }:
             return False
@@ -2242,7 +2317,8 @@ class NetworkTopologyDialog(QDialog):
         port_records, poe_by_port, port_traces = self._device_port_records(switch_id)
 
         capacity = max(0, switch.port_capacity)
-        names = {str(number) for number in range(1, capacity + 1)}
+        defined_ports = _expanded_asset_ports(switch.asset)
+        names = {row["name"] for row in defined_ports} or {str(number) for number in range(1, capacity + 1)}
         names.update(port_records)
         def port_key(value: str):
             try:
@@ -2270,6 +2346,8 @@ class NetworkTopologyDialog(QDialog):
                 details={
                     "parent_instance_id": switch_id,
                     "port_name": port,
+                    "port_type": _port_definition_for_name(switch.asset, port).get("port_type", "other"),
+                    "port_use": _port_definition_for_name(switch.asset, port).get("port_use", "other"),
                     "connected_devices": connected,
                     "occupied": occupied,
                     **port_traces.get(port, {}),
@@ -2287,7 +2365,8 @@ class NetworkTopologyDialog(QDialog):
         records, poe_by_port, port_traces = self._device_port_records(device_id)
 
         capacity = max(0, device.port_capacity)
-        names = {str(number) for number in range(1, capacity + 1)}
+        defined_ports = _expanded_asset_ports(device.asset)
+        names = {row["name"] for row in defined_ports} or {str(number) for number in range(1, capacity + 1)}
         names.update(records)
         def key(value: str):
             digits = ''.join(ch for ch in value if ch.isdigit())
@@ -2315,6 +2394,8 @@ class NetworkTopologyDialog(QDialog):
                 details={
                     "parent_instance_id": device_id,
                     "port_name": port,
+                    "port_type": _port_definition_for_name(device.asset, port).get("port_type", "other"),
+                    "port_use": _port_definition_for_name(device.asset, port).get("port_use", "other"),
                     "connected_devices": connected,
                     "occupied": bool(connected),
                     **port_traces.get(port, {}),
