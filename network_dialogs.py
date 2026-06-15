@@ -48,6 +48,8 @@ PATCH_PANEL_TYPES = ["", "copper", "fibre"]
 SPLIT_RATIOS = ["", "1:2", "1:4", "1:8", "1:16", "1:32", "1:64", "1:128"]
 FREQUENCY_OPTIONS = ["2.4 GHz", "5 GHz", "6 GHz", "60 GHz", "868 MHz", "433 MHz"]
 NETWORK_TECHNOLOGIES = ["Traditional", "PoLAN"]
+PORT_TYPE_OPTIONS = ["rj45", "sfp", "sfp+", "qsfp", "qsfp28", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"]
+PORT_USE_OPTIONS = ["input", "output", "uplink", "downlink", "management", "console", "pon", "client", "patch", "stacking", "power", "spare", "other"]
 
 from network_auto_planner import NetworkPlanningError, generate_network_design
 
@@ -101,7 +103,7 @@ class NetworkAssetEditorDialog(QDialog):
         self.setWindowTitle("Network Asset")
         self.asset = deepcopy(asset or {})
         self.result: Optional[dict] = None
-        self.resize(620, 720)
+        self.resize(760, 860)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -196,6 +198,34 @@ class NetworkAssetEditorDialog(QDialog):
         self.uplink_ports_spin.setRange(0, 100_000)
         self.uplink_ports_spin.setValue(int(self.asset.get("uplink_ports", 0) or 0))
 
+        self.port_table = QTableWidget(0, 3)
+        self.port_table.setHorizontalHeaderLabels(["Port type", "Port count", "Port use"])
+        self.port_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.port_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.port_table.setMinimumHeight(170)
+        port_rows = self.asset.get("port_definitions", [])
+        if not isinstance(port_rows, list) or not port_rows:
+            count = int(self.asset.get("number_of_ports", 0) or 0)
+            if count:
+                asset_type = _text(self.asset.get("asset_type"))
+                connector = "pon" if asset_type == "fibre_splitter" else ("lc" if _text(self.asset.get("patch_panel_type")) == "fibre" else "rj45")
+                use = "patch" if asset_type == "patch_panel" else ("pon" if asset_type in {"fibre_splitter", "optical_line_terminal"} else "client")
+                port_rows = [{"port_type": connector, "port_count": count, "port_use": use}]
+        for row in port_rows:
+            if isinstance(row, dict):
+                self._append_port_row(row)
+        port_buttons = QWidget()
+        port_buttons_layout = QHBoxLayout(port_buttons)
+        port_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        add_port_button = QPushButton("Add port row")
+        remove_port_button = QPushButton("Remove selected row")
+        add_port_button.clicked.connect(lambda: self._append_port_row({}))
+        remove_port_button.clicked.connect(self._remove_selected_port_rows)
+        port_buttons_layout.addWidget(add_port_button)
+        port_buttons_layout.addWidget(remove_port_button)
+        port_buttons_layout.addStretch(1)
+        self.port_table.itemChanged.connect(self._sync_legacy_port_counts)
+
         self.supports_stacking_check = QCheckBox("Can form a logical stack")
         self.supports_stacking_check.setChecked(
             bool(self.asset.get("supports_stacking", False))
@@ -269,10 +299,8 @@ class NetworkAssetEditorDialog(QDialog):
         form.addRow("Additional frequencies", self.additional_frequencies_edit)
         form.addRow("Power input", self.power_input_spin)
         form.addRow("PoE budget", self.poe_budget_spin)
-        form.addRow("Total number of ports", self.number_of_ports_spin)
-        form.addRow("Connections in", self.connections_in_spin)
-        form.addRow("Connections out", self.connections_out_spin)
-        form.addRow("Uplink ports", self.uplink_ports_spin)
+        form.addRow("Physical ports", self.port_table)
+        form.addRow("Port rows", port_buttons)
         form.addRow("Stacking", self.supports_stacking_check)
         form.addRow("Maximum stack members", self.max_stack_members_spin)
         form.addRow("Input connection type", self.input_type_combo)
@@ -291,6 +319,74 @@ class NetworkAssetEditorDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _append_port_row(self, row: dict) -> None:
+        table_row = self.port_table.rowCount()
+        self.port_table.insertRow(table_row)
+        type_combo = QComboBox()
+        type_combo.addItems(PORT_TYPE_OPTIONS)
+        _set_combo_text(type_combo, _text(row.get("port_type")) or "rj45")
+        use_combo = QComboBox()
+        use_combo.addItems(PORT_USE_OPTIONS)
+        _set_combo_text(use_combo, _text(row.get("port_use")) or "client")
+        count_item = QTableWidgetItem(str(max(1, int(row.get("port_count", 1) or 1))))
+        count_item.setTextAlignment(Qt.AlignCenter)
+        self.port_table.setCellWidget(table_row, 0, type_combo)
+        self.port_table.setItem(table_row, 1, count_item)
+        self.port_table.setCellWidget(table_row, 2, use_combo)
+        type_combo.currentTextChanged.connect(self._sync_legacy_port_counts)
+        use_combo.currentTextChanged.connect(self._sync_legacy_port_counts)
+        self._sync_legacy_port_counts()
+
+    def _remove_selected_port_rows(self) -> None:
+        rows = sorted(
+            {index.row() for index in self.port_table.selectionModel().selectedRows()},
+            reverse=True,
+        )
+        for row in rows:
+            self.port_table.removeRow(row)
+        self._sync_legacy_port_counts()
+
+    def _port_definitions(self) -> List[dict]:
+        result: List[dict] = []
+        for row in range(self.port_table.rowCount()):
+            type_combo = self.port_table.cellWidget(row, 0)
+            use_combo = self.port_table.cellWidget(row, 2)
+            item = self.port_table.item(row, 1)
+            try:
+                count = max(0, int(item.text() if item else 0))
+            except (TypeError, ValueError):
+                count = 0
+            if count <= 0:
+                continue
+            result.append(
+                {
+                    "port_type": _text(type_combo.currentText() if type_combo else "other").lower(),
+                    "port_count": count,
+                    "port_use": _text(use_combo.currentText() if use_combo else "other").lower(),
+                    "name_prefix": "",
+                }
+            )
+        return result
+
+    def _sync_legacy_port_counts(self, *_args) -> None:
+        if not hasattr(self, "port_table"):
+            return
+        rows = self._port_definitions()
+        self.number_of_ports_spin.setValue(sum(row["port_count"] for row in rows))
+        self.connections_in_spin.setValue(
+            sum(row["port_count"] for row in rows if row["port_use"] == "input")
+        )
+        self.connections_out_spin.setValue(
+            sum(
+                row["port_count"]
+                for row in rows
+                if row["port_use"] in {"output", "downlink", "client", "pon", "patch"}
+            )
+        )
+        self.uplink_ports_spin.setValue(
+            sum(row["port_count"] for row in rows if row["port_use"] == "uplink")
+        )
 
     def _update_visibility(self) -> None:
         asset_type = _text(self.asset_type_combo.currentData())
@@ -339,6 +435,12 @@ class NetworkAssetEditorDialog(QDialog):
                 self, "Invalid asset", "A fibre splitter requires a split ratio."
             )
             return
+        port_definitions = self._port_definitions()
+        if not port_definitions:
+            QMessageBox.critical(
+                self, "Invalid asset", "At least one physical port row is required."
+            )
+            return
         frequencies = self._frequencies()
         if asset_type == "wireless_access_point" and not frequencies:
             QMessageBox.critical(
@@ -372,7 +474,8 @@ class NetworkAssetEditorDialog(QDialog):
             "frequencies": frequencies if asset_type == "wireless_access_point" else [],
             "power_input_w": float(self.power_input_spin.value()),
             "poe_budget_w": float(self.poe_budget_spin.value()),
-            "number_of_ports": int(self.number_of_ports_spin.value()),
+            "port_definitions": port_definitions,
+            "number_of_ports": sum(row["port_count"] for row in port_definitions),
             "connections_in": int(self.connections_in_spin.value()),
             "connections_out": int(self.connections_out_spin.value()),
             "uplink_ports": int(self.uplink_ports_spin.value()),
