@@ -1523,6 +1523,7 @@ class NetworkTopologyDialog(QDialog):
 
         self.show_clients_check = QCheckBox("Endpoint groups")
         self.show_clients_check.setToolTip("Show department endpoint groups beneath their serving switch or ONT")
+        self.show_clients_check.setChecked(True)
         self.show_clients_check.toggled.connect(lambda _checked: self.rebuild_scene(fit=False))
         layout.addWidget(self.show_clients_check)
 
@@ -1984,6 +1985,14 @@ class NetworkTopologyDialog(QDialog):
         descendants = self.model.descendants(node_id)
         if node is not None:
             if node.asset_type == "site_group":
+                return True
+            # Endpoint groups are aggregated and inexpensive. When the option is
+            # enabled, automatically expose the serving device's endpoint groups
+            # unless the user has explicitly collapsed that branch.
+            if (
+                self.show_clients_check.isChecked()
+                and self.model.client_groups.get(node_id)
+            ):
                 return True
             # Automatically opening every OLT, core or distribution fan-out is
             # the main cause of very large projects creating thousands of
@@ -3135,8 +3144,13 @@ class NetworkTopologyDialog(QDialog):
         positions = self._layout_visible(visible_ids)
         self._update_breadcrumb()
         self._visible_failover_bus_nodes = set()
+        visible_cross_edges = (
+            self._visible_cross_edges(positions)
+            if self.rack_focus is None and self.switch_port_focus is None
+            else []
+        )
         if self.rack_focus is None:
-            for edge in self.model.cross_edges():
+            for edge in visible_cross_edges:
                 if edge.source_id in positions and edge.target_id in positions:
                     _source_id, target_id = self._cross_link_origin_target(edge)
                     self._visible_failover_bus_nodes.add(target_id)
@@ -3166,7 +3180,7 @@ class NetworkTopologyDialog(QDialog):
 
         if self.show_redundant_check.isChecked() and self.rack_focus is None and self.switch_port_focus is None:
             cross_by_source: Dict[str, List[Tuple[str, TopologyEdge]]] = defaultdict(list)
-            for edge in self.model.cross_edges():
+            for edge in visible_cross_edges:
                 if edge.source_id in positions and edge.target_id in positions:
                     source_id, target_id = self._cross_link_origin_target(edge)
                     cross_by_source[source_id].append((target_id, edge))
@@ -3566,6 +3580,23 @@ class NetworkTopologyDialog(QDialog):
             "none": QColor("#6f7b86"),
         }.get(medium, QColor("#6f7b86"))
 
+    @staticmethod
+    def _edge_is_failover(edge: Optional[TopologyEdge]) -> bool:
+        if edge is None:
+            return False
+        return bool(
+            edge.standby
+            or _text(edge.redundancy_role).lower() in {"secondary", "standby", "failover"}
+            or bool(edge.connection.get("standby", False))
+            or _text(edge.connection.get("redundancy_role")).lower()
+            in {"secondary", "standby", "failover"}
+        )
+
+    def _edge_colour(self, edge: Optional[TopologyEdge], medium: str = "") -> QColor:
+        if self._edge_is_failover(edge):
+            return QColor("#d68f52")
+        return self._link_colour(medium or (edge.medium if edge else ""))
+
     def _add_link_label(self, text: str, colour: QColor, point: QPointF) -> None:
         if not text:
             return
@@ -3674,8 +3705,12 @@ class NetworkTopologyDialog(QDialog):
                 trunk_item.setZValue(-1.0)
                 self.scene.addItem(trunk_item)
                 for child_id, end, edge in endpoints:
-                    colour = self._link_colour(edge.medium if edge else "fibre")
-                    self._add_bus_drop(child_id, positions, colour, z_value=-0.95)
+                    failover = self._edge_is_failover(edge)
+                    colour = self._edge_colour(edge, edge.medium if edge else "fibre")
+                    self._add_bus_drop(
+                        child_id, positions, colour, failover=failover,
+                        z_value=-0.80 if failover else -0.95,
+                    )
                     if edge and self.show_link_labels_check.isChecked():
                         self._add_link_label(edge.label, colour, QPointF((entry_x + end.x()) / 2.0, end.y()))
                 continue
@@ -3698,8 +3733,8 @@ class NetworkTopologyDialog(QDialog):
             for child_id, end, edge in endpoints:
                 client_link = child_id.startswith("client::")
                 medium = edge.medium if edge else ("virtual" if client_link else "copper")
-                colour = self._link_colour(medium)
-                standby = bool(edge and (edge.standby or edge.redundancy_role.lower() in {"secondary", "standby"}))
+                standby = self._edge_is_failover(edge)
+                colour = QColor("#d68f52") if standby else self._link_colour(medium)
                 pen = QPen(colour, 2.0 if not client_link else 1.3)
                 if standby or client_link:
                     pen.setStyle(Qt.DashLine)
@@ -3742,8 +3777,8 @@ class NetworkTopologyDialog(QDialog):
         for child_id, end, edge in endpoints:
             client_link = child_id.startswith("client::")
             medium = edge.medium if edge else ("virtual" if client_link else "copper")
-            colour = QColor("#d68f52") if cross_link else self._link_colour(medium)
-            standby = bool(edge and (edge.standby or edge.redundancy_role.lower() in {"secondary", "standby"}))
+            standby = cross_link or self._edge_is_failover(edge)
+            colour = QColor("#d68f52") if standby else self._link_colour(medium)
             pen = QPen(colour, 2.0 if not client_link else 1.3)
             if standby or client_link or cross_link:
                 pen.setStyle(Qt.DashLine)
@@ -3756,6 +3791,113 @@ class NetworkTopologyDialog(QDialog):
             self.scene.addItem(branch_item)
             if edge and self.show_link_labels_check.isChecked() and not client_link:
                 self._add_link_label(edge.label, colour, QPointF((rail_x + end.x()) / 2.0, branch_y))
+
+    def _active_descendants_for_hidden(
+        self, node_id: str, positions: Dict[str, QPointF]
+    ) -> List[str]:
+        """Return the first visible active nodes below a hidden passive node.
+
+        Passive splitters, patch panels and rack support items are omitted from
+        the overview. A standby fibre commonly terminates on one of those hidden
+        nodes, so the failover link must continue to the first visible active
+        descendant rather than disappearing with the passive card.
+        """
+        result: List[str] = []
+        pending = deque(self.model.children.get(node_id, []))
+        seen: Set[str] = set()
+        while pending:
+            candidate_id = pending.popleft()
+            if candidate_id in seen:
+                continue
+            seen.add(candidate_id)
+            if candidate_id in positions and self._is_active_topology_device(candidate_id):
+                result.append(candidate_id)
+                continue
+            pending.extend(self.model.children.get(candidate_id, []))
+        return result
+
+    def _tree_length_between(self, ancestor_id: str, descendant_id: str) -> float:
+        """Return the saved cable length along a parent-chain segment."""
+        total = 0.0
+        cursor = descendant_id
+        guard = 0
+        while cursor and cursor != ancestor_id and guard <= len(self.model.nodes):
+            edge = self.model.edges_by_id.get(self.model.parent_edge.get(cursor, ""))
+            if edge is not None:
+                total += max(0.0, edge.length_m)
+            cursor = self.model.parent.get(cursor, "")
+            guard += 1
+        return total if cursor == ancestor_id else 0.0
+
+    def _visible_cross_edges(
+        self, positions: Dict[str, QPointF]
+    ) -> List[TopologyEdge]:
+        """Return cross/failover links mapped onto visible active devices.
+
+        Direct cross-links are retained unchanged. Standby links ending on a
+        hidden splitter or patch panel are expanded to the first visible active
+        descendants, preserving the failover relationship in the active-only
+        topology.
+        """
+        visible: List[TopologyEdge] = []
+        seen: Set[Tuple[str, str, str, str]] = set()
+        for edge in self.model.cross_edges():
+            source_visible = edge.source_id in positions
+            target_visible = edge.target_id in positions
+            if source_visible and target_visible:
+                key = (edge.source_id, edge.target_id, edge.protection_group, edge.edge_id)
+                if key not in seen:
+                    seen.add(key)
+                    visible.append(edge)
+                continue
+
+            is_failover = bool(
+                edge.standby
+                or edge.redundancy_role.lower() in {"secondary", "standby", "failover"}
+                or edge.protection_group
+            )
+            if not is_failover:
+                continue
+
+            mappings: List[Tuple[str, str, float]] = []
+            if source_visible and not target_visible:
+                for target_id in self._active_descendants_for_hidden(edge.target_id, positions):
+                    mappings.append(
+                        (edge.source_id, target_id, self._tree_length_between(edge.target_id, target_id))
+                    )
+            elif target_visible and not source_visible:
+                for source_id in self._active_descendants_for_hidden(edge.source_id, positions):
+                    mappings.append(
+                        (source_id, edge.target_id, self._tree_length_between(edge.source_id, source_id))
+                    )
+
+            for source_id, target_id, extra_length in mappings:
+                if source_id == target_id or source_id not in positions or target_id not in positions:
+                    continue
+                pair = tuple(sorted((source_id, target_id)))
+                key = (pair[0], pair[1], edge.protection_group, edge.edge_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                synthetic = TopologyEdge(
+                    edge_id=f"visible-failover::{edge.edge_id}::{source_id}::{target_id}",
+                    source_id=source_id,
+                    target_id=target_id,
+                    medium=edge.medium or "fibre",
+                    source_port=edge.source_port,
+                    target_port=edge.target_port,
+                    length_m=max(0.0, edge.length_m) + max(0.0, extra_length),
+                    standby=True,
+                    redundancy_role=edge.redundancy_role or "standby",
+                    protection_group=edge.protection_group,
+                    connection={
+                        **edge.connection,
+                        "collapsed_passive_failover": edge.edge_id,
+                    },
+                )
+                self._visible_synthetic_edges[synthetic.edge_id] = synthetic
+                visible.append(synthetic)
+        return visible
 
     def _cross_link_origin_target(self, edge: TopologyEdge) -> Tuple[str, str]:
         source_rank = self.model._hierarchy_rank(edge.source_id)
@@ -3890,8 +4032,10 @@ class NetworkTopologyDialog(QDialog):
     ) -> None:
         source_pos = positions[source_id]
         target_pos = positions[target_id]
-        target_bus = self._bus_for_node(target_id, failover=cross_link)
-        if cross_link:
+        standby = self._edge_is_failover(edge)
+        failover_style = cross_link or standby
+        target_bus = self._bus_for_node(target_id, failover=failover_style)
+        if failover_style:
             source_center = QPointF(source_pos.x() + self.CARD_W / 2.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
             target_center = QPointF(
                 target_pos.x() + self.CARD_W / 2.0,
@@ -3912,9 +4056,9 @@ class NetworkTopologyDialog(QDialog):
         if target_bus is not None and not client_link:
             bus_anchor, bus_left, bus_right = target_bus
             target_right_of_source = bus_anchor.x() >= start.x()
-            if cross_link and self._failover_bus_column_x is not None and target_right_of_source:
+            if failover_style and self._failover_bus_column_x is not None and target_right_of_source:
                 entry_x = self._failover_bus_column_x
-            elif not cross_link and self._main_bus_column_x is not None and target_right_of_source:
+            elif not failover_style and self._main_bus_column_x is not None and target_right_of_source:
                 entry_x = self._main_bus_column_x
             else:
                 entry_x = bus_left - 42.0 if target_right_of_source else bus_right + 42.0
@@ -3925,21 +4069,21 @@ class NetworkTopologyDialog(QDialog):
             path.lineTo(QPointF(bus_entry_x, bus_anchor.y()))
 
             medium = edge.medium if edge else "fibre"
-            colour = QColor("#d68f52") if cross_link else self._link_colour(medium)
-            standby = bool(edge and (edge.standby or edge.redundancy_role.lower() in {"secondary", "standby"}))
+            standby = cross_link or self._edge_is_failover(edge)
+            colour = QColor("#d68f52") if standby else self._link_colour(medium)
             pen = QPen(colour, 2.0)
-            if standby or cross_link:
+            if failover_style:
                 pen.setStyle(Qt.DashLine)
             path_item = QGraphicsPathItem(path)
             path_item.setPen(pen)
-            path_item.setZValue(-1.0 if not cross_link else -0.8)
+            path_item.setZValue(-1.0 if not failover_style else -0.8)
             self.scene.addItem(path_item)
-            self._add_bus_drop(target_id, positions, colour, failover=cross_link, z_value=-0.95 if not cross_link else -0.8)
+            self._add_bus_drop(target_id, positions, colour, failover=failover_style, z_value=-0.95 if not failover_style else -0.8)
             if edge and self.show_link_labels_check.isChecked():
                 self._add_link_label(edge.label, colour, QPointF((entry_x + bus_anchor.x()) / 2.0, bus_anchor.y()))
             return
         path = QPainterPath(start)
-        if cross_link:
+        if failover_style:
             bend = max(60.0, abs(end.x() - start.x()) * 0.20)
             direction = -1.0 if end.x() >= start.x() else 1.0
             control_x = (start.x() + end.x()) / 2.0 + direction * bend
@@ -3953,21 +4097,20 @@ class NetworkTopologyDialog(QDialog):
             path.lineTo(end)
 
         medium = edge.medium if edge else ("virtual" if client_link else "copper")
-        colour = QColor("#d68f52") if cross_link else self._link_colour(medium)
-        standby = bool(edge and (edge.standby or edge.redundancy_role.lower() in {"secondary", "standby"}))
+        colour = QColor("#d68f52") if failover_style else self._link_colour(medium)
         pen = QPen(colour, 2.0 if not client_link else 1.3)
-        if standby or cross_link or client_link:
+        if failover_style or client_link:
             pen.setStyle(Qt.DashLine)
         path_item = QGraphicsPathItem(path)
         path_item.setPen(pen)
-        path_item.setZValue(-1.0 if not cross_link else -0.8)
+        path_item.setZValue(-1.0 if not failover_style else -0.8)
         self.scene.addItem(path_item)
 
         if edge and self.show_link_labels_check.isChecked() and not client_link:
             # Keep cable-length labels on a horizontal section of the
             # orthogonal topology link. Using pointAtPercent(0.50) can place
             # the label on the vertical riser when cards have different Y positions.
-            if cross_link:
+            if failover_style:
                 first_length = abs(control_x - start.x())
                 last_length = abs(end.x() - control_x)
                 if last_length >= first_length:
