@@ -793,18 +793,88 @@ class TopologyCardItem(QGraphicsObject):
 class RackEquipmentItem(QGraphicsObject):
     activated = Signal(str)
     branchToggleRequested = Signal(str)
+    portActivated = Signal(str)
 
-    def __init__(self, node: TopologyNode, width: float, height: float, units: int):
+    def __init__(
+        self,
+        node: TopologyNode,
+        width: float,
+        height: float,
+        units: int,
+        port_nodes: Sequence[TopologyNode] = (),
+    ):
         super().__init__()
         self.node = node
         self._width = float(width)
         self._height = max(8.0, float(height))
         self.units = max(1, int(units))
+        self.port_nodes = list(port_nodes)
+        self._port_rects: Dict[str, QRectF] = {}
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
+        self._build_port_rects()
 
     def boundingRect(self) -> QRectF:
         return QRectF(0.0, 0.0, self._width, self._height)
+
+    @staticmethod
+    def _port_kind(port_name: str) -> str:
+        value = _text(port_name).lower()
+        if 'pon' in value:
+            return 'pon'
+        if any(token in value for token in ('sfp', 'uplink', 'fibre', 'fiber', 'optical')):
+            return 'sfp'
+        return 'rj45'
+
+    def _build_port_rects(self) -> None:
+        self._port_rects.clear()
+        if not self.port_nodes or self._width < 42.0 or self._height < 14.0:
+            return
+        # The rack face uses a 482.6 mm-wide 19-inch panel. Shared OLT modules
+        # retain that same scale after the face is divided into equal sections.
+        scale = self._width / 482.6
+        # Keep physical proportions but enforce a small clickable minimum when
+        # an OLT module occupies only a fraction of the rack width.
+        sizes = {
+            'rj45': (max(5.0, 15.9 * scale), max(4.5, 13.5 * scale)),
+            'sfp': (max(5.0, 14.0 * scale), max(3.5, 9.0 * scale)),
+            'pon': (max(5.0, 13.0 * scale), max(3.5, 8.5 * scale)),
+        }
+        ear_w = min(15.0, self._width * 0.045)
+        left = ear_w + max(4.0, 5.0 * scale)
+        right = self._width - ear_w - max(4.0, 5.0 * scale)
+        top = max(10.0, self._height * 0.25)
+        bottom = self._height - max(3.0, self._height * 0.10)
+        usable_w = max(8.0, right - left)
+        usable_h = max(5.0, bottom - top)
+        max_w = max(value[0] for value in sizes.values())
+        max_h = max(value[1] for value in sizes.values())
+        gap_x = max(1.5, 2.5 * scale)
+        gap_y = max(1.5, 2.0 * scale)
+        per_row = max(1, int((usable_w + gap_x) // (max_w + gap_x)))
+        rows = max(1, int(math.ceil(len(self.port_nodes) / per_row)))
+        # If the declared ports cannot fit at physical scale, compress uniformly
+        # while retaining the RJ45/SFP/PON aspect ratios and hit areas.
+        required_h = rows * max_h + max(0, rows - 1) * gap_y
+        if required_h > usable_h:
+            factor = max(0.35, usable_h / required_h)
+            sizes = {kind: (w * factor, h * factor) for kind, (w, h) in sizes.items()}
+            max_w = max(value[0] for value in sizes.values())
+            max_h = max(value[1] for value in sizes.values())
+            gap_x *= factor
+            gap_y *= factor
+            per_row = max(1, int((usable_w + gap_x) // (max_w + gap_x)))
+            rows = max(1, int(math.ceil(len(self.port_nodes) / per_row)))
+        block_h = rows * max_h + max(0, rows - 1) * gap_y
+        y0 = top + max(0.0, (usable_h - block_h) / 2.0)
+        for index, port_node in enumerate(self.port_nodes):
+            row, col = divmod(index, per_row)
+            kind = self._port_kind(port_node.details.get('port_name', ''))
+            pw, ph = sizes[kind]
+            x = left + col * (max_w + gap_x) + (max_w - pw) / 2.0
+            y = y0 + row * (max_h + gap_y) + (max_h - ph) / 2.0
+            if x + pw <= right + 0.5 and y + ph <= bottom + 0.5:
+                self._port_rects[port_node.node_id] = QRectF(x, y, pw, ph)
 
     def paint(self, painter: QPainter, option, widget=None) -> None:
         rect = self.boundingRect()
@@ -813,23 +883,58 @@ class RackEquipmentItem(QGraphicsObject):
         painter.setPen(QPen(QColor('#8fc7ff') if selected else QColor('#71808b'), 2.0 if selected else 1.2))
         painter.setBrush(QColor('#26323c'))
         painter.drawRoundedRect(rect.adjusted(1.0, 1.0, -1.0, -1.0), 3.0, 3.0)
-        # Rack ears
         ear_w = min(15.0, self._width * 0.045)
         painter.setBrush(QColor('#151c22'))
         painter.drawRect(QRectF(1.0, 2.0, ear_w, max(2.0, rect.height()-4.0)))
         painter.drawRect(QRectF(rect.right()-ear_w-1.0, 2.0, ear_w, max(2.0, rect.height()-4.0)))
+
         painter.setPen(QColor('#dce5ea'))
-        font = QFont('Arial', 8 if rect.height() >= 28 else 6)
+        font = QFont('Arial', 7 if rect.height() >= 28 else 5)
         font.setBold(True)
         painter.setFont(font)
-        text_rect = rect.adjusted(ear_w+8.0, 2.0, -ear_w-8.0, -2.0)
-        painter.drawText(text_rect, Qt.AlignCenter, QFontMetrics(font).elidedText(self.node.name, Qt.ElideRight, int(text_rect.width())))
+        name_rect = QRectF(ear_w + 4.0, 1.0, max(10.0, rect.width() - 2 * ear_w - 8.0), min(10.0, rect.height() * 0.28))
+        painter.drawText(name_rect, Qt.AlignCenter, QFontMetrics(font).elidedText(self.node.name, Qt.ElideRight, int(name_rect.width())))
+
+        for port_node in self.port_nodes:
+            port_rect = self._port_rects.get(port_node.node_id)
+            if port_rect is None:
+                continue
+            occupied = bool(port_node.details.get('occupied'))
+            fill = QColor('#c94c4c') if occupied else QColor('#41a85f')
+            kind = self._port_kind(port_node.details.get('port_name', ''))
+            painter.setPen(QPen(fill.darker(175), max(0.6, port_rect.width() * 0.06)))
+            painter.setBrush(fill)
+            if kind == 'rj45':
+                painter.drawRoundedRect(port_rect, 1.0, 1.0)
+                inner = port_rect.adjusted(port_rect.width()*0.16, port_rect.height()*0.18, -port_rect.width()*0.16, -port_rect.height()*0.22)
+                painter.setBrush(fill.darker(145))
+                painter.drawRect(inner)
+                # Contact teeth make the symbol recognisable as an RJ45 socket.
+                painter.setPen(QPen(fill.lighter(150), max(0.35, port_rect.width()*0.025)))
+                for tooth in range(4):
+                    tx = inner.left() + (tooth + 0.5) * inner.width() / 4.0
+                    painter.drawLine(QPointF(tx, inner.top()), QPointF(tx, inner.top() + inner.height()*0.32))
+            elif kind == 'pon':
+                painter.drawRoundedRect(port_rect, port_rect.height()*0.28, port_rect.height()*0.28)
+                painter.setBrush(fill.darker(150))
+                painter.drawEllipse(port_rect.adjusted(port_rect.width()*0.27, port_rect.height()*0.22, -port_rect.width()*0.27, -port_rect.height()*0.22))
+            else:
+                painter.drawRoundedRect(port_rect, 0.8, 0.8)
+                painter.setBrush(fill.darker(150))
+                painter.drawRect(port_rect.adjusted(port_rect.width()*0.14, port_rect.height()*0.20, -port_rect.width()*0.14, -port_rect.height()*0.20))
+
         painter.setPen(QColor('#91a0aa'))
-        painter.setFont(QFont('Arial', 6))
-        painter.drawText(QRectF(ear_w+5.0, 2.0, 38.0, 12.0), Qt.AlignLeft|Qt.AlignTop, f'{self.units}U')
+        painter.setFont(QFont('Arial', 5))
+        painter.drawText(QRectF(ear_w+3.0, rect.bottom()-8.0, 28.0, 7.0), Qt.AlignLeft|Qt.AlignBottom, f'{self.units}U')
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
+            point = event.pos()
+            for node_id, rect in self._port_rects.items():
+                if rect.adjusted(-1.5, -1.5, 1.5, 1.5).contains(point):
+                    self.portActivated.emit(node_id)
+                    event.accept()
+                    return
             super().mousePressEvent(event)
             self.activated.emit(self.node.node_id)
             event.accept()
@@ -1240,6 +1345,7 @@ class NetworkTopologyDialog(QDialog):
         self.rack_focus: Optional[Tuple[int, str, str]] = None
         self.switch_port_focus: Optional[str] = None
         self._rack_client_nodes_by_id: Dict[str, TopologyNode] = {}
+        self._rack_port_nodes_by_id: Dict[str, TopologyNode] = {}
         self._switch_port_nodes_by_id: Dict[str, TopologyNode] = {}
         self._visible_synthetic_edges: Dict[str, TopologyEdge] = {}
 
@@ -1351,14 +1457,6 @@ class NetworkTopologyDialog(QDialog):
         self.show_clients_check.setToolTip("Show department endpoint groups beneath their serving switch or ONT")
         self.show_clients_check.toggled.connect(lambda _checked: self.rebuild_scene(fit=False))
         layout.addWidget(self.show_clients_check)
-
-        self.show_patch_panels_check = QCheckBox("Patch panels")
-        self.show_patch_panels_check.setChecked(False)
-        self.show_patch_panels_check.setToolTip(
-            "Show fibre/copper patch panels in the logical topology. Patch panels remain visible in rack view when this is off."
-        )
-        self.show_patch_panels_check.toggled.connect(lambda _checked: self.rebuild_scene(fit=False))
-        layout.addWidget(self.show_patch_panels_check)
 
         self.show_redundant_check = QCheckBox("Failover links")
         self.show_redundant_check.setChecked(True)
@@ -1598,7 +1696,9 @@ class NetworkTopologyDialog(QDialog):
         return any(self._node_matches_floor(child_id, floor) for child_id in self.model.children.get(node_id, []))
 
     def _patch_panels_visible(self) -> bool:
-        return bool(getattr(self, "show_patch_panels_check", None) and self.show_patch_panels_check.isChecked())
+        # Patch panels are physical rack components, not logical topology nodes.
+        # They remain available to rack elevations, reports and port accounting.
+        return False
 
     def _is_patch_panel(self, node_id: str) -> bool:
         node = self.model.nodes.get(node_id)
@@ -1682,6 +1782,8 @@ class NetworkTopologyDialog(QDialog):
                     return node
         if node_id.startswith("endpoint::"):
             return self._rack_client_nodes_by_id.get(node_id)
+        if node_id.startswith("rackport::"):
+            return self._rack_port_nodes_by_id.get(node_id)
         if node_id.startswith("port::"):
             return self._switch_port_nodes_by_id.get(node_id)
         return None
@@ -1758,6 +1860,7 @@ class NetworkTopologyDialog(QDialog):
         self.visible_parent.clear()
         self.visible_parent_edge.clear()
         self._rack_client_nodes_by_id.clear()
+        self._rack_port_nodes_by_id.clear()
         key = self.rack_focus
         if key is None:
             return visible
@@ -1851,6 +1954,67 @@ class NetworkTopologyDialog(QDialog):
             visible.append(node_id)
             self.visible_parent[node_id] = switch_id
         return visible
+
+    def _rack_port_nodes(self, device_id: str) -> List[TopologyNode]:
+        device = self.model.nodes.get(device_id)
+        if device is None:
+            return []
+        records: Dict[str, List[str]] = defaultdict(list)
+        poe_by_port: Dict[str, float] = defaultdict(float)
+        for assignment in self.data.get("network_endpoint_assignments", []):
+            if _text(assignment.get("network_instance_id")) != device_id:
+                continue
+            port = _text(assignment.get("network_port")) or "Unspecified"
+            endpoint = _text(assignment.get("endpoint_name")) or "Endpoint"
+            asset_name = _text(assignment.get("endpoint_asset_name"))
+            records[port].append(endpoint + (f" — {asset_name}" if asset_name else ""))
+            poe_by_port[port] += max(0.0, _float(assignment.get("poe_power_w")))
+        for edge in self.model.edges:
+            if edge.source_id == device_id:
+                port = edge.source_port or "Unspecified"
+                peer = self.model.nodes.get(edge.target_id)
+                records[port].append(peer.name if peer else edge.target_id)
+            elif edge.target_id == device_id:
+                port = edge.target_port or "Unspecified"
+                peer = self.model.nodes.get(edge.source_id)
+                records[port].append(peer.name if peer else edge.source_id)
+
+        capacity = max(0, device.port_capacity)
+        names = {str(number) for number in range(1, capacity + 1)}
+        names.update(records)
+        def key(value: str):
+            digits = ''.join(ch for ch in value if ch.isdigit())
+            try:
+                return (0, int(value), value)
+            except Exception:
+                return (1, int(digits) if digits else 999999, value.lower())
+        result: List[TopologyNode] = []
+        for index, port in enumerate(sorted(names, key=key), start=1):
+            connected = records.get(port, [])
+            node_id = f"rackport::{device_id}::{index}"
+            node = TopologyNode(
+                node_id=node_id,
+                name=f"Port {port}",
+                asset_type="client_device",
+                role="switch_port",
+                floor=device.floor,
+                location_name=device.location_name,
+                port_capacity=1,
+                ports_used=1 if connected else 0,
+                poe_used_w=poe_by_port.get(port, 0.0),
+                connection_count=len(connected),
+                endpoint_count=len(connected),
+                pseudo=True,
+                details={
+                    "parent_instance_id": device_id,
+                    "port_name": port,
+                    "connected_devices": connected,
+                    "occupied": bool(connected),
+                },
+            )
+            self._rack_port_nodes_by_id[node_id] = node
+            result.append(node)
+        return result
 
     def _rack_client_nodes(self, parent_id: str) -> List[TopologyNode]:
         parent = self.model.nodes.get(parent_id)
@@ -2746,7 +2910,34 @@ class NetworkTopologyDialog(QDialog):
                 self.visible_nodes[node_id] = node
                 if self.rack_focus is not None:
                     units = max(1, self._node_rack_units(node_id))
-                    item = RackEquipmentItem(node, 482.6, units * 44.45 - 4.0, units)
+                    shared_capacity = max(
+                        1,
+                        _int(node.instance.get("shared_rack_unit_capacity"), 1),
+                    )
+                    shared_group = _text(
+                        node.instance.get("shared_rack_unit_group")
+                    )
+                    if shared_group and shared_capacity > 1:
+                        # Several independent OLTs share one physical 1U mounting
+                        # position.  Draw each functional unit as its own equal-width
+                        # section of the 19-inch face rather than as a full-width 1U
+                        # item.  The layout position already offsets each member by
+                        # shared_rack_unit_position.
+                        equipment_width = (482.6 - 8.0) / shared_capacity
+                        equipment_height = 44.45 - 4.0
+                        display_units = 1
+                    else:
+                        equipment_width = 482.6
+                        equipment_height = units * 44.45 - 4.0
+                        display_units = units
+                    port_nodes = self._rack_port_nodes(node_id)
+                    item = RackEquipmentItem(
+                        node,
+                        equipment_width,
+                        equipment_height,
+                        display_units,
+                        port_nodes,
+                    )
                 else:
                     children = self._children_for(node_id)
                     has_children = bool(children)
@@ -2756,6 +2947,8 @@ class NetworkTopologyDialog(QDialog):
                 item.setPos(positions[node_id])
                 item.setZValue(1.0)
                 item.activated.connect(self._card_activated)
+                if isinstance(item, RackEquipmentItem):
+                    item.portActivated.connect(self._card_activated)
                 item.branchToggleRequested.connect(self._card_double_clicked)
                 self.scene.addItem(item)
                 self.node_items[node_id] = item
@@ -2796,7 +2989,7 @@ class NetworkTopologyDialog(QDialog):
             equipment_count = sum(1 for node in self.visible_nodes.values() if not node.pseudo)
             return (
                 f"Rack view: {equipment_count:,} installed equipment items shown at their rack U positions"
-                " · Double-click a switch for its port view · Use the breadcrumb to return · Drag to pan · Wheel to zoom"
+                " · Red ports are occupied, green ports are free · Click a port for details · Double-click a switch for its port view · Use the breadcrumb to return · Drag to pan · Wheel to zoom"
             )
         hidden_patch_panels = (
             sum(1 for node in self.model.nodes.values() if node.asset_type == "patch_panel")
@@ -2806,7 +2999,7 @@ class NetworkTopologyDialog(QDialog):
         return (
             f"Showing {sum(1 for node in self.visible_nodes.values() if not node.pseudo):,} of "
             f"{sum(1 for node in self.model.nodes.values() if not node.pseudo):,} network assets"
-            + (f" · {hidden_patch_panels:,} patch panels collapsed" if hidden_patch_panels else "")
+            + (f" · {hidden_patch_panels:,} patch panels omitted from topology" if hidden_patch_panels else "")
             + (f" on Floor {self._selected_floor()}" if self._selected_floor() is not None else "")
             + " · Double-click a rack switch to drill into its rack · Drag to pan · Wheel to zoom"
         )

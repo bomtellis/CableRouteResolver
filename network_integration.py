@@ -118,14 +118,29 @@ def _network_pick_radius(editor) -> float:
 
 
 def _find_network_instance(editor, x: float, y: float) -> Optional[str]:
+    """Find a selectable main-canvas network instance, excluding patch panels."""
     ensure_network_schema(editor.store.data)
-    return find_nearest_network_instance(
-        editor.store.data,
-        int(editor.floor_spin.value()),
-        float(x),
-        float(y),
-        _network_pick_radius(editor),
-    )
+    data = editor.store.data
+    assets = {
+        _text(item.get("id")): item
+        for item in data.get("network_assets", [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    floor = int(editor.floor_spin.value())
+    radius = _network_pick_radius(editor)
+    best_id = None
+    best_distance = float(radius)
+    for instance_id, instance in network_instances_for_floor(data, floor).items():
+        asset = assets.get(_text(instance.get("asset_id")), {})
+        if _text(asset.get("asset_type")).lower() == "patch_panel":
+            continue
+        dx = float(instance.get("x", 0.0)) - float(x)
+        dy = float(instance.get("y", 0.0)) - float(y)
+        distance = (dx * dx + dy * dy) ** 0.5
+        if distance <= best_distance:
+            best_id = instance_id
+            best_distance = distance
+    return best_id
 
 
 def _point_segment_distance(
@@ -986,6 +1001,8 @@ def _refresh_network_search(editor) -> None:
     for instance in editor.store.data.get("network_asset_instances", []):
         instance_id = _text(instance.get("id"))
         asset = assets.get(_text(instance.get("asset_id")), {})
+        if _text(asset.get("asset_type")).lower() == "patch_panel":
+            continue
         label = (
             f"{instance_id} - {_text(instance.get('name')) or instance_id} | "
             f"{_text(asset.get('asset_type'))} | {_text(instance.get('location_name'))}"
@@ -1135,7 +1152,7 @@ def install_network_planning(editor_class) -> None:
                 canvas.set_visible_layers(
                     show_network=show_network,
                     show_network_assets=show_network_assets,
-                    show_network_links=show_network_connections,
+                    show_network_connections=show_network_connections,
                 )
             except TypeError:
                 # The extension package includes a renderer with this argument;

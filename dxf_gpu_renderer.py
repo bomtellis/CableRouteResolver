@@ -308,7 +308,16 @@ class GpuDxfGraphView(QOpenGLWidget):
                 best_name = str(department_id)
 
         if self.show_network:
+            data = getattr(self.store, "data", {}) or {}
+            assets = {
+                str(item.get("id", "")).strip(): item
+                for item in data.get("network_assets", [])
+                if isinstance(item, dict) and str(item.get("id", "")).strip()
+            }
             for instance_id, instance in self._network_instances_for_floor().items():
+                asset = assets.get(str(instance.get("asset_id", "")).strip(), {})
+                if str(asset.get("asset_type", "")).strip().lower() == "patch_panel":
+                    continue
                 d = math.hypot(
                     float(instance.get("x", 0.0)) - x,
                     float(instance.get("y", 0.0)) - y,
@@ -671,6 +680,11 @@ class GpuDxfGraphView(QOpenGLWidget):
             for item in data.get("network_assets", [])
             if isinstance(item, dict) and str(item.get("id", "")).strip()
         }
+
+        def is_patch_panel(instance: dict) -> bool:
+            asset = assets.get(str(instance.get("asset_id", "")).strip(), {})
+            return str(asset.get("asset_type", "")).strip().lower() == "patch_panel"
+
         all_points = self.store.all_points() if hasattr(self.store, "all_points") else {}
         display_positions = self._network_display_positions(floor_instances, assets)
 
@@ -705,6 +719,11 @@ class GpuDxfGraphView(QOpenGLWidget):
                 source = all_instances.get(str(connection.get("from_instance_id", "")).strip())
                 target = all_instances.get(str(connection.get("to_instance_id", "")).strip())
                 if not source or not target:
+                    continue
+                # Patch panels are physical rack components and are deliberately
+                # omitted from the main spatial graph, including their terminating
+                # link segments. They remain available in rack views and reports.
+                if is_patch_panel(source) or is_patch_panel(target):
                     continue
                 route_records = [
                     all_points[name]
@@ -742,7 +761,7 @@ class GpuDxfGraphView(QOpenGLWidget):
                 # Network switches remain part of the installed design and their
                 # links are still drawn, but the switch symbols and labels are
                 # intentionally hidden from the main floor graph view.
-                if asset_type == "network_switch":
+                if asset_type in {"network_switch", "patch_panel"}:
                     continue
                 display_x, display_y = display_positions.get(
                     str(instance_id),
@@ -909,9 +928,25 @@ class GpuDxfGraphView(QOpenGLWidget):
             self._network_instances_for_floor() if self.show_network else {}
         )
         if network_instances:
-            xs = [float(p.get("x", 0.0)) for p in network_instances.values()]
-            ys = [float(p.get("y", 0.0)) for p in network_instances.values()]
-            bounds.append((min(xs), min(ys), max(xs), max(ys)))
+            data = getattr(self.store, "data", {}) or {}
+            assets = {
+                str(item.get("id", "")).strip(): item
+                for item in data.get("network_assets", [])
+                if isinstance(item, dict) and str(item.get("id", "")).strip()
+            }
+            visible_instances = [
+                instance
+                for instance in network_instances.values()
+                if str(
+                    assets.get(str(instance.get("asset_id", "")).strip(), {}).get(
+                        "asset_type", ""
+                    )
+                ).strip().lower() != "patch_panel"
+            ]
+            if visible_instances:
+                xs = [float(p.get("x", 0.0)) for p in visible_instances]
+                ys = [float(p.get("y", 0.0)) for p in visible_instances]
+                bounds.append((min(xs), min(ys), max(xs), max(ys)))
 
         if not bounds:
             return None
