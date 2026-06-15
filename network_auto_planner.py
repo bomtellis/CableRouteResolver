@@ -2052,34 +2052,72 @@ def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
 
 
 def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -> None:
-    """Install fibre patch panels and physically interpose them in every fibre link.
+    """Install fibre patch panels only where a fibre link crosses rack boundaries.
 
-    Each original equipment-to-equipment fibre connection becomes:
+    Physical rules:
 
-      equipment -> local patch panel -> remote patch panel -> equipment
+    * Equipment in the same cabinet/rack is connected directly with a patch lead.
+    * Equipment in different cabinets/racks at the same location is connected
+      through a fibre patch panel in each cabinet/rack.
+    * Equipment in different locations is connected through a fibre patch panel
+      in each endpoint cabinet/rack.
+    * PoLAN links involving a fibre splitter are never rewritten, preserving the
+      required OLT -> splitter -> ONT hierarchy.
 
-    The original routed connection is retained as the panel-to-panel backbone so
-    its route path, length, failover metadata and fibre count remain unchanged.
-    Short equipment-to-panel segments receive explicit patch-lead records.
+    For an eligible cross-rack link, the original routed connection becomes the
+    panel-to-panel backbone. Two short equipment-to-panel connections and their
+    patch leads are then added at the endpoints.
     """
-    original_connections = [
-        row for row in list(builder.connections)
-        if _text(row.get("medium")).lower() == "fibre"
-    ]
+    instance_by_id = {_text(row.get("id")): row for row in builder.instances}
+
+    def endpoint_asset_type(connection: dict, field: str) -> str:
+        instance = instance_by_id.get(_text(connection.get(field)))
+        if instance is None:
+            return ""
+        return _asset_type(builder._asset_for_instance(instance))
+
+    def rack_key(instance: dict) -> Tuple[int, str, str]:
+        """Return the physical cabinet identity used for patching decisions."""
+        return (
+            _int(instance.get("floor")),
+            _text(instance.get("location_name")),
+            _text(instance.get("rack_name")),
+        )
+
+    def same_rack(a: dict, b: dict) -> bool:
+        return rack_key(a) == rack_key(b)
+
+    # Splitter feeder/distribution links remain untouched. Of the remaining
+    # fibre links, only those crossing a physical rack boundary need panels.
+    original_connections: List[dict] = []
+    for row in list(builder.connections):
+        if _text(row.get("medium")).lower() != "fibre":
+            continue
+        if endpoint_asset_type(row, "from_instance_id") == "fibre_splitter":
+            continue
+        if endpoint_asset_type(row, "to_instance_id") == "fibre_splitter":
+            continue
+        from_instance = instance_by_id.get(_text(row.get("from_instance_id")))
+        to_instance = instance_by_id.get(_text(row.get("to_instance_id")))
+        if from_instance is None or to_instance is None:
+            continue
+        if same_rack(from_instance, to_instance):
+            # The direct connection and its generated endpoint patch leads are
+            # already the correct physical representation for adjacent devices.
+            row["physical_segment"] = "intra_rack"
+            continue
+        original_connections.append(row)
+
     if not original_connections:
         return
 
-    instance_by_id = {_text(row.get("id")): row for row in builder.instances}
-    terminations: Dict[Tuple[int, str], int] = defaultdict(int)
+    terminations: Dict[Tuple[int, str, str], int] = defaultdict(int)
     for connection in original_connections:
         fibres = max(1, _int(connection.get("fibre_count"), 1))
         for endpoint_field in ("from_instance_id", "to_instance_id"):
             instance = instance_by_id.get(_text(connection.get(endpoint_field)))
-            if instance is None:
-                continue
-            location_name = _text(instance.get("location_name"))
-            if location_name:
-                terminations[(_int(instance.get("floor")), location_name)] += fibres
+            if instance is not None:
+                terminations[rack_key(instance)] += fibres
 
     if not terminations:
         return
@@ -2097,54 +2135,65 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         if isinstance(row, dict) and _text(row.get("name"))
     }
 
-    panels_by_location: Dict[Tuple[int, str], List[dict]] = defaultdict(list)
-    for (floor, location_name), used_terminations in sorted(terminations.items()):
+    panels_by_rack: Dict[Tuple[int, str, str], List[dict]] = defaultdict(list)
+    for (floor, location_name, rack_name), used_terminations in sorted(terminations.items()):
         required = max(1, int(math.ceil(used_terminations * (1.0 + spare_fraction))))
         panel_count = max(1, int(math.ceil(required / capacity)))
         location = locations.get(location_name) or {
-            "name": location_name, "floor": floor, "x": 0.0, "y": 0.0
+            "name": location_name,
+            "floor": floor,
+            "x": 0.0,
+            "y": 0.0,
         }
+        cabinet_label = rack_name or "Unassigned rack"
         for index in range(panel_count):
             first_port = index * capacity + 1
             last_port = min(required, (index + 1) * capacity)
             panel = builder.add_instance(
                 asset,
-                f"AUTO {location_name} Fibre Patch Panel {index + 1}",
+                f"AUTO {location_name} {cabinet_label} Fibre Patch Panel {index + 1}",
                 location,
                 "fibre_patch_panel",
-                rack_name="",
+                rack_name=rack_name,
                 rack_start_u=0,
                 rack_size_u=max(1, _int(builder.settings.get("default_rack_size_u"), 42)),
                 route_anchor=location_name,
                 termination_count=max(0, min(capacity, used_terminations - index * capacity)),
                 reserved_port_count=max(0, last_port - first_port + 1),
                 port_range=f"{first_port}-{last_port}",
+                cabinet_patch_panel=True,
             )
-            panels_by_location[(floor, location_name)].append(panel)
+            panels_by_rack[(floor, location_name, rack_name)].append(panel)
             instance_by_id[_text(panel.get("id"))] = panel
 
-    next_port: Dict[Tuple[int, str], int] = defaultdict(int)
+    next_port: Dict[Tuple[int, str, str], int] = defaultdict(int)
 
     def allocate_panel_port(instance: dict) -> Tuple[dict, str]:
-        key = (_int(instance.get("floor")), _text(instance.get("location_name")))
-        panels = panels_by_location.get(key, [])
+        key = rack_key(instance)
+        panels = panels_by_rack.get(key, [])
         if not panels:
+            location = key[1] or "the selected location"
+            rack = key[2] or "the unassigned rack"
             raise NetworkPlanningError(
-                f"No fibre patch panel was generated at {key[1] or 'the selected location'}."
+                f"No fibre patch panel was generated for {location} / {rack}."
             )
         index = next_port[key]
         panel_index, port_index = divmod(index, capacity)
         if panel_index >= len(panels):
+            location = key[1] or "the selected location"
+            rack = key[2] or "the unassigned rack"
             raise NetworkPlanningError(
-                f"Fibre patch-panel capacity was exceeded at {key[1] or 'the selected location'}."
+                f"Fibre patch-panel capacity was exceeded for {location} / {rack}."
             )
         next_port[key] += 1
         return panels[panel_index], f"LC-{port_index + 1}"
 
-    # Remove the obsolete direct equipment-to-equipment patch leads.
+    # Remove direct endpoint patch leads only for links that are being replaced
+    # by a panel-to-panel backbone. Intra-rack leads are deliberately retained.
     original_ids = {_text(row.get("id")) for row in original_connections}
     builder.patch_leads[:] = [
-        lead for lead in builder.patch_leads
+        lead
+        for lead in builder.patch_leads
         if _text(lead.get("connection_id")) not in original_ids
     ]
 
@@ -2153,13 +2202,14 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         to_instance = instance_by_id.get(_text(connection.get("to_instance_id")))
         if from_instance is None or to_instance is None:
             continue
+
         original_from_port = _text(connection.get("from_port"))
         original_to_port = _text(connection.get("to_port"))
         from_panel, from_panel_port = allocate_panel_port(from_instance)
         to_panel, to_panel_port = allocate_panel_port(to_instance)
 
-        # The existing routed record becomes the permanent/backbone cable between
-        # the two rack patch locations. This preserves route and failover fields.
+        # Preserve the routed cable, distance, failover role and protection
+        # metadata on the permanent panel-to-panel backbone record.
         connection["from_instance_id"] = _text(from_panel.get("id"))
         connection["from_port"] = from_panel_port
         connection["to_instance_id"] = _text(to_panel.get("id"))
@@ -2168,18 +2218,30 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         connection["physical_segment"] = "backbone"
         connection["notes"] = (
             _text(connection.get("notes"))
-            + " Routed backbone terminated on fibre patch panels."
+            + " Routed backbone terminated on cabinet fibre patch panels."
         ).strip()
 
         builder.add_connection(
-            from_instance, original_from_port, from_panel, from_panel_port, "fibre",
-            generate_patch_leads=True, physical_segment="patch_lead",
-            parent_backbone_connection_id=_text(connection.get("id")), fibre_count=1,
+            from_instance,
+            original_from_port,
+            from_panel,
+            from_panel_port,
+            "fibre",
+            generate_patch_leads=True,
+            physical_segment="patch_lead",
+            parent_backbone_connection_id=_text(connection.get("id")),
+            fibre_count=1,
         )
         builder.add_connection(
-            to_panel, to_panel_port, to_instance, original_to_port, "fibre",
-            generate_patch_leads=True, physical_segment="patch_lead",
-            parent_backbone_connection_id=_text(connection.get("id")), fibre_count=1,
+            to_panel,
+            to_panel_port,
+            to_instance,
+            original_to_port,
+            "fibre",
+            generate_patch_leads=True,
+            physical_segment="patch_lead",
+            parent_backbone_connection_id=_text(connection.get("id")),
+            fibre_count=1,
         )
 
 

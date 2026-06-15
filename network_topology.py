@@ -115,6 +115,20 @@ def _port_definition_for_name(asset: dict, port_name: str) -> dict:
             return row
     return {"name": port_name, "port_type": "pon" if "pon" in target else ("sfp" if any(x in target for x in ("sfp","uplink","fibre","fiber")) else "rj45"), "port_use": "other"}
 
+
+def _port_group_sort_key(port: dict, fallback_name: str = "") -> Tuple[int, int, str, str]:
+    """Keep connector families together while preserving their physical order."""
+    type_order = {
+        "rj45": 0, "pon": 1, "lc": 2, "sc": 3, "mpo": 4,
+        "sfp": 5, "sfp+": 6, "qsfp": 7, "qsfp28": 8,
+        "console": 9, "usb": 10, "power": 11, "other": 12,
+    }
+    name = _text(port.get("name")) or _text(fallback_name)
+    digits = "".join(ch for ch in name if ch.isdigit())
+    return (type_order.get(_text(port.get("port_type")).lower(), 99),
+            int(digits) if digits else 999999,
+            _text(port.get("port_use")).lower(), name.lower())
+
 def _role_rank(role: str, asset_type: str) -> int:
     role = role.lower()
     asset_type = asset_type.lower()
@@ -2171,11 +2185,11 @@ class NetworkTopologyDialog(QDialog):
             node_id
             for node_id, node in self.model.nodes.items()
             if not node.pseudo
-            and node.floor == floor
             and _text(node.instance.get("rack_name"))
             and (
-                node.location_name == location
+                (node.floor == floor and node.location_name == location)
                 or _text(node.instance.get("rack_name")) in rack_names_at_location
+                or _text(node.instance.get("rack_name")) == _text(_selected_rack)
             )
         ]
         rack_nodes.sort(key=lambda node_id: (
@@ -2336,13 +2350,16 @@ class NetworkTopologyDialog(QDialog):
         defined_ports = _expanded_asset_ports(switch.asset)
         names = {row["name"] for row in defined_ports} or {str(number) for number in range(1, capacity + 1)}
         names.update(port_records)
-        def port_key(value: str):
-            try:
-                return (0, int(value), value)
-            except Exception:
-                digits = ''.join(ch for ch in value if ch.isdigit())
-                return (1, int(digits) if digits else 999999, value.lower())
-        for index, port in enumerate(sorted(names, key=port_key), start=1):
+        port_definitions_by_name = {_text(row.get("name")): row for row in defined_ports}
+        ordered_names = sorted(
+            names,
+            key=lambda value: _port_group_sort_key(
+                port_definitions_by_name.get(value)
+                or _port_definition_for_name(switch.asset, value),
+                value,
+            ),
+        )
+        for index, port in enumerate(ordered_names, start=1):
             connected = port_records.get(port, [])
             occupied = bool(connected)
             node_id = f"port::{switch_id}::{index}"
@@ -2384,14 +2401,17 @@ class NetworkTopologyDialog(QDialog):
         defined_ports = _expanded_asset_ports(device.asset)
         names = {row["name"] for row in defined_ports} or {str(number) for number in range(1, capacity + 1)}
         names.update(records)
-        def key(value: str):
-            digits = ''.join(ch for ch in value if ch.isdigit())
-            try:
-                return (0, int(value), value)
-            except Exception:
-                return (1, int(digits) if digits else 999999, value.lower())
+        port_definitions_by_name = {_text(row.get("name")): row for row in defined_ports}
+        ordered_names = sorted(
+            names,
+            key=lambda value: _port_group_sort_key(
+                port_definitions_by_name.get(value)
+                or _port_definition_for_name(device.asset, value),
+                value,
+            ),
+        )
         result: List[TopologyNode] = []
-        for index, port in enumerate(sorted(names, key=key), start=1):
+        for index, port in enumerate(ordered_names, start=1):
             connected = records.get(port, [])
             node_id = f"rackport::{device_id}::{index}"
             node = TopologyNode(
