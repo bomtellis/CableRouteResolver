@@ -845,6 +845,7 @@ class DesignBuilder:
         route_destination: str = "",
         **extra,
     ) -> dict:
+        generate_patch_leads = bool(extra.pop("generate_patch_leads", True))
         connection_id = _next_identifier(self.connection_ids, "AUTO-NC-")
         length_m, route_path = (
             self.graph.route(route_source, route_destination)
@@ -875,7 +876,7 @@ class DesignBuilder:
             **extra,
         }
         self.connections.append(connection)
-        if medium in {"copper", "fibre"}:
+        if generate_patch_leads and medium in {"copper", "fibre"}:
             self.add_patch_lead(connection_id=connection_id, instance=from_instance, port=str(from_port), medium=medium, peer_instance_id=_text(to_instance.get("id")), peer_port=str(to_port), preferred_use="uplink")
             self.add_patch_lead(connection_id=connection_id, instance=to_instance, port=str(to_port), medium=medium, peer_instance_id=_text(from_instance.get("id")), peer_port=str(from_port), preferred_use="input")
         if medium == "fibre":
@@ -2031,6 +2032,10 @@ def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
         "number_of_ports": 24,
         "connections_in": 24,
         "connections_out": 24,
+        "uplink_ports": 0,
+        "port_definitions": [
+            {"port_type": "lc", "port_count": 24, "port_use": "patch", "name_prefix": "LC"}
+        ],
         "input_connection_type": "fibre",
         "output_connection_type": "fibre",
         "rack_units": 1,
@@ -2047,22 +2052,34 @@ def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
 
 
 def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -> None:
-    """Add rack-space allowance for every rack-side fibre termination."""
+    """Install fibre patch panels and physically interpose them in every fibre link.
+
+    Each original equipment-to-equipment fibre connection becomes:
+
+      equipment -> local patch panel -> remote patch panel -> equipment
+
+    The original routed connection is retained as the panel-to-panel backbone so
+    its route path, length, failover metadata and fibre count remain unchanged.
+    Short equipment-to-panel segments receive explicit patch-lead records.
+    """
+    original_connections = [
+        row for row in list(builder.connections)
+        if _text(row.get("medium")).lower() == "fibre"
+    ]
+    if not original_connections:
+        return
+
     instance_by_id = {_text(row.get("id")): row for row in builder.instances}
     terminations: Dict[Tuple[int, str], int] = defaultdict(int)
-
-    for connection in builder.connections:
-        if _text(connection.get("medium")).lower() != "fibre":
-            continue
+    for connection in original_connections:
         fibres = max(1, _int(connection.get("fibre_count"), 1))
         for endpoint_field in ("from_instance_id", "to_instance_id"):
             instance = instance_by_id.get(_text(connection.get(endpoint_field)))
-            if not instance:
+            if instance is None:
                 continue
             location_name = _text(instance.get("location_name"))
-            if not location_name:
-                continue
-            terminations[(_int(instance.get("floor")), location_name)] += fibres
+            if location_name:
+                terminations[(_int(instance.get("floor")), location_name)] += fibres
 
     if not terminations:
         return
@@ -2080,16 +2097,17 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         if isinstance(row, dict) and _text(row.get("name"))
     }
 
+    panels_by_location: Dict[Tuple[int, str], List[dict]] = defaultdict(list)
     for (floor, location_name), used_terminations in sorted(terminations.items()):
         required = max(1, int(math.ceil(used_terminations * (1.0 + spare_fraction))))
         panel_count = max(1, int(math.ceil(required / capacity)))
-        location = locations.get(location_name)
-        if location is None:
-            location = {"name": location_name, "floor": floor, "x": 0.0, "y": 0.0}
+        location = locations.get(location_name) or {
+            "name": location_name, "floor": floor, "x": 0.0, "y": 0.0
+        }
         for index in range(panel_count):
             first_port = index * capacity + 1
             last_port = min(required, (index + 1) * capacity)
-            builder.add_instance(
+            panel = builder.add_instance(
                 asset,
                 f"AUTO {location_name} Fibre Patch Panel {index + 1}",
                 location,
@@ -2102,6 +2120,67 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                 reserved_port_count=max(0, last_port - first_port + 1),
                 port_range=f"{first_port}-{last_port}",
             )
+            panels_by_location[(floor, location_name)].append(panel)
+            instance_by_id[_text(panel.get("id"))] = panel
+
+    next_port: Dict[Tuple[int, str], int] = defaultdict(int)
+
+    def allocate_panel_port(instance: dict) -> Tuple[dict, str]:
+        key = (_int(instance.get("floor")), _text(instance.get("location_name")))
+        panels = panels_by_location.get(key, [])
+        if not panels:
+            raise NetworkPlanningError(
+                f"No fibre patch panel was generated at {key[1] or 'the selected location'}."
+            )
+        index = next_port[key]
+        panel_index, port_index = divmod(index, capacity)
+        if panel_index >= len(panels):
+            raise NetworkPlanningError(
+                f"Fibre patch-panel capacity was exceeded at {key[1] or 'the selected location'}."
+            )
+        next_port[key] += 1
+        return panels[panel_index], f"LC-{port_index + 1}"
+
+    # Remove the obsolete direct equipment-to-equipment patch leads.
+    original_ids = {_text(row.get("id")) for row in original_connections}
+    builder.patch_leads[:] = [
+        lead for lead in builder.patch_leads
+        if _text(lead.get("connection_id")) not in original_ids
+    ]
+
+    for connection in original_connections:
+        from_instance = instance_by_id.get(_text(connection.get("from_instance_id")))
+        to_instance = instance_by_id.get(_text(connection.get("to_instance_id")))
+        if from_instance is None or to_instance is None:
+            continue
+        original_from_port = _text(connection.get("from_port"))
+        original_to_port = _text(connection.get("to_port"))
+        from_panel, from_panel_port = allocate_panel_port(from_instance)
+        to_panel, to_panel_port = allocate_panel_port(to_instance)
+
+        # The existing routed record becomes the permanent/backbone cable between
+        # the two rack patch locations. This preserves route and failover fields.
+        connection["from_instance_id"] = _text(from_panel.get("id"))
+        connection["from_port"] = from_panel_port
+        connection["to_instance_id"] = _text(to_panel.get("id"))
+        connection["to_port"] = to_panel_port
+        connection["connection_role"] = "output"
+        connection["physical_segment"] = "backbone"
+        connection["notes"] = (
+            _text(connection.get("notes"))
+            + " Routed backbone terminated on fibre patch panels."
+        ).strip()
+
+        builder.add_connection(
+            from_instance, original_from_port, from_panel, from_panel_port, "fibre",
+            generate_patch_leads=True, physical_segment="patch_lead",
+            parent_backbone_connection_id=_text(connection.get("id")), fibre_count=1,
+        )
+        builder.add_connection(
+            to_panel, to_panel_port, to_instance, original_to_port, "fibre",
+            generate_patch_leads=True, physical_segment="patch_lead",
+            parent_backbone_connection_id=_text(connection.get("id")), fibre_count=1,
+        )
 
 
 def _support_rack_asset(

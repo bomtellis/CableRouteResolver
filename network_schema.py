@@ -40,6 +40,11 @@ NETWORK_ASSET_TYPES = {
     "wireless_access_point",
     "optical_line_terminal",
     "optical_network_terminal",
+    "ups",
+    "pdu",
+    "power_device",
+    "cable_management",
+    "cable_manager",
     "other",
 }
 
@@ -504,6 +509,16 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         for item in data.get("locations", [])
         if isinstance(item, dict) and _text(item.get("name"))
     }
+    assets_by_id = {
+        _text(item.get("id")): item
+        for item in data.get("network_assets", [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    instances_by_id = {
+        _text(item.get("id")): item
+        for item in data.get("network_asset_instances", [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
 
     for asset in data.get("network_assets", []):
         if not isinstance(asset, dict):
@@ -618,6 +633,7 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                     )
 
     used_endpoints: set[tuple[str, str]] = set()
+    used_endpoint_segments: Dict[tuple[str, str], set[str]] = {}
     for connection in data.get("network_connections", []):
         if not isinstance(connection, dict):
             continue
@@ -646,11 +662,23 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                 )
                 continue
             endpoint = (instance_id, port)
-            if instance_id and endpoint in used_endpoints:
+            segment = _text(connection.get("physical_segment")).lower() or "direct"
+            existing_segments = used_endpoint_segments.setdefault(endpoint, set())
+            instance = instances_by_id.get(instance_id, {})
+            endpoint_asset = assets_by_id.get(_text(instance.get("asset_id")), {})
+            is_patch_panel = _text(endpoint_asset.get("asset_type")) == "patch_panel"
+            valid_patch_pair = (
+                is_patch_panel
+                and segment in {"backbone", "patch_lead"}
+                and segment not in existing_segments
+                and existing_segments.issubset({"backbone", "patch_lead"})
+            )
+            if instance_id and endpoint in used_endpoints and not valid_patch_pair:
                 messages.append(
                     f"Network endpoint {instance_id}:{port} is used by more than one connection."
                 )
             used_endpoints.add(endpoint)
+            existing_segments.add(segment)
         for vlan_id in connection.get("vlan_ids", []):
             if _text(vlan_id) not in vlan_record_ids:
                 messages.append(

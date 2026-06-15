@@ -39,6 +39,10 @@ NETWORK_ASSET_TYPES = [
     ("wireless_access_point", "Wireless access point"),
     ("optical_line_terminal", "Optical line terminal (OLT)"),
     ("optical_network_terminal", "Optical network terminal (ONT)"),
+    ("ups", "Uninterruptible power supply (UPS)"),
+    ("pdu", "Power distribution unit (PDU)"),
+    ("power_device", "Power device"),
+    ("cable_management", "Cable management"),
     ("other", "Other"),
 ]
 
@@ -436,7 +440,8 @@ class NetworkAssetEditorDialog(QDialog):
             )
             return
         port_definitions = self._port_definitions()
-        if not port_definitions:
+        portless_asset_types = {"ups", "pdu", "power_device", "cable_management"}
+        if not port_definitions and asset_type not in portless_asset_types:
             QMessageBox.critical(
                 self, "Invalid asset", "At least one physical port row is required."
             )

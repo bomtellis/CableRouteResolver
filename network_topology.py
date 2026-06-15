@@ -1909,17 +1909,21 @@ class NetworkTopologyDialog(QDialog):
             return True
 
         asset_type = _text(node.asset_type).lower()
+        # Fibre splitters are passive, but they are an essential logical PoLAN
+        # stage between OLTs and ONTs and must remain visible in the topology.
+        if asset_type == "fibre_splitter":
+            return True
         role = _text(node.role).lower()
         name = _text(node.name).lower()
 
         passive_or_power_tokens = (
-            "patch", "splitter", "coupler", "adapter", "splice",
+            "patch", "coupler", "adapter", "splice",
             "cable management", "cable-management", "cable manager",
             "ups", "pdu", "power distribution", "power supply",
             "battery", "rectifier", "shelf", "blanking panel",
         )
         if asset_type in {
-            "patch_panel", "fibre_splitter", "cable_management",
+            "patch_panel", "cable_management",
             "cable_manager", "ups", "pdu", "power_device",
         }:
             return False
@@ -2155,13 +2159,24 @@ class NetworkTopologyDialog(QDialog):
         # Include every physical rack at the same floor/location so additional
         # racks are visible side by side rather than appearing to overflow the
         # selected rack.
+        rack_names_at_location = {
+            _text(node.instance.get("rack_name"))
+            for node in self.model.nodes.values()
+            if not node.pseudo
+            and node.floor == floor
+            and node.location_name == location
+            and _text(node.instance.get("rack_name"))
+        }
         rack_nodes = [
             node_id
             for node_id, node in self.model.nodes.items()
             if not node.pseudo
             and node.floor == floor
-            and node.location_name == location
             and _text(node.instance.get("rack_name"))
+            and (
+                node.location_name == location
+                or _text(node.instance.get("rack_name")) in rack_names_at_location
+            )
         ]
         rack_nodes.sort(key=lambda node_id: (
             _text(self._node_for(node_id).instance.get("rack_name")) if self._node_for(node_id) else "",
@@ -2180,6 +2195,7 @@ class NetworkTopologyDialog(QDialog):
             "optical_network_terminal",
             "wireless_access_point",
             "patch_panel",
+            "fibre_splitter",
         }
 
     def _passive_patch_description(self, node: TopologyNode) -> str:
@@ -3517,6 +3533,10 @@ class NetworkTopologyDialog(QDialog):
             and node.location_name == location
             and _text(node.instance.get("rack_name"))
         }
+        # Support equipment generated into the same named rack can have legacy
+        # or blank location metadata. Keep it visible with the active equipment.
+        if self.rack_focus is not None and self.rack_focus[2]:
+            names.add(_text(self.rack_focus[2]))
         return sorted(names, key=lambda value: value.lower())
 
     def _rack_capacity_for_key(self, key: Tuple[int, str, str]) -> int:
