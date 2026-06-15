@@ -308,7 +308,14 @@ class TopologyModel:
                 medium=_text(connection.get("medium")).lower() or "copper",
                 source_port=_text(connection.get("from_port")),
                 target_port=_text(connection.get("to_port")),
-                length_m=max(0.0, _float(connection.get("length_m"))),
+                length_m=max(
+                    0.0,
+                    _float(connection.get("length_m")),
+                    _float(connection.get("route_length_m")),
+                    _float(connection.get("cable_length_m")),
+                    _float(connection.get("calculated_length_m")),
+                    _float(connection.get("total_length_m")),
+                ),
                 standby=bool(connection.get("standby", False)),
                 redundancy_role=_text(connection.get("redundancy_role")),
                 protection_group=_text(connection.get("protection_group")),
@@ -353,11 +360,19 @@ class TopologyModel:
                 model=_text(asset.get("model")),
                 management_ip=_text(instance.get("management_ip")),
                 port_capacity=max(
-                    0,
-                    _int(asset.get("number_of_ports")),
-                    _int(asset.get("connections_in")) + _int(asset.get("connections_out")),
-                    _int(asset.get("connections_out")),
-                ) * stack_members,
+                    max(
+                        0,
+                        _int(asset.get("number_of_ports")),
+                        _int(asset.get("connections_in"))
+                        + _int(asset.get("connections_out"))
+                        + _int(asset.get("uplink_ports")),
+                        _int(asset.get("connections_out")) + _int(asset.get("uplink_ports")),
+                        _int(asset.get("number_of_pon_ports")),
+                        _int(asset.get("pon_ports")),
+                        _int(asset.get("sfp_ports")) + _int(asset.get("rj45_ports")),
+                    ) * stack_members,
+                    len(occupied_ports_by_instance.get(instance_id, set())),
+                ),
                 ports_used=len(occupied_ports_by_instance.get(instance_id, set())),
                 poe_budget_w=max(0.0, _float(asset.get("poe_budget_w"))) * stack_members,
                 poe_used_w=sum(max(0.0, _float(item.get("poe_power_w"))) for item in assignments),
@@ -856,7 +871,7 @@ class RackEquipmentItem(QGraphicsObject):
         value = _text(port_name).lower()
         if 'pon' in value:
             return 'pon'
-        if any(token in value for token in ('sfp', 'uplink', 'fibre', 'fiber', 'optical')):
+        if any(token in value for token in ('sfp', 'uplink', 'fibre', 'fiber', 'optical', 'lc', 'sc')):
             return 'sfp'
         return 'rj45'
 
@@ -1000,7 +1015,11 @@ class SwitchFrontPanelItem(QGraphicsObject):
 
     def _port_kind(self, port_name: str) -> str:
         value = _text(port_name).lower()
-        return 'sfp' if any(token in value for token in ('sfp', 'pon', 'uplink', 'fibre', 'fiber')) else 'rj45'
+        if 'pon' in value:
+            return 'pon'
+        if any(token in value for token in ('sfp', 'uplink', 'fibre', 'fiber', 'optical', 'lc', 'sc')):
+            return 'sfp'
+        return 'rj45'
 
     def _build_port_rects(self) -> None:
         self._port_rects.clear()
@@ -1025,7 +1044,7 @@ class SwitchFrontPanelItem(QGraphicsObject):
             row = index // per_row
             col = index % per_row
             kind = self._port_kind(port_node.details.get('port_name', ''))
-            pw, ph = (sfp_w, sfp_h) if kind == 'sfp' else (rj_w, rj_h)
+            pw, ph = (sfp_w, sfp_h) if kind in {'sfp', 'pon'} else (rj_w, rj_h)
             x = margin_x + col * (max_w + gap_x) + (max_w - pw) / 2.0
             y = start_y + row * row_pitch + (max(rj_h, sfp_h) - ph) / 2.0
             self._port_rects[port_node.node_id] = QRectF(x, y, pw, ph)
@@ -1080,9 +1099,12 @@ class LinkLabelItem(QGraphicsObject):
         self.colour = colour
         self.font = QFont("Arial", 7)
         metrics = QFontMetrics(self.font)
-        self._width = min(160.0, max(42.0, float(metrics.horizontalAdvance(text) + 14)))
-        self._height = 18.0
-        self.setZValue(-0.25)
+        # Cable labels must show the complete medium, length and failover role.
+        # The old 160 px cap clipped longer labels such as
+        # "Fibre · 1,245 m · Failover".
+        self._width = min(420.0, max(54.0, float(metrics.horizontalAdvance(text) + 18)))
+        self._height = 20.0
+        self.setZValue(0.35)
 
     def boundingRect(self) -> QRectF:
         return QRectF(-self._width / 2.0, -self._height / 2.0, self._width, self._height)
@@ -1094,7 +1116,7 @@ class LinkLabelItem(QGraphicsObject):
         painter.drawRoundedRect(self.boundingRect(), 8.0, 8.0)
         painter.setFont(self.font)
         painter.setPen(self.colour.lighter(145))
-        painter.drawText(self.boundingRect(), Qt.AlignCenter, QFontMetrics(self.font).elidedText(self.text, Qt.ElideRight, int(self._width - 10)))
+        painter.drawText(self.boundingRect().adjusted(7.0, 0.0, -7.0, 0.0), Qt.AlignCenter, self.text)
 
 
 class TopologyGraphicsView(QGraphicsView):
@@ -1558,7 +1580,8 @@ class NetworkTopologyDialog(QDialog):
         self.rack_view_button.clicked.connect(self._open_selected_rack_view)
         panel_layout.addWidget(self.rack_view_button)
 
-        self.port_view_button = QPushButton("Open switch port view")
+        self.port_view_button = QPushButton("Open device port view")
+        self.port_view_button.setToolTip("Show physical ports, direct connections and traced paths through passive equipment")
         self.port_view_button.setEnabled(False)
         self.port_view_button.clicked.connect(self._open_selected_switch_port_view)
         panel_layout.addWidget(self.port_view_button)
@@ -1661,7 +1684,24 @@ class NetworkTopologyDialog(QDialog):
                 self._detail_row("Port", _text(node.details.get("port_name")), True)
                 self._detail_row("Status", "Occupied" if node.details.get("occupied") else "Available")
                 connected_devices = node.details.get("connected_devices", []) or []
-                self._detail_row("Connected", "\n".join(str(value) for value in connected_devices) if connected_devices else "—")
+                self._detail_row("Directly connected", "\n".join(str(value) for value in connected_devices) if connected_devices else "—")
+                if not any(
+                    key in node.details
+                    for key in ("next_active_devices", "next_passive_patch_locations", "connection_paths")
+                ):
+                    parent_instance_id = _text(node.details.get("parent_instance_id"))
+                    port_name = _text(node.details.get("port_name"))
+                    if parent_instance_id and port_name:
+                        node.details.update(self._port_trace_details(parent_instance_id, port_name))
+                next_active = node.details.get("next_active_devices", []) or []
+                if next_active:
+                    self._detail_row("Next active device", "\n".join(str(value) for value in next_active))
+                passive_locations = node.details.get("next_passive_patch_locations", []) or []
+                if passive_locations:
+                    self._detail_row("Next passive patch", "\n".join(str(value) for value in passive_locations))
+                paths = node.details.get("connection_paths", []) or []
+                if paths:
+                    self._detail_row("Connection path", "\n\n".join(str(value) for value in paths))
                 if node.poe_used_w:
                     self._detail_row("PoE load", f"{node.poe_used_w:.1f} W")
             elif node.asset_type == "client_device":
@@ -1722,7 +1762,7 @@ class NetworkTopologyDialog(QDialog):
         rack_key = self._rack_group_key(node.node_id)
         self.rack_view_button.setEnabled(not node.pseudo and rack_key != (0, "", ""))
         self.rack_view_button.setProperty("node_id", node.node_id)
-        self.port_view_button.setEnabled(not node.pseudo and node.asset_type == "network_switch")
+        self.port_view_button.setEnabled(not node.pseudo and self._supports_port_view(node))
         self.port_view_button.setProperty("node_id", node.node_id)
 
     def _selected_floor(self) -> Optional[int]:
@@ -2041,6 +2081,138 @@ class NetworkTopologyDialog(QDialog):
         visible.extend(rack_nodes)
         return visible
 
+    def _supports_port_view(self, node: TopologyNode) -> bool:
+        return node.asset_type in {
+            "network_switch",
+            "network_router",
+            "firewall",
+            "optical_line_terminal",
+            "optical_network_terminal",
+            "wireless_access_point",
+            "patch_panel",
+        }
+
+    def _passive_patch_description(self, node: TopologyNode) -> str:
+        parts = [node.name]
+        if node.location_name:
+            parts.append(node.location_name)
+        rack = _text(node.instance.get("rack_name"))
+        start_u = _int(node.instance.get("rack_start_u"))
+        if rack:
+            rack_text = rack + (f" at {start_u}U" if start_u else "")
+            parts.append(rack_text)
+        return " — ".join(parts)
+
+    def _port_trace_details(self, device_id: str, port_name: str) -> dict:
+        """Trace a physical port through passive equipment and active devices.
+
+        The trace keeps direct patch-panel/splitter connections visible in port
+        details while the overview topology continues to omit those components.
+        Paths stop at a splitter, an endpoint-serving device, or a leaf device.
+        """
+        direct_edges: List[Tuple[str, TopologyEdge]] = []
+        for neighbour_id, edge in self.model.adjacency.get(device_id, []):
+            local_port = edge.source_port if edge.source_id == device_id else edge.target_port
+            if _text(local_port) == _text(port_name):
+                direct_edges.append((neighbour_id, edge))
+
+        next_active: List[str] = []
+        next_passive: List[str] = []
+        paths: List[str] = []
+        seen_path_labels: Set[str] = set()
+
+        for neighbour_id, first_edge in direct_edges:
+            queue = deque([(neighbour_id, device_id, [device_id, neighbour_id], 0, False, False)])
+            visited_states: Set[Tuple[str, str]] = set()
+            while queue and len(paths) < 40:
+                current_id, previous_id, path_ids, depth, active_found, passive_found = queue.popleft()
+                state = (current_id, previous_id)
+                if state in visited_states or depth > 14:
+                    continue
+                visited_states.add(state)
+                current = self.model.nodes.get(current_id)
+                if current is None:
+                    continue
+
+                is_patch = current.asset_type == "patch_panel"
+                is_splitter = current.asset_type == "fibre_splitter" or "splitter" in current.role
+                is_active = self._is_active_topology_device(current_id) and not current.pseudo
+
+                if is_patch and not passive_found:
+                    description = self._passive_patch_description(current)
+                    if description not in next_passive:
+                        next_passive.append(description)
+                    passive_found = True
+
+                if is_active and current_id != device_id and not active_found:
+                    description = current.name
+                    if current.location_name:
+                        description += f" — {current.location_name}"
+                    if description not in next_active:
+                        next_active.append(description)
+                    active_found = True
+
+                has_clients = current.endpoint_count > 0
+                neighbours = [
+                    (candidate_id, edge)
+                    for candidate_id, edge in self.model.adjacency.get(current_id, [])
+                    if candidate_id != previous_id and candidate_id not in path_ids
+                ]
+                terminal = is_splitter or has_clients or not neighbours or depth >= 14
+                if terminal:
+                    labels = []
+                    for path_id in path_ids:
+                        path_node = self.model.nodes.get(path_id)
+                        labels.append(path_node.name if path_node is not None else path_id)
+                    reason = "splitter" if is_splitter else ("client-serving device" if has_clients else "end device")
+                    label = " → ".join(labels) + f"  [{reason}]"
+                    if label not in seen_path_labels:
+                        seen_path_labels.add(label)
+                        paths.append(label)
+                    continue
+
+                for candidate_id, _edge in neighbours:
+                    queue.append((
+                        candidate_id,
+                        current_id,
+                        path_ids + [candidate_id],
+                        depth + 1,
+                        active_found,
+                        passive_found,
+                    ))
+
+        return {
+            "next_active_devices": next_active,
+            "next_passive_patch_locations": next_passive,
+            "connection_paths": paths,
+        }
+
+    def _device_port_records(self, device_id: str) -> Tuple[Dict[str, List[str]], Dict[str, float], Dict[str, dict]]:
+        records: Dict[str, List[str]] = defaultdict(list)
+        poe_by_port: Dict[str, float] = defaultdict(float)
+        traces: Dict[str, dict] = {}
+        for assignment in self.data.get("network_endpoint_assignments", []):
+            if _text(assignment.get("network_instance_id")) != device_id:
+                continue
+            port = _text(assignment.get("network_port")) or "Unspecified"
+            endpoint = _text(assignment.get("endpoint_name")) or "Endpoint"
+            asset_name = _text(assignment.get("endpoint_asset_name"))
+            records[port].append(endpoint + (f" — {asset_name}" if asset_name else ""))
+            poe_by_port[port] += max(0.0, _float(assignment.get("poe_power_w")))
+        for edge in self.model.edges:
+            if edge.source_id == device_id:
+                port = edge.source_port or "Unspecified"
+                peer = self.model.nodes.get(edge.target_id)
+                records[port].append(peer.name if peer else edge.target_id)
+            elif edge.target_id == device_id:
+                port = edge.target_port or "Unspecified"
+                peer = self.model.nodes.get(edge.source_id)
+                records[port].append(peer.name if peer else edge.source_id)
+        # Trace details are intentionally calculated only when a user selects
+        # a port. Eagerly tracing every port on every rack device would undo the
+        # topology loading-performance improvements on large projects.
+        return records, poe_by_port, traces
+
     def _collect_switch_port_visible(self) -> List[str]:
         visible: List[str] = []
         self.visible_parent.clear()
@@ -2052,26 +2224,7 @@ class NetworkTopologyDialog(QDialog):
             return visible
         visible.append(switch_id)
 
-        port_records: Dict[str, List[str]] = defaultdict(list)
-        poe_by_port: Dict[str, float] = defaultdict(float)
-        for assignment in self.data.get("network_endpoint_assignments", []):
-            if _text(assignment.get("network_instance_id")) != switch_id:
-                continue
-            port = _text(assignment.get("network_port")) or "Unspecified"
-            endpoint = _text(assignment.get("endpoint_name")) or "Endpoint"
-            asset_name = _text(assignment.get("endpoint_asset_name"))
-            label = endpoint + (f" — {asset_name}" if asset_name else "")
-            port_records[port].append(label)
-            poe_by_port[port] += max(0.0, _float(assignment.get("poe_power_w")))
-        for edge in self.model.edges:
-            if edge.source_id == switch_id:
-                port = edge.source_port or "Unspecified"
-                peer = self.model.nodes.get(edge.target_id)
-                port_records[port].append(peer.name if peer else edge.target_id)
-            elif edge.target_id == switch_id:
-                port = edge.target_port or "Unspecified"
-                peer = self.model.nodes.get(edge.source_id)
-                port_records[port].append(peer.name if peer else edge.source_id)
+        port_records, poe_by_port, port_traces = self._device_port_records(switch_id)
 
         capacity = max(0, switch.port_capacity)
         names = {str(number) for number in range(1, capacity + 1)}
@@ -2104,6 +2257,7 @@ class NetworkTopologyDialog(QDialog):
                     "port_name": port,
                     "connected_devices": connected,
                     "occupied": occupied,
+                    **port_traces.get(port, {}),
                 },
             )
             self._switch_port_nodes_by_id[node_id] = node
@@ -2115,25 +2269,7 @@ class NetworkTopologyDialog(QDialog):
         device = self.model.nodes.get(device_id)
         if device is None:
             return []
-        records: Dict[str, List[str]] = defaultdict(list)
-        poe_by_port: Dict[str, float] = defaultdict(float)
-        for assignment in self.data.get("network_endpoint_assignments", []):
-            if _text(assignment.get("network_instance_id")) != device_id:
-                continue
-            port = _text(assignment.get("network_port")) or "Unspecified"
-            endpoint = _text(assignment.get("endpoint_name")) or "Endpoint"
-            asset_name = _text(assignment.get("endpoint_asset_name"))
-            records[port].append(endpoint + (f" — {asset_name}" if asset_name else ""))
-            poe_by_port[port] += max(0.0, _float(assignment.get("poe_power_w")))
-        for edge in self.model.edges:
-            if edge.source_id == device_id:
-                port = edge.source_port or "Unspecified"
-                peer = self.model.nodes.get(edge.target_id)
-                records[port].append(peer.name if peer else edge.target_id)
-            elif edge.target_id == device_id:
-                port = edge.target_port or "Unspecified"
-                peer = self.model.nodes.get(edge.source_id)
-                records[port].append(peer.name if peer else edge.source_id)
+        records, poe_by_port, port_traces = self._device_port_records(device_id)
 
         capacity = max(0, device.port_capacity)
         names = {str(number) for number in range(1, capacity + 1)}
@@ -2166,6 +2302,7 @@ class NetworkTopologyDialog(QDialog):
                     "port_name": port,
                     "connected_devices": connected,
                     "occupied": bool(connected),
+                    **port_traces.get(port, {}),
                 },
             )
             self._rack_port_nodes_by_id[node_id] = node
@@ -3140,7 +3277,7 @@ class NetworkTopologyDialog(QDialog):
             node = self.model.nodes.get(self.switch_port_focus)
             occupied = sum(1 for item in self._switch_port_nodes_by_id.values() if item.ports_used)
             total = len(self._switch_port_nodes_by_id)
-            return f"Switch port view: {node.name if node else self.switch_port_focus} · {occupied:,}/{total:,} ports occupied · Red = occupied, green = free · Click a port for details"
+            return f"Device port view: {node.name if node else self.switch_port_focus} · {occupied:,}/{total:,} ports occupied · Red = occupied, green = free · Click a port for details"
         if self.rack_focus is not None:
             equipment_count = sum(1 for node in self.visible_nodes.values() if not node.pseudo)
             return (
@@ -3246,7 +3383,7 @@ class NetworkTopologyDialog(QDialog):
 
     def _switch_group_key(self, node_id: str) -> Tuple[int, str, str]:
         node = self._node_for(node_id)
-        if node is None or node.asset_type != "network_switch":
+        if node is None or not self._supports_port_view(node):
             return (0, "", "")
         rack = _text(node.instance.get("rack_name"))
         location = node.location_name
@@ -3433,6 +3570,9 @@ class NetworkTopologyDialog(QDialog):
         if not text:
             return
         label = LinkLabelItem(text, colour)
+        # Keep failover labels clear of the primary fibre label and bus line.
+        if "failover" in text.lower() or "standby" in text.lower():
+            point = QPointF(point.x(), point.y() - 14.0)
         label.setPos(point)
         self.scene.addItem(label)
 
@@ -3481,7 +3621,7 @@ class NetworkTopologyDialog(QDialog):
             for child_id in child_ids:
                 if child_id not in positions:
                     continue
-                edge = None if child_id.startswith("client::") else self.model.edges_by_id.get(
+                edge = None if child_id.startswith("client::") else self._edge_by_id(
                     self.visible_parent_edge.get(child_id, "")
                 )
                 self._add_link(
@@ -3912,7 +4052,7 @@ class NetworkTopologyDialog(QDialog):
     def _open_selected_switch_port_view(self) -> None:
         node_id = _text(self.port_view_button.property("node_id"))
         node = self.model.nodes.get(node_id)
-        if node is None or node.asset_type != "network_switch":
+        if node is None or not self._supports_port_view(node):
             return
         self.switch_port_focus = node_id
         self.rebuild_scene(fit=True)
@@ -3922,7 +4062,7 @@ class NetworkTopologyDialog(QDialog):
             return
         if self.rack_focus is not None:
             node = self._node_for(node_id)
-            if node is not None and node.asset_type == "network_switch":
+            if node is not None and self._supports_port_view(node):
                 self.switch_port_focus = node_id
                 self.rebuild_scene(fit=True)
             return
