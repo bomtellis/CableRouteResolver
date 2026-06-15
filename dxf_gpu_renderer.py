@@ -637,6 +637,23 @@ class GpuDxfGraphView(QOpenGLWidget):
             if self.show_labels:
                 self._draw_screen_label(painter, pos, str(name), label_color)
 
+    def _network_display_positions(
+        self, floor_instances: Dict[str, dict], assets: Dict[str, dict]
+    ) -> Dict[str, Tuple[float, float]]:
+        """Return the stored spatial positions for network assets.
+
+        The main graph is a spatial cable-routing view.  Asset symbols must
+        therefore remain at the coordinates selected by the planner rather
+        than being arranged by the renderer in radial or linear patterns.
+        """
+        return {
+            instance_id: (
+                float(instance.get("x", 0.0)),
+                float(instance.get("y", 0.0)),
+            )
+            for instance_id, instance in floor_instances.items()
+        }
+
     def _draw_network(self, painter: QPainter) -> None:
         if self.store is None or not self.show_network:
             return
@@ -655,6 +672,14 @@ class GpuDxfGraphView(QOpenGLWidget):
             if isinstance(item, dict) and str(item.get("id", "")).strip()
         }
         all_points = self.store.all_points() if hasattr(self.store, "all_points") else {}
+        display_positions = self._network_display_positions(floor_instances, assets)
+
+        def displayed_instance(instance: dict) -> dict:
+            instance_id = str(instance.get("id", "")).strip()
+            position = display_positions.get(instance_id)
+            if not position:
+                return instance
+            return {**instance, "x": position[0], "y": position[1]}
 
         fibre_pen = QPen(QColor("#6f8dff"), 0.08)
         copper_pen = QPen(QColor("#4fbfa3"), 0.06)
@@ -686,7 +711,7 @@ class GpuDxfGraphView(QOpenGLWidget):
                     for name in connection.get("route_path", [])
                     if str(name) in all_points
                 ]
-                records = [source] + route_records + [target]
+                records = [displayed_instance(source)] + route_records + [displayed_instance(target)]
                 medium = str(connection.get("medium", "") or "").strip().lower()
                 standby = bool(connection.get("standby", False)) or str(
                     connection.get("redundancy_role", "")
@@ -707,16 +732,23 @@ class GpuDxfGraphView(QOpenGLWidget):
                     for name in assignment.get("route_path", [])
                     if str(name) in all_points
                 ]
-                draw_routed_polyline([instance] + route_records + [endpoint], copper_pen)
+                draw_routed_polyline([displayed_instance(instance)] + route_records + [endpoint], copper_pen)
 
         # Every placed network device belongs exclusively to the network-assets layer.
         if self.show_network_assets:
             for instance_id, instance in floor_instances.items():
                 asset = assets.get(str(instance.get("asset_id", "")).strip(), {})
-                asset_type = str(asset.get("asset_type", "") or "").strip()
-                pos = self.world_to_scene(
-                    float(instance.get("x", 0.0)), float(instance.get("y", 0.0))
+                asset_type = str(asset.get("asset_type", "") or "").strip().lower()
+                # Network switches remain part of the installed design and their
+                # links are still drawn, but the switch symbols and labels are
+                # intentionally hidden from the main floor graph view.
+                if asset_type == "network_switch":
+                    continue
+                display_x, display_y = display_positions.get(
+                    str(instance_id),
+                    (float(instance.get("x", 0.0)), float(instance.get("y", 0.0))),
                 )
+                pos = self.world_to_scene(display_x, display_y)
                 selected = str(instance_id) == str(self.selected_point_name)
                 fill = {
                     "network_switch": QColor("#265f88"),
@@ -727,14 +759,30 @@ class GpuDxfGraphView(QOpenGLWidget):
                     "fibre_splitter": QColor("#697f3f"),
                     "patch_panel": QColor("#53616d"),
                 }.get(asset_type, QColor("#53616d"))
-                self._draw_diamond(
-                    painter, pos, 0.62, fill,
-                    QColor("#ffffff") if selected else QColor("#cce7ff"),
-                )
+                outline = QColor("#ffffff") if selected else QColor("#cce7ff")
+                role = str(instance.get("design_role", "") or "").lower()
+                is_splitter = asset_type == "fibre_splitter" or "splitter" in role
+                if is_splitter:
+                    self._draw_splitter_symbol(painter, pos, fill, outline)
+                else:
+                    self._draw_diamond(painter, pos, 0.62, fill, outline)
                 if self.show_labels:
                     self._draw_screen_label(
                         painter, pos, str(instance.get("name") or instance_id), QColor("#cce7ff")
                     )
+
+    @staticmethod
+    def _draw_splitter_symbol(
+        painter: QPainter, pos: QPointF, fill: QColor, outline: QColor
+    ) -> None:
+        radius = 0.58
+        rect = QRectF(pos.x() - radius, pos.y() - radius, radius * 2.0, radius * 2.0)
+        painter.setBrush(QBrush(fill))
+        painter.setPen(QPen(outline, 0.08))
+        painter.drawRoundedRect(rect, 0.12, 0.12)
+        arm = 0.34
+        painter.drawLine(QPointF(pos.x() - arm, pos.y()), QPointF(pos.x() + arm, pos.y()))
+        painter.drawLine(QPointF(pos.x(), pos.y() - arm), QPointF(pos.x(), pos.y() + arm))
 
     @staticmethod
     def _draw_diamond(

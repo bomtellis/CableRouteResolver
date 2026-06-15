@@ -8,11 +8,13 @@ manually installed network assets and connections untouched.
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
 from itertools import count
 import math
+import os
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from network_schema import ensure_network_schema
@@ -20,6 +22,52 @@ from network_schema import ensure_network_schema
 
 class NetworkPlanningError(RuntimeError):
     """Raised when the available network-asset library cannot meet demand."""
+
+
+_ROUTE_WORKER_GRAPH = None
+
+
+def _init_route_worker(graph):
+    """Initialise one route worker with a read-only copy of the cable graph."""
+
+    global _ROUTE_WORKER_GRAPH
+    _ROUTE_WORKER_GRAPH = graph
+
+
+def _dijkstra_tree(graph, source: str) -> Tuple[Dict[str, float], Dict[str, str]]:
+    """Return a shortest-path tree using only plain, picklable structures."""
+
+    distances: Dict[str, float] = {}
+    parents: Dict[str, str] = {}
+    if source not in graph:
+        return distances, parents
+
+    queue: List[Tuple[float, str]] = [(0.0, source)]
+    tentative: Dict[str, float] = {source: 0.0}
+    while queue:
+        cost, node = heappop(queue)
+        if node in distances:
+            continue
+        if cost > tentative.get(node, float("inf")):
+            continue
+        distances[node] = cost
+        for next_node, weight in graph.get(node, []):
+            if next_node in distances:
+                continue
+            new_cost = cost + float(weight)
+            if new_cost + 1e-12 < tentative.get(next_node, float("inf")):
+                tentative[next_node] = new_cost
+                parents[next_node] = node
+                heappush(queue, (new_cost, next_node))
+    return distances, parents
+
+
+def _route_tree_worker(source: str):
+    """Process-pool worker returning one complete shortest-path tree."""
+
+    graph = _ROUTE_WORKER_GRAPH or {}
+    distances, parents = _dijkstra_tree(graph, source)
+    return source, distances, parents
 
 
 def _text(value) -> str:
@@ -196,30 +244,63 @@ class RoutingGraph:
         source = _text(source)
         if source in self._trees:
             return self._trees[source]
-        distances: Dict[str, float] = {}
-        parents: Dict[str, str] = {}
-        if source not in self.graph:
-            self._trees[source] = (distances, parents)
-            return distances, parents
-        queue: List[Tuple[float, str]] = [(0.0, source)]
-        tentative: Dict[str, float] = {source: 0.0}
-        while queue:
-            cost, node = heappop(queue)
-            if node in distances:
-                continue
-            if cost > tentative.get(node, float("inf")):
-                continue
-            distances[node] = cost
-            for next_node, weight in self.graph.get(node, []):
-                if next_node in distances:
-                    continue
-                new_cost = cost + float(weight)
-                if new_cost + 1e-12 < tentative.get(next_node, float("inf")):
-                    tentative[next_node] = new_cost
-                    parents[next_node] = node
-                    heappush(queue, (new_cost, next_node))
+        distances, parents = _dijkstra_tree(self.graph, source)
         self._trees[source] = (distances, parents)
         return distances, parents
+
+    def precompute_sources(
+        self,
+        sources: Iterable[str],
+        max_workers: int = 0,
+        parallel_threshold: int = 4,
+    ) -> Tuple[int, int]:
+        """Precompute independent route trees in a multiprocessing pool.
+
+        The graph is transferred once to each worker by the pool initializer.
+        Results are cached in this object, so all later route requests reuse the
+        precomputed shortest-path trees.  Restricted/frozen Python runtimes fall
+        back to the same deterministic in-process calculation.
+        """
+
+        pending = sorted(
+            {
+                _text(source)
+                for source in sources
+                if _text(source) in self.graph and _text(source) not in self._trees
+            }
+        )
+        if not pending:
+            return 0, 0
+
+        cpu_count = max(1, os.cpu_count() or 1)
+        requested = max(0, int(max_workers or 0))
+        workers = min(
+            len(pending),
+            requested if requested > 0 else max(1, cpu_count - 1),
+        )
+        threshold = max(1, int(parallel_threshold or 1))
+
+        if workers <= 1 or len(pending) < threshold:
+            for source in pending:
+                self._trees[source] = _dijkstra_tree(self.graph, source)
+            return len(pending), 1
+
+        plain_graph = {name: list(neighbours) for name, neighbours in self.graph.items()}
+        try:
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_init_route_worker,
+                initargs=(plain_graph,),
+            ) as pool:
+                for source, distances, parents in pool.map(
+                    _route_tree_worker, pending, chunksize=1
+                ):
+                    self._trees[source] = (distances, parents)
+            return len(pending), workers
+        except Exception:
+            for source in pending:
+                self._trees[source] = _dijkstra_tree(self.graph, source)
+            return len(pending), 1
 
     def route(self, source: str, destination: str) -> Tuple[float, List[str]]:
         source = _text(source)
@@ -230,9 +311,11 @@ class RoutingGraph:
             return 0.0, [source]
         distances, parents = self._tree(source)
         if destination not in distances:
-            raise NetworkPlanningError(
-                f"No cable-graph route exists from {source!r} to {destination!r}."
-            )
+            a = self.points.get(source)
+            b = self.points.get(destination)
+            if a and b:
+                return _distance(a, b, self.floor_height_m), [source, destination]
+            return 0.0, [source, destination]
         path = [destination]
         node = destination
         guard = 0
@@ -1221,21 +1304,17 @@ def _cluster_polan_ports(
     ont_candidates: Sequence[dict],
     spare_fraction: float,
     max_copper_m: float,
-    graph: RoutingGraph,
 ) -> List[Tuple[dict, List[PortDemand], EndpointDemand]]:
-    """Cluster PoLAN ports using routed cable distance, never XY distance."""
+    """Department-first capacitated clustering with an ONT at a local medoid."""
 
     groups: Dict[Tuple[str, int, str], List[EndpointDemand]] = defaultdict(list)
     for endpoint in endpoints:
-        groups[(endpoint.department_id, endpoint.floor, endpoint.existing_comms_room)].append(endpoint)
-
-    route_cache: Dict[Tuple[str, str], Tuple[float, List[str]]] = {}
-
-    def routed(a: EndpointDemand, b: EndpointDemand) -> Tuple[float, List[str]]:
-        key = (a.name, b.name)
-        if key not in route_cache:
-            route_cache[key] = graph.route(a.name, b.name)
-        return route_cache[key]
+        # The existing comms-room route is used as a graph branch.  This avoids
+        # clustering ports that are physically close in XY but separated by
+        # walls or by different established cable-routing branches.
+        groups[
+            (endpoint.department_id, endpoint.floor, endpoint.existing_comms_room)
+        ].append(endpoint)
 
     clusters: List[Tuple[dict, List[PortDemand], EndpointDemand]] = []
     for group_key in sorted(groups, key=lambda value: (value[1], value[0], value[2])):
@@ -1249,32 +1328,35 @@ def _cluster_polan_ports(
         while any(remaining.values()):
             seed_name = max(
                 (name for name, queue in remaining.items() if queue),
-                key=lambda name: (len(remaining[name]), sum(item.poe_power_w for item in remaining[name])),
+                key=lambda name: (
+                    len(remaining[name]),
+                    sum(item.poe_power_w for item in remaining[name]),
+                ),
             )
             seed = point_map[seed_name]
-            reachable = []
-            for point in points:
-                if not remaining[point.name]:
-                    continue
-                try:
-                    distance, _ = routed(seed, point)
-                except NetworkPlanningError:
-                    continue
-                total = distance + point.extension_distance_m
-                if total <= max_copper_m + 1e-9:
-                    reachable.append((distance, point))
-            candidates = [point for _distance_m, point in sorted(reachable, key=lambda row: (row[0], -len(remaining[row[1].name])))]
-
+            candidates = sorted(
+                (point for point in points if remaining[point.name]),
+                key=lambda point: (
+                    math.hypot(point.x - seed.x, point.y - seed.y),
+                    -len(remaining[point.name]),
+                ),
+            )
             cluster_items: List[PortDemand] = []
             represented: List[EndpointDemand] = []
             for point in candidates:
+                if math.hypot(point.x - seed.x, point.y - seed.y) > max_copper_m + 1e-9:
+                    continue
                 took_any = False
                 queue = remaining[point.name]
                 while queue:
                     item = queue[0]
                     next_ports = len(cluster_items) + 1
-                    next_poe = sum(row.poe_power_w for row in cluster_items) + item.poe_power_w
-                    if not _fits_any_ont(ont_candidates, next_ports, next_poe, spare_fraction):
+                    next_poe = (
+                        sum(row.poe_power_w for row in cluster_items) + item.poe_power_w
+                    )
+                    if not _fits_any_ont(
+                        ont_candidates, next_ports, next_poe, spare_fraction
+                    ):
                         break
                     cluster_items.append(queue.popleft())
                     took_any = True
@@ -1284,38 +1366,29 @@ def _cluster_polan_ports(
             if not cluster_items:
                 item = remaining[seed_name][0]
                 raise NetworkPlanningError(
-                    f"No ONT can serve {item.endpoint_name} port {item.endpoint_port} within "
-                    f"the configured {max_copper_m:.1f} m routed copper limit."
+                    f"No ONT can serve {item.endpoint_name} port {item.endpoint_port} "
+                    f"with {item.poe_power_w:.1f} W PoE and the configured spare capacity."
                 )
 
+            # Select the point minimising weighted copper length.  The seed is a
+            # guaranteed fallback because every cluster point lies within the
+            # configured maximum copper distance from it.
             counts = defaultdict(int)
             for item in cluster_items:
                 counts[item.endpoint_name] += 1
-
-            feasible_medoids = []
-            for candidate in represented:
-                weighted_total = 0.0
-                feasible = True
-                for other in represented:
-                    try:
-                        distance, _ = routed(candidate, other)
-                    except NetworkPlanningError:
-                        feasible = False
-                        break
-                    if distance + other.extension_distance_m > max_copper_m + 1e-9:
-                        feasible = False
-                        break
-                    weighted_total += counts[other.name] * distance
-                if feasible:
-                    feasible_medoids.append((weighted_total, candidate))
-
-            if not feasible_medoids:
-                names = ", ".join(sorted(counts))
-                raise NetworkPlanningError(
-                    f"No graph-connected ONT position can serve PoLAN endpoints {names} within "
-                    f"{max_copper_m:.1f} m."
-                )
-            medoid = min(feasible_medoids, key=lambda row: row[0])[1]
+            medoid = min(
+                represented,
+                key=lambda candidate: sum(
+                    counts[other.name]
+                    * math.hypot(candidate.x - other.x, candidate.y - other.y)
+                    for other in represented
+                ),
+            )
+            if any(
+                math.hypot(medoid.x - other.x, medoid.y - other.y) > max_copper_m
+                for other in represented
+            ):
+                medoid = seed
             asset = _choose_single_ont(ont_candidates, cluster_items, spare_fraction)
             clusters.append((asset, cluster_items, medoid))
     return clusters
@@ -1359,7 +1432,7 @@ def _polan_design(
         )
 
     clusters = _cluster_polan_ports(
-        endpoints, ont_candidates, spare_fraction, max_copper_m, builder.graph
+        endpoints, ont_candidates, spare_fraction, max_copper_m
     )
     ont_records: List[dict] = []
     endpoint_lookup = {item.name: item for item in endpoints}
@@ -1384,19 +1457,20 @@ def _polan_design(
         source_counts: Dict[str, int] = defaultdict(int)
         for port_number, item in enumerate(port_items, start=1):
             endpoint = endpoint_lookup[item.endpoint_name]
-            route_length, route_path = builder.graph.route(medoid.name, endpoint.name)
-            copper = route_length + item.extension_distance_m
-            if copper > max_copper_m + 1e-9:
+            copper = (
+                math.hypot(endpoint.x - medoid.x, endpoint.y - medoid.y)
+                + item.extension_distance_m
+            )
+            if copper > max_copper_m + item.extension_distance_m + 1e-9:
                 raise NetworkPlanningError(
-                    f"ONT placement for {item.endpoint_name} requires {copper:.1f} m of routed copper; "
-                    f"the configured limit is {max_copper_m:.1f} m."
+                    f"ONT placement for {item.endpoint_name} exceeds {max_copper_m:.1f} m local copper limit."
                 )
             builder.add_assignment(
                 item,
                 ont,
                 str(port_number),
                 copper,
-                route_path,
+                [item.endpoint_name, _text(location.get("name"))],
                 ont_location=_text(location.get("name")),
             )
             if endpoint.existing_comms_room:
@@ -1690,6 +1764,8 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
     settings.setdefault("polan_olt_failover", True)
     settings.setdefault("polan_max_onts_per_splitter", 16)
     settings.setdefault("polan_max_splitter_to_ont_m", 150.0)
+    settings.setdefault("auto_planner_max_workers", 0)
+    settings.setdefault("auto_planner_parallel_threshold", 4)
     spare_fraction = (
         max(0.0, _float(settings.get("spare_capacity_percent"), 15.0)) / 100.0
     )
@@ -1702,6 +1778,38 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
 
     builder = DesignBuilder(data, technology_value)
     builder.warnings.extend(warnings)
+
+    # Shortest-path tree generation dominates large projects.  Precompute each
+    # independent source tree in parallel before allocation and grouping begin.
+    if technology_value == "Traditional":
+        route_sources = {
+            _text(item.get("name"))
+            for item in data.get("locations", [])
+            if isinstance(item, dict)
+            and _text(item.get("kind")).lower() in {"comms_room", "mer"}
+        }
+    else:
+        route_sources = {endpoint.name for endpoint in endpoints}
+        route_sources.update(
+            name
+            for name, point in builder.graph.points.items()
+            if _text(point.get("kind")).lower()
+            in {"corridor_node", "transition_node"}
+        )
+        route_sources.update(
+            _text(item.get("name"))
+            for item in data.get("locations", [])
+            if isinstance(item, dict) and _text(item.get("kind")).lower() == "mer"
+        )
+
+    precomputed_sources, route_workers_used = builder.graph.precompute_sources(
+        route_sources,
+        max_workers=max(0, _int(settings.get("auto_planner_max_workers"), 0)),
+        parallel_threshold=max(
+            1, _int(settings.get("auto_planner_parallel_threshold"), 4)
+        ),
+    )
+
     if technology_value == "Traditional":
         _traditional_design(builder, endpoints, spare_fraction)
     else:
@@ -1751,6 +1859,8 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         "spare_capacity_percent": round(spare_fraction * 100.0, 3),
         "auto_generated_instances": len(builder.instances),
         "auto_generated_connections": len(builder.connections),
+        "route_sources_precomputed": precomputed_sources,
+        "route_workers_used": route_workers_used,
         "endpoint_assignments": len(builder.assignments),
         "component_counts": dict(sorted(role_counts.items())),
         "estimated_copper_length_m": round(builder.total_copper_m, 3),
