@@ -970,12 +970,19 @@ class RackEquipmentItem(QGraphicsObject):
         self.units = max(1, int(units))
         self.port_nodes = list(port_nodes)
         self._port_rects: Dict[str, QRectF] = {}
+        self.search_match = False
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
         self._build_port_rects()
 
     def boundingRect(self) -> QRectF:
         return QRectF(0.0, 0.0, self._width, self._height)
+
+    def set_search_match(self, match: bool) -> None:
+        match = bool(match)
+        if self.search_match != match:
+            self.search_match = match
+            self.update()
 
     @staticmethod
     def _port_kind(port_name: str) -> str:
@@ -1052,7 +1059,8 @@ class RackEquipmentItem(QGraphicsObject):
         rect = self.boundingRect()
         painter.setRenderHint(QPainter.Antialiasing, True)
         selected = self.isSelected()
-        painter.setPen(QPen(QColor('#8fc7ff') if selected else QColor('#71808b'), 2.0 if selected else 1.2))
+        border = QColor('#8fc7ff') if selected else (QColor('#f5bf42') if self.search_match else QColor('#71808b'))
+        painter.setPen(QPen(border, 2.0 if selected or self.search_match else 1.2))
         painter.setBrush(QColor('#26323c'))
         painter.drawRoundedRect(rect.adjusted(1.0, 1.0, -1.0, -1.0), 3.0, 3.0)
         ear_w = min(15.0, self._width * 0.045)
@@ -1141,12 +1149,19 @@ class SwitchFrontPanelItem(QGraphicsObject):
         self._width = float(width)
         self._height = float(height)
         self._port_rects: Dict[str, QRectF] = {}
+        self.search_match = False
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
         self._build_port_rects()
 
     def boundingRect(self) -> QRectF:
         return QRectF(0.0, 0.0, self._width, self._height)
+
+    def set_search_match(self, match: bool) -> None:
+        match = bool(match)
+        if self.search_match != match:
+            self.search_match = match
+            self.update()
 
     def _port_kind(self, port_name: str) -> str:
         value = _text(port_name).lower()
@@ -1195,7 +1210,9 @@ class SwitchFrontPanelItem(QGraphicsObject):
     def paint(self, painter: QPainter, option, widget=None) -> None:
         rect = self.boundingRect()
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(QPen(QColor('#8fc7ff') if self.isSelected() else QColor('#71808b'), 2.0))
+        selected = self.isSelected()
+        border = QColor('#8fc7ff') if selected else (QColor('#f5bf42') if self.search_match else QColor('#71808b'))
+        painter.setPen(QPen(border, 2.0 if selected or self.search_match else 1.2))
         painter.setBrush(QColor('#222d35'))
         painter.drawRoundedRect(rect.adjusted(1.0, 1.0, -1.0, -1.0), 5.0, 5.0)
         painter.setBrush(QColor('#11181e'))
@@ -1258,12 +1275,19 @@ class SplitterFrontPanelItem(QGraphicsObject):
         self._width = float(width)
         self._height = max(40.0, float(height))
         self._port_rects: Dict[str, QRectF] = {}
+        self.search_match = False
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
         self._build_port_rects()
 
     def boundingRect(self) -> QRectF:
         return QRectF(0.0, 0.0, self._width, self._height)
+
+    def set_search_match(self, match: bool) -> None:
+        match = bool(match)
+        if self.search_match != match:
+            self.search_match = match
+            self.update()
 
     def _build_port_rects(self) -> None:
         self._port_rects.clear()
@@ -1297,7 +1321,9 @@ class SplitterFrontPanelItem(QGraphicsObject):
     def paint(self, painter: QPainter, option, widget=None) -> None:
         rect = self.boundingRect()
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(QPen(QColor('#8fc7ff') if self.isSelected() else QColor('#71808b'), 1.4))
+        selected = self.isSelected()
+        border = QColor('#8fc7ff') if selected else (QColor('#f5bf42') if self.search_match else QColor('#71808b'))
+        painter.setPen(QPen(border, 2.0 if selected or self.search_match else 1.4))
         painter.setBrush(QColor('#222d35'))
         painter.drawRoundedRect(rect.adjusted(1,1,-1,-1), 4, 4)
         painter.setFont(QFont('Arial', 7, QFont.Bold))
@@ -4719,7 +4745,10 @@ class NetworkTopologyDialog(QDialog):
                 )
             ).lower()
             match = bool(query and query in haystack)
-            item.set_search_match(match)
+            if hasattr(item, 'set_search_match'):
+                item.set_search_match(match)
+            elif match:
+                item.update()
             if match:
                 self._search_matches.append(node_id)
         if query and self._search_matches:
