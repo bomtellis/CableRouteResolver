@@ -134912,7 +134912,7 @@
     "default_poe_power_w": 0.0,
     "poe_power_defaults": {},
     "default_rack_size_u": 42,
-    "polan_max_onts_per_splitter": 8,
+    "polan_max_onts_per_splitter": 32,
     "polan_max_splitter_ont_route_m": 120.0
   },
   "network_assets": [

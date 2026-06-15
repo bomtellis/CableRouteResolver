@@ -1304,17 +1304,21 @@ def _cluster_polan_ports(
     ont_candidates: Sequence[dict],
     spare_fraction: float,
     max_copper_m: float,
+    graph: RoutingGraph,
 ) -> List[Tuple[dict, List[PortDemand], EndpointDemand]]:
-    """Department-first capacitated clustering with an ONT at a local medoid."""
+    """Cluster PoLAN ports using cable-graph distance only."""
 
     groups: Dict[Tuple[str, int, str], List[EndpointDemand]] = defaultdict(list)
     for endpoint in endpoints:
-        # The existing comms-room route is used as a graph branch.  This avoids
-        # clustering ports that are physically close in XY but separated by
-        # walls or by different established cable-routing branches.
-        groups[
-            (endpoint.department_id, endpoint.floor, endpoint.existing_comms_room)
-        ].append(endpoint)
+        groups[(endpoint.department_id, endpoint.floor, endpoint.existing_comms_room)].append(endpoint)
+
+    route_cache: Dict[Tuple[str, str], Tuple[float, List[str]]] = {}
+
+    def routed(a_name: str, b_name: str) -> Tuple[float, List[str]]:
+        key = (a_name, b_name)
+        if key not in route_cache:
+            route_cache[key] = graph.route(a_name, b_name)
+        return route_cache[key]
 
     clusters: List[Tuple[dict, List[PortDemand], EndpointDemand]] = []
     for group_key in sorted(groups, key=lambda value: (value[1], value[0], value[2])):
@@ -1334,31 +1338,39 @@ def _cluster_polan_ports(
                 ),
             )
             seed = point_map[seed_name]
-            candidates = sorted(
-                (point for point in points if remaining[point.name]),
-                key=lambda point: (
-                    math.hypot(point.x - seed.x, point.y - seed.y),
-                    -len(remaining[point.name]),
-                ),
-            )
+            reachable: List[Tuple[float, EndpointDemand]] = []
+            for point in points:
+                if not remaining[point.name]:
+                    continue
+                try:
+                    distance, _ = routed(seed.name, point.name)
+                except NetworkPlanningError:
+                    continue
+                if distance + point.extension_distance_m <= max_copper_m + 1e-9:
+                    reachable.append((distance, point))
+
+            candidates = [
+                point
+                for _distance_m, point in sorted(
+                    reachable,
+                    key=lambda row: (row[0], -len(remaining[row[1].name]), row[1].name),
+                )
+            ]
+
             cluster_items: List[PortDemand] = []
             represented: List[EndpointDemand] = []
+            cluster_poe = 0.0
             for point in candidates:
-                if math.hypot(point.x - seed.x, point.y - seed.y) > max_copper_m + 1e-9:
-                    continue
                 took_any = False
                 queue = remaining[point.name]
                 while queue:
                     item = queue[0]
                     next_ports = len(cluster_items) + 1
-                    next_poe = (
-                        sum(row.poe_power_w for row in cluster_items) + item.poe_power_w
-                    )
-                    if not _fits_any_ont(
-                        ont_candidates, next_ports, next_poe, spare_fraction
-                    ):
+                    next_poe = cluster_poe + item.poe_power_w
+                    if not _fits_any_ont(ont_candidates, next_ports, next_poe, spare_fraction):
                         break
                     cluster_items.append(queue.popleft())
+                    cluster_poe = next_poe
                     took_any = True
                 if took_any:
                     represented.append(point)
@@ -1366,33 +1378,45 @@ def _cluster_polan_ports(
             if not cluster_items:
                 item = remaining[seed_name][0]
                 raise NetworkPlanningError(
-                    f"No ONT can serve {item.endpoint_name} port {item.endpoint_port} "
-                    f"with {item.poe_power_w:.1f} W PoE and the configured spare capacity."
+                    f"No ONT can serve {item.endpoint_name} port {item.endpoint_port} within "
+                    f"the configured {max_copper_m:.1f} m routed copper limit."
                 )
 
-            # Select the point minimising weighted copper length.  The seed is a
-            # guaranteed fallback because every cluster point lies within the
-            # configured maximum copper distance from it.
-            counts = defaultdict(int)
+            counts: Dict[str, int] = defaultdict(int)
             for item in cluster_items:
                 counts[item.endpoint_name] += 1
-            medoid = min(
-                represented,
-                key=lambda candidate: sum(
-                    counts[other.name]
-                    * math.hypot(candidate.x - other.x, candidate.y - other.y)
-                    for other in represented
-                ),
-            )
-            if any(
-                math.hypot(medoid.x - other.x, medoid.y - other.y) > max_copper_m
-                for other in represented
-            ):
-                medoid = seed
+
+            feasible_medoids: List[Tuple[float, float, EndpointDemand]] = []
+            for candidate in represented:
+                weighted_total = 0.0
+                worst = 0.0
+                feasible = True
+                for other in represented:
+                    try:
+                        distance, _ = routed(candidate.name, other.name)
+                    except NetworkPlanningError:
+                        feasible = False
+                        break
+                    total = distance + other.extension_distance_m
+                    if total > max_copper_m + 1e-9:
+                        feasible = False
+                        break
+                    weighted_total += counts[other.name] * total
+                    worst = max(worst, total)
+                if feasible:
+                    feasible_medoids.append((weighted_total, worst, candidate))
+
+            if not feasible_medoids:
+                names = ", ".join(sorted(counts))
+                raise NetworkPlanningError(
+                    f"No graph-connected ONT position can serve PoLAN endpoints {names} within "
+                    f"{max_copper_m:.1f} m."
+                )
+
+            medoid = min(feasible_medoids, key=lambda row: (row[0], row[1], row[2].name))[2]
             asset = _choose_single_ont(ont_candidates, cluster_items, spare_fraction)
             clusters.append((asset, cluster_items, medoid))
     return clusters
-
 
 def _protected_splitter_asset(builder: DesignBuilder, base_asset: dict) -> dict:
     existing_id = f"AUTO-PROTECTED-{_text(base_asset.get('id'))}"
@@ -1432,7 +1456,7 @@ def _polan_design(
         )
 
     clusters = _cluster_polan_ports(
-        endpoints, ont_candidates, spare_fraction, max_copper_m
+        endpoints, ont_candidates, spare_fraction, max_copper_m, builder.graph
     )
     ont_records: List[dict] = []
     endpoint_lookup = {item.name: item for item in endpoints}
@@ -1457,20 +1481,19 @@ def _polan_design(
         source_counts: Dict[str, int] = defaultdict(int)
         for port_number, item in enumerate(port_items, start=1):
             endpoint = endpoint_lookup[item.endpoint_name]
-            copper = (
-                math.hypot(endpoint.x - medoid.x, endpoint.y - medoid.y)
-                + item.extension_distance_m
-            )
-            if copper > max_copper_m + item.extension_distance_m + 1e-9:
+            route_length, route_path = builder.graph.route(medoid.name, endpoint.name)
+            copper = route_length + item.extension_distance_m
+            if copper > max_copper_m + 1e-9:
                 raise NetworkPlanningError(
-                    f"ONT placement for {item.endpoint_name} exceeds {max_copper_m:.1f} m local copper limit."
+                    f"ONT placement for {item.endpoint_name} requires {copper:.1f} m of routed copper; "
+                    f"the configured limit is {max_copper_m:.1f} m."
                 )
             builder.add_assignment(
                 item,
                 ont,
                 str(port_number),
                 copper,
-                [item.endpoint_name, _text(location.get("name"))],
+                route_path,
                 ont_location=_text(location.get("name")),
             )
             if endpoint.existing_comms_room:
@@ -1485,6 +1508,7 @@ def _polan_design(
                 "source_room": (
                     max(source_counts, key=source_counts.get) if source_counts else ""
                 ),
+                "endpoint_names": sorted({item.endpoint_name for item in port_items}),
             }
         )
 
@@ -1540,17 +1564,145 @@ def _polan_design(
     for record in ont_records:
         onts_by_floor[record["floor"]].append(record)
 
-    for floor in sorted(onts_by_floor):
-        records = sorted(
-            onts_by_floor[floor],
-            key=lambda row: (
-                row["department_id"],
-                _float(row["location"].get("x")),
-                _float(row["location"].get("y")),
-            ),
+    max_splitter_route_m = max(
+        0.0,
+        _float(builder.settings.get("polan_max_splitter_ont_route_m"), 120.0),
+    )
+
+    route_cache: Dict[Tuple[str, str], Tuple[float, List[str]]] = {}
+
+    def routed(source: str, destination: str) -> Tuple[float, List[str]]:
+        key = (source, destination)
+        if key not in route_cache:
+            route_cache[key] = builder.graph.route(source, destination)
+        return route_cache[key]
+
+    def endpoint_route_from_anchor(anchor: str, endpoint_name: str) -> float:
+        distance, _ = routed(anchor, endpoint_name)
+        endpoint = endpoint_lookup[endpoint_name]
+        return distance + endpoint.extension_distance_m
+
+    corridor_candidates_by_floor: Dict[int, List[str]] = defaultdict(list)
+    for name, point in builder.graph.points.items():
+        if _text(point.get("kind")).lower() in {"corridor_node", "transition_node"}:
+            corridor_candidates_by_floor[_int(point.get("floor"))].append(name)
+    for floor in corridor_candidates_by_floor:
+        corridor_candidates_by_floor[floor].sort()
+
+    used_splitter_anchors: set[str] = set()
+
+    def group_endpoint_names(group: Sequence[dict]) -> List[str]:
+        return sorted({
+            endpoint_name
+            for row in group
+            for endpoint_name in row.get("endpoint_names", [])
+        })
+
+    def feasible_splitter_anchors(
+        group: Sequence[dict], floor: int
+    ) -> List[Tuple[float, float, str]]:
+        """Return corridor/transition nodes that serve the complete group.
+
+        Every distance is measured along the cable-routing graph from the
+        candidate spatial graph node to each endpoint device.  Endpoint
+        extension distance is then added to the graph route.
+        """
+        endpoint_names = group_endpoint_names(group)
+        feasible: List[Tuple[float, float, str]] = []
+        for anchor in corridor_candidates_by_floor.get(floor, []):
+            endpoint_distances: List[float] = []
+            try:
+                for endpoint_name in endpoint_names:
+                    endpoint_distances.append(
+                        endpoint_route_from_anchor(anchor, endpoint_name)
+                    )
+            except NetworkPlanningError:
+                continue
+            worst = max(endpoint_distances, default=0.0)
+            if max_splitter_route_m > 0.0 and worst > max_splitter_route_m + 1e-9:
+                continue
+            feasible.append((sum(endpoint_distances), worst, anchor))
+        return feasible
+
+    def graph_groups(records: Sequence[dict], floor: int) -> List[List[dict]]:
+        """Build only groups having a common routed splitter anchor.
+
+        The previous capacity-only grouping could combine ONTs from separate
+        spatial graph branches and fail later even though smaller valid groups
+        existed.  This incremental grouping retains a candidate only when the
+        enlarged group still has at least one corridor/transition node that can
+        reach every endpoint within the configured routed limit.
+        """
+        remaining = sorted(records, key=lambda row: _text(row["instance"].get("id")))
+        groups: List[List[dict]] = []
+        while remaining:
+            seed = remaining.pop(0)
+            group = [seed]
+            if not feasible_splitter_anchors(group, floor):
+                names = ", ".join(group_endpoint_names(group))
+                raise NetworkPlanningError(
+                    f"No corridor/transition graph node on floor {floor} can reach endpoint devices "
+                    f"{names} within the configured {max_splitter_route_m:.1f} m routed limit. "
+                    "Check that each endpoint is connected to the corridor graph or increase the limit."
+                )
+
+            ranked = []
+            for row in remaining:
+                try:
+                    distance, _ = routed(seed["anchor"], row["anchor"])
+                except NetworkPlanningError:
+                    continue
+                ranked.append((distance, _text(row["instance"].get("id")), row))
+            ranked.sort(key=lambda item: (item[0], item[1]))
+
+            selected_ids = set()
+            for _distance_m, _row_id, row in ranked:
+                if len(group) >= splitter_capacity:
+                    break
+                trial_group = group + [row]
+                if not feasible_splitter_anchors(trial_group, floor):
+                    continue
+                group.append(row)
+                selected_ids.add(id(row))
+
+            remaining = [row for row in remaining if id(row) not in selected_ids]
+            groups.append(group)
+        return groups
+
+    def best_splitter_anchor(group: Sequence[dict], floor: int) -> str:
+        candidates = corridor_candidates_by_floor.get(floor, [])
+        if not candidates:
+            raise NetworkPlanningError(
+                f"No corridor or transition graph nodes exist on floor {floor} for splitter placement."
+            )
+
+        scored = []
+        for total, worst, anchor in feasible_splitter_anchors(group, floor):
+            reuse_penalty = 1 if anchor in used_splitter_anchors else 0
+            scored.append((reuse_penalty, total, worst, anchor))
+
+        if not scored:
+            names = ", ".join(group_endpoint_names(group))
+            raise NetworkPlanningError(
+                f"No corridor/transition graph node on floor {floor} can reach endpoint devices "
+                f"{names} within the configured {max_splitter_route_m:.1f} m routed limit."
+            )
+
+        _reuse, _total, _worst, anchor = min(
+            scored, key=lambda item: (item[0], item[1], item[2], item[3])
         )
-        for start in range(0, len(records), splitter_capacity):
-            group = records[start : start + splitter_capacity]
+        used_splitter_anchors.add(anchor)
+        return anchor
+
+    location_by_anchor: Dict[str, dict] = {}
+    for location in polan_distribution_locations:
+        anchor = _text(location.get("anchor_point_name"))
+        if anchor:
+            location_by_anchor.setdefault(anchor, location)
+
+    for floor in sorted(onts_by_floor):
+        records = onts_by_floor[floor]
+        for group in graph_groups(records, floor):
             required_outputs = int(math.ceil(len(group) * (1.0 + spare_fraction)))
             base_asset = min(
                 (
@@ -1566,37 +1718,21 @@ def _polan_design(
                 if failover
                 else base_asset
             )
-            same_floor_locations = [
-                item
-                for item in polan_distribution_locations
-                if _int(item.get("floor")) == floor
-            ]
-            if same_floor_locations:
-                location = min(
-                    same_floor_locations,
-                    key=lambda candidate: sum(
-                        math.hypot(
-                            _float(candidate.get("x"))
-                            - _float(row["location"].get("x")),
-                            _float(candidate.get("y"))
-                            - _float(row["location"].get("y")),
-                        )
-                        for row in group
-                    ),
-                )
-                anchor = _text(location.get("name"))
-            else:
-                centre_x = sum(_float(row["location"].get("x")) for row in group) / len(
-                    group
-                )
-                centre_y = sum(_float(row["location"].get("y")) for row in group) / len(
-                    group
-                )
+
+            anchor = best_splitter_anchor(group, floor)
+            location = location_by_anchor.get(anchor)
+            if location is None:
+                anchor_point = builder.graph.points[anchor]
                 location = builder.add_polan_location(
-                    floor, centre_x, centre_y, "", group[0]["anchor"]
+                    floor,
+                    _float(anchor_point.get("x")),
+                    _float(anchor_point.get("y")),
+                    group[0]["department_id"],
+                    anchor,
                 )
                 polan_distribution_locations.append(location)
-                anchor = group[0]["anchor"]
+                location_by_anchor[anchor] = location
+
             splitter = builder.add_instance(
                 asset,
                 f"AUTO Splitter F{floor} {len(splitter_records) + 1}",
@@ -1606,6 +1742,7 @@ def _polan_design(
                 protected=failover,
             )
             for output_number, ont_record in enumerate(group, start=1):
+                route_length, _route_path = routed(anchor, ont_record["anchor"])
                 builder.add_connection(
                     splitter,
                     f"Output-{output_number}",
