@@ -351,6 +351,13 @@ class GpuDxfGraphView(_ViewBase):
 
         self._scale = 1.0
         self._offset = QPointF(0.0, 0.0)
+        # The last transform baked into the retained painted-layer textures.
+        # During pan/zoom the Qt Quick scene graph transforms those textures
+        # directly on the GPU; geometry is repainted only after interaction
+        # settles or model data changes.
+        self._committed_scale = 1.0
+        self._committed_offset = QPointF(0.0, 0.0)
+        self._live_view_transform_active = False
         self._last_middle_pos: Optional[QPoint] = None
         self._overlay_provider = None
         self._dxf_cache = DxfRenderCache()
@@ -380,6 +387,7 @@ class GpuDxfGraphView(_ViewBase):
         self._quality_timer.setSingleShot(True)
         self._quality_timer.timeout.connect(self._end_fast_interaction)
         self._fast_interaction = False
+        self._interaction_finish_layers = 0
 
         self._drag_timer = QTimer(self)
         self._drag_timer.setSingleShot(True)
@@ -430,6 +438,18 @@ class GpuDxfGraphView(_ViewBase):
             ):
                 item = _PaintLayer(self, mask, root)
                 item.setZ(float(z))
+                # Retained textures are temporarily scaled/translated during
+                # navigation. Smooth sampling and mipmaps avoid the blocky
+                # appearance that would otherwise occur before the final
+                # high-quality repaint.
+                try:
+                    item.setSmooth(True)
+                except Exception:
+                    pass
+                try:
+                    item.setMipmap(True)
+                except Exception:
+                    pass
                 self._layer_items[mask] = item
             self._resize_quick_layers()
             try:
@@ -470,6 +490,82 @@ class GpuDxfGraphView(_ViewBase):
     def update(self, *args, **kwargs) -> None:  # QGraphicsView compatibility
         self.request_redraw(DirtyLayer.ALL)
 
+    def _schedule_scene_graph_update(self) -> None:
+        if not self._quick_mode:
+            self.request_redraw(DirtyLayer.VIEW)
+            return
+        try:
+            self.quickWindow().update()
+        except Exception:
+            # Setting QQuickItem properties normally schedules a scene-graph
+            # frame itself. This is only a compatibility fallback.
+            pass
+
+    def _apply_live_view_transform(self) -> None:
+        """Move retained view textures without repainting their geometry."""
+        if not self._quick_mode:
+            self.request_redraw(DirtyLayer.VIEW)
+            return
+        base_scale = max(1.0e-9, float(self._committed_scale))
+        ratio = float(self._scale) / base_scale
+        delta_x = float(self._offset.x()) - (ratio * float(self._committed_offset.x()))
+        delta_y = float(self._offset.y()) - (ratio * float(self._committed_offset.y()))
+        # QQuickItem scales around its centre by default. Compensate so the
+        # effective transform is screen' = ratio * screen + delta.
+        centre_x = max(1.0, float(self.width())) * 0.5
+        centre_y = max(1.0, float(self.height())) * 0.5
+        item_x = delta_x - (centre_x * (1.0 - ratio))
+        item_y = delta_y - (centre_y * (1.0 - ratio))
+        for mask in (DirtyLayer.DXF, DirtyLayer.EDGES, DirtyLayer.OBJECTS):
+            item = self._layer_items.get(mask)
+            if item is None:
+                continue
+            item.setScale(ratio)
+            item.setX(item_x)
+            item.setY(item_y)
+        self._live_view_transform_active = True
+        self._schedule_scene_graph_update()
+        # The retained texture covers the viewport, so very large camera moves
+        # can expose uncached margins. Re-bake only after a substantial move or
+        # zoom, not for every pointer event.
+        pan_budget_x = max(220.0, float(self.width()) * 0.35)
+        pan_budget_y = max(180.0, float(self.height()) * 0.35)
+        if (
+            self._last_middle_pos is None
+            and (
+                abs(delta_x) > pan_budget_x
+                or abs(delta_y) > pan_budget_y
+                or ratio < 0.65
+                or ratio > 1.55
+            )
+        ):
+            self.request_redraw(DirtyLayer.VIEW)
+
+    def _commit_live_view_transform(self) -> None:
+        """Reset scene-graph transforms before baking the current view."""
+        if self._quick_mode:
+            for mask in (DirtyLayer.DXF, DirtyLayer.EDGES, DirtyLayer.OBJECTS):
+                item = self._layer_items.get(mask)
+                if item is None:
+                    continue
+                item.setScale(1.0)
+                item.setX(0.0)
+                item.setY(0.0)
+        self._committed_scale = float(self._scale)
+        self._committed_offset = QPointF(self._offset)
+        self._live_view_transform_active = False
+
+    def pan_by(self, dx: float, dy: float) -> None:
+        """Pan retained layers without scheduling a release-time re-render.
+
+        The scene-graph transform is already the final camera transform.  A
+        delayed repaint used to reset the retained items before their new
+        textures were ready, which caused a visible jump when panning ended.
+        Geometry is re-baked only when a real model/layer change requires it.
+        """
+        self._offset += QPointF(float(dx), float(dy))
+        self._apply_live_view_transform()
+
     def _flush_redraw(self) -> None:
         if not self.isVisible():
             self._frame_timer.stop()
@@ -481,6 +577,16 @@ class GpuDxfGraphView(_ViewBase):
             return
 
         started = time.perf_counter()
+        # A layer repaint must use one coherent view transform. If retained
+        # textures are currently being moved by the scene graph, commit the
+        # final camera and repaint all view layers together exactly once.
+        if layers & DirtyLayer.VIEW and self._live_view_transform_active:
+            layers |= DirtyLayer.VIEW
+            self._commit_live_view_transform()
+        elif layers & DirtyLayer.VIEW:
+            self._committed_scale = float(self._scale)
+            self._committed_offset = QPointF(self._offset)
+
         if layers & (DirtyLayer.EDGES | DirtyLayer.OBJECTS):
             self._ensure_frame_snapshot()
 
@@ -503,15 +609,19 @@ class GpuDxfGraphView(_ViewBase):
         if not self._dirty_layers:
             self._frame_timer.stop()
 
-    def _mark_interaction(self) -> None:
+    def _mark_interaction(self, final_layers: int = DirtyLayer.VIEW) -> None:
         self._fast_interaction = True
-        self._quality_timer.start(140)
+        self._interaction_finish_layers |= int(final_layers)
+        self._quality_timer.start(120)
 
     def _end_fast_interaction(self) -> None:
         if not self._fast_interaction:
             return
         self._fast_interaction = False
-        self.request_redraw(DirtyLayer.VIEW)
+        layers = self._interaction_finish_layers
+        self._interaction_finish_layers = 0
+        if layers:
+            self.request_redraw(layers)
 
     def set_target_fps(self, fps: int) -> None:
         self._target_fps = max(5, min(120, int(fps)))
@@ -616,7 +726,7 @@ class GpuDxfGraphView(_ViewBase):
                 changes |= dirty
 
         assign("show_dxf", show_dxf, DirtyLayer.DXF)
-        assign("show_labels", show_labels, DirtyLayer.ALL)
+        assign("show_labels", show_labels, DirtyLayer.DXF | DirtyLayer.OBJECTS)
         assign("show_graph", show_graph, DirtyLayer.EDGES | DirtyLayer.OBJECTS)
         assign("show_overlay", show_overlay, DirtyLayer.OVERLAY)
         assign("show_edges", show_edges, DirtyLayer.EDGES)
@@ -660,7 +770,14 @@ class GpuDxfGraphView(_ViewBase):
         self._overlay_provider = overlay_provider
         self.request_redraw(DirtyLayer.OVERLAY)
 
-    def invalidate_dxf_cache(self) -> None:
+    def invalidate_dxf_cache(self, force: bool = False) -> None:
+        # The host historically called this after many graph-only operations.
+        # DXF content is revision-keyed by set_dxf_scene(), so ignore redundant
+        # invalidations unless a caller explicitly requests a forced rebuild.
+        current_key = self._dxf_source_key(self.dxf_scene)
+        if not force and current_key == self._bound_dxf_key:
+            return
+        self._bound_dxf_key = current_key
         self._dxf_cache.clear()
         self.request_redraw(DirtyLayer.DXF)
 
@@ -693,8 +810,8 @@ class GpuDxfGraphView(_ViewBase):
             scene_pos = QPointF(float(value), float(y))
         centre = QPointF(self.width() / 2.0, self.height() / 2.0)
         self._offset = centre - QPointF(scene_pos.x() * self._scale, scene_pos.y() * self._scale)
-        self._mark_interaction()
-        self.request_redraw(DirtyLayer.VIEW)
+        self._mark_interaction(DirtyLayer.VIEW)
+        self._apply_live_view_transform()
 
     def scale(self, sx: float, sy: float) -> None:
         factor = float(sx)
@@ -703,12 +820,13 @@ class GpuDxfGraphView(_ViewBase):
         self._scale = max(0.001, min(5000.0, self._scale * factor))
         after_screen = self.world_to_screen(before[0], before[1])
         self._offset += centre - after_screen
-        self._mark_interaction()
-        self.request_redraw(DirtyLayer.VIEW)
+        self._mark_interaction(DirtyLayer.VIEW)
+        self._apply_live_view_transform()
 
     def resetTransform(self) -> None:  # noqa: N802
         self._scale = 1.0
         self._offset = QPointF(0.0, 0.0)
+        self._commit_live_view_transform()
         self.request_redraw(DirtyLayer.VIEW)
 
     def fitInView(
@@ -738,6 +856,7 @@ class GpuDxfGraphView(_ViewBase):
         self._offset = centre_screen - QPointF(
             centre_scene.x() * self._scale, centre_scene.y() * self._scale
         )
+        self._commit_live_view_transform()
         self.request_redraw(DirtyLayer.VIEW)
 
     def content_scene_rect(self, padding: float = 8.0) -> Optional[QRectF]:
@@ -841,14 +960,22 @@ class GpuDxfGraphView(_ViewBase):
             painter.end()
 
     def mousePressEvent(self, event) -> None:
-        self._mark_interaction()
         x, y = self.screen_to_world(event.position())
         if event.button() == Qt.LeftButton:
             self.leftClicked.emit(event, x, y)
         elif event.button() == Qt.RightButton:
+            # Opening a context menu is not a visual change. In particular, do
+            # not enter fast-interaction mode: its completion timer previously
+            # forced a full DXF/graph repaint after every right click.
             self.rightClicked.emit(event, x, y)
         elif event.button() == Qt.MiddleButton:
             self._last_middle_pos = event.position().toPoint()
+            # Panning is a pure retained-texture transform.  Cancel any
+            # outstanding zoom/drag quality pass as well, otherwise its timer
+            # can fire during the pan and reset the camera unexpectedly.
+            self._quality_timer.stop()
+            self._fast_interaction = False
+            self._interaction_finish_layers = 0
             self.middleClicked.emit(event)
         event.accept()
 
@@ -865,7 +992,13 @@ class GpuDxfGraphView(_ViewBase):
         elif event.button() == Qt.MiddleButton:
             self._last_middle_pos = None
             self.middleReleased.emit(event)
-        self._quality_timer.start(100)
+            # The current live transform is already exact.  Keeping it in
+            # place avoids resetting the layer items one frame before their
+            # replacement textures are painted.
+            event.accept()
+            return
+        if self._fast_interaction:
+            self._quality_timer.start(100)
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
@@ -874,9 +1007,8 @@ class GpuDxfGraphView(_ViewBase):
             delta = current - self._last_middle_pos
             self._offset += QPointF(delta.x(), delta.y())
             self._last_middle_pos = current
-            self._mark_interaction()
             self.middleDragged.emit(event)
-            self.request_redraw(DirtyLayer.VIEW)
+            self._apply_live_view_transform()
             event.accept()
             return
 
@@ -888,7 +1020,10 @@ class GpuDxfGraphView(_ViewBase):
                 self._emit_pending_drag()
             elif not self._drag_timer.isActive():
                 self._drag_timer.start(max(1, int(self._frame_interval_ms - elapsed_ms)))
-            self._mark_interaction()
+            # Point/rubber-band dragging changes graph objects, not the
+            # camera. Restore full object/edge quality after the drag without
+            # unnecessarily repainting the DXF background.
+            self._mark_interaction(DirtyLayer.EDGES | DirtyLayer.OBJECTS)
         event.accept()
 
     def _emit_pending_drag(self) -> None:
@@ -911,8 +1046,8 @@ class GpuDxfGraphView(_ViewBase):
         new_screen = self.world_to_screen(old_world[0], old_world[1])
         self._offset += QPointF(event.position().x(), event.position().y()) - new_screen
         self.mouseWheelScrolled.emit(event)
-        self._mark_interaction()
-        self.request_redraw(DirtyLayer.VIEW)
+        self._mark_interaction(DirtyLayer.VIEW)
+        self._apply_live_view_transform()
         event.accept()
 
     # ------------------------------------------------------------------
@@ -1089,7 +1224,14 @@ class GpuDxfGraphView(_ViewBase):
                     continue
                 raw_height = float(entity.get("height") or 0.0)
                 world_height = max(0.45, min(3.0, raw_height if raw_height > 0 else 0.8))
-                pixel_size = max(6, min(64, int(round(world_height * self._scale))))
+                # Labels have a fixed model-space height.  Their projected
+                # pixel size must therefore be directly proportional to the
+                # camera scale.  The old six-pixel minimum made labels grow
+                # again after a zoom-out repaint.
+                projected_size = world_height * self._scale
+                if projected_size < 1.0:
+                    continue
+                pixel_size = max(1, min(1024, int(round(projected_size))))
                 self._draw_cached_text(
                     painter,
                     screen,
@@ -1398,10 +1540,16 @@ class GpuDxfGraphView(_ViewBase):
         painter.drawPolygon(poly)
 
     def _draw_label_batch(self, painter: QPainter, labels: Sequence[Tuple[QPointF, str, QColor]]) -> None:
-        if not self.show_labels or self._scale < 2.5:
+        if not self.show_labels:
             return
         limit = min(self._max_graph_labels, 250 if self._fast_interaction else self._max_graph_labels)
-        pixel_size = max(6, min(48, int(round(0.25 * self._scale))))
+        # A 0.25-unit model-space label grows with zoom-in and shrinks with
+        # zoom-out.  Do not impose a screen-pixel minimum, because doing so
+        # reverses the apparent scaling when a low-zoom frame is re-rendered.
+        projected_size = 0.25 * self._scale
+        if projected_size < 1.0:
+            return
+        pixel_size = max(1, min(1024, int(round(projected_size))))
         for index, (screen, text, color) in enumerate(labels):
             if index >= limit:
                 break

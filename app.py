@@ -2957,6 +2957,24 @@ class CableRouteEditor(QMainWindow):
 
         self._rebuild_static_scene_items(floor, visible_rect)
 
+    def refresh_canvas_geometry_only(self):
+        """Invalidate graph geometry without re-running the full UI refresh path.
+
+        This is used for high-frequency drag updates. Layer controls, DXF
+        bindings, search lists, file labels and overlay signatures are
+        unchanged while an item is moving.
+        """
+        canvas = getattr(self, "canvas", None)
+        if canvas is None:
+            return
+        if hasattr(canvas, "notify_store_changed"):
+            canvas.notify_store_changed()
+            return
+        if hasattr(canvas, "invalidate_store_cache"):
+            canvas.invalidate_store_cache()
+            return
+        self.refresh_canvas()
+
     def refresh_canvas(self):
         self._unconnected_cache = self._unconnected_data_point_names()
 
@@ -5797,9 +5815,10 @@ class CableRouteEditor(QMainWindow):
             return
 
         if picked:
-            self.selected_point_name = picked
-            self.refresh_canvas()
-
+            # A context menu is not a model or camera change. Keep the current
+            # visual selection untouched so opening the menu does not trigger a
+            # graph/DXF repaint. Menu actions receive ``picked`` explicitly and
+            # refresh only when they actually modify data.
             point = self.store.all_points().get(picked)
             kind = str(point.get("kind", "")).strip() if point else ""
 
@@ -5931,7 +5950,10 @@ class CableRouteEditor(QMainWindow):
             dx = current.x() - self.last_pan.x()
             dy = current.y() - self.last_pan.y()
             self.last_pan = current
-            self.canvas.update()
+            if hasattr(self.canvas, "pan_by"):
+                self.canvas.pan_by(dx, dy)
+            else:
+                self.canvas.update()
             return
         if mode == "select_move":
             if self.selection_rect_active:
@@ -5975,7 +5997,7 @@ class CableRouteEditor(QMainWindow):
                 else:
                     self._move_point_or_transition(self.dragging_point_name, x, y)
 
-                self.refresh_canvas()
+                self.refresh_canvas_geometry_only()
 
     def on_middle_click(self, event):
         self.last_pan = event.position().toPoint()
@@ -5985,11 +6007,12 @@ class CableRouteEditor(QMainWindow):
         if self.last_pan is None:
             self.last_pan = current
             return
-        dx = current.x() - self.last_pan.x()
-        dy = current.y() - self.last_pan.y()
-
         self.last_pan = current
-        self.canvas.update()
+        # GpuDxfGraphView has already applied the middle-button delta to its
+        # retained scene-graph layers before emitting this signal. Calling
+        # update() here used to invalidate every layer a second time.
+        if not isinstance(self.canvas, GpuDxfGraphView):
+            self.canvas.update()
 
     def on_middle_release(self, event):
         self.last_pan = None

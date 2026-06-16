@@ -1187,8 +1187,8 @@ def _delete_network_connection(editor, connection_id: str) -> None:
 
 
 def _show_network_location_context_menu(editor, event, name: str) -> None:
-    editor.selected_point_name = name
-    editor.refresh_canvas()
+    # Opening a menu must not invalidate the main viewer. The selected object
+    # is passed directly to every action and is redrawn only after an edit.
     menu = QMenu(editor)
     edit_action = menu.addAction("Edit network location")
     delete_action = menu.addAction("Delete network location")
@@ -1200,8 +1200,6 @@ def _show_network_location_context_menu(editor, event, name: str) -> None:
 
 
 def _show_network_connection_context_menu(editor, event, connection_id: str) -> None:
-    editor.selected_point_name = connection_id
-    editor.refresh_canvas()
     menu = QMenu(editor)
     trace_action = menu.addAction("Trace circuit")
     physical_action = menu.addAction("Open in physical fibre map")
@@ -1228,8 +1226,6 @@ def _show_network_connection_context_menu(editor, event, connection_id: str) -> 
 
 
 def _show_network_context_menu(editor, event, instance_id: str) -> None:
-    editor.selected_point_name = instance_id
-    editor.refresh_canvas()
     menu = QMenu(editor)
     edit_action = menu.addAction("Edit installed network asset")
     connect_action = menu.addAction("Start network connection")
@@ -1557,14 +1553,20 @@ def install_network_planning(editor_class) -> None:
                     instance["y"] = round(float(y), 3)
                     instance["floor"] = int(self.floor_spin.value())
                     instance["location_name"] = ""
-                    self.refresh_canvas()
+                    if hasattr(self, "refresh_canvas_geometry_only"):
+                        self.refresh_canvas_geometry_only()
+                    else:
+                        self.refresh_canvas()
                     return
             if mode == "network_select" and getattr(
                 self, "_network_drag_location_name", None
             ):
                 x, y = self.snap(float(sx), float(sy))
                 if _move_network_location(self, self._network_drag_location_name, x, y):
-                    self.refresh_canvas()
+                    if hasattr(self, "refresh_canvas_geometry_only"):
+                        self.refresh_canvas_geometry_only()
+                    else:
+                        self.refresh_canvas()
                     return
             return original_on_drag(self, event, sx, sy)
 
