@@ -1433,6 +1433,23 @@ class RoomTypeEditorDialog(QDialog):
         self.total_label = QLabel()
         layout.addWidget(self.total_label)
 
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("Search assets"))
+
+        self.asset_search_edit = QLineEdit()
+        self.asset_search_edit.setPlaceholderText(
+            "Type to filter by asset name, asset ID, or category..."
+        )
+        self.asset_search_edit.setClearButtonEnabled(True)
+        search_row.addWidget(self.asset_search_edit, 1)
+
+        self.asset_filter_count_label = QLabel()
+        self.asset_filter_count_label.setMinimumWidth(110)
+        self.asset_filter_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        search_row.addWidget(self.asset_filter_count_label)
+
+        layout.addLayout(search_row)
+
         self.assets_table = QTableWidget(0, 6)
         self.assets_table.setHorizontalHeaderLabels(
             ["Use", "Category", "Asset", "Data points each", "Qty in room", "Total"]
@@ -1464,6 +1481,9 @@ class RoomTypeEditorDialog(QDialog):
             )
         )
 
+        self._asset_table_rows = []
+        self._asset_category_header_rows = {}
+
         last_category = None
 
         for category_name, asset_name, asset_id in grouped_assets:
@@ -1475,6 +1495,7 @@ class RoomTypeEditorDialog(QDialog):
                 category_item.setFlags(Qt.ItemIsEnabled)
                 self.assets_table.setSpan(row, 0, 1, 6)
                 self.assets_table.setItem(row, 0, category_item)
+                self._asset_category_header_rows[str(category_name)] = row
 
                 last_category = category_name
 
@@ -1504,7 +1525,20 @@ class RoomTypeEditorDialog(QDialog):
 
             self.assets_table.setItem(row, 5, QTableWidgetItem(str(room_qty * dp)))
 
+            self._asset_table_rows.append(
+                {
+                    "row": row,
+                    "asset_id": str(asset_id),
+                    "asset_name": str(asset_name),
+                    "category_name": str(category_name),
+                    "search_text": " ".join(
+                        (str(asset_id), str(asset_name), str(category_name))
+                    ).casefold(),
+                }
+            )
+
         self.assets_table.itemChanged.connect(self._refresh_total)
+        self.asset_search_edit.textChanged.connect(self._filter_asset_rows)
 
         layout.addWidget(QLabel("Select assets required in this room type"))
         layout.addWidget(self.assets_table, 1)
@@ -1515,6 +1549,49 @@ class RoomTypeEditorDialog(QDialog):
         layout.addWidget(buttons)
 
         self._refresh_total()
+        self._filter_asset_rows("")
+        self.asset_search_edit.setFocus()
+
+    def _filter_asset_rows(self, search_text):
+        """Filter room assets without rebuilding the table or losing selections."""
+        terms = [
+            term.casefold()
+            for term in str(search_text or "").split()
+            if term.strip()
+        ]
+
+        visible_by_category = {
+            category_name: 0
+            for category_name in self._asset_category_header_rows
+        }
+        visible_count = 0
+
+        for metadata in self._asset_table_rows:
+            searchable = metadata["search_text"]
+            matches = all(term in searchable for term in terms)
+            row = int(metadata["row"])
+            self.assets_table.setRowHidden(row, not matches)
+
+            if matches:
+                visible_count += 1
+                category_name = metadata["category_name"]
+                visible_by_category[category_name] = (
+                    visible_by_category.get(category_name, 0) + 1
+                )
+
+        for category_name, header_row in self._asset_category_header_rows.items():
+            self.assets_table.setRowHidden(
+                int(header_row),
+                visible_by_category.get(category_name, 0) == 0,
+            )
+
+        total_count = len(self._asset_table_rows)
+        if terms:
+            self.asset_filter_count_label.setText(
+                f"{visible_count} of {total_count}"
+            )
+        else:
+            self.asset_filter_count_label.setText(f"{total_count} assets")
 
     def _seed_asset_rows_by_id(self):
         result = {}

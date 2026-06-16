@@ -61,12 +61,18 @@ except (ImportError, AttributeError):  # PySide6 build without the wrapper.
 
 try:  # Qt Quick is the Vulkan/RHI path.
     from PySide6.QtQml import QQmlComponent
-    from PySide6.QtQuick import QQuickPaintedItem, QQuickWindow, QSGRendererInterface
+    from PySide6.QtQuick import (
+        QQuickItem,
+        QQuickPaintedItem,
+        QQuickWindow,
+        QSGRendererInterface,
+    )
     from PySide6.QtQuickWidgets import QQuickWidget
 
     _QT_QUICK_AVAILABLE = True
 except Exception:  # pragma: no cover - depends on the installed PySide6 build.
     QQmlComponent = None
+    QQuickItem = None
     QQuickPaintedItem = object
     QQuickWindow = None
     QSGRendererInterface = None
@@ -365,6 +371,73 @@ class GpuDxfGraphView(_ViewBase):
         self._frame_snapshot: Optional[_FrameSnapshot] = None
         self._rubber_band = QRubberBand(QRubberBand.Rectangle, self)
         self._static_text_cache: Dict[Tuple[str, int, bool], QStaticText] = {}
+        # Graph and DXF labels use cached vector glyph outlines rather than
+        # scaled QStaticText bitmaps. This keeps settled text sharp at every
+        # camera scale without deriving font size from zoom.
+        self._vector_text_cache: Dict[Tuple[str, bool], Tuple[QPainterPath, QRectF]] = {}
+
+        # Retained graph textures use 1920 x 1080 as the minimum working
+        # viewport, but only a modest overscan margin is cached around it.
+        # The previous one-full-viewport margin produced 5760 x 3240 textures
+        # at Full HD and consumed excessive memory bandwidth during zoom.
+        self._cache_base_width_px = max(
+            1920.0,
+            float(os.environ.get("CABLE_ROUTER_CACHE_BASE_WIDTH", "1920") or 1920),
+        )
+        self._cache_base_height_px = max(
+            1080.0,
+            float(os.environ.get("CABLE_ROUTER_CACHE_BASE_HEIGHT", "1080") or 1080),
+        )
+        self._cache_margin_factor = max(
+            0.15,
+            min(
+                1.0,
+                float(
+                    os.environ.get("CABLE_ROUTER_CACHE_MARGIN_FACTOR", "0.35")
+                    or 0.35
+                ),
+            ),
+        )
+        self._cache_margin_max_x_px = max(
+            256.0,
+            float(
+                os.environ.get("CABLE_ROUTER_CACHE_MARGIN_MAX_X_PX", "1280")
+                or 1280
+            ),
+        )
+        self._cache_margin_max_y_px = max(
+            192.0,
+            float(
+                os.environ.get("CABLE_ROUTER_CACHE_MARGIN_MAX_Y_PX", "720")
+                or 720
+            ),
+        )
+        self._cache_margin_x = min(
+            self._cache_margin_max_x_px,
+            self._cache_base_width_px * self._cache_margin_factor,
+        )
+        self._cache_margin_y = min(
+            self._cache_margin_max_y_px,
+            self._cache_base_height_px * self._cache_margin_factor,
+        )
+        self._pan_rebake_pending = False
+
+        # Label dimensions are fixed in model space.  These constants never
+        # depend on camera zoom; the camera transform alone changes the
+        # apparent screen size.  Defaults are intentionally slightly larger
+        # than the previous 0.25-unit graph labels.
+        self._graph_label_world_height = max(
+            0.05,
+            float(os.environ.get("CABLE_ROUTER_GRAPH_LABEL_WORLD_HEIGHT", "0.25") or 0.25),
+        )
+        self._dxf_label_world_scale = max(
+            0.25,
+            float(os.environ.get("CABLE_ROUTER_DXF_LABEL_WORLD_SCALE", "0.6") or 0.6),
+        )
+        self._zoom_settle_ms = max(
+            120,
+            int(os.environ.get("CABLE_ROUTER_ZOOM_SETTLE_MS", "280") or 280),
+        )
 
         self._background = QColor("#111111")
         self._dxf_line_pen = QPen(QColor("#858585"), 0.0)
@@ -446,8 +519,24 @@ class GpuDxfGraphView(_ViewBase):
                     item.setSmooth(True)
                 except Exception:
                     pass
+                # Mipmap generation is expensive for large painted textures.
+                # Keep it disabled by default; smooth filtering is sufficient
+                # during the short live zoom transform and avoids a costly
+                # mip-chain rebuild after every settled zoom.
+                if str(os.environ.get("CABLE_ROUTER_TEXTURE_MIPMAP", "0")).strip().lower() in {
+                    "1", "true", "yes", "on"
+                }:
+                    try:
+                        item.setMipmap(True)
+                    except Exception:
+                        pass
+                # Top-left origin makes the retained camera transform exact:
+                # screen' = ratio * screen + delta. It also avoids centre
+                # compensation changing the apparent label scale.
                 try:
-                    item.setMipmap(True)
+                    origin = _enum_member(QQuickItem, "TransformOrigin", "TopLeft")
+                    if origin is not None:
+                        item.setTransformOrigin(origin)
                 except Exception:
                     pass
                 self._layer_items[mask] = item
@@ -470,15 +559,33 @@ class GpuDxfGraphView(_ViewBase):
             return
         width = max(1.0, float(self.width()))
         height = max(1.0, float(self.height()))
+        base_width = max(width, self._cache_base_width_px)
+        base_height = max(height, self._cache_base_height_px)
+        self._cache_margin_x = min(
+            self._cache_margin_max_x_px,
+            base_width * self._cache_margin_factor,
+        )
+        self._cache_margin_y = min(
+            self._cache_margin_max_y_px,
+            base_height * self._cache_margin_factor,
+        )
         if self._quick_root is not None:
             try:
                 self._quick_root.setWidth(width)
                 self._quick_root.setHeight(height)
             except Exception:
                 pass
-        for item in self._layer_items.values():
-            item.setWidth(width)
-            item.setHeight(height)
+        for mask, item in self._layer_items.items():
+            if mask == DirtyLayer.OVERLAY:
+                item.setX(0.0)
+                item.setY(0.0)
+                item.setWidth(width)
+                item.setHeight(height)
+                continue
+            item.setX(-self._cache_margin_x)
+            item.setY(-self._cache_margin_y)
+            item.setWidth(width + (self._cache_margin_x * 2.0))
+            item.setHeight(height + (self._cache_margin_y * 2.0))
 
     def request_redraw(self, layers: int = DirtyLayer.ALL) -> None:
         self._dirty_layers |= int(layers)
@@ -510,12 +617,11 @@ class GpuDxfGraphView(_ViewBase):
         ratio = float(self._scale) / base_scale
         delta_x = float(self._offset.x()) - (ratio * float(self._committed_offset.x()))
         delta_y = float(self._offset.y()) - (ratio * float(self._committed_offset.y()))
-        # QQuickItem scales around its centre by default. Compensate so the
-        # effective transform is screen' = ratio * screen + delta.
-        centre_x = max(1.0, float(self.width())) * 0.5
-        centre_y = max(1.0, float(self.height())) * 0.5
-        item_x = delta_x - (centre_x * (1.0 - ratio))
-        item_y = delta_y - (centre_y * (1.0 - ratio))
+        # View-layer local coordinates include the overscan margin. With a
+        # top-left transform origin the following produces the exact desired
+        # camera transform while keeping the larger cached area around it.
+        item_x = delta_x - (ratio * self._cache_margin_x)
+        item_y = delta_y - (ratio * self._cache_margin_y)
         for mask in (DirtyLayer.DXF, DirtyLayer.EDGES, DirtyLayer.OBJECTS):
             item = self._layer_items.get(mask)
             if item is None:
@@ -528,18 +634,25 @@ class GpuDxfGraphView(_ViewBase):
         # The retained texture covers the viewport, so very large camera moves
         # can expose uncached margins. Re-bake only after a substantial move or
         # zoom, not for every pointer event.
-        pan_budget_x = max(220.0, float(self.width()) * 0.35)
-        pan_budget_y = max(180.0, float(self.height()) * 0.35)
-        if (
-            self._last_middle_pos is None
-            and (
-                abs(delta_x) > pan_budget_x
-                or abs(delta_y) > pan_budget_y
-                or ratio < 0.65
-                or ratio > 1.55
-            )
-        ):
-            self.request_redraw(DirtyLayer.VIEW)
+        pan_budget_x = max(180.0, self._cache_margin_x * 0.76)
+        pan_budget_y = max(140.0, self._cache_margin_y * 0.76)
+        needs_rebake = (
+            abs(delta_x) > pan_budget_x
+            or abs(delta_y) > pan_budget_y
+            or ratio < 0.50
+            or ratio > 2.00
+        )
+        if needs_rebake:
+            if self._last_middle_pos is not None:
+                # Never reset a live middle-pan transform while the button is
+                # held. Re-bake after release only if the smaller overscan has
+                # genuinely been consumed.
+                self._pan_rebake_pending = True
+            elif not self._fast_interaction:
+                # Wheel zoom remains a pure scene-graph transform while input
+                # is active. The interaction-settle timer performs one final
+                # geometry bake instead of repainting between wheel notches.
+                self.request_redraw(DirtyLayer.VIEW)
 
     def _commit_live_view_transform(self) -> None:
         """Reset scene-graph transforms before baking the current view."""
@@ -549,8 +662,8 @@ class GpuDxfGraphView(_ViewBase):
                 if item is None:
                     continue
                 item.setScale(1.0)
-                item.setX(0.0)
-                item.setY(0.0)
+                item.setX(-self._cache_margin_x)
+                item.setY(-self._cache_margin_y)
         self._committed_scale = float(self._scale)
         self._committed_offset = QPointF(self._offset)
         self._live_view_transform_active = False
@@ -609,10 +722,14 @@ class GpuDxfGraphView(_ViewBase):
         if not self._dirty_layers:
             self._frame_timer.stop()
 
-    def _mark_interaction(self, final_layers: int = DirtyLayer.VIEW) -> None:
+    def _mark_interaction(
+        self,
+        final_layers: int = DirtyLayer.VIEW,
+        settle_ms: int = 120,
+    ) -> None:
         self._fast_interaction = True
         self._interaction_finish_layers |= int(final_layers)
-        self._quality_timer.start(120)
+        self._quality_timer.start(max(60, int(settle_ms)))
 
     def _end_fast_interaction(self) -> None:
         if not self._fast_interaction:
@@ -895,13 +1012,29 @@ class GpuDxfGraphView(_ViewBase):
         return self.scene_to_world(scene.x(), scene.y())
 
     def visible_world_bounds(self, padding_px: float = 60.0) -> Bounds:
-        left = -padding_px
-        top = -padding_px
-        right = self.width() + padding_px
-        bottom = self.height() + padding_px
+        # Geometry is painted into an overscanned retained texture, not merely
+        # the visible widget. Include that full cache area in all culling tests
+        # so panning reveals already-rendered DXF, routes, objects and labels.
+        left = -(self._cache_margin_x + padding_px)
+        top = -(self._cache_margin_y + padding_px)
+        right = self.width() + self._cache_margin_x + padding_px
+        bottom = self.height() + self._cache_margin_y + padding_px
         p1 = self.screen_to_world(QPointF(left, top))
         p2 = self.screen_to_world(QPointF(right, bottom))
         return min(p1[0], p2[0]), min(p1[1], p2[1]), max(p1[0], p2[0]), max(p1[1], p2[1])
+
+    def _cached_screen_rect(self, padding_px: float = 0.0) -> QRectF:
+        """Screen-space extent currently baked into retained view textures."""
+        return QRectF(
+            -self._cache_margin_x - padding_px,
+            -self._cache_margin_y - padding_px,
+            float(self.width())
+            + (self._cache_margin_x * 2.0)
+            + (padding_px * 2.0),
+            float(self.height())
+            + (self._cache_margin_y * 2.0)
+            + (padding_px * 2.0),
+        )
 
     def find_nearest_selectable_name(
         self, x: float, y: float, radius_px: float = 12.0
@@ -992,9 +1125,12 @@ class GpuDxfGraphView(_ViewBase):
         elif event.button() == Qt.MiddleButton:
             self._last_middle_pos = None
             self.middleReleased.emit(event)
-            # The current live transform is already exact.  Keeping it in
-            # place avoids resetting the layer items one frame before their
-            # replacement textures are painted.
+            # The current live transform is already exact. Keep it in place on
+            # ordinary releases. Only a gesture that exhausted the enlarged
+            # 1920 x 1080 based overscan schedules a deferred geometry rebake.
+            if self._pan_rebake_pending:
+                self._pan_rebake_pending = False
+                QTimer.singleShot(0, lambda: self.request_redraw(DirtyLayer.VIEW))
             event.accept()
             return
         if self._fast_interaction:
@@ -1046,7 +1182,10 @@ class GpuDxfGraphView(_ViewBase):
         new_screen = self.world_to_screen(old_world[0], old_world[1])
         self._offset += QPointF(event.position().x(), event.position().y()) - new_screen
         self.mouseWheelScrolled.emit(event)
-        self._mark_interaction(DirtyLayer.VIEW)
+        self._mark_interaction(
+            DirtyLayer.VIEW,
+            settle_ms=self._zoom_settle_ms,
+        )
         self._apply_live_view_transform()
         event.accept()
 
@@ -1058,22 +1197,40 @@ class GpuDxfGraphView(_ViewBase):
         painter.setRenderHint(QPainter.TextAntialiasing, not self._fast_interaction)
 
         if layer_mask == DirtyLayer.DXF:
-            painter.fillRect(QRectF(0, 0, self.width(), self.height()), self._background)
+            device = painter.device()
+            paint_width = (
+                float(device.width()) if device is not None else float(self.width())
+            )
+            paint_height = (
+                float(device.height()) if device is not None else float(self.height())
+            )
+            painter.fillRect(
+                QRectF(0, 0, paint_width, paint_height), self._background
+            )
+            painter.save()
+            painter.translate(self._cache_margin_x, self._cache_margin_y)
             if self.show_dxf:
                 self._draw_dxf(painter)
+            painter.restore()
             return
         if layer_mask == DirtyLayer.EDGES:
+            painter.save()
+            painter.translate(self._cache_margin_x, self._cache_margin_y)
             if self.show_graph:
                 self._draw_edges(painter)
                 if self.show_network and self.show_network_links:
                     self._draw_network_links(painter)
+            painter.restore()
             return
         if layer_mask == DirtyLayer.OBJECTS:
+            painter.save()
+            painter.translate(self._cache_margin_x, self._cache_margin_y)
             if self.show_graph:
                 self._draw_departments(painter)
                 self._draw_points(painter)
                 if self.show_network and self.show_network_assets:
                     self._draw_network_assets(painter)
+            painter.restore()
             return
         if layer_mask == DirtyLayer.OVERLAY:
             if self.show_overlay and self._overlay_provider is not None:
@@ -1206,41 +1363,50 @@ class GpuDxfGraphView(_ViewBase):
                 painter.setPen(self._dxf_arc_pen)
                 painter.drawPath(tile.arc_path)
         painter.restore()
-        if self.show_labels and self._scale >= 6.0 and not self._fast_interaction:
+        if self.show_labels and not self._fast_interaction:
             self._draw_dxf_text(painter, visible_tiles)
 
     def _draw_dxf_text(self, painter: QPainter, tiles: Sequence[_DxfTile]) -> None:
+        """Draw DXF text at a fixed model-space height.
+
+        No font size is derived from the current camera scale.  The same world
+        geometry is painted at every zoom level and the camera transform alone
+        determines its apparent screen size.
+        """
         count = 0
-        for tile in tiles:
-            for entity in tile.text_entities:
-                if count >= self._max_dxf_labels:
-                    return
-                text = str(entity.get("text") or "").strip()
-                if not text:
-                    continue
-                x, y = entity.get("insert", (0.0, 0.0))
-                screen = self.world_to_screen(float(x), float(y))
-                if not self.rect().adjusted(-120, -120, 120, 120).contains(screen.toPoint()):
-                    continue
-                raw_height = float(entity.get("height") or 0.0)
-                world_height = max(0.45, min(3.0, raw_height if raw_height > 0 else 0.8))
-                # Labels have a fixed model-space height.  Their projected
-                # pixel size must therefore be directly proportional to the
-                # camera scale.  The old six-pixel minimum made labels grow
-                # again after a zoom-out repaint.
-                projected_size = world_height * self._scale
-                if projected_size < 1.0:
-                    continue
-                pixel_size = max(1, min(1024, int(round(projected_size))))
-                self._draw_cached_text(
-                    painter,
-                    screen,
-                    text,
-                    QColor("#C0C0C0"),
-                    pixel_size,
-                    rotation=-float(entity.get("rotation", 0.0)),
-                )
-                count += 1
+        painter.save()
+        self._apply_world_transform(painter)
+        try:
+            for tile in tiles:
+                for entity in tile.text_entities:
+                    if count >= self._max_dxf_labels:
+                        return
+                    text = str(entity.get("text") or "").strip()
+                    if not text:
+                        continue
+                    x, y = entity.get("insert", (0.0, 0.0))
+                    screen = self.world_to_screen(float(x), float(y))
+                    if not self._cached_screen_rect(160.0).contains(screen):
+                        continue
+                    raw_height = float(entity.get("height") or 0.0)
+                    world_height = self._dxf_label_world_scale * max(
+                        0.45,
+                        min(3.0, raw_height if raw_height > 0.0 else 0.8),
+                    )
+                    # Tiny projected labels are skipped, never resized.
+                    if world_height * self._scale < 0.35:
+                        continue
+                    self._draw_world_text(
+                        painter,
+                        self.world_to_scene(float(x), float(y)),
+                        text,
+                        QColor("#C0C0C0"),
+                        world_height=world_height,
+                        rotation=-float(entity.get("rotation", 0.0)),
+                    )
+                    count += 1
+        finally:
+            painter.restore()
 
     # ------------------------------------------------------------------
     # Graph drawing
@@ -1351,7 +1517,7 @@ class GpuDxfGraphView(_ViewBase):
             painter.setPen(QPen(QColor("#ffffff") if selected else QColor("#8ef3df"), 0.08))
             painter.drawPolygon(poly)
             if self.show_labels:
-                labels.append((self.world_to_screen(float(dept.get("x", 0.0)), float(dept.get("y", 0.0))), str(dept.get("name") or department_id), QColor("#aaf7ea")))
+                labels.append((self.world_to_scene(float(dept.get("x", 0.0)), float(dept.get("y", 0.0))), str(dept.get("name") or department_id), QColor("#aaf7ea")))
         painter.restore()
         self._draw_label_batch(painter, labels)
 
@@ -1396,7 +1562,7 @@ class GpuDxfGraphView(_ViewBase):
                 self._draw_diamond(painter, pos, 0.5, QColor("#ff7b72"), QColor("#ffffff") if selected else QColor("#ffb3ae"))
                 label_color = QColor("#ffb3ae")
             if self.show_labels:
-                labels.append((self.world_to_screen(float(point.get("x", 0.0)), float(point.get("y", 0.0))), str(name), label_color))
+                labels.append((self.world_to_scene(float(point.get("x", 0.0)), float(point.get("y", 0.0))), str(name), label_color))
         painter.restore()
         self._draw_label_batch(painter, labels)
 
@@ -1512,7 +1678,7 @@ class GpuDxfGraphView(_ViewBase):
             else:
                 self._draw_diamond(painter, pos, 0.62, fill, outline)
             if self.show_labels:
-                labels.append((self.world_to_screen(float(instance.get("x", 0.0)), float(instance.get("y", 0.0))), str(instance.get("name") or instance_id), QColor("#cce7ff")))
+                labels.append((self.world_to_scene(float(instance.get("x", 0.0)), float(instance.get("y", 0.0))), str(instance.get("name") or instance_id), QColor("#cce7ff")))
         painter.restore()
         self._draw_label_batch(painter, labels)
 
@@ -1539,29 +1705,123 @@ class GpuDxfGraphView(_ViewBase):
         painter.setPen(QPen(outline, 0.08))
         painter.drawPolygon(poly)
 
-    def _draw_label_batch(self, painter: QPainter, labels: Sequence[Tuple[QPointF, str, QColor]]) -> None:
+    def _draw_label_batch(
+        self,
+        painter: QPainter,
+        labels: Sequence[Tuple[QPointF, str, QColor]],
+    ) -> None:
+        """Draw graph labels as fixed model-space geometry.
+
+        ``labels`` contains scene positions, not screen positions. Font size is
+        never recalculated from zoom. The fixed model-space glyph becomes larger
+        on screen only because the camera is closer.
+        """
         if not self.show_labels:
             return
-        limit = min(self._max_graph_labels, 250 if self._fast_interaction else self._max_graph_labels)
-        # A 0.25-unit model-space label grows with zoom-in and shrinks with
-        # zoom-out.  Do not impose a screen-pixel minimum, because doing so
-        # reverses the apparent scaling when a low-zoom frame is re-rendered.
-        projected_size = 0.25 * self._scale
-        if projected_size < 1.0:
+        limit = min(
+            self._max_graph_labels,
+            250 if self._fast_interaction else self._max_graph_labels,
+        )
+        world_height = self._graph_label_world_height
+        if world_height * self._scale < 0.35:
             return
-        pixel_size = max(1, min(1024, int(round(projected_size))))
-        for index, (screen, text, color) in enumerate(labels):
-            if index >= limit:
-                break
-            if not self.rect().adjusted(-120, -120, 120, 120).contains(screen.toPoint()):
-                continue
-            self._draw_cached_text(
-                painter,
-                QPointF(screen.x() + 5.0, screen.y() - 5.0),
-                text,
-                color,
-                pixel_size,
-            )
+        painter.save()
+        self._apply_world_transform(painter)
+        try:
+            for index, (scene_pos, text, color) in enumerate(labels):
+                if index >= limit:
+                    break
+                screen = QPointF(
+                    scene_pos.x() * self._scale + self._offset.x(),
+                    scene_pos.y() * self._scale + self._offset.y(),
+                )
+                if not self._cached_screen_rect(160.0).contains(screen):
+                    continue
+                self._draw_world_text(
+                    painter,
+                    scene_pos,
+                    text,
+                    color,
+                    world_height=world_height,
+                    offset=QPointF(0.42, -0.42),
+                )
+        finally:
+            painter.restore()
+
+    def _draw_world_text(
+        self,
+        painter: QPainter,
+        scene_pos: QPointF,
+        text: str,
+        color: QColor,
+        *,
+        world_height: float,
+        rotation: float = 0.0,
+        offset: QPointF = QPointF(0.0, 0.0),
+        bold: bool = False,
+    ) -> None:
+        """Paint sharp vector text at a constant scene/model-space height.
+
+        The glyph outline and its model-space height are independent of camera
+        zoom. The camera transform is therefore the only operation that changes
+        the apparent screen size. Using a cached QPainterPath avoids scaling a
+        small pre-rasterised QStaticText bitmap, which was the source of the
+        blurred labels at settled zoom levels.
+        """
+        if not text or world_height <= 0.0:
+            return
+
+        glyph_path, glyph_bounds = self._vector_text_path(text, bold)
+        glyph_height = max(1.0e-6, float(glyph_bounds.height()))
+        local_scale = float(world_height) / glyph_height
+
+        painter.save()
+        painter.translate(scene_pos + offset)
+        if rotation:
+            painter.rotate(float(rotation))
+        painter.scale(local_scale, local_scale)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(color))
+        painter.drawPath(glyph_path)
+        painter.restore()
+
+    def _vector_text_path(
+        self, text: str, bold: bool = False
+    ) -> Tuple[QPainterPath, QRectF]:
+        """Return a normalised, cached Arial glyph outline for ``text``."""
+        key = (str(text), bool(bold))
+        cached = self._vector_text_cache.get(key)
+        if cached is not None:
+            return cached
+
+        font = QFont("Arial")
+        font.setPixelSize(96)
+        font.setBold(bool(bold))
+        try:
+            font.setHintingPreference(QFont.PreferNoHinting)
+        except Exception:
+            pass
+
+        raw_path = QPainterPath()
+        raw_path.addText(QPointF(0.0, 0.0), font, str(text))
+        raw_bounds = raw_path.boundingRect()
+
+        if raw_path.isEmpty() or raw_bounds.isNull() or raw_bounds.height() <= 0.0:
+            fallback = QPainterPath()
+            fallback.addRect(QRectF(0.0, 0.0, 1.0, 1.0))
+            result = (fallback, QRectF(0.0, 0.0, 1.0, 1.0))
+        else:
+            transform = QTransform()
+            transform.translate(-raw_bounds.left(), -raw_bounds.top())
+            normalised = transform.map(raw_path)
+            result = (normalised, normalised.boundingRect())
+
+        if len(self._vector_text_cache) > 12000:
+            self._vector_text_cache.clear()
+        self._vector_text_cache[key] = result
+        return result
 
     def _static_text(self, text: str, pixel_size: int, bold: bool = False) -> QStaticText:
         key = (text, int(pixel_size), bool(bold))
