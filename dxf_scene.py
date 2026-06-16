@@ -1,5 +1,6 @@
 import math
-from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainterPath, QPen, QBrush
@@ -16,16 +17,76 @@ except Exception:  # pragma: no cover
     ezdxf = None
 
 
+class _EntitySpatialIndex:
+    """Uniform-grid index for fast viewport entity queries."""
+
+    def __init__(self, entities: List[Dict], bounds):
+        self.entities = entities
+        self.cells = defaultdict(list)
+        self.global_indices = []
+        self.origin_x = 0.0
+        self.origin_y = 0.0
+        self.cell_size = 25.0
+        if bounds and len(bounds) == 4:
+            min_x, min_y, max_x, max_y = [float(v) for v in bounds]
+            self.origin_x = min_x
+            self.origin_y = min_y
+            span = max(1.0, max(max_x - min_x, max_y - min_y))
+            target = max(8, min(128, int(math.sqrt(max(1, len(entities))))))
+            self.cell_size = max(1.0, span / float(target))
+        self._build()
+
+    def _cell_range(self, bbox):
+        if not bbox or len(bbox) != 4:
+            return None
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        ix1 = math.floor((min(x1, x2) - self.origin_x) / self.cell_size)
+        ix2 = math.floor((max(x1, x2) - self.origin_x) / self.cell_size)
+        iy1 = math.floor((min(y1, y2) - self.origin_y) / self.cell_size)
+        iy2 = math.floor((max(y1, y2) - self.origin_y) / self.cell_size)
+        return ix1, iy1, ix2, iy2
+
+    def _build(self):
+        for index, entity in enumerate(self.entities):
+            cell_range = self._cell_range(entity.get("bbox"))
+            if cell_range is None:
+                self.global_indices.append(index)
+                continue
+            ix1, iy1, ix2, iy2 = cell_range
+            cell_count = (ix2 - ix1 + 1) * (iy2 - iy1 + 1)
+            if cell_count > 64:
+                self.global_indices.append(index)
+                continue
+            for ix in range(ix1, ix2 + 1):
+                for iy in range(iy1, iy2 + 1):
+                    self.cells[(ix, iy)].append(index)
+
+    def query(self, bounds) -> Iterable[Dict]:
+        cell_range = self._cell_range(bounds)
+        if cell_range is None:
+            return tuple(self.entities)
+        ix1, iy1, ix2, iy2 = cell_range
+        seen = set(self.global_indices)
+        for ix in range(ix1, ix2 + 1):
+            for iy in range(iy1, iy2 + 1):
+                seen.update(self.cells.get((ix, iy), ()))
+        return tuple(self.entities[index] for index in sorted(seen))
+
+
 class DXFScene:
     def __init__(self):
         self.path = None
         self.entities: List[Dict] = []
         self.bounds: Optional[Tuple[float, float, float, float]] = None
+        self.revision = 0
+        self._spatial_index = None
 
     def clear(self):
         self.path = None
         self.entities = []
         self.bounds = None
+        self.revision += 1
+        self._spatial_index = None
 
     def set_content(
         self,
@@ -36,6 +97,8 @@ class DXFScene:
         self.path = path
         self.entities = list(entities or [])
         self.bounds = bounds
+        self.revision += 1
+        self._spatial_index = None
 
     @classmethod
     def from_content(
@@ -70,6 +133,25 @@ class DXFScene:
             max(0.001, (max_y - min_y) + (padding * 2.0)),
         )
 
+
+    def query_entities_world(
+        self,
+        min_x: float,
+        min_y: float,
+        max_x: float,
+        max_y: float,
+        padding: float = 0.0,
+    ) -> Iterable[Dict]:
+        """Return only entities that can intersect a world-coordinate viewport."""
+        bounds = (
+            float(min_x) - float(padding),
+            float(min_y) - float(padding),
+            float(max_x) + float(padding),
+            float(max_y) + float(padding),
+        )
+        if self._spatial_index is None:
+            self._spatial_index = _EntitySpatialIndex(self.entities, self.bounds)
+        return self._spatial_index.query(bounds)
 
     @classmethod
     def _bbox_intersects_scene_rect(
@@ -387,14 +469,26 @@ class DXFScene:
         text_items = []
         created_items = []
 
-        for entity in self.entities:
+        if visible_rect is None:
+            candidate_entities = self.entities
+        else:
+            # Convert scene coordinates (Y down) back to the DXF world coordinates.
+            min_x = float(visible_rect.left())
+            max_x = float(visible_rect.right())
+            min_y = -float(visible_rect.bottom())
+            max_y = -float(visible_rect.top())
+            candidate_entities = self.query_entities_world(
+                min_x, min_y, max_x, max_y, padding=cull_padding
+            )
+
+        for entity in candidate_entities:
             if not self._bbox_intersects_scene_rect(
                 entity.get("bbox"),
                 visible_rect,
                 padding=cull_padding,
             ):
                 continue
-            
+
             etype = entity["type"]
 
             if etype == "LINE":
