@@ -5299,6 +5299,150 @@ class CableRouteEditor(QMainWindow):
             name for name in self.selected_template_names if name in data_point_names
         )
 
+    def _similar_data_point_seed_names(self, picked=None):
+        """Return the data points that define a Select Similar search.
+
+        When the right-clicked data point is already part of the current
+        multi-selection, every selected data point contributes criteria. When
+        it is not selected, the clicked data point is used on its own so an
+        unrelated previous selection cannot broaden the search unexpectedly.
+        """
+        picked = str(picked or "").strip()
+        selected = self._selected_data_point_names()
+
+        data_point_names = {
+            str(item.get("name", "")).strip()
+            for item in self.store.data.get("data_points", [])
+            if str(item.get("name", "")).strip()
+        }
+
+        if picked and picked in data_point_names:
+            if picked in selected:
+                return selected
+            return [picked]
+
+        return selected
+
+    def _matching_data_point_names_for_similarity(self, seed_names, floor=None):
+        """Find visible data points sharing a seed room-type/department pair.
+
+        A multi-selection expands each room type across every department paired
+        with that room type in the seed selection. Pairing is retained per room
+        type, preventing a selection containing different room types and
+        departments from creating an unintended room-type/department
+        cross-product.
+        """
+        seed_names = {
+            str(name).strip() for name in (seed_names or []) if str(name).strip()
+        }
+        if not seed_names:
+            return []
+
+        if floor is None:
+            floor = int(self.floor_spin.value())
+        else:
+            floor = int(floor)
+
+        records_by_name = {
+            str(item.get("name", "")).strip(): item
+            for item in self.store.data.get("data_points", [])
+            if isinstance(item, dict) and str(item.get("name", "")).strip()
+        }
+
+        criteria_by_room_type = {}
+        for name in seed_names:
+            point = records_by_name.get(name)
+            if point is None:
+                continue
+
+            room_type_id = str(point.get("room_type_id", "") or "").strip()
+            department_ids = set(self._data_point_department_ids(point))
+            if not department_ids:
+                department_ids = {""}
+
+            criteria_by_room_type.setdefault(room_type_id, set()).update(
+                department_ids
+            )
+
+        if not criteria_by_room_type:
+            return []
+
+        eligible_names = self._eligible_template_name_set(floor)
+        matches = []
+
+        for point in self.store.data.get("data_points", []):
+            if not isinstance(point, dict):
+                continue
+
+            name = str(point.get("name", "")).strip()
+            if not name or name not in eligible_names:
+                continue
+
+            try:
+                point_floor = int(point.get("floor", 0))
+            except (TypeError, ValueError):
+                point_floor = 0
+            if point_floor != floor:
+                continue
+
+            room_type_id = str(point.get("room_type_id", "") or "").strip()
+            allowed_departments = criteria_by_room_type.get(room_type_id)
+            if allowed_departments is None:
+                continue
+
+            department_ids = set(self._data_point_department_ids(point))
+            if not department_ids:
+                department_ids = {""}
+
+            if department_ids & allowed_departments:
+                matches.append(name)
+
+        return sorted(set(matches))
+
+    def select_similar_data_points(self, picked=None):
+        """Select current-floor data points with matching room/dept criteria."""
+        seed_names = self._similar_data_point_seed_names(picked)
+        if not seed_names:
+            self.set_status("Select Similar requires at least one data point")
+            return
+
+        matches = self._matching_data_point_names_for_similarity(seed_names)
+        if not matches:
+            self.set_status(
+                "No visible data points match the selected room type and department"
+            )
+            return
+
+        self._set_canvas_multi_selection(matches, append=False)
+        self.refresh_canvas()
+
+        seed_lookup = {
+            str(item.get("name", "")).strip(): item
+            for item in self.store.data.get("data_points", [])
+            if isinstance(item, dict) and str(item.get("name", "")).strip()
+        }
+        room_types = set()
+        departments = set()
+        includes_unassigned_department = False
+
+        for name in seed_names:
+            point = seed_lookup.get(name)
+            if point is None:
+                continue
+            room_types.add(str(point.get("room_type_id", "") or "").strip())
+            point_departments = set(self._data_point_department_ids(point))
+            if point_departments:
+                departments.update(point_departments)
+            else:
+                includes_unassigned_department = True
+
+        department_scope_count = len(departments) + int(includes_unassigned_department)
+        self.set_status(
+            f"Selected {len(matches)} similar data point(s) on floor "
+            f"{self.floor_spin.value()} using {len(room_types)} room type(s) and "
+            f"{department_scope_count} department scope(s)"
+        )
+
     def assign_room_type_to_selected_data_points(self):
         selected = self._selected_data_point_names()
 
@@ -6227,6 +6371,8 @@ class CableRouteEditor(QMainWindow):
             delete_action = menu.addAction("Delete")
 
             selected_data_points = self._selected_data_point_names()
+            similar_seed_names = self._similar_data_point_seed_names(picked)
+            select_similar_dp_action = None
             update_selected_dp_qty_action = None
 
             create_selected_dp_connections_action = None
@@ -6234,6 +6380,19 @@ class CableRouteEditor(QMainWindow):
 
             assign_selected_dp_departments_action = None
             assign_selected_dp_room_type_action = None
+
+            if kind == "data_point" and similar_seed_names:
+                menu.addSeparator()
+                seed_count = len(similar_seed_names)
+                select_similar_dp_action = menu.addAction(
+                    "Select similar data points "
+                    f"(room type + department, {seed_count} seed"
+                    f"{'s' if seed_count != 1 else ''})"
+                )
+                select_similar_dp_action.setToolTip(
+                    "Select visible data points on this floor that share the same "
+                    "room-type and department combinations as the current selection"
+                )
 
             if selected_data_points:
                 menu.addSeparator()
@@ -6289,6 +6448,11 @@ class CableRouteEditor(QMainWindow):
                 self.rotate_right_clicked_selection_90(picked)
             elif action == delete_action:
                 self.delete_right_clicked_items(picked)
+            elif (
+                select_similar_dp_action is not None
+                and action == select_similar_dp_action
+            ):
+                self.select_similar_data_points(picked)
             elif (
                 update_selected_dp_qty_action is not None
                 and action == update_selected_dp_qty_action
