@@ -52,6 +52,7 @@ from network_schema import (
     find_nearest_network_instance,
     install_json_store_extensions,
     network_instances_by_id,
+    network_instances_for_floor,
     next_network_id,
     validate_network_data,
 )
@@ -268,6 +269,56 @@ def _find_network_connection(editor, x: float, y: float) -> Optional[str]:
             if distance <= best_distance:
                 best_id = connection_id
                 best_distance = distance
+    return best_id
+
+
+def _find_routing_edge(editor, x: float, y: float) -> Optional[str]:
+    """Return the nearest ordinary routing-graph edge on the current floor.
+
+    The network extension wraps the editor's right-click handler.  Ordinary
+    graph edges must be detected before network overlays outside Network mode,
+    otherwise a nearby network symbol/link can consume the click and prevent
+    the editor's original Delete Edge menu from opening.
+    """
+
+    all_points = editor.store.all_points()
+    floor = int(editor.floor_spin.value())
+    # Keep this tolerance slightly tighter than the network overlay tolerance.
+    # It only decides whether to delegate to the original handler; the original
+    # editor still performs its own final hit-test before showing its menu.
+    radius = max(0.25, _network_pick_radius(editor) * 0.65)
+    best_id = None
+    best_distance = radius
+
+    for index, connection in enumerate(editor.store.data.get("connections", [])):
+        if not isinstance(connection, dict):
+            continue
+        from_name = _text(connection.get("from"))
+        to_name = _text(connection.get("to"))
+        start = all_points.get(from_name)
+        end = all_points.get(to_name)
+        if not start or not end:
+            continue
+        try:
+            start_floor = int(start.get("floor", floor))
+            end_floor = int(end.get("floor", floor))
+        except (TypeError, ValueError):
+            continue
+        if start_floor != floor or end_floor != floor:
+            continue
+
+        distance = _point_segment_distance(
+            float(x),
+            float(y),
+            float(start.get("x", 0.0)),
+            float(start.get("y", 0.0)),
+            float(end.get("x", 0.0)),
+            float(end.get("y", 0.0)),
+        )
+        if distance <= best_distance:
+            best_distance = distance
+            best_id = _text(connection.get("id")) or f"connection:{index}"
+
     return best_id
 
 
@@ -1456,15 +1507,33 @@ def install_network_planning(editor_class) -> None:
         editor_class.on_double_click = on_double_click_wrapper
 
     def on_right_click_wrapper(self, event, sx, sy):
-        instance_id = _find_network_instance(self, float(sx), float(sy))
+        x = float(sx)
+        y = float(sy)
+        mode = _text(self.mode_combo.currentText()).lower()
+        network_modes = {
+            "network_select",
+            "network_asset",
+            "network_connection",
+            "fibre_node",
+        }
+
+        # Preserve the host editor's ordinary routing-edge context menu.  The
+        # network overlay uses a deliberately generous pick radius, so without
+        # this priority check a nearby network item can swallow a right-click
+        # intended for Delete Edge.  Network mode remains explicit and keeps
+        # network links/assets first.
+        if mode not in network_modes and _find_routing_edge(self, x, y):
+            return original_on_right_click(self, event, sx, sy)
+
+        instance_id = _find_network_instance(self, x, y)
         if instance_id:
             _show_network_context_menu(self, event, instance_id)
             return
-        location_name = _find_network_location(self, float(sx), float(sy))
+        location_name = _find_network_location(self, x, y)
         if location_name:
             _show_network_location_context_menu(self, event, location_name)
             return
-        connection_id = _find_network_connection(self, float(sx), float(sy))
+        connection_id = _find_network_connection(self, x, y)
         if connection_id:
             _show_network_connection_context_menu(self, event, connection_id)
             return
