@@ -1429,6 +1429,7 @@ class CableRouteEditor(QMainWindow):
 
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self.refresh_rhs_search_sidebar)
+        layout.addWidget(refresh_btn)
         sidebar_button_row.addWidget(refresh_btn)
 
         room_counts_btn = QPushButton("Room Type Counts")
@@ -6396,6 +6397,9 @@ class CableRouteEditor(QMainWindow):
         if self.last_pan is None:
             self.last_pan = current
             return
+        dx = current.x() - self.last_pan.x()
+        dy = current.y() - self.last_pan.y()
+
         self.last_pan = current
         # GpuDxfGraphView has already applied the middle-button delta to its
         # retained scene-graph layers before emitting this signal. Calling
