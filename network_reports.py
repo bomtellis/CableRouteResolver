@@ -4,7 +4,7 @@ import csv
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-from network_services import cable_core_statistics, splice_arrangement_rows
+from network_services import cable_core_statistics, splice_arrangement_rows, network_traffic_loads
 
 
 def _text(value) -> str:
@@ -103,8 +103,14 @@ def _switch_schedule(data: dict) -> List[dict]:
         if instance_id:
             endpoint_assignments.setdefault(instance_id, []).append(assignment)
 
+    traffic = network_traffic_loads(data)
+    carried = traffic.get("carried_by_instance", {})
+    direct = traffic.get("direct_by_instance", {})
     rows = []
-    switch_types = {"network_switch", "optical_line_terminal"}
+    switch_types = {
+        "network_switch", "network_router", "firewall",
+        "optical_line_terminal", "optical_network_terminal",
+    }
     technology = _text(data.get("network_settings", {}).get("technology"))
     for instance in instances.values():
         asset = assets.get(_text(instance.get("asset_id")), {})
@@ -116,6 +122,13 @@ def _switch_schedule(data: dict) -> List[dict]:
         poe_load = sum(_float(item.get("poe_power_w")) for item in assignments)
         number_of_ports = _effective_ports(instance, asset)
         poe_budget = _effective_poe_budget(instance, asset)
+        stack_members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+        bandwidth_capacity_mbps = max(0.0, _float(asset.get("bandwidth_capacity_gbps"))) * 1000.0 * stack_members
+        packet_capacity_pps = max(0.0, _float(asset.get("packet_throughput_mpps"))) * 1_000_000.0 * stack_members
+        carried_row = carried.get(instance_id, {})
+        direct_row = direct.get(instance_id, {})
+        bandwidth_load = max(0.0, _float(carried_row.get("bandwidth_mbps")))
+        packet_load = max(0.0, _float(carried_row.get("packet_rate_pps")))
         row = _instance_description(instance, assets, locations)
         row.update(
             {
@@ -135,12 +148,21 @@ def _switch_schedule(data: dict) -> List[dict]:
                 "poe_load_w": round(poe_load, 3),
                 "poe_headroom_w": round(max(0.0, poe_budget - poe_load), 3),
                 "poe_utilisation_percent": round(100.0 * poe_load / poe_budget, 3) if poe_budget else 0.0,
-                "power_input_w": _float(asset.get("power_input_w")),
+                "power_input_w": _float(asset.get("power_input_w")) * stack_members,
+                "bandwidth_capacity_mbps": round(bandwidth_capacity_mbps, 3),
+                "expected_direct_bandwidth_mbps": round(max(0.0, _float(direct_row.get("bandwidth_mbps"))), 3),
+                "expected_bandwidth_load_mbps": round(bandwidth_load, 3),
+                "bandwidth_headroom_mbps": round(max(0.0, bandwidth_capacity_mbps - bandwidth_load), 3) if bandwidth_capacity_mbps else "",
+                "bandwidth_utilisation_percent": round(100.0 * bandwidth_load / bandwidth_capacity_mbps, 3) if bandwidth_capacity_mbps else "",
+                "packet_throughput_pps": round(packet_capacity_pps, 1),
+                "expected_direct_packet_rate_pps": round(max(0.0, _float(direct_row.get("packet_rate_pps"))), 1),
+                "expected_packet_load_pps": round(packet_load, 1),
+                "packet_headroom_pps": round(max(0.0, packet_capacity_pps - packet_load), 1) if packet_capacity_pps else "",
+                "packet_utilisation_percent": round(100.0 * packet_load / packet_capacity_pps, 3) if packet_capacity_pps else "",
             }
         )
         rows.append(row)
     return sorted(rows, key=lambda row: (str(row["floor"]), row["location_name"], row["instance_id"]))
-
 
 def _natural_port_key(value: str):
     text = _text(value)
@@ -169,6 +191,7 @@ def _port_schedule(data: dict) -> List[dict]:
         if instance_id and port:
             assignment_map.setdefault((instance_id, port), []).append(assignment)
 
+    traffic_by_connection = network_traffic_loads(data).get("by_connection", {})
     rows = []
     for instance in instances.values():
         instance_id = _text(instance.get("id"))
@@ -207,6 +230,8 @@ def _port_schedule(data: dict) -> List[dict]:
                         "department_id": "",
                         "department_name": "",
                         "poe_power_w": 0.0,
+                        "expected_bandwidth_mbps": 0.0,
+                        "expected_packet_rate_pps": 0.0,
                         "copper_length_m": 0.0,
                         "vlan_ids": "",
                         "cable_specification": "",
@@ -231,6 +256,8 @@ def _port_schedule(data: dict) -> List[dict]:
                         "department_id": _text(assignment.get("department_id")),
                         "department_name": _text(assignment.get("department_name")),
                         "poe_power_w": _float(assignment.get("poe_power_w")),
+                        "expected_bandwidth_mbps": _float(assignment.get("expected_bandwidth_mbps")),
+                        "expected_packet_rate_pps": _float(assignment.get("expected_packet_rate_pps")),
                         "copper_length_m": _float(assignment.get("copper_length_m")),
                         "vlan_ids": ", ".join(str(x) for x in assignment.get("vlan_ids", []) if _text(x)),
                         "cable_specification": "Category 6A",
@@ -256,6 +283,8 @@ def _port_schedule(data: dict) -> List[dict]:
                         "department_id": "",
                         "department_name": "",
                         "poe_power_w": 0.0,
+                        "expected_bandwidth_mbps": _float(traffic_by_connection.get(_text(connection.get("id")), {}).get("bandwidth_mbps")),
+                        "expected_packet_rate_pps": _float(traffic_by_connection.get(_text(connection.get("id")), {}).get("packet_rate_pps")),
                         "copper_length_m": _float(connection.get("length_m")),
                         "vlan_ids": ", ".join(str(x) for x in connection.get("vlan_ids", []) if _text(x)),
                         "cable_specification": _text(connection.get("cable_specification")),
@@ -266,6 +295,7 @@ def _port_schedule(data: dict) -> List[dict]:
 
 def _patching_schedule(data: dict, medium: str) -> List[dict]:
     assets, instances, locations = _maps(data)
+    traffic_by_connection = network_traffic_loads(data).get("by_connection", {})
     rows = []
     for connection in data.get("network_connections", []):
         if _text(connection.get("medium")).lower() != medium.lower():
@@ -283,6 +313,10 @@ def _patching_schedule(data: dict, medium: str) -> List[dict]:
                 "from_instance_name": from_desc.get("instance_name", ""),
                 "from_location": from_desc.get("location_name", ""),
                 "from_port": _text(connection.get("from_port")),
+                "logical_serving_instance_id": "",
+                "logical_serving_instance_name": "",
+                "logical_serving_port": "",
+                "physical_termination_type": _text(connection.get("physical_segment")),
                 "to_instance_id": _text(connection.get("to_instance_id")),
                 "to_instance_name": to_desc.get("instance_name", ""),
                 "to_location": to_desc.get("location_name", ""),
@@ -293,6 +327,8 @@ def _patching_schedule(data: dict, medium: str) -> List[dict]:
                 "department_id": "",
                 "department_name": "",
                 "poe_power_w": 0.0,
+                "expected_bandwidth_mbps": _float(traffic_by_connection.get(_text(connection.get("id")), {}).get("bandwidth_mbps")),
+                "expected_packet_rate_pps": _float(traffic_by_connection.get(_text(connection.get("id")), {}).get("packet_rate_pps")),
                 "length_m": _float(connection.get("length_m")),
                 "cable_specification": _text(connection.get("cable_specification")),
                 "fibre_count": _int(connection.get("fibre_count")),
@@ -307,17 +343,35 @@ def _patching_schedule(data: dict, medium: str) -> List[dict]:
 
     if medium.lower() == "copper":
         for assignment in data.get("network_endpoint_assignments", []):
-            instance = instances.get(_text(assignment.get("network_instance_id")), {})
-            desc = _instance_description(instance, assets, locations) if instance else {}
+            logical_instance_id = _text(assignment.get("network_instance_id"))
+            logical_instance = instances.get(logical_instance_id, {})
+            logical_desc = (
+                _instance_description(logical_instance, assets, locations)
+                if logical_instance else {}
+            )
+            panel_instance_id = _text(assignment.get("physical_patch_panel_instance_id"))
+            physical_instance = instances.get(panel_instance_id, {}) if panel_instance_id else logical_instance
+            physical_desc = (
+                _instance_description(physical_instance, assets, locations)
+                if physical_instance else {}
+            )
+            physical_port = (
+                _text(assignment.get("physical_patch_panel_port"))
+                if panel_instance_id else _text(assignment.get("network_port"))
+            )
             rows.append(
                 {
                     "connection_id": _text(assignment.get("id")),
                     "connection_role": "output",
                     "medium": "copper",
-                    "from_instance_id": _text(assignment.get("network_instance_id")),
-                    "from_instance_name": desc.get("instance_name", ""),
-                    "from_location": desc.get("location_name", ""),
-                    "from_port": _text(assignment.get("network_port")),
+                    "from_instance_id": panel_instance_id or logical_instance_id,
+                    "from_instance_name": physical_desc.get("instance_name", ""),
+                    "from_location": physical_desc.get("location_name", ""),
+                    "from_port": physical_port,
+                    "logical_serving_instance_id": logical_instance_id,
+                    "logical_serving_instance_name": logical_desc.get("instance_name", ""),
+                    "logical_serving_port": _text(assignment.get("network_port")),
+                    "physical_termination_type": _text(assignment.get("physical_termination_type")),
                     "to_instance_id": "",
                     "to_instance_name": "",
                     "to_location": _text(assignment.get("endpoint_name")),
@@ -328,6 +382,8 @@ def _patching_schedule(data: dict, medium: str) -> List[dict]:
                     "department_id": _text(assignment.get("department_id")),
                     "department_name": _text(assignment.get("department_name")),
                     "poe_power_w": _float(assignment.get("poe_power_w")),
+                    "expected_bandwidth_mbps": _float(assignment.get("expected_bandwidth_mbps")),
+                    "expected_packet_rate_pps": _float(assignment.get("expected_packet_rate_pps")),
                     "length_m": _float(assignment.get("copper_length_m")),
                     "cable_specification": "Category 6A",
                     "fibre_count": 0,
@@ -662,6 +718,10 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
                 "connections_in", "connections_out", "uplink_ports",
                 "input_connection_type", "output_connection_type", "uplink_connection_type",
                 "power_input_w", "poe_budget_w", "poe_load_w", "poe_headroom_w", "poe_utilisation_percent",
+                "bandwidth_capacity_mbps", "expected_direct_bandwidth_mbps", "expected_bandwidth_load_mbps",
+                "bandwidth_headroom_mbps", "bandwidth_utilisation_percent",
+                "packet_throughput_pps", "expected_direct_packet_rate_pps", "expected_packet_load_pps",
+                "packet_headroom_pps", "packet_utilisation_percent",
             ],
             _switch_schedule(data),
         ),
@@ -671,7 +731,8 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
                 "instance_id", "instance_name", "asset_id", "asset_name", "asset_type", "location_name",
                 "floor", "logical_stack", "stack_member_count", "port", "status", "connection_id", "connection_role", "medium",
                 "connected_to_instance", "connected_to_port", "endpoint_name", "endpoint_port",
-                "endpoint_asset_name", "department_id", "department_name", "poe_power_w", "copper_length_m",
+                "endpoint_asset_name", "department_id", "department_name", "poe_power_w",
+                "expected_bandwidth_mbps", "expected_packet_rate_pps", "copper_length_m",
                 "vlan_ids", "cable_specification",
             ],
             _port_schedule(data),
@@ -680,9 +741,11 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
             "copper_patching_schedule",
             [
                 "connection_id", "connection_role", "medium", "from_instance_id", "from_instance_name",
-                "from_location", "from_port", "to_instance_id", "to_instance_name", "to_location",
+                "from_location", "from_port", "logical_serving_instance_id", "logical_serving_instance_name",
+                "logical_serving_port", "physical_termination_type", "to_instance_id", "to_instance_name", "to_location",
                 "to_port", "endpoint_name", "endpoint_port", "endpoint_asset_name", "department_id",
-                "department_name", "poe_power_w", "length_m", "cable_specification", "fibre_count",
+                "department_name", "poe_power_w", "expected_bandwidth_mbps", "expected_packet_rate_pps",
+                "length_m", "cable_specification", "fibre_count",
                 "vlan_ids", "route_profile", "route_path", "redundancy_role", "protection_group", "notes",
             ],
             _patching_schedule(data, "copper"),
@@ -691,9 +754,11 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
             "fibre_patching_schedule",
             [
                 "connection_id", "connection_role", "medium", "from_instance_id", "from_instance_name",
-                "from_location", "from_port", "to_instance_id", "to_instance_name", "to_location",
+                "from_location", "from_port", "logical_serving_instance_id", "logical_serving_instance_name",
+                "logical_serving_port", "physical_termination_type", "to_instance_id", "to_instance_name", "to_location",
                 "to_port", "endpoint_name", "endpoint_port", "endpoint_asset_name", "department_id",
-                "department_name", "poe_power_w", "length_m", "cable_specification", "fibre_count",
+                "department_name", "poe_power_w", "expected_bandwidth_mbps", "expected_packet_rate_pps",
+                "length_m", "cable_specification", "fibre_count",
                 "vlan_ids", "route_profile", "route_path", "redundancy_role", "protection_group", "notes",
             ],
             _patching_schedule(data, "fibre"),

@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 )
 
 from network_schema import ensure_network_schema, next_network_id
-from network_services import circuit_trace
+from network_services import circuit_trace, network_traffic_loads
 from network_dialogs import NetworkConnectionEditorDialog, NetworkInstanceEditorDialog
 from network_fibre_dialogs import PatchLeadEditorDialog
 
@@ -294,6 +294,10 @@ class TopologyNode:
     ports_used: int = 0
     poe_budget_w: float = 0.0
     poe_used_w: float = 0.0
+    bandwidth_capacity_mbps: float = 0.0
+    bandwidth_used_mbps: float = 0.0
+    packet_capacity_pps: float = 0.0
+    packet_used_pps: float = 0.0
     connection_count: int = 0
     endpoint_count: int = 0
     endpoint_locations: int = 0
@@ -323,6 +327,18 @@ class TopologyNode:
         return self.poe_used_w / self.poe_budget_w
 
     @property
+    def bandwidth_utilisation(self) -> float:
+        if self.bandwidth_capacity_mbps <= 0:
+            return 0.0
+        return self.bandwidth_used_mbps / self.bandwidth_capacity_mbps
+
+    @property
+    def packet_utilisation(self) -> float:
+        if self.packet_capacity_pps <= 0:
+            return 0.0
+        return self.packet_used_pps / self.packet_capacity_pps
+
+    @property
     def state(self) -> str:
         if self.pseudo:
             return "online"
@@ -330,9 +346,13 @@ class TopologyNode:
             return "error"
         if self.poe_budget_w and self.poe_used_w > self.poe_budget_w + 0.001:
             return "error"
+        if self.bandwidth_capacity_mbps and self.bandwidth_used_mbps > self.bandwidth_capacity_mbps + 0.001:
+            return "error"
+        if self.packet_capacity_pps and self.packet_used_pps > self.packet_capacity_pps + 0.001:
+            return "error"
         if self.connection_count == 0 and self.endpoint_count == 0:
             return "offline"
-        if self.utilisation >= 0.90 or self.poe_utilisation >= 0.90:
+        if max(self.utilisation, self.poe_utilisation, self.bandwidth_utilisation, self.packet_utilisation) >= 0.90:
             return "warning"
         return "online"
 
@@ -393,6 +413,8 @@ class TopologyModel:
         self._build()
 
     def _build(self) -> None:
+        traffic = network_traffic_loads(self.data)
+        carried_traffic = traffic.get("carried_by_instance", {})
         assignments_by_instance: Dict[str, List[dict]] = defaultdict(list)
         for assignment in self.data.get("network_endpoint_assignments", []):
             if not isinstance(assignment, dict):
@@ -502,6 +524,10 @@ class TopologyModel:
                 ports_used=len(occupied_ports_by_instance.get(instance_id, set())),
                 poe_budget_w=max(0.0, _float(asset.get("poe_budget_w"))) * stack_members,
                 poe_used_w=sum(max(0.0, _float(item.get("poe_power_w"))) for item in assignments),
+                bandwidth_capacity_mbps=max(0.0, _float(asset.get("bandwidth_capacity_gbps"))) * 1000.0 * stack_members,
+                bandwidth_used_mbps=max(0.0, _float(carried_traffic.get(instance_id, {}).get("bandwidth_mbps"))),
+                packet_capacity_pps=max(0.0, _float(asset.get("packet_throughput_mpps"))) * 1_000_000.0 * stack_members,
+                packet_used_pps=max(0.0, _float(carried_traffic.get(instance_id, {}).get("packet_rate_pps"))),
                 connection_count=connection_counts.get(instance_id, 0),
                 endpoint_count=len(assignments),
                 endpoint_locations=len(endpoint_locations),
@@ -763,6 +789,12 @@ class TopologyCardItem(QGraphicsObject):
             rows.append(f"Ports {node.endpoint_count}")
         if node.poe_budget_w:
             rows.append(f"PoE {node.poe_used_w:.1f}/{node.poe_budget_w:.1f} W")
+        if node.bandwidth_capacity_mbps:
+            rows.append(f"Traffic {node.bandwidth_used_mbps:.1f}/{node.bandwidth_capacity_mbps:.1f} Mbps")
+        elif node.bandwidth_used_mbps:
+            rows.append(f"Expected traffic {node.bandwidth_used_mbps:.1f} Mbps")
+        if node.packet_capacity_pps:
+            rows.append(f"Packets {node.packet_used_pps:.0f}/{node.packet_capacity_pps:.0f} pps")
         if self.hidden_descendants:
             rows.append(f"{self.hidden_descendants} hidden descendants")
         return "\n".join(rows)
@@ -978,6 +1010,9 @@ class RackEquipmentItem(QGraphicsObject):
     portActivated = Signal(str)
     contextRequested = Signal(str, object)
     portContextRequested = Signal(str, object)
+    dragStarted = Signal(str)
+    dragMoved = Signal(str, object)
+    dragFinished = Signal(str, object)
 
     def __init__(
         self,
@@ -996,7 +1031,11 @@ class RackEquipmentItem(QGraphicsObject):
         self._port_rects: Dict[str, QRectF] = {}
         self.search_match = False
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
         self.setAcceptHoverEvents(True)
+        self._drag_origin = QPointF()
+        self._drag_active = False
         self._build_port_rects()
 
     def boundingRect(self) -> QRectF:
@@ -1151,11 +1190,28 @@ class RackEquipmentItem(QGraphicsObject):
                     self.portActivated.emit(node_id)
                     event.accept()
                     return
+            self._drag_origin = QPointF(self.pos())
+            self._drag_active = True
             super().mousePressEvent(event)
             self.activated.emit(self.node.node_id)
+            self.dragStarted.emit(self.node.node_id)
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        super().mouseMoveEvent(event)
+        if self._drag_active:
+            self.dragMoved.emit(self.node.node_id, QPointF(self.pos()))
+
+    def mouseReleaseEvent(self, event) -> None:
+        delta = self.pos() - self._drag_origin
+        moved = self._drag_active and (abs(delta.x()) + abs(delta.y())) > 0.5
+        super().mouseReleaseEvent(event)
+        self._drag_active = False
+        if moved:
+            self.dragFinished.emit(self.node.node_id, QPointF(self.pos()))
+            event.accept()
 
     def contextMenuEvent(self, event) -> None:
         point = event.pos()
@@ -1312,11 +1368,22 @@ class SwitchFrontPanelItem(QGraphicsObject):
 class SplitterFrontPanelItem(QGraphicsObject):
     """Dedicated 1U optical splitter face with a central prism."""
     activated = Signal(str)
+    branchToggleRequested = Signal(str)
     portActivated = Signal(str)
     contextRequested = Signal(str, object)
     portContextRequested = Signal(str, object)
+    dragStarted = Signal(str)
+    dragMoved = Signal(str, object)
+    dragFinished = Signal(str, object)
 
-    def __init__(self, node: TopologyNode, port_nodes: Sequence[TopologyNode], width: float, height: float):
+    def __init__(
+        self,
+        node: TopologyNode,
+        port_nodes: Sequence[TopologyNode],
+        width: float,
+        height: float,
+        movable: bool = False,
+    ):
         super().__init__()
         self.node = node
         self.port_nodes = list(port_nodes)
@@ -1325,7 +1392,11 @@ class SplitterFrontPanelItem(QGraphicsObject):
         self._port_rects: Dict[str, QRectF] = {}
         self.search_match = False
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.ItemIsMovable, bool(movable))
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, bool(movable))
         self.setAcceptHoverEvents(True)
+        self._drag_origin = QPointF()
+        self._drag_active = False
         self._build_port_rects()
 
     def boundingRect(self) -> QRectF:
@@ -1417,9 +1488,27 @@ class SplitterFrontPanelItem(QGraphicsObject):
                 if rect.adjusted(-2,-2,2,2).contains(event.pos()):
                     self.portActivated.emit(node_id)
                     event.accept(); return
+            self._drag_origin = QPointF(self.pos())
+            self._drag_active = True
+            super().mousePressEvent(event)
             self.activated.emit(self.node.node_id)
+            self.dragStarted.emit(self.node.node_id)
             event.accept(); return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        super().mouseMoveEvent(event)
+        if self._drag_active:
+            self.dragMoved.emit(self.node.node_id, QPointF(self.pos()))
+
+    def mouseReleaseEvent(self, event) -> None:
+        delta = self.pos() - self._drag_origin
+        moved = self._drag_active and (abs(delta.x()) + abs(delta.y())) > 0.5
+        super().mouseReleaseEvent(event)
+        self._drag_active = False
+        if moved:
+            self.dragFinished.emit(self.node.node_id, QPointF(self.pos()))
+            event.accept()
 
     def contextMenuEvent(self, event) -> None:
         for node_id, rect in self._port_rects.items():
@@ -1428,6 +1517,10 @@ class SplitterFrontPanelItem(QGraphicsObject):
                 event.accept()
                 return
         self.contextRequested.emit(self.node.node_id, event.screenPos())
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        self.branchToggleRequested.emit(self.node.node_id)
         event.accept()
 
 
@@ -1535,6 +1628,7 @@ class TopologyGraphicsView(QGraphicsView):
         self.setFocusPolicy(Qt.StrongFocus)
 
         self._panning = False
+        self._rubber_band_selecting = False
         self._pan_button = Qt.NoButton
         self._pan_start = QPoint()
         self._navigation_margin = 5000.0
@@ -1549,6 +1643,17 @@ class TopologyGraphicsView(QGraphicsView):
         # Middle mouse pans from anywhere.
         if event.button() == Qt.MiddleButton:
             self._start_pan(event, Qt.MiddleButton)
+            return
+
+        # Shift/Ctrl drag on empty space performs rubber-band multi-selection.
+        if (
+            event.button() == Qt.LeftButton
+            and clicked_item is None
+            and event.modifiers() & (Qt.ShiftModifier | Qt.ControlModifier)
+        ):
+            self._rubber_band_selecting = True
+            self.setDragMode(QGraphicsView.RubberBandDrag)
+            super().mousePressEvent(event)
             return
 
         # Left mouse pans only when clicking empty scene space.
@@ -1573,6 +1678,13 @@ class TopologyGraphicsView(QGraphicsView):
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if self._rubber_band_selecting and event.button() == Qt.LeftButton:
+            super().mouseReleaseEvent(event)
+            self._rubber_band_selecting = False
+            self.setDragMode(QGraphicsView.NoDrag)
+            event.accept()
+            return
+
         if self._panning and event.button() == self._pan_button:
             self._panning = False
             self._pan_button = Qt.NoButton
@@ -1799,6 +1911,7 @@ class NetworkTopologyDialog(QDialog):
         self._fit_after_show = False
         self.rack_focus: Optional[Tuple[int, str, str]] = None
         self.switch_port_focus: Optional[str] = None
+        self._rack_drag_state: Dict[str, object] = {}
         self._rack_client_nodes_by_id: Dict[str, TopologyNode] = {}
         self._rack_port_nodes_by_id: Dict[str, TopologyNode] = {}
         self._switch_port_nodes_by_id: Dict[str, TopologyNode] = {}
@@ -2124,6 +2237,8 @@ class NetworkTopologyDialog(QDialog):
                 self._detail_row("Endpoint port", str(_int(assignment.get("endpoint_port"), 1)))
                 self._detail_row("Network port", _text(assignment.get("network_port")))
                 self._detail_row("Endpoint asset", _text(assignment.get("endpoint_asset_name")))
+                self._detail_row("Expected bandwidth", f"{_float(assignment.get('expected_bandwidth_mbps')):.3f} Mbps")
+                self._detail_row("Expected packet rate", f"{_float(assignment.get('expected_packet_rate_pps')):.1f} pps")
                 self._detail_row("Copper length", f"{_float(assignment.get('copper_length_m')):.1f} m")
             else:
                 self._detail_row("Department", _text(node.details.get("department_id")))
@@ -2138,6 +2253,16 @@ class NetworkTopologyDialog(QDialog):
             self._detail_row("PoE utilisation", f"{node.poe_utilisation * 100:.1f}%")
         elif node.poe_used_w:
             self._detail_row("PoE demand", f"{node.poe_used_w:.1f} W")
+        if node.bandwidth_capacity_mbps:
+            self._detail_row("Bandwidth", f"{node.bandwidth_used_mbps:.3f} Mbps / {node.bandwidth_capacity_mbps:.3f} Mbps")
+            self._detail_row("Bandwidth utilisation", f"{node.bandwidth_utilisation * 100:.1f}%")
+        elif node.bandwidth_used_mbps:
+            self._detail_row("Expected bandwidth", f"{node.bandwidth_used_mbps:.3f} Mbps")
+        if node.packet_capacity_pps:
+            self._detail_row("Packet throughput", f"{node.packet_used_pps:.1f} pps / {node.packet_capacity_pps:.1f} pps")
+            self._detail_row("Packet utilisation", f"{node.packet_utilisation * 100:.1f}%")
+        elif node.packet_used_pps:
+            self._detail_row("Expected packet rate", f"{node.packet_used_pps:.1f} pps")
         self._detail_row("Connections", str(node.connection_count))
         if node.endpoint_count:
             self._detail_row("Endpoint ports", str(node.endpoint_count))
@@ -3723,7 +3848,9 @@ class NetworkTopologyDialog(QDialog):
                         display_units = units
                     port_nodes = self._rack_port_nodes(node_id)
                     item = (
-                        SplitterFrontPanelItem(node, port_nodes, equipment_width, 44.45 - 4.0)
+                        SplitterFrontPanelItem(
+                            node, port_nodes, equipment_width, 44.45 - 4.0, movable=True
+                        )
                         if node.asset_type == "fibre_splitter"
                         else RackEquipmentItem(
                             node,
@@ -3749,6 +3876,9 @@ class NetworkTopologyDialog(QDialog):
                 if isinstance(item, (RackEquipmentItem, SplitterFrontPanelItem)):
                     item.portActivated.connect(self._card_activated)
                     item.portContextRequested.connect(self._port_context_menu)
+                    item.dragStarted.connect(self._rack_drag_started)
+                    item.dragMoved.connect(self._rack_drag_moved)
+                    item.dragFinished.connect(self._rack_drag_finished)
                 item.branchToggleRequested.connect(self._card_double_clicked)
                 self.scene.addItem(item)
                 self.node_items[node_id] = item
@@ -3788,7 +3918,8 @@ class NetworkTopologyDialog(QDialog):
         if self.rack_focus is not None:
             equipment_count = sum(1 for node in self.visible_nodes.values() if not node.pseudo)
             return (
-                f"Rack view: {equipment_count:,} installed equipment items shown at their rack U positions"
+                f"Rack view: {equipment_count:,} installed equipment items · drag to move and snap · "
+                "Shift/Ctrl-click or Shift/Ctrl-drag for multi-selection"
                 " · Red ports are occupied, green ports are free · Click a port for details · Double-click a switch for its port view · Use the breadcrumb to return · Drag to pan · Wheel to zoom"
             )
         hidden_patch_panels = (
@@ -4777,6 +4908,20 @@ class NetworkTopologyDialog(QDialog):
         selected = self.scene.selectedItems()
         if not selected:
             return
+        rack_items = [
+            item for item in selected
+            if isinstance(item, (RackEquipmentItem, SplitterFrontPanelItem))
+        ]
+        if self.rack_focus is not None and rack_items:
+            item = rack_items[0]
+            self._show_node_details(item.node.node_id)
+            count = len(rack_items)
+            if count > 1:
+                self.status_label.setText(
+                    f"Rack view: {count} devices selected · drag any selected device to move the group · "
+                    "Shift/Ctrl-click or Shift/Ctrl-drag to change the selection"
+                )
+            return
         item = selected[0]
         if isinstance(item, TopologyCardItem):
             self._show_node_details(item.node.node_id)
@@ -5053,6 +5198,319 @@ class NetworkTopologyDialog(QDialog):
                 self.data[key] = deepcopy(payload[key])
         self._commit_changes()
 
+
+    def _selected_rack_instance_ids(self, anchor_id: str = "") -> List[str]:
+        """Return the selected rack equipment IDs, expanding shared 1U groups."""
+        if self.rack_focus is None:
+            return [_text(anchor_id)] if _text(anchor_id) else []
+        selected = [
+            _text(item.node.node_id)
+            for item in self.scene.selectedItems()
+            if isinstance(item, (RackEquipmentItem, SplitterFrontPanelItem))
+            and _text(item.node.node_id)
+        ]
+        anchor_id = _text(anchor_id)
+        if anchor_id and anchor_id not in selected:
+            selected = [anchor_id]
+        if not selected:
+            return []
+
+        rows = {
+            _text(row.get("id")): row
+            for row in self.data.get("network_asset_instances", [])
+            if isinstance(row, dict) and _text(row.get("id"))
+        }
+        expanded = set(selected)
+        changed = True
+        while changed:
+            changed = False
+            for instance_id in list(expanded):
+                row = rows.get(instance_id, {})
+                shared_group = _text(row.get("shared_rack_unit_group"))
+                if not shared_group:
+                    continue
+                for other_id, other in rows.items():
+                    if (
+                        _text(other.get("shared_rack_unit_group")) == shared_group
+                        and _text(other.get("location_name")) == _text(row.get("location_name"))
+                        and _text(other.get("rack_name")) == _text(row.get("rack_name"))
+                        and max(1, _int(other.get("rack_start_u"), 1))
+                        == max(1, _int(row.get("rack_start_u"), 1))
+                        and other_id not in expanded
+                    ):
+                        expanded.add(other_id)
+                        changed = True
+        return sorted(expanded)
+
+    def _rack_drag_started(self, node_id: str) -> None:
+        if self.rack_focus is None:
+            return
+        ids = self._selected_rack_instance_ids(node_id)
+        if not ids:
+            ids = [_text(node_id)]
+        for instance_id in ids:
+            item = self.node_items.get(instance_id)
+            if item is not None:
+                item.setSelected(True)
+        rows = {
+            _text(row.get("id")): row
+            for row in self.data.get("network_asset_instances", [])
+            if isinstance(row, dict) and _text(row.get("id"))
+        }
+        self._rack_drag_state = {
+            "anchor_id": _text(node_id),
+            "instance_ids": ids,
+            "original": {
+                instance_id: {
+                    "rack_name": _text(rows.get(instance_id, {}).get("rack_name")),
+                    "rack_start_u": max(1, _int(rows.get(instance_id, {}).get("rack_start_u"), 1)),
+                    "position": QPointF(self.node_items[instance_id].pos())
+                    if instance_id in self.node_items
+                    else QPointF(),
+                }
+                for instance_id in ids
+            },
+        }
+
+    def _rack_drag_moved(self, node_id: str, scene_position) -> None:
+        """Keep every selected rack item aligned with the active drag item."""
+        state = self._rack_drag_state
+        if not state or _text(state.get("anchor_id")) != _text(node_id):
+            return
+        original = state.get("original", {})
+        anchor_original = original.get(_text(node_id), {})
+        anchor_position = anchor_original.get("position")
+        if not isinstance(anchor_position, QPointF):
+            return
+        delta = QPointF(scene_position) - anchor_position
+        for instance_id in state.get("instance_ids", []):
+            item = self.node_items.get(_text(instance_id))
+            row = original.get(_text(instance_id), {})
+            original_position = row.get("position")
+            if item is not None and isinstance(original_position, QPointF):
+                item.setPos(original_position + delta)
+
+    def _rack_drag_finished(self, node_id: str, scene_position) -> None:
+        if self.rack_focus is None:
+            return
+        state = self._rack_drag_state
+        self._rack_drag_state = {}
+        if not state or _text(state.get("anchor_id")) != _text(node_id):
+            self.rebuild_scene(fit=False)
+            return
+
+        ids = list(state.get("instance_ids", []))
+        original = state.get("original", {})
+        anchor_original = original.get(_text(node_id), {})
+        anchor_node = self._node_for(_text(node_id))
+        anchor_item = self.node_items.get(_text(node_id))
+        if anchor_node is None or anchor_item is None:
+            self.rebuild_scene(fit=False)
+            return
+
+        floor, location, _selected_rack = self.rack_focus
+        rack_names = self._rack_names_for_location(floor, location)
+        source_rack = _text(anchor_original.get("rack_name"))
+        if source_rack not in rack_names or not rack_names:
+            self.rebuild_scene(fit=False)
+            return
+
+        rack_left_start = 92.0
+        rack_width = 518.6
+        rack_gap = 90.0
+        rack_top = 90.0
+        unit_pitch = 44.45
+        centre_x = anchor_item.sceneBoundingRect().center().x()
+        target_index = min(
+            range(len(rack_names)),
+            key=lambda index: abs(
+                centre_x
+                - (rack_left_start + index * (rack_width + rack_gap) + rack_width / 2.0)
+            ),
+        )
+        source_index = rack_names.index(source_rack)
+        rack_delta = target_index - source_index
+        target_rack = rack_names[target_index]
+        target_capacity = self._rack_capacity_for_key((floor, location, target_rack))
+        units = max(1, self._node_rack_units(_text(node_id)))
+        top_edge_y = float(scene_position.y()) - 2.0
+        raw_top_u = target_capacity - ((top_edge_y - rack_top) / unit_pitch)
+        top_u = int(math.floor(raw_top_u + 0.5))
+        desired_start = top_u - units + 1
+        original_start = max(1, _int(anchor_original.get("rack_start_u"), 1))
+        delta_u = desired_start - original_start
+
+        self._apply_rack_group_move(
+            ids,
+            delta_u=delta_u,
+            rack_delta=rack_delta,
+            anchor_id=_text(node_id),
+            allow_create_rack=False,
+            operation_label="Drag rack equipment",
+        )
+
+    def _apply_rack_group_move(
+        self,
+        instance_ids: Sequence[str],
+        *,
+        delta_u: int = 0,
+        rack_delta: int = 0,
+        anchor_id: str = "",
+        allow_create_rack: bool = False,
+        operation_label: str = "Move rack equipment",
+    ) -> bool:
+        """Validate and atomically move one or more rack-mounted devices."""
+        ids = self._selected_rack_instance_ids(anchor_id) if anchor_id else list(instance_ids)
+        if instance_ids:
+            ids = sorted(set(ids).union(_text(value) for value in instance_ids if _text(value)))
+        rows = {
+            _text(row.get("id")): row
+            for row in self.data.get("network_asset_instances", [])
+            if isinstance(row, dict) and _text(row.get("id"))
+        }
+        ids = [instance_id for instance_id in ids if instance_id in rows]
+        if not ids:
+            return False
+
+        anchor_id = _text(anchor_id) or ids[0]
+        anchor = rows.get(anchor_id, rows[ids[0]])
+        floor = _int(anchor.get("floor"))
+        location = _text(anchor.get("location_name"))
+        rack_names = self._rack_names_for_location(floor, location)
+        if not rack_names:
+            rack_names = sorted({_text(rows[i].get("rack_name")) for i in ids if _text(rows[i].get("rack_name"))})
+        if not rack_names:
+            QMessageBox.warning(self, operation_label, "The selected equipment is not assigned to a rack cabinet.")
+            self.rebuild_scene(fit=False)
+            return False
+
+        source_indices = []
+        for instance_id in ids:
+            row = rows[instance_id]
+            if _text(row.get("location_name")) != location or _int(row.get("floor")) != floor:
+                QMessageBox.warning(self, operation_label, "All selected equipment must be in the same location and floor.")
+                self.rebuild_scene(fit=False)
+                return False
+            rack_name = _text(row.get("rack_name"))
+            if rack_name not in rack_names:
+                rack_names.append(rack_name)
+                rack_names.sort(key=lambda value: value.lower())
+            source_indices.append(rack_names.index(rack_name))
+
+        minimum_target = min(index + int(rack_delta) for index in source_indices)
+        maximum_target = max(index + int(rack_delta) for index in source_indices)
+        if minimum_target < 0:
+            QMessageBox.information(self, operation_label, "The selected equipment is already at the first cabinet boundary.")
+            self.rebuild_scene(fit=False)
+            return False
+        if maximum_target >= len(rack_names):
+            if not allow_create_rack:
+                QMessageBox.warning(self, operation_label, "Drop the equipment inside an existing cabinet at this location.")
+                self.rebuild_scene(fit=False)
+                return False
+            while maximum_target >= len(rack_names):
+                base = f"AUTO-RACK-{location}" if location else "AUTO-RACK"
+                candidate = f"{base}-{len(rack_names) + 1}"
+                while candidate in rack_names:
+                    candidate += "-N"
+                rack_names.append(candidate)
+
+        plans: Dict[str, dict] = {}
+        for instance_id in ids:
+            row = rows[instance_id]
+            source_rack = _text(row.get("rack_name"))
+            source_index = rack_names.index(source_rack)
+            target_rack = rack_names[source_index + int(rack_delta)]
+            start_u = max(1, _int(row.get("rack_start_u"), 1)) + int(delta_u)
+            units = self._rack_units_for_instance(row)
+            capacity = self._rack_capacity_for_key((floor, location, target_rack))
+            if start_u < 1 or start_u + units - 1 > capacity:
+                QMessageBox.warning(
+                    self,
+                    operation_label,
+                    f"{_text(row.get('name')) or instance_id} would be outside {target_rack} "
+                    f"(U{start_u}-U{start_u + units - 1}, capacity {capacity}U).",
+                )
+                self.rebuild_scene(fit=False)
+                return False
+            plans[instance_id] = {
+                "rack_name": target_rack,
+                "start_u": start_u,
+                "end_u": start_u + units - 1,
+                "shared_group": _text(row.get("shared_rack_unit_group")),
+            }
+
+        selected = set(ids)
+        occupied: Dict[str, List[Tuple[int, int, str]]] = defaultdict(list)
+        for other_id, row in rows.items():
+            if other_id in selected:
+                continue
+            if _text(row.get("location_name")) != location or _int(row.get("floor")) != floor:
+                continue
+            rack_name = _text(row.get("rack_name"))
+            start_u = max(1, _int(row.get("rack_start_u"), 1))
+            occupied[rack_name].append(
+                (start_u, start_u + self._rack_units_for_instance(row) - 1, other_id)
+            )
+
+        def overlaps(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+            return a_start <= b_end and a_end >= b_start
+
+        for instance_id, plan in plans.items():
+            for other_start, other_end, other_id in occupied.get(plan["rack_name"], []):
+                if overlaps(plan["start_u"], plan["end_u"], other_start, other_end):
+                    QMessageBox.warning(
+                        self,
+                        operation_label,
+                        f"The move would overlap {other_id} in {plan['rack_name']} at "
+                        f"U{other_start}-U{other_end}.",
+                    )
+                    self.rebuild_scene(fit=False)
+                    return False
+
+        planned_items = list(plans.items())
+        for index, (left_id, left) in enumerate(planned_items):
+            for right_id, right in planned_items[index + 1 :]:
+                if left["rack_name"] != right["rack_name"]:
+                    continue
+                if not overlaps(left["start_u"], left["end_u"], right["start_u"], right["end_u"]):
+                    continue
+                intentional_shared_u = (
+                    left["shared_group"]
+                    and left["shared_group"] == right["shared_group"]
+                    and left["start_u"] == right["start_u"]
+                )
+                if not intentional_shared_u:
+                    QMessageBox.warning(
+                        self,
+                        operation_label,
+                        f"The selected group would make {left_id} overlap {right_id} in {left['rack_name']}.",
+                    )
+                    self.rebuild_scene(fit=False)
+                    return False
+
+        for instance_id, plan in plans.items():
+            rows[instance_id]["rack_name"] = plan["rack_name"]
+            rows[instance_id]["rack_start_u"] = plan["start_u"]
+
+        anchor_plan = plans.get(anchor_id, plans[ids[0]])
+        self.rack_focus = (floor, location, anchor_plan["rack_name"])
+        self._commit_changes(refresh=False)
+        self.model = TopologyModel(self.data)
+        self._floor_match_cache.clear()
+        self._logical_children_cache.clear()
+        self._collapsed_edge_cache.clear()
+        self.rebuild_scene(fit=False)
+        for instance_id in ids:
+            item = self.node_items.get(instance_id)
+            if item is not None:
+                item.setSelected(True)
+        self.status_label.setText(
+            f"Moved {len(ids)} rack device{'s' if len(ids) != 1 else ''} "
+            f"{delta_u:+d}U and {rack_delta:+d} cabinet(s)."
+        )
+        return True
+
     def _rack_units_for_instance(self, instance: dict) -> int:
         asset = next((row for row in self.data.get("network_assets", []) if _text(row.get("id")) == _text(instance.get("asset_id"))), {})
         members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
@@ -5074,41 +5532,15 @@ class NetworkTopologyDialog(QDialog):
         return 0
 
     def _move_rack_item(self, instance_id: str, delta_u: int = 0, rack_delta: int = 0) -> None:
-        instance = next((row for row in self.data.get("network_asset_instances", []) if _text(row.get("id")) == instance_id), None)
-        if not instance:
-            return
-        location = _text(instance.get("location_name")); rack = _text(instance.get("rack_name")); units = self._rack_units_for_instance(instance)
-        if rack_delta:
-            racks = sorted({_text(row.get("rack_name")) for row in self.data.get("network_asset_instances", []) if _text(row.get("location_name")) == location and _text(row.get("rack_name"))})
-            if rack not in racks:
-                racks.append(rack); racks.sort()
-            index = racks.index(rack) if rack in racks else 0
-            target_index = index + rack_delta
-            if target_index < 0:
-                QMessageBox.information(self, "Move rack equipment", "This is already the first cabinet in the location.")
-                return
-            if target_index >= len(racks):
-                base = rack.rsplit("-", 1)[0] if rack else f"RACK-{location}"
-                candidate = f"{base}-{len(racks) + 1}"
-                while candidate in racks:
-                    candidate += "-N"
-                racks.append(candidate)
-            target_rack = racks[target_index]
-            start = self._rack_free_start(location, target_rack, units, max(1, _int(instance.get("rack_start_u"), 1)), instance_id)
-            if not start:
-                QMessageBox.warning(self, "Move rack equipment", f"No {units}U space is available in {target_rack}.")
-                return
-            instance["rack_name"] = target_rack; instance["rack_start_u"] = start
-        else:
-            target = max(1, _int(instance.get("rack_start_u"), 1) + delta_u)
-            free = self._rack_free_start(location, rack, units, target, instance_id)
-            if free != target:
-                QMessageBox.warning(self, "Move rack equipment", f"U{target}-U{target + units - 1} is occupied or outside the rack.")
-                return
-            instance["rack_start_u"] = target
-        self._commit_changes()
-        self.rack_focus = (instance.get("floor", 0), location, _text(instance.get("rack_name")))
-        self.rebuild_scene(fit=False)
+        ids = self._selected_rack_instance_ids(instance_id)
+        self._apply_rack_group_move(
+            ids or [instance_id],
+            delta_u=delta_u,
+            rack_delta=rack_delta,
+            anchor_id=instance_id,
+            allow_create_rack=bool(rack_delta > 0),
+            operation_label="Move rack equipment",
+        )
 
     def _node_context_menu(self, node_id: str, screen_pos) -> None:
         node = self.model.nodes.get(node_id)
@@ -5120,10 +5552,12 @@ class NetworkTopologyDialog(QDialog):
         physical = menu.addAction("Open linked physical fibre")
         if self.rack_focus is not None:
             menu.addSeparator()
-            up = menu.addAction("Move up 1U")
-            down = menu.addAction("Move down 1U")
-            previous_rack = menu.addAction("Move to previous cabinet")
-            next_rack = menu.addAction("Move to next cabinet")
+            selected_count = len(self._selected_rack_instance_ids(node_id))
+            prefix = "selected devices" if selected_count > 1 else "device"
+            up = menu.addAction(f"Move {prefix} up 1U")
+            down = menu.addAction(f"Move {prefix} down 1U")
+            previous_rack = menu.addAction(f"Move {prefix} to previous cabinet")
+            next_rack = menu.addAction(f"Move {prefix} to next cabinet")
             add_to_rack = menu.addAction("Add equipment to this location/rack")
         else:
             up = down = previous_rack = next_rack = add_to_rack = None

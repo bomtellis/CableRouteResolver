@@ -354,6 +354,7 @@ def _open_network_planner(editor) -> None:
         dict_keys = {"network_settings", "network_design_summary"}
         for key in (
             "network_settings",
+            "assets",
             "network_assets",
             "network_asset_instances",
             "network_connections",

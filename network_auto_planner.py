@@ -165,6 +165,8 @@ class PortDemand:
     y: float
     extension_distance_m: float
     poe_power_w: float
+    expected_bandwidth_mbps: float
+    expected_packet_rate_pps: float
     room_type_id: str
 
 
@@ -188,6 +190,14 @@ class EndpointDemand:
     @property
     def poe_power_w(self) -> float:
         return sum(item.poe_power_w for item in self.ports)
+
+    @property
+    def expected_bandwidth_mbps(self) -> float:
+        return sum(item.expected_bandwidth_mbps for item in self.ports)
+
+    @property
+    def expected_packet_rate_pps(self) -> float:
+        return sum(item.expected_packet_rate_pps for item in self.ports)
 
 
 class RoutingGraph:
@@ -489,7 +499,7 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
         room_type_id = _text(point.get("room_type_id"))
         room_type = room_types.get(room_type_id, {})
         requested_ports = max(0, _int(point.get("qty"), 1))
-        templates: List[Tuple[str, str, float]] = []
+        templates: List[Tuple[str, str, float, float, float]] = []
 
         if room_type:
             for room_asset in room_type.get("assets", []):
@@ -501,8 +511,35 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
                 quantity = max(0, _int(room_asset.get("qty"), 1))
                 data_points_per_asset = max(0, _int(asset.get("data_points"), 1))
                 power = _poe_power_for_asset(asset, settings)
+                divisor = max(1, data_points_per_asset)
+                bandwidth_per_port = max(
+                    0.0,
+                    _float(
+                        asset.get(
+                            "expected_bandwidth_mbps",
+                            settings.get("default_expected_bandwidth_mbps", 0.0),
+                        )
+                    ),
+                ) / divisor
+                packets_per_port = max(
+                    0.0,
+                    _float(
+                        asset.get(
+                            "expected_packet_rate_pps",
+                            settings.get("default_expected_packet_rate_pps", 0.0),
+                        )
+                    ),
+                ) / divisor
                 for _ in range(quantity * data_points_per_asset):
-                    templates.append((asset_id, asset_name, power))
+                    templates.append(
+                        (
+                            asset_id,
+                            asset_name,
+                            power,
+                            bandwidth_per_port,
+                            packets_per_port,
+                        )
+                    )
         elif room_type_id:
             missing_room_types.add(room_type_id)
 
@@ -510,7 +547,21 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
         if target_ports <= 0:
             continue
         while len(templates) < target_ports:
-            templates.append(("", "Generic network port", 0.0))
+            templates.append(
+                (
+                    "",
+                    "Generic network port",
+                    0.0,
+                    max(
+                        0.0,
+                        _float(settings.get("default_expected_bandwidth_mbps")),
+                    ),
+                    max(
+                        0.0,
+                        _float(settings.get("default_expected_packet_rate_pps")),
+                    ),
+                )
+            )
 
         endpoint = EndpointDemand(
             name=name,
@@ -523,7 +574,13 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
             extension_distance_m=max(0.0, _float(point.get("extension_distance_m"))),
             existing_comms_room=existing_sources.get(name, ""),
         )
-        for index, (asset_id, asset_name, poe_w) in enumerate(
+        for index, (
+            asset_id,
+            asset_name,
+            poe_w,
+            bandwidth_mbps,
+            packet_rate_pps,
+        ) in enumerate(
             templates[:target_ports], start=1
         ):
             endpoint.ports.append(
@@ -539,6 +596,8 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
                     y=endpoint.y,
                     extension_distance_m=endpoint.extension_distance_m,
                     poe_power_w=poe_w,
+                    expected_bandwidth_mbps=bandwidth_mbps,
+                    expected_packet_rate_pps=packet_rate_pps,
                     room_type_id=room_type_id,
                 )
             )
@@ -688,6 +747,91 @@ def _minimum_asset_mix(
     )
 
 
+def _ensure_aggregate_traffic_capacity(
+    candidates: Sequence[dict],
+    selected: Sequence[dict],
+    actual_bandwidth_mbps: float,
+    actual_packet_rate_pps: float,
+    spare_fraction: float,
+    label: str,
+) -> List[dict]:
+    """Extend a selected asset mix until declared traffic limits are satisfied.
+
+    A zero manufacturer capacity means the metric is not declared and is not
+    treated as a hard constraint. Port and PoE capacity selected by
+    ``_minimum_asset_mix`` is always retained.
+    """
+
+    result = list(selected)
+    required_bandwidth = max(0.0, actual_bandwidth_mbps) * (1.0 + spare_fraction)
+    required_packets = max(0.0, actual_packet_rate_pps) * (1.0 + spare_fraction)
+    bandwidth_declared = any(
+        _float(item.get("bandwidth_capacity_gbps")) > 0 for item in candidates
+    )
+    packets_declared = any(
+        _float(item.get("packet_throughput_mpps")) > 0 for item in candidates
+    )
+    if not bandwidth_declared and not packets_declared:
+        return result
+
+    def totals(items: Sequence[dict]) -> Tuple[float, float]:
+        return (
+            sum(
+                max(0.0, _float(item.get("bandwidth_capacity_gbps"))) * 1000.0
+                for item in items
+            ),
+            sum(
+                max(0.0, _float(item.get("packet_throughput_mpps")))
+                * 1_000_000.0
+                for item in items
+            ),
+        )
+
+    for _ in range(256):
+        bandwidth, packets = totals(result)
+        bandwidth_ok = not bandwidth_declared or bandwidth + 1e-9 >= required_bandwidth
+        packets_ok = not packets_declared or packets + 1e-9 >= required_packets
+        if bandwidth_ok and packets_ok:
+            return result
+
+        choices = []
+        for candidate in candidates:
+            bw = max(0.0, _float(candidate.get("bandwidth_capacity_gbps"))) * 1000.0
+            pps = (
+                max(0.0, _float(candidate.get("packet_throughput_mpps")))
+                * 1_000_000.0
+            )
+            if bandwidth_declared and not bandwidth_ok and bw <= 0:
+                continue
+            if packets_declared and not packets_ok and pps <= 0:
+                continue
+            contribution = (
+                bw / max(1.0, required_bandwidth)
+                + pps / max(1.0, required_packets)
+            )
+            choices.append(
+                (
+                    -contribution,
+                    max(1, _rack_units_for_asset(candidate, 1)),
+                    _float(candidate.get("power_input_w")),
+                    _text(candidate.get("id")),
+                    candidate,
+                )
+            )
+        if not choices:
+            missing = []
+            if bandwidth_declared and not bandwidth_ok:
+                missing.append(f"{required_bandwidth:.3f} Mbps")
+            if packets_declared and not packets_ok:
+                missing.append(f"{required_packets:.0f} packets/s")
+            raise NetworkPlanningError(
+                f"The available {label} assets cannot satisfy " + " and ".join(missing) + "."
+            )
+        result.append(min(choices)[-1])
+
+    raise NetworkPlanningError(f"Unable to stabilise traffic capacity for {label}.")
+
+
 def _pack_ports_to_devices(
     port_items: Sequence[PortDemand],
     device_assets: Sequence[dict],
@@ -700,20 +844,56 @@ def _pack_ports_to_devices(
         {
             "ports": max(0, _int(asset.get("number_of_ports"))),
             "poe": max(0.0, _float(asset.get("poe_budget_w"))),
+            "bandwidth": (
+                max(0.0, _float(asset.get("bandwidth_capacity_gbps"))) * 1000.0
+                if _float(asset.get("bandwidth_capacity_gbps")) > 0
+                else None
+            ),
+            "packets": (
+                max(0.0, _float(asset.get("packet_throughput_mpps"))) * 1_000_000.0
+                if _float(asset.get("packet_throughput_mpps")) > 0
+                else None
+            ),
             "items": [],
         }
         for asset in device_assets
     ]
     for item in sorted(
         port_items,
-        key=lambda row: (-row.poe_power_w, row.endpoint_name, row.endpoint_port),
+        key=lambda row: (
+            -row.expected_bandwidth_mbps,
+            -row.expected_packet_rate_pps,
+            -row.poe_power_w,
+            row.endpoint_name,
+            row.endpoint_port,
+        ),
     ):
         choices = []
         for index, device in enumerate(devices):
             if device["ports"] < 1 or device["poe"] + 1e-9 < item.poe_power_w:
                 continue
+            if (
+                device["bandwidth"] is not None
+                and device["bandwidth"] + 1e-9 < item.expected_bandwidth_mbps
+            ):
+                continue
+            if (
+                device["packets"] is not None
+                and device["packets"] + 1e-9 < item.expected_packet_rate_pps
+            ):
+                continue
             choices.append(
                 (
+                    (
+                        device["bandwidth"] - item.expected_bandwidth_mbps
+                        if device["bandwidth"] is not None
+                        else float("inf")
+                    ),
+                    (
+                        device["packets"] - item.expected_packet_rate_pps
+                        if device["packets"] is not None
+                        else float("inf")
+                    ),
                     device["poe"] - item.poe_power_w,
                     device["ports"] - 1,
                     index,
@@ -724,9 +904,13 @@ def _pack_ports_to_devices(
                 f"Unable to allocate {item.endpoint_name} port {item.endpoint_port}; "
                 f"it requires {item.poe_power_w:.1f} W PoE."
             )
-        _, _, selected = min(choices)
+        *_, selected = min(choices)
         devices[selected]["ports"] -= 1
         devices[selected]["poe"] -= item.poe_power_w
+        if devices[selected]["bandwidth"] is not None:
+            devices[selected]["bandwidth"] -= item.expected_bandwidth_mbps
+        if devices[selected]["packets"] is not None:
+            devices[selected]["packets"] -= item.expected_packet_rate_pps
         devices[selected]["items"].append(item)
     return [device["items"] for device in devices]
 
@@ -969,6 +1153,8 @@ class DesignBuilder:
             "network_instance_id": _text(instance.get("id")),
             "network_port": str(port_name),
             "poe_power_w": round(item.poe_power_w, 3),
+            "expected_bandwidth_mbps": round(item.expected_bandwidth_mbps, 6),
+            "expected_packet_rate_pps": round(item.expected_packet_rate_pps, 3),
             "copper_length_m": round(max(0.0, copper_length_m), 3),
             "route_path": list(route_path),
             "vlan_ids": [],
@@ -1188,6 +1374,8 @@ def _minimum_layer_mix(
     minimum_devices: int,
     spare_fraction: float,
     label: str,
+    expected_bandwidth_mbps: float = 0.0,
+    expected_packet_rate_pps: float = 0.0,
 ) -> List[dict]:
     """Select a layer mix while accounting for uplinks and peer interconnects."""
 
@@ -1208,6 +1396,14 @@ def _minimum_layer_mix(
             candidates,
             required_ports,
             0.0,
+            spare_fraction,
+            label,
+        )
+        selected = _ensure_aggregate_traffic_capacity(
+            candidates,
+            selected,
+            expected_bandwidth_mbps,
+            expected_packet_rate_pps,
             spare_fraction,
             label,
         )
@@ -1629,6 +1825,14 @@ def _build_traditional_layer_topology(
         bool(settings.get("redundant_core", True)),
         _int(settings.get("independent_link_count"), 2),
     )
+    total_bandwidth_mbps = sum(
+        max(0.0, _float(item.get("expected_bandwidth_mbps")))
+        for item in access_switches
+    )
+    total_packet_rate_pps = sum(
+        max(0.0, _float(item.get("expected_packet_rate_pps")))
+        for item in access_switches
+    )
 
     core_peer = _layer_rule(settings, "core", "core")
     core_candidates = _choose_core_candidates(builder.data)
@@ -1656,6 +1860,8 @@ def _build_traditional_layer_topology(
             core_minimum,
             spare_fraction,
             "core switch",
+            total_bandwidth_mbps,
+            total_packet_rate_pps,
         )
         cores = _build_layer_instances(builder, core_mix, roots, "core")
         _connect_peer_ring(builder, cores, core_peer, "core")
@@ -1701,6 +1907,8 @@ def _build_traditional_layer_topology(
         aggregation_minimum,
         spare_fraction,
         "aggregation switch",
+        total_bandwidth_mbps,
+        total_packet_rate_pps,
     )
     aggregations = _build_layer_instances(
         builder, aggregation_mix, roots, "aggregation"
@@ -1722,6 +1930,8 @@ def _build_traditional_layer_topology(
         core_minimum,
         spare_fraction,
         "core switch",
+        total_bandwidth_mbps,
+        total_packet_rate_pps,
     )
     cores = _build_layer_instances(builder, core_mix, roots, "core")
 
@@ -1771,15 +1981,21 @@ def _assert_generated_capacity(builder: DesignBuilder, spare_fraction: float) ->
         for item in builder.data.get("network_assets", [])
         if isinstance(item, dict) and _text(item.get("id"))
     }
-    loads: Dict[str, Tuple[int, float]] = defaultdict(lambda: (0, 0.0))
+    loads: Dict[str, Tuple[int, float, float, float]] = defaultdict(
+        lambda: (0, 0.0, 0.0, 0.0)
+    )
     for assignment in builder.assignments:
         instance_id = _text(assignment.get("network_instance_id"))
         if not instance_id:
             continue
-        ports, poe = loads[instance_id]
+        ports, poe, bandwidth, packets = loads[instance_id]
         loads[instance_id] = (
             ports + 1,
             poe + max(0.0, _float(assignment.get("poe_power_w"))),
+            bandwidth
+            + max(0.0, _float(assignment.get("expected_bandwidth_mbps"))),
+            packets
+            + max(0.0, _float(assignment.get("expected_packet_rate_pps"))),
         )
 
     for instance in builder.instances:
@@ -1795,9 +2011,23 @@ def _assert_generated_capacity(builder: DesignBuilder, spare_fraction: float) ->
         )
         port_capacity = max(0, _int(asset.get("number_of_ports"))) * stack_members
         poe_capacity = max(0.0, _float(asset.get("poe_budget_w"))) * stack_members
-        used_ports, used_poe = loads.get(instance_id, (0, 0.0))
+        used_ports, used_poe, used_bandwidth, used_packets = loads.get(
+            instance_id, (0, 0.0, 0.0, 0.0)
+        )
         required_ports = int(math.ceil(used_ports * (1.0 + spare_fraction)))
         required_poe = used_poe * (1.0 + spare_fraction)
+        required_bandwidth = used_bandwidth * (1.0 + spare_fraction)
+        required_packets = used_packets * (1.0 + spare_fraction)
+        bandwidth_capacity = (
+            max(0.0, _float(asset.get("bandwidth_capacity_gbps")))
+            * 1000.0
+            * stack_members
+        )
+        packet_capacity = (
+            max(0.0, _float(asset.get("packet_throughput_mpps")))
+            * 1_000_000.0
+            * stack_members
+        )
         if port_capacity and required_ports > port_capacity:
             raise NetworkPlanningError(
                 f"Generated {instance.get('name') or instance_id} would use {used_ports} ports "
@@ -1807,6 +2037,20 @@ def _assert_generated_capacity(builder: DesignBuilder, spare_fraction: float) ->
             raise NetworkPlanningError(
                 f"Generated {instance.get('name') or instance_id} would use {used_poe:.1f} W PoE "
                 f"plus spare capacity ({required_poe:.1f} W required) but only has {poe_capacity:.1f} W."
+            )
+        if bandwidth_capacity and required_bandwidth > bandwidth_capacity + 1e-9:
+            raise NetworkPlanningError(
+                f"Generated {instance.get('name') or instance_id} would carry "
+                f"{used_bandwidth:.3f} Mbps plus spare capacity "
+                f"({required_bandwidth:.3f} Mbps required) but only has "
+                f"{bandwidth_capacity:.3f} Mbps."
+            )
+        if packet_capacity and required_packets > packet_capacity + 1e-9:
+            raise NetworkPlanningError(
+                f"Generated {instance.get('name') or instance_id} would process "
+                f"{used_packets:.0f} packets/s plus spare capacity "
+                f"({required_packets:.0f} packets/s required) but only has "
+                f"{packet_capacity:.0f} packets/s."
             )
 
 
@@ -1828,8 +2072,24 @@ def _build_core_layer(
         if not leaves:
             continue
         root = roots[root_name]
+        expected_bandwidth_mbps = sum(
+            max(0.0, _float(item.get("expected_bandwidth_mbps")))
+            for item in leaves
+        )
+        expected_packet_rate_pps = sum(
+            max(0.0, _float(item.get("expected_packet_rate_pps")))
+            for item in leaves
+        )
         mix = _minimum_asset_mix(
             candidates, len(leaves), 0.0, spare_fraction, "core switch"
+        )
+        mix = _ensure_aggregate_traffic_capacity(
+            candidates,
+            mix,
+            expected_bandwidth_mbps,
+            expected_packet_rate_pps,
+            spare_fraction,
+            "core switch",
         )
         rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
         rack_index = 1
@@ -1853,6 +2113,8 @@ def _build_core_layer(
                     ),
                     rack_start_u=next_rack_u,
                     rack_size_u=rack_size_u,
+                    expected_bandwidth_mbps=round(expected_bandwidth_mbps, 6),
+                    expected_packet_rate_pps=round(expected_packet_rate_pps, 3),
                 )
             )
             next_rack_u += rack_u
@@ -1974,6 +2236,14 @@ def _traditional_design(
             spare_fraction,
             f"access switch at {room_name}",
         )
+        mix = _ensure_aggregate_traffic_capacity(
+            switch_candidates,
+            mix,
+            sum(item.expected_bandwidth_mbps for item in port_items),
+            sum(item.expected_packet_rate_pps for item in port_items),
+            spare_fraction,
+            f"access switch at {room_name}",
+        )
         packed = _pack_ports_to_devices(port_items, mix, spare_fraction)
         switch_number = 1
         stack_number = 1
@@ -2044,6 +2314,22 @@ def _traditional_design(
                 stack_interconnect_specification=(
                     "Cisco StackWise stacking cables" if is_stack else ""
                 ),
+                expected_bandwidth_mbps=round(
+                    sum(
+                        item.expected_bandwidth_mbps
+                        for assigned in group_assignments
+                        for item in assigned
+                    ),
+                    6,
+                ),
+                expected_packet_rate_pps=round(
+                    sum(
+                        item.expected_packet_rate_pps
+                        for assigned in group_assignments
+                        for item in assigned
+                    ),
+                    3,
+                ),
             )
             instance["rack_size_u"] = rack_size_u
             for member_offset, assigned in enumerate(group_assignments, start=1):
@@ -2076,13 +2362,30 @@ def _traditional_design(
 
 
 def _fits_any_ont(
-    candidates: Sequence[dict], ports: int, poe_w: float, spare_fraction: float
+    candidates: Sequence[dict],
+    ports: int,
+    poe_w: float,
+    bandwidth_mbps: float,
+    packet_rate_pps: float,
+    spare_fraction: float,
 ) -> bool:
     required_ports = int(math.ceil(ports * (1.0 + spare_fraction)))
     required_poe = poe_w * (1.0 + spare_fraction)
+    required_bandwidth = bandwidth_mbps * (1.0 + spare_fraction)
+    required_packets = packet_rate_pps * (1.0 + spare_fraction)
     return any(
         _int(asset.get("number_of_ports")) >= required_ports
         and _float(asset.get("poe_budget_w")) + 1e-9 >= required_poe
+        and (
+            _float(asset.get("bandwidth_capacity_gbps")) <= 0
+            or _float(asset.get("bandwidth_capacity_gbps")) * 1000.0 + 1e-9
+            >= required_bandwidth
+        )
+        and (
+            _float(asset.get("packet_throughput_mpps")) <= 0
+            or _float(asset.get("packet_throughput_mpps")) * 1_000_000.0 + 1e-9
+            >= required_packets
+        )
         for asset in candidates
     )
 
@@ -2092,22 +2395,45 @@ def _choose_single_ont(
 ) -> dict:
     ports = len(items)
     poe = sum(item.poe_power_w for item in items)
+    bandwidth = sum(item.expected_bandwidth_mbps for item in items)
+    packets = sum(item.expected_packet_rate_pps for item in items)
     feasible = [
         asset
         for asset in candidates
         if _int(asset.get("number_of_ports"))
         >= math.ceil(ports * (1.0 + spare_fraction))
         and _float(asset.get("poe_budget_w")) + 1e-9 >= poe * (1.0 + spare_fraction)
+        and (
+            _float(asset.get("bandwidth_capacity_gbps")) <= 0
+            or _float(asset.get("bandwidth_capacity_gbps")) * 1000.0 + 1e-9
+            >= bandwidth * (1.0 + spare_fraction)
+        )
+        and (
+            _float(asset.get("packet_throughput_mpps")) <= 0
+            or _float(asset.get("packet_throughput_mpps")) * 1_000_000.0 + 1e-9
+            >= packets * (1.0 + spare_fraction)
+        )
     ]
     if not feasible:
         raise NetworkPlanningError(
-            f"No ONT can support a cluster of {ports} ports and {poe:.1f} W PoE."
+            f"No ONT can support a cluster of {ports} ports, {poe:.1f} W PoE, "
+            f"{bandwidth:.3f} Mbps and {packets:.0f} packets/s."
         )
     return min(
         feasible,
         key=lambda asset: (
             _int(asset.get("number_of_ports")) - ports,
             _float(asset.get("poe_budget_w")) - poe,
+            (
+                _float(asset.get("bandwidth_capacity_gbps")) * 1000.0 - bandwidth
+                if _float(asset.get("bandwidth_capacity_gbps")) > 0
+                else float("inf")
+            ),
+            (
+                _float(asset.get("packet_throughput_mpps")) * 1_000_000.0 - packets
+                if _float(asset.get("packet_throughput_mpps")) > 0
+                else float("inf")
+            ),
             _float(asset.get("power_input_w")),
         ),
     )
@@ -2174,6 +2500,8 @@ def _cluster_polan_ports(
             cluster_items: List[PortDemand] = []
             represented: List[EndpointDemand] = []
             cluster_poe = 0.0
+            cluster_bandwidth = 0.0
+            cluster_packets = 0.0
             for point in candidates:
                 took_any = False
                 queue = remaining[point.name]
@@ -2181,10 +2509,21 @@ def _cluster_polan_ports(
                     item = queue[0]
                     next_ports = len(cluster_items) + 1
                     next_poe = cluster_poe + item.poe_power_w
-                    if not _fits_any_ont(ont_candidates, next_ports, next_poe, spare_fraction):
+                    next_bandwidth = cluster_bandwidth + item.expected_bandwidth_mbps
+                    next_packets = cluster_packets + item.expected_packet_rate_pps
+                    if not _fits_any_ont(
+                        ont_candidates,
+                        next_ports,
+                        next_poe,
+                        next_bandwidth,
+                        next_packets,
+                        spare_fraction,
+                    ):
                         break
                     cluster_items.append(queue.popleft())
                     cluster_poe = next_poe
+                    cluster_bandwidth = next_bandwidth
+                    cluster_packets = next_packets
                     took_any = True
                 if took_any:
                     represented.append(point)
@@ -2279,6 +2618,12 @@ def _protected_splitter_asset(builder: DesignBuilder, base_asset: dict) -> dict:
 def _polan_design(
     builder: DesignBuilder, endpoints: Sequence[EndpointDemand], spare_fraction: float
 ) -> None:
+    total_bandwidth_mbps = sum(
+        endpoint.expected_bandwidth_mbps for endpoint in endpoints
+    )
+    total_packet_rate_pps = sum(
+        endpoint.expected_packet_rate_pps for endpoint in endpoints
+    )
     max_copper_m = max(
         1.0, _float(builder.settings.get("polan_max_ont_copper_m"), 30.0)
     )
@@ -2315,6 +2660,12 @@ def _polan_design(
             route_anchor=medoid.name,
             department_id=medoid.department_id,
             department_name=medoid.department_name,
+            expected_bandwidth_mbps=round(
+                sum(item.expected_bandwidth_mbps for item in port_items), 6
+            ),
+            expected_packet_rate_pps=round(
+                sum(item.expected_packet_rate_pps for item in port_items), 3
+            ),
         )
         source_counts: Dict[str, int] = defaultdict(int)
         for port_number, item in enumerate(port_items, start=1):
@@ -2662,6 +3013,14 @@ def _polan_design(
         mix = _minimum_asset_mix(
             eligible_olts, required_pon_ports, 0.0, spare_fraction, f"{side} OLT"
         )
+        mix = _ensure_aggregate_traffic_capacity(
+            eligible_olts,
+            mix,
+            total_bandwidth_mbps,
+            total_packet_rate_pps,
+            spare_fraction,
+            f"{side} OLT",
+        )
         instances = [
             builder.add_instance(
                 asset,
@@ -2673,6 +3032,8 @@ def _polan_design(
                 route_anchor=_text(root.get("name")),
                 olt_side=side.lower(),
                 core_redundancy_role=side.lower(),
+                expected_bandwidth_mbps=round(total_bandwidth_mbps, 6),
+                expected_packet_rate_pps=round(total_packet_rate_pps, 3),
             )
             for index, asset in enumerate(mix)
         ]
@@ -2799,56 +3160,69 @@ def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
 
 
 def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -> None:
-    """Install rack fibre panels without changing the logical topology.
+    """Terminate cabinet-to-field fibre on rack-mounted patch panels.
 
-    The original active-device connection remains the authoritative logical
-    topology link.  Separate hidden physical connections model the equipment
-    patch leads and the panel-to-panel backbone.  Fibre links within one rack
-    remain direct and do not require patch panels.
+    Logical links remain direct active-device edges in the network topology.
+    Hidden physical records model the internal equipment patch lead and the
+    permanent field cable. A patch panel is installed only on an endpoint that
+    is actually assigned to a rack cabinet; rackless field devices, splitters,
+    joints and ONTs remain direct field terminations.
     """
+
     instance_by_id = {_text(row.get("id")): row for row in builder.instances}
 
-    def endpoint_asset_type(connection: dict, field: str) -> str:
-        instance = instance_by_id.get(_text(connection.get(field)))
-        return _asset_type(builder._asset_for_instance(instance)) if instance else ""
-
-    def rack_key(instance: dict) -> Tuple[int, str, str]:
+    def rack_key(instance: dict) -> Optional[Tuple[int, str, str]]:
+        rack_name = _text(instance.get("rack_name"))
+        if not rack_name:
+            return None
         return (
             _int(instance.get("floor")),
             _text(instance.get("location_name")),
-            _text(instance.get("rack_name")),
+            rack_name,
         )
 
-    eligible: List[dict] = []
+    eligible: List[Tuple[dict, dict, dict]] = []
     for row in list(builder.connections):
         if _text(row.get("medium")).lower() != "fibre":
             continue
         if bool(row.get("physical_connection")):
             continue
-        if endpoint_asset_type(row, "from_instance_id") == "fibre_splitter":
-            continue
-        if endpoint_asset_type(row, "to_instance_id") == "fibre_splitter":
-            continue
         a = instance_by_id.get(_text(row.get("from_instance_id")))
         b = instance_by_id.get(_text(row.get("to_instance_id")))
         if not a or not b:
             continue
-        if rack_key(a) == rack_key(b):
+        a_rack = rack_key(a)
+        b_rack = rack_key(b)
+        if a_rack is not None and a_rack == b_rack:
             row["physical_segment"] = "intra_rack"
             continue
+        # Only cabinet boundaries need panels. A field-to-field link remains a
+        # routed physical cable without inventing a rack at either end.
+        if a_rack is None and b_rack is None:
+            continue
         row["logical_topology"] = True
-        eligible.append(row)
+        eligible.append((row, a, b))
 
     if not eligible:
         return
 
+    default_cable_cores = max(
+        2, _int(builder.settings.get("default_fibre_core_count"), 12)
+    )
     terminations: Dict[Tuple[int, str, str], int] = defaultdict(int)
-    for connection in eligible:
-        fibres = max(1, _int(connection.get("fibre_count"), 1))
-        for field in ("from_instance_id", "to_instance_id"):
-            instance = instance_by_id.get(_text(connection.get(field)))
-            if instance:
-                terminations[rack_key(instance)] += fibres
+    ports_per_connection: Dict[str, int] = {}
+    for logical, a, b in eligible:
+        cable_cores = max(
+            default_cable_cores,
+            max(1, _int(logical.get("fibre_count"), 2)),
+        )
+        # LC panel capacity is treated as duplex adapter positions.
+        adapter_ports = max(1, int(math.ceil(cable_cores / 2.0)))
+        ports_per_connection[_text(logical.get("id"))] = adapter_ports
+        for instance in (a, b):
+            key = rack_key(instance)
+            if key is not None:
+                terminations[key] += adapter_ports
 
     panel_asset = _fibre_patch_panel_asset(builder)
     capacity = max(
@@ -2868,75 +3242,125 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         required = max(1, int(math.ceil(used * (1.0 + spare_fraction))))
         count_needed = max(1, int(math.ceil(required / capacity)))
         location = locations.get(location_name) or {
-            "name": location_name, "floor": floor, "x": 0.0, "y": 0.0
+            "name": location_name,
+            "floor": floor,
+            "x": 0.0,
+            "y": 0.0,
         }
         for index in range(count_needed):
             panel = builder.add_instance(
                 panel_asset,
-                f"AUTO {location_name} {rack_name or 'Rack'} Fibre Patch Panel {index + 1}",
+                f"AUTO {location_name} {rack_name} Fibre Patch Panel {index + 1}",
                 location,
                 "fibre_patch_panel",
                 rack_name=rack_name,
                 target_rack_name=rack_name,
                 rack_start_u=0,
-                rack_size_u=max(1, _int(builder.settings.get("default_rack_size_u"), 42)),
+                rack_size_u=max(
+                    1, _int(builder.settings.get("default_rack_size_u"), 42)
+                ),
                 route_anchor=location_name,
                 termination_count=max(0, min(capacity, used - index * capacity)),
                 cabinet_patch_panel=True,
+                external_field_termination=True,
             )
             panels_by_rack[key].append(panel)
             instance_by_id[_text(panel.get("id"))] = panel
 
     next_port: Dict[Tuple[int, str, str], int] = defaultdict(int)
 
-    def allocate(instance: dict) -> Tuple[dict, str]:
+    def allocate(instance: dict, count: int) -> Tuple[dict, str, List[str]]:
         key = rack_key(instance)
+        if key is None:
+            raise NetworkPlanningError("Cannot allocate a fibre panel outside a rack.")
         index = next_port[key]
         panel_index, port_index = divmod(index, capacity)
+        if port_index + count > capacity:
+            panel_index += 1
+            port_index = 0
+            index = panel_index * capacity
         panels = panels_by_rack.get(key, [])
         if panel_index >= len(panels):
             raise NetworkPlanningError(
-                f"Fibre patch-panel capacity was exceeded for {key[1]} / {key[2] or 'unassigned rack'}."
+                f"Fibre patch-panel capacity was exceeded for {key[1]} / {key[2]}."
             )
-        next_port[key] += 1
-        return panels[panel_index], f"LC-{port_index + 1}"
+        ports = [f"LC-{port_index + offset + 1}" for offset in range(count)]
+        next_port[key] = index + count
+        return panels[panel_index], ports[0], ports
 
-    for logical in eligible:
-        a = instance_by_id.get(_text(logical.get("from_instance_id")))
-        b = instance_by_id.get(_text(logical.get("to_instance_id")))
-        if not a or not b:
-            continue
-        a_panel, a_panel_port = allocate(a)
-        b_panel, b_panel_port = allocate(b)
+    for logical, a, b in eligible:
         parent_id = _text(logical.get("id"))
-        common = {
-            "generate_patch_leads": False,
-            "topology_hidden": True,
-            "physical_connection": True,
-            "parent_logical_connection_id": parent_id,
-            "fibre_count": max(1, _int(logical.get("fibre_count"), 1)),
-        }
-        builder.add_connection(
-            a, _text(logical.get("from_port")), a_panel, a_panel_port, "fibre",
-            physical_segment="fibre_patch_cable", cable_specification="OS2 fibre patch lead",
-            **common,
-        )
+        adapter_count = ports_per_connection.get(parent_id, 1)
+        used_cores = max(1, _int(logical.get("fibre_count"), 2))
+        cable_core_count = max(default_cable_cores, used_cores)
+
+        a_termination = a
+        a_port = _text(logical.get("from_port"))
+        a_panel_ports: List[str] = []
+        if rack_key(a) is not None:
+            a_termination, a_port, a_panel_ports = allocate(a, adapter_count)
+            builder.add_connection(
+                a,
+                _text(logical.get("from_port")),
+                a_termination,
+                a_port,
+                "fibre",
+                generate_patch_leads=False,
+                topology_hidden=True,
+                physical_connection=True,
+                parent_logical_connection_id=parent_id,
+                physical_segment="fibre_patch_cable",
+                cable_specification="OS2 fibre patch lead",
+                fibre_count=used_cores,
+                terminated_panel_ports=list(a_panel_ports),
+            )
+
+        b_termination = b
+        b_port = _text(logical.get("to_port"))
+        b_panel_ports: List[str] = []
+        if rack_key(b) is not None:
+            b_termination, b_port, b_panel_ports = allocate(b, adapter_count)
+            builder.add_connection(
+                b_termination,
+                b_port,
+                b,
+                _text(logical.get("to_port")),
+                "fibre",
+                generate_patch_leads=False,
+                topology_hidden=True,
+                physical_connection=True,
+                parent_logical_connection_id=parent_id,
+                physical_segment="fibre_patch_cable",
+                cable_specification="OS2 fibre patch lead",
+                fibre_count=used_cores,
+                terminated_panel_ports=list(b_panel_ports),
+            )
+
         backbone = builder.add_connection(
-            a_panel, a_panel_port, b_panel, b_panel_port, "fibre",
+            a_termination,
+            a_port,
+            b_termination,
+            b_port,
+            "fibre",
             _text(a.get("route_anchor")) or _text(a.get("location_name")),
             _text(b.get("route_anchor")) or _text(b.get("location_name")),
-            physical_segment="fibre_backbone", **common,
+            generate_patch_leads=False,
+            topology_hidden=True,
+            physical_connection=True,
+            parent_logical_connection_id=parent_id,
+            physical_segment="fibre_backbone",
+            fibre_count=used_cores,
+            cable_core_count=cable_core_count,
+            from_terminated_panel_ports=list(a_panel_ports),
+            to_terminated_panel_ports=list(b_panel_ports),
+            cabinet_to_field=(rack_key(a) is None or rack_key(b) is None),
         )
-        # Preserve the logical link's route metrics on the permanent backbone.
+        # Preserve the logical route exactly; this is the permanent cable shown
+        # on the independent physical-fibre drawing layer.
         backbone["route_path"] = list(logical.get("route_path", []))
         backbone["length_m"] = _float(logical.get("length_m"))
         backbone["redundancy_role"] = _text(logical.get("redundancy_role"))
         backbone["protection_group"] = _text(logical.get("protection_group"))
-        builder.add_connection(
-            b_panel, b_panel_port, b, _text(logical.get("to_port")), "fibre",
-            physical_segment="fibre_patch_cable", cable_specification="OS2 fibre patch lead",
-            **common,
-        )
 
 
 def _copper_patch_panel_asset(builder: DesignBuilder) -> dict:
@@ -2970,7 +3394,17 @@ def _copper_patch_panel_asset(builder: DesignBuilder) -> dict:
 
 
 def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) -> None:
-    """Provide copper panels and hidden patch-cable connections for access switches."""
+    """Terminate traditional horizontal copper cabling on rack patch panels.
+
+    Endpoint assignments remain logically associated with their serving access
+    switch so capacity, PoE and traffic calculations are unchanged.  Physical
+    fields on each assignment identify the permanent horizontal-cable
+    termination, while a hidden switch-to-panel connection and one patch-lead
+    record model the short rack patch cord.
+    """
+    if _text(builder.technology).lower() != "traditional":
+        return
+
     assignments_by_instance: Dict[str, List[dict]] = defaultdict(list)
     for assignment in builder.assignments:
         instance_id = _text(assignment.get("network_instance_id"))
@@ -2978,6 +3412,24 @@ def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) 
             assignments_by_instance[instance_id].append(assignment)
     if not assignments_by_instance:
         return
+
+    # add_assignment() creates a direct endpoint patch-lead for backwards
+    # compatibility.  Traditional designs replace those records with the
+    # correct switch-to-patch-panel cord once panel positions are known.
+    panelised_assignment_ids = {
+        _text(assignment.get("id"))
+        for rows in assignments_by_instance.values()
+        for assignment in rows
+        if _text(assignment.get("id"))
+    }
+    builder.patch_leads = [
+        lead for lead in builder.patch_leads
+        if not (
+            bool(lead.get("auto_generated"))
+            and _text(lead.get("assignment_id")) in panelised_assignment_ids
+        )
+    ]
+
     instance_by_id = {_text(row.get("id")): row for row in builder.instances}
     locations = {_text(row.get("name")): row for row in builder.data.get("locations", []) if isinstance(row, dict)}
     panel_asset = _copper_patch_panel_asset(builder)
@@ -3012,19 +3464,44 @@ def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) 
             panels.append(panel)
         for index, assignment in enumerate(assignments):
             panel, port_index = panels[index // capacity], (index % capacity) + 1
-            builder.add_connection(
+            panel_port = f"Port-{port_index}"
+            switch_port = _text(assignment.get("network_port"))
+            assignment_id = _text(assignment.get("id"))
+
+            # Keep the logical endpoint-to-switch association intact, but
+            # explicitly record where the field cable terminates physically.
+            assignment["physical_patch_panel_instance_id"] = _text(panel.get("id"))
+            assignment["physical_patch_panel_port"] = panel_port
+            assignment["horizontal_cable_from_instance_id"] = _text(panel.get("id"))
+            assignment["horizontal_cable_from_port"] = panel_port
+            assignment["horizontal_cable_to_endpoint"] = _text(assignment.get("endpoint_name"))
+            assignment["horizontal_cable_to_port"] = _text(assignment.get("endpoint_port"))
+            assignment["physical_termination_type"] = "copper_patch_panel"
+
+            patch_connection = builder.add_connection(
                 switch,
-                _text(assignment.get("network_port")),
+                switch_port,
                 panel,
-                f"Port-{port_index}",
+                panel_port,
                 "copper",
                 generate_patch_leads=False,
                 topology_hidden=True,
                 physical_connection=True,
                 physical_segment="copper_patch_cable",
-                assignment_id=_text(assignment.get("id")),
+                assignment_id=assignment_id,
                 cable_specification="Category 6A copper patch lead",
                 length_m=2.0,
+            )
+            builder.add_patch_lead(
+                connection_id=_text(patch_connection.get("id")),
+                assignment_id=assignment_id,
+                instance=switch,
+                port=switch_port,
+                medium="copper",
+                peer_instance_id=_text(panel.get("id")),
+                peer_port=panel_port,
+                endpoint_name=_text(assignment.get("endpoint_name")),
+                preferred_use="client",
             )
 
 
@@ -3325,6 +3802,8 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
     settings.setdefault("traditional_max_copper_m", 90.0)
     settings.setdefault("polan_max_ont_copper_m", 30.0)
     settings.setdefault("polan_olt_failover", True)
+    settings.setdefault("default_expected_bandwidth_mbps", 0.0)
+    settings.setdefault("default_expected_packet_rate_pps", 0.0)
     settings.setdefault("topology_model", "collapsed_core")
     settings.setdefault("independent_link_count", 2)
     settings.setdefault("layer_connection_rules", [])
@@ -3419,6 +3898,44 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
     )
     demand_ports = sum(endpoint.port_count for endpoint in endpoints)
     demand_poe = sum(endpoint.poe_power_w for endpoint in endpoints)
+    demand_bandwidth = sum(endpoint.expected_bandwidth_mbps for endpoint in endpoints)
+    demand_packets = sum(endpoint.expected_packet_rate_pps for endpoint in endpoints)
+    installed_bandwidth = sum(
+        max(
+            0.0,
+            _float(
+                assets_by_id.get(_text(item.get("asset_id")), {}).get(
+                    "bandwidth_capacity_gbps"
+                )
+            ),
+        )
+        * 1000.0
+        * (
+            max(1, _int(item.get("stack_member_count"), 1))
+            if bool(item.get("logical_stack"))
+            else 1
+        )
+        for item in builder.instances
+        if _text(item.get("design_role")) in {"access_switch", "ont"}
+    )
+    installed_packets = sum(
+        max(
+            0.0,
+            _float(
+                assets_by_id.get(_text(item.get("asset_id")), {}).get(
+                    "packet_throughput_mpps"
+                )
+            ),
+        )
+        * 1_000_000.0
+        * (
+            max(1, _int(item.get("stack_member_count"), 1))
+            if bool(item.get("logical_stack"))
+            else 1
+        )
+        for item in builder.instances
+        if _text(item.get("design_role")) in {"access_switch", "ont"}
+    )
     role_counts: Dict[str, int] = defaultdict(int)
     for instance in builder.instances:
         role_counts[_text(instance.get("design_role")) or "other"] += 1
@@ -3440,12 +3957,16 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
             if technology_value == "Traditional"
             else []
         ),
-        "objective": "Minimum feasible component count after department-first, graph-branch-aware proximity clustering, subject to port, PoE, spare-capacity, distance and configured layer-diversity constraints",
+        "objective": "Minimum feasible component count after department-first, graph-branch-aware proximity clustering, subject to port, PoE, bandwidth, packet-throughput, spare-capacity, distance and configured layer-diversity constraints",
         "endpoint_locations": len(endpoints),
         "required_ports": demand_ports,
         "required_poe_w": round(demand_poe, 3),
+        "required_bandwidth_mbps": round(demand_bandwidth, 6),
+        "required_packet_rate_pps": round(demand_packets, 3),
         "installed_endpoint_ports": installed_ports,
         "installed_poe_budget_w": round(installed_poe, 3),
+        "installed_bandwidth_capacity_mbps": round(installed_bandwidth, 6),
+        "installed_packet_throughput_pps": round(installed_packets, 3),
         "spare_capacity_percent": round(spare_fraction * 100.0, 3),
         "auto_generated_instances": len(builder.instances),
         "auto_generated_connections": len(builder.connections),

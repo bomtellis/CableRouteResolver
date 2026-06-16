@@ -63,17 +63,22 @@ class FibreNodeItem(QGraphicsObject):
     moved = Signal(str, float, float)
     activated = Signal(str)
 
-    def __init__(self, node: dict, traced: bool = False):
+    def __init__(self, node: dict, traced: bool = False, symbol_scale: float = 0.32):
         super().__init__(); self.node = node; self.traced = traced
+        self.symbol_scale = max(0.08, float(symbol_scale or 0.32))
         self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemSendsGeometryChanges)
         self.setAcceptHoverEvents(True); self.setToolTip(self._tooltip())
 
-    def boundingRect(self): return QRectF(-13, -13, 26, 26)
+    def boundingRect(self):
+        size = 26.0 * self.symbol_scale
+        return QRectF(-size / 2.0, -size / 2.0, size, size)
 
     def _tooltip(self):
         return f"{_text(self.node.get('name'))}\n{_text(self.node.get('node_type')).replace('_',' ').title()}\n{_text(self.node.get('location_name'))} · Floor {_int(self.node.get('floor'))}"
 
     def paint(self, painter, option, widget=None):
+        painter.save()
+        painter.scale(self.symbol_scale, self.symbol_scale)
         painter.setRenderHint(QPainter.Antialiasing, True)
         node_type = _text(self.node.get("node_type"))
         colour = {
@@ -83,18 +88,20 @@ class FibreNodeItem(QGraphicsObject):
         }.get(node_type, QColor("#77838d"))
         border = QColor("#ff8a24") if self.traced else (QColor("#8fc7ff") if self.isSelected() else QColor("#d5dce1"))
         painter.setPen(QPen(border, 2.8 if self.traced or self.isSelected() else 1.2)); painter.setBrush(colour)
+        base_rect = QRectF(-13, -13, 26, 26)
         if node_type in {"splice_enclosure", "fibre_joint"}:
-            painter.drawEllipse(self.boundingRect().adjusted(2,2,-2,-2))
+            painter.drawEllipse(base_rect.adjusted(2,2,-2,-2))
         elif node_type == "splice_cassette":
-            painter.drawRoundedRect(self.boundingRect().adjusted(2,4,-2,-4), 3, 3)
+            painter.drawRoundedRect(base_rect.adjusted(2,4,-2,-4), 3, 3)
             painter.drawLine(QPointF(-8,-2), QPointF(8,-2)); painter.drawLine(QPointF(-8,3), QPointF(8,3))
         elif node_type in {"handhole", "chamber"}:
-            painter.drawRect(self.boundingRect().adjusted(2,2,-2,-2))
+            painter.drawRect(base_rect.adjusted(2,2,-2,-2))
         else:
-            painter.drawRoundedRect(self.boundingRect().adjusted(2,2,-2,-2), 5, 5)
+            painter.drawRoundedRect(base_rect.adjusted(2,2,-2,-2), 5, 5)
         painter.setPen(QColor("#ffffff")); painter.setFont(QFont("Arial", 6, QFont.Bold))
         initials = {"splice_enclosure":"SE","splice_cassette":"SC","fibre_joint":"J","termination":"T","handhole":"HH","chamber":"CH"}.get(node_type,"F")
-        painter.drawText(self.boundingRect(), Qt.AlignCenter, initials)
+        painter.drawText(base_rect, Qt.AlignCenter, initials)
+        painter.restore()
 
     def mouseDoubleClickEvent(self, event): self.activated.emit(_text(self.node.get("id"))); event.accept()
     def contextMenuEvent(self, event): self.contextRequested.emit(_text(self.node.get("id")), event.screenPos()); event.accept()
@@ -104,8 +111,9 @@ class FibreNodeItem(QGraphicsObject):
 
 
 class FibreCableItem(QGraphicsPathItem):
-    def __init__(self, cable: dict, path: QPainterPath, traced: bool, context_callback: Callable[[str, QPoint], None]):
+    def __init__(self, cable: dict, path: QPainterPath, traced: bool, context_callback: Callable[[str, QPoint], None], width_scale: float = 0.55):
         super().__init__(path); self.cable = cable; self.traced = traced; self.context_callback = context_callback
+        self.width_scale = max(0.2, float(width_scale or 0.55))
         self.setFlags(QGraphicsItem.ItemIsSelectable); self.setAcceptHoverEvents(True); self.setZValue(-0.2)
         self._update_pen(False)
         stats = cable_core_statistics(cable)
@@ -113,7 +121,7 @@ class FibreCableItem(QGraphicsPathItem):
 
     def _update_pen(self, hover: bool):
         colour = QColor("#ff8a24") if self.traced else QColor("#6f8dff")
-        width = 5.0 if self.traced else (4.0 if hover or self.isSelected() else 2.6)
+        width = (5.0 if self.traced else (4.0 if hover or self.isSelected() else 2.6)) * self.width_scale
         self.setPen(QPen(colour, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
     def hoverEnterEvent(self,event): self._update_pen(True); super().hoverEnterEvent(event)
     def hoverLeaveEvent(self,event): self._update_pen(False); super().hoverLeaveEvent(event)
@@ -164,6 +172,7 @@ class PhysicalFibreTopologyDialog(QDialog):
 
     def rebuild(self, *_args):
         ensure_network_schema(self.data); self.scene.clear(); floor=self._floor(); layer=self._layer_settings(); self.layer_label.setText(f"DXF layers: {layer.get('cable_layer','NET-FIBRE-CABLE')} / {layer.get('splice_layer','NET-FIBRE-SPLICE')}")
+        symbol_scale=max(0.08,_float(layer.get("symbol_scale"),0.32)); label_scale=max(0.2,_float(layer.get("label_scale"),0.55)); width_scale=max(0.2,_float(layer.get("cable_width_scale"),0.55))
         if layer.get("show_base_graph", True): self._draw_base_graph(floor)
         traced_cables=set(self.trace.get("fibre_cable_ids",[])); traced_nodes=set()
         for splice in self.data.get("network_fibre_splices",[]):
@@ -175,21 +184,21 @@ class PhysicalFibreTopologyDialog(QDialog):
             if len(points)<2: continue
             path=QPainterPath(QPointF(_float(points[0].get("x")),-_float(points[0].get("y"))))
             for point in points[1:]: path.lineTo(QPointF(_float(point.get("x")),-_float(point.get("y"))))
-            item=FibreCableItem(cable,path,_text(cable.get("id")) in traced_cables,self._cable_context); self.scene.addItem(item); cable_count+=1
+            item=FibreCableItem(cable,path,_text(cable.get("id")) in traced_cables,self._cable_context,width_scale); self.scene.addItem(item); cable_count+=1
             midpoint=path.pointAtPercent(0.5); stats=cable_core_statistics(cable)
             label_text=f"{_text(cable.get('id'))} · {_int(cable.get('core_count'))}F"
             if layer.get("show_dark_fibre",True): label_text+=f" · {stats['dark']} dark"
-            label=QGraphicsSimpleTextItem(label_text); label.setBrush(QBrush(QColor("#ffb25f") if item.traced else QColor("#b8c8ff"))); label.setFont(QFont("Arial",7,QFont.Bold)); label.setPos(midpoint+QPointF(5,-18)); label.setZValue(0.3); self.scene.addItem(label)
+            label=QGraphicsSimpleTextItem(label_text); label.setBrush(QBrush(QColor("#ffb25f") if item.traced else QColor("#b8c8ff"))); label.setFont(QFont("Arial",max(1,int(round(7*label_scale))),QFont.Bold)); label.setPos(midpoint+QPointF(5*label_scale,-18*label_scale)); label.setZValue(0.3); self.scene.addItem(label)
         node_count=0
         for node in self.data.get("network_fibre_nodes",[]):
             if not isinstance(node,dict) or _int(node.get("floor"))!=floor: continue
-            item=FibreNodeItem(node,_text(node.get("id")) in traced_nodes); item.setPos(_float(node.get("x")),-_float(node.get("y"))); item.contextRequested.connect(self._node_context); item.moved.connect(self._node_moved); item.activated.connect(self.edit_node); self.scene.addItem(item); node_count+=1
-            label=QGraphicsSimpleTextItem(_text(node.get("label")) or _text(node.get("name"))); label.setBrush(QBrush(QColor("#dce5ea"))); label.setFont(QFont("Arial",7)); label.setPos(item.pos()+QPointF(15,-10)); self.scene.addItem(label)
+            item=FibreNodeItem(node,_text(node.get("id")) in traced_nodes,symbol_scale); item.setPos(_float(node.get("x")),-_float(node.get("y"))); item.contextRequested.connect(self._node_context); item.moved.connect(self._node_moved); item.activated.connect(self.edit_node); self.scene.addItem(item); node_count+=1
+            label=QGraphicsSimpleTextItem(_text(node.get("label")) or _text(node.get("name"))); label.setBrush(QBrush(QColor("#dce5ea"))); label.setFont(QFont("Arial",max(1,int(round(7*label_scale))))); label.setPos(item.pos()+QPointF(15*symbol_scale,-10*symbol_scale)); self.scene.addItem(label)
             if layer.get("show_splice_labels",True):
                 rows=splice_arrangement_rows(self.data,_text(node.get("id")))
                 if rows:
-                    splice_label=QGraphicsSimpleTextItem(f"{len(rows)} splice{'s' if len(rows)!=1 else ''}"); splice_label.setBrush(QBrush(QColor("#d5a5f1"))); splice_label.setFont(QFont("Arial",6)); splice_label.setPos(item.pos()+QPointF(15,2)); self.scene.addItem(splice_label)
-        rect=self.scene.itemsBoundingRect().adjusted(-100,-100,100,100); self.scene.setSceneRect(rect if not rect.isEmpty() else QRectF(-100,-100,200,200))
+                    splice_label=QGraphicsSimpleTextItem(f"{len(rows)} splice{'s' if len(rows)!=1 else ''}"); splice_label.setBrush(QBrush(QColor("#d5a5f1"))); splice_label.setFont(QFont("Arial",max(1,int(round(6*label_scale))))); splice_label.setPos(item.pos()+QPointF(15*symbol_scale,2*symbol_scale)); self.scene.addItem(splice_label)
+        margin=max(20.0,40.0*max(symbol_scale,label_scale)); rect=self.scene.itemsBoundingRect().adjusted(-margin,-margin,margin,margin); self.scene.setSceneRect(rect if not rect.isEmpty() else QRectF(-100,-100,200,200))
         self.status.setText(f"Floor {floor}: {cable_count} routed fibre cables, {node_count} fibre nodes, {len([s for s in self.data.get('network_fibre_splices',[]) if _text(s.get('node_id')) in {_text(n.get('id')) for n in self.data.get('network_fibre_nodes',[]) if _int(n.get('floor'))==floor}])} core splices · Drag fibre nodes to reposition · Right-click cables and nodes to edit or trace")
 
     def _draw_base_graph(self,floor):

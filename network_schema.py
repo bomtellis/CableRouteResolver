@@ -23,6 +23,8 @@ NETWORK_DEFAULTS = {
         "polan_max_splitter_ont_route_m": 120.0,
         "polan_olt_failover": True,
         "default_poe_power_w": 0.0,
+        "default_expected_bandwidth_mbps": 0.0,
+        "default_expected_packet_rate_pps": 0.0,
         "poe_power_defaults": {},
         "default_rack_size_u": 42,
         "default_fibre_core_count": 12,
@@ -278,6 +280,8 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("polan_max_splitter_ont_route_m", 120.0)
     settings.setdefault("polan_olt_failover", True)
     settings.setdefault("default_poe_power_w", 0.0)
+    settings.setdefault("default_expected_bandwidth_mbps", 0.0)
+    settings.setdefault("default_expected_packet_rate_pps", 0.0)
     settings.setdefault("poe_power_defaults", {})
     settings.setdefault("default_rack_size_u", 42)
     settings.setdefault("default_fibre_core_count", 12)
@@ -321,6 +325,12 @@ def ensure_network_schema(data: dict) -> dict:
     settings["default_poe_power_w"] = max(
         0.0, _as_float(settings.get("default_poe_power_w"), 0.0)
     )
+    settings["default_expected_bandwidth_mbps"] = max(
+        0.0, _as_float(settings.get("default_expected_bandwidth_mbps"), 0.0)
+    )
+    settings["default_expected_packet_rate_pps"] = max(
+        0.0, _as_float(settings.get("default_expected_packet_rate_pps"), 0.0)
+    )
     settings["default_rack_size_u"] = max(
         1, _as_int(settings.get("default_rack_size_u"), 42)
     )
@@ -335,6 +345,15 @@ def ensure_network_schema(data: dict) -> dict:
         merged_layer_settings[flag] = bool(merged_layer_settings.get(flag, True))
     for field in ("name", "dxf_layer_prefix", "cable_layer", "node_layer", "splice_layer", "label_layer"):
         merged_layer_settings[field] = _text(merged_layer_settings.get(field)) or fibre_layer_defaults()[field]
+    merged_layer_settings["symbol_scale"] = max(
+        0.08, min(2.0, _as_float(merged_layer_settings.get("symbol_scale"), 0.32))
+    )
+    merged_layer_settings["label_scale"] = max(
+        0.2, min(2.0, _as_float(merged_layer_settings.get("label_scale"), 0.55))
+    )
+    merged_layer_settings["cable_width_scale"] = max(
+        0.2, min(2.0, _as_float(merged_layer_settings.get("cable_width_scale"), 0.55))
+    )
     settings["physical_fibre_layer"] = merged_layer_settings
     if not isinstance(settings.get("poe_power_defaults"), dict):
         settings["poe_power_defaults"] = {}
@@ -359,6 +378,19 @@ def ensure_network_schema(data: dict) -> dict:
 
     if not isinstance(data.get("network_design_summary"), dict):
         data["network_design_summary"] = {}
+
+    # General project assets are the traffic-producing endpoints consumed by
+    # the auto-planner. Store expected load on the existing asset records so
+    # room-type quantities automatically contribute to switch/router demand.
+    for endpoint_asset in data.get("assets", []):
+        if not isinstance(endpoint_asset, dict):
+            continue
+        endpoint_asset["expected_bandwidth_mbps"] = max(
+            0.0, _as_float(endpoint_asset.get("expected_bandwidth_mbps"))
+        )
+        endpoint_asset["expected_packet_rate_pps"] = max(
+            0.0, _as_float(endpoint_asset.get("expected_packet_rate_pps"))
+        )
 
     for asset in data["network_assets"]:
         if not isinstance(asset, dict):
@@ -395,6 +427,36 @@ def ensure_network_schema(data: dict) -> dict:
         asset["frequencies"] = _normalise_string_list(asset.get("frequencies", []))
         asset["power_input_w"] = max(0.0, _as_float(asset.get("power_input_w")))
         asset["poe_budget_w"] = max(0.0, _as_float(asset.get("poe_budget_w")))
+        asset["bandwidth_capacity_gbps"] = max(
+            0.0,
+            _as_float(
+                asset.get(
+                    "bandwidth_capacity_gbps",
+                    asset.get(
+                        "switching_capacity_gbps",
+                        asset.get("routing_capacity_gbps", 0.0),
+                    ),
+                )
+            ),
+        )
+        asset["packet_throughput_mpps"] = max(
+            0.0,
+            _as_float(
+                asset.get(
+                    "packet_throughput_mpps",
+                    asset.get(
+                        "packet_forwarding_rate_mpps",
+                        asset.get("forwarding_rate_mpps", 0.0),
+                    ),
+                )
+            ),
+        )
+        asset["expected_bandwidth_mbps"] = max(
+            0.0, _as_float(asset.get("expected_bandwidth_mbps"))
+        )
+        asset["expected_packet_rate_pps"] = max(
+            0.0, _as_float(asset.get("expected_packet_rate_pps"))
+        )
         asset["number_of_ports"] = max(0, _as_int(asset.get("number_of_ports")))
         asset["connections_in"] = max(0, _as_int(asset.get("connections_in")))
         asset["connections_out"] = max(0, _as_int(asset.get("connections_out")))
@@ -642,7 +704,20 @@ def ensure_network_schema(data: dict) -> dict:
         assignment["y"] = _as_float(assignment.get("y"))
         assignment.setdefault("network_instance_id", "")
         assignment.setdefault("network_port", "")
+        assignment.setdefault("physical_patch_panel_instance_id", "")
+        assignment.setdefault("physical_patch_panel_port", "")
+        assignment.setdefault("horizontal_cable_from_instance_id", "")
+        assignment.setdefault("horizontal_cable_from_port", "")
+        assignment.setdefault("horizontal_cable_to_endpoint", assignment.get("endpoint_name", ""))
+        assignment.setdefault("horizontal_cable_to_port", assignment.get("endpoint_port", ""))
+        assignment.setdefault("physical_termination_type", "")
         assignment["poe_power_w"] = max(0.0, _as_float(assignment.get("poe_power_w")))
+        assignment["expected_bandwidth_mbps"] = max(
+            0.0, _as_float(assignment.get("expected_bandwidth_mbps"))
+        )
+        assignment["expected_packet_rate_pps"] = max(
+            0.0, _as_float(assignment.get("expected_packet_rate_pps"))
+        )
         assignment["copper_length_m"] = max(
             0.0, _as_float(assignment.get("copper_length_m"))
         )
@@ -1084,6 +1159,8 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     assigned_endpoint_ports: set[tuple[str, int]] = set()
     port_loads: Dict[str, int] = {}
     poe_loads: Dict[str, float] = {}
+    bandwidth_loads: Dict[str, float] = {}
+    packet_loads: Dict[str, float] = {}
     max_ont_copper = _as_float(
         data.get("network_settings", {}).get("polan_max_ont_copper_m"), 30.0
     )
@@ -1119,9 +1196,43 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                     f"Network endpoint {instance_id}:{network_port} is used more than once."
                 )
             used_endpoints.add(network_endpoint)
+
+        patch_panel_id = _text(assignment.get("physical_patch_panel_instance_id"))
+        patch_panel_port = _text(assignment.get("physical_patch_panel_port"))
+        if patch_panel_id:
+            panel_instance = instances_by_id.get(patch_panel_id)
+            if panel_instance is None:
+                messages.append(
+                    f"Endpoint assignment {assignment_id} references missing copper patch panel {patch_panel_id!r}."
+                )
+            else:
+                panel_asset = assets_by_id.get(_text(panel_instance.get("asset_id")), {})
+                if (
+                    _text(panel_asset.get("asset_type")) != "patch_panel"
+                    or _text(panel_asset.get("patch_panel_type")).lower() != "copper"
+                ):
+                    messages.append(
+                        f"Endpoint assignment {assignment_id} physical termination {patch_panel_id!r} "
+                        "is not a copper patch panel."
+                    )
+            if not patch_panel_port:
+                messages.append(
+                    f"Endpoint assignment {assignment_id} has a copper patch panel but no panel port."
+                )
+        elif patch_panel_port:
+            messages.append(
+                f"Endpoint assignment {assignment_id} has patch-panel port {patch_panel_port!r} "
+                "but no patch-panel instance."
+            )
         port_loads[instance_id] = port_loads.get(instance_id, 0) + 1
         poe_loads[instance_id] = poe_loads.get(instance_id, 0.0) + max(
             0.0, _as_float(assignment.get("poe_power_w"))
+        )
+        bandwidth_loads[instance_id] = bandwidth_loads.get(instance_id, 0.0) + max(
+            0.0, _as_float(assignment.get("expected_bandwidth_mbps"))
+        )
+        packet_loads[instance_id] = packet_loads.get(instance_id, 0.0) + max(
+            0.0, _as_float(assignment.get("expected_packet_rate_pps"))
         )
         if _text(assignment.get("technology")) == "PoLAN":
             copper = max(0.0, _as_float(assignment.get("copper_length_m")))
@@ -1151,6 +1262,69 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             messages.append(
                 f"Network instance {instance_id} has {poe_load:.1f} W PoE load but only {poe_budget:.1f} W budget."
             )
+        bandwidth_capacity = (
+            max(0.0, _as_float(asset.get("bandwidth_capacity_gbps")))
+            * 1000.0
+            * stack_members
+        )
+        packet_capacity = (
+            max(0.0, _as_float(asset.get("packet_throughput_mpps")))
+            * 1_000_000.0
+            * stack_members
+        )
+        bandwidth_load = bandwidth_loads.get(instance_id, 0.0)
+        packet_load = packet_loads.get(instance_id, 0.0)
+        if bandwidth_capacity and bandwidth_load > bandwidth_capacity + 1e-9:
+            messages.append(
+                f"Network instance {instance_id} has {bandwidth_load:.3f} Mbps expected traffic "
+                f"but only {bandwidth_capacity:.3f} Mbps switching/routing capacity."
+            )
+        if packet_capacity and packet_load > packet_capacity + 1e-9:
+            messages.append(
+                f"Network instance {instance_id} has {packet_load:.0f} packets/s expected traffic "
+                f"but only {packet_capacity:.0f} packets/s throughput."
+            )
+
+    # Core, aggregation and router devices carry descendant traffic even when
+    # they have no directly assigned endpoints. Validate their aggregated load.
+    try:
+        from network_services import network_traffic_loads
+
+        carried = network_traffic_loads(data).get("carried_by_instance", {})
+        for instance_id, load in carried.items():
+            instance = instances_by_id.get(instance_id, {})
+            asset = assets_by_id.get(_text(instance.get("asset_id")), {})
+            stack_members = (
+                max(1, _as_int(instance.get("stack_member_count"), 1))
+                if bool(instance.get("logical_stack"))
+                else 1
+            )
+            bandwidth_capacity = (
+                max(0.0, _as_float(asset.get("bandwidth_capacity_gbps")))
+                * 1000.0
+                * stack_members
+            )
+            packet_capacity = (
+                max(0.0, _as_float(asset.get("packet_throughput_mpps")))
+                * 1_000_000.0
+                * stack_members
+            )
+            bandwidth_load = max(0.0, _as_float(load.get("bandwidth_mbps")))
+            packet_load = max(0.0, _as_float(load.get("packet_rate_pps")))
+            if bandwidth_capacity and bandwidth_load > bandwidth_capacity + 1e-9:
+                messages.append(
+                    f"Network instance {instance_id} carries {bandwidth_load:.3f} Mbps "
+                    f"but only provides {bandwidth_capacity:.3f} Mbps switching/routing capacity."
+                )
+            if packet_capacity and packet_load > packet_capacity + 1e-9:
+                messages.append(
+                    f"Network instance {instance_id} carries {packet_load:.0f} packets/s "
+                    f"but only provides {packet_capacity:.0f} packets/s throughput."
+                )
+    except Exception:
+        # Validation must remain available in restricted runtimes even if a
+        # service import fails; direct endpoint checks above still run.
+        pass
 
     for group in data.get("network_redundancy_groups", []):
         if not isinstance(group, dict):
