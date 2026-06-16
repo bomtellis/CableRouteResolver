@@ -549,6 +549,254 @@ class FindDataPointDialog(QDialog):
         self.status_label.setText(text)
 
 
+class RoomTypeCountsDialog(QDialog):
+    """Show placed-room counts for every room type in the current model."""
+
+    navigateRequested = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Room Type Counts")
+        self.setModal(False)
+        self.resize(760, 560)
+        self._rows = []
+
+        layout = QVBoxLayout(self)
+
+        description = QLabel(
+            "Counts are based on placed data points that have a room_type_id. "
+            "Double-click a populated room type to navigate to the nearest matching room."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        search_row = QHBoxLayout()
+        layout.addLayout(search_row)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText(
+            "Type to filter room type ID, name, count or floor..."
+        )
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._apply_filter)
+        search_row.addWidget(QLabel("Search"))
+        search_row.addWidget(self.search_edit, 1)
+
+        self.match_label = QLabel("0 room types")
+        search_row.addWidget(self.match_label)
+
+        self.summary_label = QLabel()
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(
+            ["Room type ID", "Room type", "Placed rooms", "Floors"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.itemDoubleClicked.connect(self._navigate_selected_row)
+        layout.addWidget(self.table, 1)
+
+        button_row = QHBoxLayout()
+        layout.addLayout(button_row)
+
+        refresh_btn = QPushButton("Refresh")
+        navigate_btn = QPushButton("Navigate to nearest")
+        close_btn = QPushButton("Close")
+
+        refresh_btn.clicked.connect(self.refresh_from_parent)
+        navigate_btn.clicked.connect(self._navigate_selected_row)
+        close_btn.clicked.connect(self.close)
+
+        button_row.addWidget(refresh_btn)
+        button_row.addWidget(navigate_btn)
+        button_row.addStretch(1)
+        button_row.addWidget(close_btn)
+
+    @staticmethod
+    def _floor_summary(floor_counts):
+        if not floor_counts:
+            return "-"
+        return ", ".join(
+            f"F{floor}: {count}"
+            for floor, count in sorted(floor_counts.items(), key=lambda item: item[0])
+        )
+
+    def set_model_data(self, data):
+        data = data if isinstance(data, dict) else {}
+
+        room_types = {}
+        for room_type in data.get("room_types", []):
+            if not isinstance(room_type, dict):
+                continue
+            room_type_id = str(room_type.get("id", "")).strip()
+            if not room_type_id:
+                continue
+            room_types[room_type_id] = (
+                str(room_type.get("name", room_type_id)).strip() or room_type_id
+            )
+
+        counts = {
+            room_type_id: {"count": 0, "floors": {}}
+            for room_type_id in room_types
+        }
+        unassigned_count = 0
+        total_rooms = 0
+
+        for point in data.get("data_points", []):
+            if not isinstance(point, dict):
+                continue
+            total_rooms += 1
+            room_type_id = str(point.get("room_type_id", "") or "").strip()
+            if not room_type_id:
+                unassigned_count += 1
+                continue
+
+            record = counts.setdefault(room_type_id, {"count": 0, "floors": {}})
+            record["count"] += 1
+            try:
+                floor = int(point.get("floor", 0))
+            except (TypeError, ValueError):
+                floor = 0
+            record["floors"][floor] = record["floors"].get(floor, 0) + 1
+
+        rows = []
+        all_ids = sorted(
+            set(room_types) | set(counts),
+            key=lambda room_type_id: (
+                room_types.get(room_type_id, room_type_id).lower(),
+                room_type_id.lower(),
+            ),
+        )
+        for room_type_id in all_ids:
+            record = counts.get(room_type_id, {"count": 0, "floors": {}})
+            rows.append(
+                {
+                    "id": room_type_id,
+                    "name": room_types.get(
+                        room_type_id,
+                        "(missing room type definition)",
+                    ),
+                    "count": int(record.get("count", 0)),
+                    "floors": dict(record.get("floors", {})),
+                }
+            )
+
+        self._rows = rows
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+
+        for record in rows:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+
+            id_item = QTableWidgetItem(record["id"])
+            id_item.setData(Qt.UserRole, record["id"])
+
+            name_item = QTableWidgetItem(record["name"])
+            count_item = QTableWidgetItem()
+            count_item.setData(Qt.DisplayRole, record["count"])
+            count_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            floor_item = QTableWidgetItem(self._floor_summary(record["floors"]))
+
+            search_text = " ".join(
+                [
+                    record["id"],
+                    record["name"],
+                    str(record["count"]),
+                    floor_item.text(),
+                ]
+            ).lower()
+            id_item.setData(Qt.UserRole + 1, search_text)
+
+            self.table.setItem(row, 0, id_item)
+            self.table.setItem(row, 1, name_item)
+            self.table.setItem(row, 2, count_item)
+            self.table.setItem(row, 3, floor_item)
+
+        self.table.setSortingEnabled(True)
+        self.table.sortItems(1, Qt.AscendingOrder)
+
+        assigned_count = total_rooms - unassigned_count
+        used_defined_count = sum(
+            1
+            for room_type_id in room_types
+            if counts.get(room_type_id, {}).get("count", 0) > 0
+        )
+        unknown_assignment_count = sum(
+            int(record.get("count", 0))
+            for room_type_id, record in counts.items()
+            if room_type_id not in room_types
+        )
+        defined_count = len(room_types)
+        summary = (
+            f"Total placed rooms/data points: {total_rooms} | "
+            f"Assigned to a room type: {assigned_count} | "
+            f"Unassigned/manual: {unassigned_count} | "
+            f"Defined room types used: {used_defined_count} of {defined_count}"
+        )
+        if unknown_assignment_count:
+            summary += f" | Missing room-type definitions: {unknown_assignment_count}"
+        self.summary_label.setText(summary)
+        self._apply_filter()
+
+    def refresh_from_parent(self):
+        parent = self.parent()
+        store = getattr(parent, "store", None)
+        data = getattr(store, "data", {}) if store is not None else {}
+        self.set_model_data(data)
+
+    def _apply_filter(self, *_):
+        terms = [
+            term
+            for term in self.search_edit.text().strip().lower().split()
+            if term
+        ]
+        visible_count = 0
+
+        for row in range(self.table.rowCount()):
+            id_item = self.table.item(row, 0)
+            haystack = str(id_item.data(Qt.UserRole + 1) or "") if id_item else ""
+            visible = all(term in haystack for term in terms)
+            self.table.setRowHidden(row, not visible)
+            if visible:
+                visible_count += 1
+
+        self.match_label.setText(
+            f"{visible_count} room type{'s' if visible_count != 1 else ''}"
+        )
+
+    def _navigate_selected_row(self, *_):
+        row = self.table.currentRow()
+        if row < 0 or self.table.isRowHidden(row):
+            return
+
+        id_item = self.table.item(row, 0)
+        count_item = self.table.item(row, 2)
+        if id_item is None or count_item is None:
+            return
+
+        room_type_id = str(id_item.data(Qt.UserRole) or "").strip()
+        try:
+            count = int(count_item.data(Qt.DisplayRole) or count_item.text() or 0)
+        except (TypeError, ValueError):
+            count = 0
+
+        if not room_type_id or count <= 0:
+            return
+
+        self.navigateRequested.emit(room_type_id)
+
+
+
 class CableRouteEditor(QMainWindow):
     _request_dxf_batch_load = Signal(object)
 
@@ -620,6 +868,7 @@ class CableRouteEditor(QMainWindow):
         self._find_dp_dialog = None
         self._find_dp_matches = []
         self._find_dp_index = -1
+        self._room_type_counts_dialog = None
 
         self._viewport_refresh_timer = QTimer(self)
         self._viewport_refresh_timer.setSingleShot(True)
@@ -982,9 +1231,19 @@ class CableRouteEditor(QMainWindow):
             self.search_tabs.addTab(list_widget, module_name)
             self.search_lists[module_name] = list_widget
 
+        sidebar_button_row = QHBoxLayout()
+        layout.addLayout(sidebar_button_row)
+
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self.refresh_rhs_search_sidebar)
-        layout.addWidget(refresh_btn)
+        sidebar_button_row.addWidget(refresh_btn)
+
+        room_counts_btn = QPushButton("Room Type Counts")
+        room_counts_btn.setToolTip(
+            "Show the number of placed rooms assigned to each room type"
+        )
+        room_counts_btn.clicked.connect(self.show_room_type_counts_dialog)
+        sidebar_button_row.addWidget(room_counts_btn)
 
         self.search_dock.setWidget(container)
         self.addDockWidget(Qt.RightDockWidgetArea, self.search_dock)
@@ -1175,6 +1434,19 @@ class CableRouteEditor(QMainWindow):
             f"(floor {floor}, {len(candidates)} matching room(s))"
         )
 
+    def show_room_type_counts_dialog(self):
+        """Open or refresh the model-wide room-type count summary."""
+        if self._room_type_counts_dialog is None:
+            self._room_type_counts_dialog = RoomTypeCountsDialog(self)
+            self._room_type_counts_dialog.navigateRequested.connect(
+                self._centre_on_nearest_room_type
+            )
+
+        self._room_type_counts_dialog.set_model_data(self.store.data)
+        self._room_type_counts_dialog.show()
+        self._room_type_counts_dialog.raise_()
+        self._room_type_counts_dialog.activateWindow()
+
     def _centre_on_named_point(self, name):
         point = self.store.all_points().get(name)
         if not point:
@@ -1285,6 +1557,9 @@ class CableRouteEditor(QMainWindow):
         fit_action.triggered.connect(self.fit_view)
 
         tools_menu = self.menuBar().addMenu("Tools")
+
+        room_type_counts_action = tools_menu.addAction("Room Type Counts")
+        room_type_counts_action.triggered.connect(self.show_room_type_counts_dialog)
 
         tools_menu.addSeparator()
 
