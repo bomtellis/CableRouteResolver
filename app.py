@@ -41,6 +41,10 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
+    QHeaderView,
+    QTableWidget,
+    QTableWidgetItem,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -384,6 +388,188 @@ class DXFLoadingDialog(QDialog):
             super().closeEvent(event)
         else:
             event.ignore()
+
+
+class LayerVisibilityDialog(QDialog):
+    """Batch layer visibility editor.
+
+    The checkboxes in this dialog are deliberately disconnected from the live
+    ribbon controls until Apply/OK is pressed.  This lets several layers be
+    changed with one renderer invalidation instead of causing a full refresh for
+    every click.
+    """
+
+    LAYER_SPECS = [
+        ("Drawing", "DXF background", "show_dxf_check"),
+        ("Drawing", "Labels", "show_labels_check"),
+        ("Routing graph", "Edges", "show_edges_check"),
+        ("Routing graph", "Corridor nodes", "show_nodes_check"),
+        ("Routing graph", "Data points", "show_data_points_check"),
+        ("Routing graph", "Locations", "show_locations_check"),
+        ("Routing graph", "Comms rooms", "show_comms_rooms_check"),
+        ("Routing graph", "Departments", "show_departments_check"),
+        ("Network", "Network planning", "show_network_check"),
+        ("Network", "Network assets", "show_network_assets_check"),
+        ("Network", "Network links", "show_network_connections_check"),
+        ("Network", "Physical fibre", "show_physical_fibre_check"),
+    ]
+
+    def __init__(self, editor, parent=None):
+        super().__init__(parent or editor)
+        self.editor = editor
+        self.setWindowTitle("Drawing Layers")
+        self.setModal(True)
+        self.resize(440, 520)
+        self._rows = []
+
+        root = QVBoxLayout(self)
+        intro = QLabel(
+            "Select all required layer changes, then press Apply. "
+            "The main viewer redraws once for the whole batch."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(8, 8, 8, 8)
+        container_layout.setSpacing(8)
+
+        current_group = None
+        group_grid = None
+        row_index = 0
+        for group, label, attr_name in self.LAYER_SPECS:
+            target = getattr(editor, attr_name, None)
+            if target is None or not hasattr(target, "isChecked"):
+                continue
+            if group != current_group:
+                current_group = group
+                title = QLabel(group)
+                title_font = title.font()
+                title_font.setBold(True)
+                title.setFont(title_font)
+                container_layout.addWidget(title)
+                group_widget = QWidget()
+                group_grid = QGridLayout(group_widget)
+                group_grid.setContentsMargins(12, 0, 0, 0)
+                group_grid.setHorizontalSpacing(12)
+                group_grid.setVerticalSpacing(6)
+                container_layout.addWidget(group_widget)
+                row_index = 0
+
+            check = QCheckBox(label)
+            check.setChecked(bool(target.isChecked()))
+            group_grid.addWidget(check, row_index // 2, row_index % 2)
+            row_index += 1
+            self._rows.append((target, check))
+
+        container_layout.addStretch(1)
+        scroll.setWidget(container)
+        root.addWidget(scroll, 1)
+
+        batch_row = QHBoxLayout()
+        show_all = QPushButton("Show all")
+        hide_all = QPushButton("Hide all")
+        invert = QPushButton("Invert")
+        show_all.clicked.connect(lambda: self._set_all(True))
+        hide_all.clicked.connect(lambda: self._set_all(False))
+        invert.clicked.connect(self._invert)
+        batch_row.addWidget(show_all)
+        batch_row.addWidget(hide_all)
+        batch_row.addWidget(invert)
+        batch_row.addStretch(1)
+        root.addLayout(batch_row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Apply | QDialogButtonBox.Cancel
+        )
+        buttons.button(QDialogButtonBox.Apply).clicked.connect(self.apply_changes)
+        buttons.accepted.connect(self._accept_changes)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _set_all(self, checked):
+        for _target, check in self._rows:
+            check.setChecked(bool(checked))
+
+    def _invert(self):
+        for _target, check in self._rows:
+            check.setChecked(not check.isChecked())
+
+    def apply_changes(self):
+        changed = False
+        for target, check in self._rows:
+            value = bool(check.isChecked())
+            if bool(target.isChecked()) == value:
+                continue
+            target.blockSignals(True)
+            target.setChecked(value)
+            target.blockSignals(False)
+            changed = True
+        if changed:
+            self.editor.refresh_canvas()
+            self.editor.set_status("Layer visibility updated")
+
+    def _accept_changes(self):
+        self.apply_changes()
+        self.accept()
+
+
+class RendererPerformanceDialog(QDialog):
+    def __init__(self, editor, parent=None):
+        super().__init__(parent or editor)
+        self.editor = editor
+        self.setWindowTitle("Main Viewer Performance")
+        self.setModal(True)
+        self.resize(420, 220)
+
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        root.addLayout(form)
+
+        stats = editor.canvas.render_stats() if hasattr(editor.canvas, "render_stats") else {}
+        backend = QLabel(str(stats.get("backend", "Unknown")))
+        backend.setWordWrap(True)
+        form.addRow("Graphics backend", backend)
+
+        self.fps_spin = QSpinBox()
+        self.fps_spin.setRange(5, 120)
+        self.fps_spin.setSuffix(" FPS")
+        current_fps = (
+            editor.canvas.target_fps()
+            if hasattr(editor.canvas, "target_fps")
+            else 30
+        )
+        self.fps_spin.setValue(int(current_fps))
+        form.addRow("Maximum interactive frame rate", self.fps_spin)
+
+        self.stats_check = QCheckBox("Show renderer statistics in the legend")
+        self.stats_check.setChecked(bool(getattr(editor, "_show_render_stats", True)))
+        root.addWidget(self.stats_check)
+
+        note = QLabel(
+            "The viewer is event-driven: once no layer is dirty, frame production "
+            "stops instead of continuously using the GPU."
+        )
+        note.setWordWrap(True)
+        root.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._apply_and_accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _apply_and_accept(self):
+        if hasattr(self.editor.canvas, "set_target_fps"):
+            self.editor.canvas.set_target_fps(self.fps_spin.value())
+        self.editor._show_render_stats = bool(self.stats_check.isChecked())
+        self.editor.refresh_canvas()
+        self.editor.set_status(
+            f"Viewer limited to {self.fps_spin.value()} FPS"
+        )
+        self.accept()
 
 
 class EditorGraphicsView(QGraphicsView):
@@ -797,6 +983,7 @@ class RoomTypeCountsDialog(QDialog):
 
 
 
+
 class CableRouteEditor(QMainWindow):
     _request_dxf_batch_load = Signal(object)
 
@@ -805,6 +992,8 @@ class CableRouteEditor(QMainWindow):
         self.setWindowTitle("Cable Routing Graph Editor")
         self.resize(1500, 920)
 
+        self._render_data_revision = 0
+        self._last_overlay_signature = None
         self.undo_stack = []
         self.redo_stack = []
         self.max_undo_steps = 50
@@ -873,6 +1062,7 @@ class CableRouteEditor(QMainWindow):
         self._viewport_refresh_timer = QTimer(self)
         self._viewport_refresh_timer.setSingleShot(True)
         self._viewport_refresh_timer.timeout.connect(self.refresh_canvas)
+        self._show_render_stats = True
 
         self._build_ui()
         self.refresh_canvas()
@@ -946,6 +1136,7 @@ class CableRouteEditor(QMainWindow):
         self.multi_drag_anchor_start = None
 
     def push_undo_state(self, label="Change"):
+        self._render_data_revision += 1
         self.undo_stack.append(
             {
                 "label": label,
@@ -972,6 +1163,7 @@ class CableRouteEditor(QMainWindow):
 
         state = self.undo_stack.pop()
         self.store.data = deepcopy(state["data"])
+        self._render_data_revision += 1
         self.selected_point_name = None
         self.selected_template_names.clear()
         self.selected_for_edge = None
@@ -995,6 +1187,7 @@ class CableRouteEditor(QMainWindow):
 
         state = self.redo_stack.pop()
         self.store.data = deepcopy(state["data"])
+        self._render_data_revision += 1
         self.selected_point_name = None
         self.selected_template_names.clear()
         self.selected_for_edge = None
@@ -1556,6 +1749,12 @@ class CableRouteEditor(QMainWindow):
         fit_action = view_menu.addAction("Fit View")
         fit_action.triggered.connect(self.fit_view)
 
+        layers_action = view_menu.addAction("Drawing Layers...")
+        layers_action.triggered.connect(self.show_layer_visibility_dialog)
+
+        performance_action = view_menu.addAction("Viewer Performance...")
+        performance_action.triggered.connect(self.show_renderer_performance_dialog)
+
         tools_menu = self.menuBar().addMenu("Tools")
 
         room_type_counts_action = tools_menu.addAction("Room Type Counts")
@@ -1579,51 +1778,22 @@ class CableRouteEditor(QMainWindow):
         btn.clicked.connect(handler)
         return btn
 
+    def show_layer_visibility_dialog(self):
+        LayerVisibilityDialog(self, self).exec()
+
+    def show_renderer_performance_dialog(self):
+        RendererPerformanceDialog(self, self).exec()
+
     def _ribbon_layers_button(self):
         btn = QToolButton()
         btn.setText("Layers")
-        btn.setToolTip("Show / hide drawing layers")
+        btn.setToolTip("Open the batch drawing-layer visibility dialog")
         btn.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         btn.setIconSize(QSize(16, 16))
         btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        btn.setPopupMode(QToolButton.InstantPopup)
         btn.setFixedSize(125, 30)
         btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        menu = QMenu(btn)
-
-        layer_actions = [
-            ("DXF", self.show_dxf_check),
-            ("Labels", self.show_labels_check),
-            ("Edges", self.show_edges_check),
-            ("Nodes", self.show_nodes_check),
-            ("Data Points", self.show_data_points_check),
-            ("Locations", self.show_locations_check),
-            ("Comms Rooms", self.show_comms_rooms_check),
-        ]
-
-        all_on_action = QAction("Show All Layers", menu)
-
-        def enable_all_layers():
-            for _, target in layer_actions:
-                target.setChecked(True)
-
-        all_on_action.triggered.connect(enable_all_layers)
-
-        menu.addAction(all_on_action)
-        menu.addSeparator()
-
-        for text, target in layer_actions:
-            action = QAction(text, menu)
-            action.setCheckable(True)
-            action.setChecked(target.isChecked())
-
-            action.toggled.connect(target.setChecked)
-            target.toggled.connect(action.setChecked)
-
-            menu.addAction(action)
-
-        btn.setMenu(menu)
+        btn.clicked.connect(self.show_layer_visibility_dialog)
         return btn
 
     def _add_ribbon_group(self, parent_layout, title, widgets, columns=3):
@@ -1806,6 +1976,12 @@ class CableRouteEditor(QMainWindow):
             True,
         )
 
+        self.show_departments_check = self._ribbon_toggle_button(
+            "Departments",
+            QStyle.SP_DirHomeIcon,
+            True,
+        )
+
         for check in [
             self.show_dxf_check,
             self.show_labels_check,
@@ -1816,6 +1992,7 @@ class CableRouteEditor(QMainWindow):
             self.hide_connected_data_points_check,
             self.show_locations_check,
             self.show_comms_rooms_check,
+            self.show_departments_check,
         ]:
             check.toggled.connect(self.refresh_canvas)
 
@@ -2096,6 +2273,12 @@ class CableRouteEditor(QMainWindow):
                     "Export floor DXFs",
                     QStyle.SP_DriveHDIcon,
                     self.export_floor_dxfs,
+                ),
+                self._ribbon_icon_button(
+                    "Performance",
+                    "Configure the Vulkan/RHI viewer and frame-rate limit",
+                    QStyle.SP_ComputerIcon,
+                    self.show_renderer_performance_dialog,
                 ),
             ],
             columns=2,
@@ -3163,13 +3346,34 @@ class CableRouteEditor(QMainWindow):
 
         self._rebuild_static_scene_items(floor, visible_rect)
 
+    def refresh_canvas_geometry_only(self):
+        """Invalidate graph geometry without re-running the full UI refresh path.
+
+        This is used for high-frequency drag updates. Layer controls, DXF
+        bindings, search lists, file labels and overlay signatures are
+        unchanged while an item is moving.
+        """
+        canvas = getattr(self, "canvas", None)
+        if canvas is None:
+            return
+        if hasattr(canvas, "notify_store_changed"):
+            canvas.notify_store_changed()
+            return
+        if hasattr(canvas, "invalidate_store_cache"):
+            canvas.invalidate_store_cache()
+            return
+        self.refresh_canvas()
+
     def refresh_canvas(self):
         self._unconnected_cache = self._unconnected_data_point_names()
 
         floor = self.floor_spin.value()
         self.ensure_floor_dxf_loaded(floor)
 
-        self.canvas.set_store(self.store)
+        try:
+            self.canvas.set_store(self.store, self._render_data_revision)
+        except TypeError:
+            self.canvas.set_store(self.store)
         self.canvas.set_dxf_scene(self.dxf_scene)
         self.canvas.set_floor(floor)
         self.canvas.set_visible_layers(
@@ -3182,6 +3386,7 @@ class CableRouteEditor(QMainWindow):
             show_data_points=self.show_data_points_check.isChecked(),
             show_locations=self.show_locations_check.isChecked(),
             show_comms_rooms=self.show_comms_rooms_check.isChecked(),
+            show_departments=self.show_departments_check.isChecked(),
         )
         self.canvas.set_selection(
             self.selected_point_name,
@@ -3190,7 +3395,20 @@ class CableRouteEditor(QMainWindow):
         )
 
         self.file_label.setText(self.current_json_path or "New file")
-        self.canvas.update()
+        overlay_signature = (
+            self.current_json_path,
+            int(floor),
+            self.mode_combo.currentText(),
+            self.selected_for_edge,
+            tuple(sorted(self.selected_template_names)),
+            self.get_floor_dxf_path(floor),
+            self.canvas.target_fps() if hasattr(self.canvas, "target_fps") else 0,
+            bool(self._show_render_stats),
+        )
+        if overlay_signature != self._last_overlay_signature:
+            self._last_overlay_signature = overlay_signature
+            if hasattr(self.canvas, "invalidate_overlay"):
+                self.canvas.invalidate_overlay()
 
     def draw_edges(self, floor, visible_rect=None):
         if not self.show_edges_check.isChecked():
@@ -3556,7 +3774,17 @@ class CableRouteEditor(QMainWindow):
             "Drag in select_move to multi-select template items",
             "Double-click a point to edit",
         ]
-        self._draw_overlay_box(painter, 12, 12, 330, lines, "#333333", "white")
+        if self._show_render_stats and hasattr(self.canvas, "render_stats"):
+            stats = self.canvas.render_stats()
+            lines.extend(
+                [
+                    f"Renderer: {stats.get('backend', 'Unknown')}",
+                    f"Frame cap: {stats.get('target_fps', 0)} FPS | "
+                    f"Last: {stats.get('actual_fps', 0):.1f} FPS / "
+                    f"{stats.get('last_frame_ms', 0):.2f} ms",
+                ]
+            )
+        self._draw_overlay_box(painter, 12, 12, 390, lines, "#333333", "white")
 
     def _draw_overlay_box(self, painter, x, y, w, lines, border_color, title_color):
         margin_x = 10
@@ -4666,6 +4894,7 @@ class CableRouteEditor(QMainWindow):
         if not path:
             return
         self.store = JsonStore.from_file(path)
+        self._render_data_revision += 1
         self.bulk_location_session = None
         self.bulk_data_point_session = None
         self.current_json_path = path
@@ -5975,9 +6204,10 @@ class CableRouteEditor(QMainWindow):
             return
 
         if picked:
-            self.selected_point_name = picked
-            self.refresh_canvas()
-
+            # A context menu is not a model or camera change. Keep the current
+            # visual selection untouched so opening the menu does not trigger a
+            # graph/DXF repaint. Menu actions receive ``picked`` explicitly and
+            # refresh only when they actually modify data.
             point = self.store.all_points().get(picked)
             kind = str(point.get("kind", "")).strip() if point else ""
 
@@ -6109,7 +6339,10 @@ class CableRouteEditor(QMainWindow):
             dx = current.x() - self.last_pan.x()
             dy = current.y() - self.last_pan.y()
             self.last_pan = current
-            self.canvas.update()
+            if hasattr(self.canvas, "pan_by"):
+                self.canvas.pan_by(dx, dy)
+            else:
+                self.canvas.update()
             return
         if mode == "select_move":
             if self.selection_rect_active:
@@ -6153,7 +6386,7 @@ class CableRouteEditor(QMainWindow):
                 else:
                     self._move_point_or_transition(self.dragging_point_name, x, y)
 
-                self.refresh_canvas()
+                self.refresh_canvas_geometry_only()
 
     def on_middle_click(self, event):
         self.last_pan = event.position().toPoint()
@@ -6163,11 +6396,12 @@ class CableRouteEditor(QMainWindow):
         if self.last_pan is None:
             self.last_pan = current
             return
-        dx = current.x() - self.last_pan.x()
-        dy = current.y() - self.last_pan.y()
-
         self.last_pan = current
-        self.canvas.update()
+        # GpuDxfGraphView has already applied the middle-button delta to its
+        # retained scene-graph layers before emitting this signal. Calling
+        # update() here used to invalidate every layer a second time.
+        if not isinstance(self.canvas, GpuDxfGraphView):
+            self.canvas.update()
 
     def on_middle_release(self, event):
         self.last_pan = None
@@ -7337,6 +7571,7 @@ class CableRouteEditor(QMainWindow):
             self._comms_optimisation_dialog.mark_complete(message)
 
     def _move_point_or_transition(self, point_name, x, y):
+        self._render_data_revision += 1
         point = self.store.all_points().get(point_name)
 
         if point and point.get("kind") == "transition_node":
