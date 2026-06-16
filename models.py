@@ -113,6 +113,10 @@ class JsonStore:
             asset["data_points"] = int(asset.get("data_points", 1))
             asset.setdefault("connection_type", asset.get("type_of_connection", "wired"))
             asset.setdefault("category_id", asset.get("category", ""))
+            asset.setdefault("ADB_Code", asset.get("adb_code", ""))
+            asset.setdefault("Group", asset.get("group", ""))
+            asset["ADB_Code"] = str(asset.get("ADB_Code", "") or "").strip()
+            asset["Group"] = str(asset.get("Group", "") or "").strip()
 
         for room_type in self.data.get("room_types", []):
             room_type.setdefault("id", "")

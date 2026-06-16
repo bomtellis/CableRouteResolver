@@ -94,8 +94,8 @@
       "id": "13",
       "name": "Endoscopy",
       "floor": 1,
-      "x": 185.503,
-      "y": -136.061
+      "x": 185.52,
+      "y": -136.034
     },
     {
       "id": "14",
@@ -171,8 +171,8 @@
       "id": "24",
       "name": "OPD2",
       "floor": 0,
-      "x": 138.144,
-      "y": -203.814
+      "x": 138.48,
+      "y": -203.871
     },
     {
       "id": "25",
@@ -276,8 +276,8 @@
       "id": "39",
       "name": "General Inpatients 7",
       "floor": 4,
-      "x": 137.958,
-      "y": -186.46
+      "x": 138.446,
+      "y": -186.208
     },
     {
       "id": "40",
@@ -762,7 +762,7 @@
     },
     {
       "id": "RT9",
-      "name": "Generic - Assessment / Treat",
+      "name": "TREATMENT & ASSESSMENT ROOM (STANDARD)",
       "assets": [],
       "asset_ids": []
     },
@@ -774,13 +774,13 @@
     },
     {
       "id": "RT11",
-      "name": "Generic - Treatment Room",
+      "name": "TREATMENT ROOM",
       "assets": [],
       "asset_ids": []
     },
     {
       "id": "RT12",
-      "name": "Generic - Triage",
+      "name": "TRIAGE ROOM",
       "assets": [],
       "asset_ids": []
     },
@@ -792,7 +792,7 @@
     },
     {
       "id": "RT14",
-      "name": "Generic - Resus Bay",
+      "name": "RESUSCITATION ROOM (MEDIUM)",
       "assets": [],
       "asset_ids": []
     },
@@ -862,7 +862,7 @@
     },
     {
       "id": "RT20",
-      "name": "Ultrasound Room",
+      "name": "ULTRASOUND ROOM GENERAL",
       "assets": [],
       "asset_ids": []
     },
@@ -952,7 +952,7 @@
     },
     {
       "id": "RT35",
-      "name": "Recovery Room",
+      "name": "RECOVERY SPACE STAGE 1 (STANDARD)",
       "assets": [],
       "asset_ids": []
     },
@@ -1110,13 +1110,7 @@
     },
     {
       "id": "RT56",
-      "name": "Generic - Male WC",
-      "assets": [],
-      "asset_ids": []
-    },
-    {
-      "id": "RT57",
-      "name": "Generic - Female WC",
+      "name": "WC - AMBULANT",
       "assets": [],
       "asset_ids": []
     },
@@ -1252,14 +1246,14 @@
     },
     {
       "id": "RT62",
-      "name": "Generic - Unisex WC",
+      "name": "WC - INDEPENDENT WHEELCHAIR",
       "assets": [
         {
-          "asset_id": "A4",
+          "asset_id": "A14",
           "qty": 1
         },
         {
-          "asset_id": "A5",
+          "asset_id": "A17",
           "qty": 1
         },
         {
@@ -1267,11 +1261,11 @@
           "qty": 1
         },
         {
-          "asset_id": "A14",
+          "asset_id": "A5",
           "qty": 1
         },
         {
-          "asset_id": "A15",
+          "asset_id": "A4",
           "qty": 1
         },
         {
@@ -1279,18 +1273,18 @@
           "qty": 1
         },
         {
-          "asset_id": "A17",
+          "asset_id": "A15",
           "qty": 1
         }
       ],
       "asset_ids": [
-        "A4",
-        "A5",
-        "A10",
         "A14",
-        "A15",
+        "A17",
+        "A10",
+        "A5",
+        "A4",
         "A16",
-        "A17"
+        "A15"
       ]
     },
     {
@@ -1900,7 +1894,7 @@
     },
     {
       "id": "RT118",
-      "name": "Imaging - Xray",
+      "name": "XRAY GENERAL",
       "assets": [],
       "asset_ids": []
     },
@@ -2440,6 +2434,24 @@
       "name": "IMAGING LOBBY INNER CONTROL",
       "assets": [],
       "asset_ids": []
+    },
+    {
+      "id": "RT57",
+      "name": "Staff Shower Accessible",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT172",
+      "name": "LOBBY ISOLATION",
+      "assets": [],
+      "asset_ids": []
+    },
+    {
+      "id": "RT173",
+      "name": "PoCT",
+      "assets": [],
+      "asset_ids": []
     }
   ],
   "asset_categories": [
@@ -2494,7 +2506,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 25.0,
       "expected_packet_rate_pps": 2500.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A2",
@@ -2505,7 +2519,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.1,
       "expected_packet_rate_pps": 100.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A3",
@@ -2516,7 +2532,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 8.0,
       "expected_packet_rate_pps": 800.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A4",
@@ -2527,7 +2545,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.05,
       "expected_packet_rate_pps": 25.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A5",
@@ -2538,7 +2558,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.1,
       "expected_packet_rate_pps": 50.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A6",
@@ -2549,7 +2571,9 @@
       "data_points": 2,
       "expected_bandwidth_mbps": 10.0,
       "expected_packet_rate_pps": 1000.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A7",
@@ -2560,7 +2584,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 5.0,
       "expected_packet_rate_pps": 500.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A8",
@@ -2571,7 +2597,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.05,
       "expected_packet_rate_pps": 25.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A9",
@@ -2582,7 +2610,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.05,
       "expected_packet_rate_pps": 20.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A10",
@@ -2593,7 +2623,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.02,
       "expected_packet_rate_pps": 10.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A11",
@@ -2604,7 +2636,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 10.0,
       "expected_packet_rate_pps": 1000.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A12",
@@ -2615,7 +2649,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 8.0,
       "expected_packet_rate_pps": 800.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A13",
@@ -2626,7 +2662,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.02,
       "expected_packet_rate_pps": 10.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A14",
@@ -2637,7 +2675,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.02,
       "expected_packet_rate_pps": 10.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A15",
@@ -2648,7 +2688,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.1,
       "expected_packet_rate_pps": 50.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A16",
@@ -2659,7 +2701,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.02,
       "expected_packet_rate_pps": 10.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A17",
@@ -2670,7 +2714,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.02,
       "expected_packet_rate_pps": 10.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A18",
@@ -2681,7 +2727,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 6.0,
       "expected_packet_rate_pps": 750.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A19",
@@ -2692,7 +2740,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.5,
       "expected_packet_rate_pps": 100.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A20",
@@ -2703,7 +2753,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.1,
       "expected_packet_rate_pps": 100.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A21",
@@ -2714,7 +2766,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.2,
       "expected_packet_rate_pps": 100.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A22",
@@ -2725,7 +2779,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.02,
       "expected_packet_rate_pps": 10.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A23",
@@ -2736,7 +2792,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 3.0,
       "expected_packet_rate_pps": 300.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A24",
@@ -2747,7 +2805,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.2,
       "expected_packet_rate_pps": 50.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A25",
@@ -2758,7 +2818,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.1,
       "expected_packet_rate_pps": 50.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A26",
@@ -2769,7 +2831,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 2.0,
       "expected_packet_rate_pps": 200.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A27",
@@ -2780,7 +2844,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.1,
       "expected_packet_rate_pps": 25.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A28",
@@ -2791,7 +2857,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.1,
       "expected_packet_rate_pps": 25.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A29",
@@ -2802,7 +2870,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.1,
       "expected_packet_rate_pps": 50.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A30",
@@ -2813,7 +2883,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.05,
       "expected_packet_rate_pps": 20.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A31",
@@ -2824,7 +2896,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.05,
       "expected_packet_rate_pps": 20.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A32",
@@ -2835,7 +2909,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 25.0,
       "expected_packet_rate_pps": 2500.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A33",
@@ -2846,7 +2922,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.05,
       "expected_packet_rate_pps": 25.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A34",
@@ -2857,7 +2935,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.5,
       "expected_packet_rate_pps": 100.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A35",
@@ -2868,7 +2948,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 1.0,
       "expected_packet_rate_pps": 150.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A36",
@@ -2879,7 +2961,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 15.0,
       "expected_packet_rate_pps": 1500.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A37",
@@ -2890,7 +2974,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.1,
       "expected_packet_rate_pps": 50.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A38",
@@ -2901,7 +2987,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 10.0,
       "expected_packet_rate_pps": 1000.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A39",
@@ -2912,7 +3000,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 20.0,
       "expected_packet_rate_pps": 2000.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A40",
@@ -2923,7 +3013,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 2.0,
       "expected_packet_rate_pps": 250.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A41",
@@ -2934,7 +3026,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.02,
       "expected_packet_rate_pps": 10.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A42",
@@ -2945,7 +3039,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.05,
       "expected_packet_rate_pps": 25.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A43",
@@ -2956,7 +3052,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.5,
       "expected_packet_rate_pps": 100.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A44",
@@ -2967,7 +3065,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 0.02,
       "expected_packet_rate_pps": 10.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A45",
@@ -2978,7 +3078,9 @@
       "data_points": 1,
       "expected_bandwidth_mbps": 500.0,
       "expected_packet_rate_pps": 50000.0,
-      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A46",
@@ -2988,7 +3090,9 @@
       "qty": 1,
       "data_points": 2,
       "expected_bandwidth_mbps": 0.0,
-      "expected_packet_rate_pps": 0.0
+      "expected_packet_rate_pps": 0.0,
+      "ADB_Code": "",
+      "Group": ""
     },
     {
       "id": "A47",
@@ -2998,7 +3102,9 @@
       "qty": 1,
       "data_points": 2,
       "expected_bandwidth_mbps": 0.0,
-      "expected_packet_rate_pps": 0.0
+      "expected_packet_rate_pps": 0.0,
+      "ADB_Code": "",
+      "Group": ""
     }
   ],
   "locations": [
@@ -10979,8 +11085,8 @@
     {
       "name": "DP1-190",
       "floor": 1,
-      "x": 55.041,
-      "y": -50.824,
+      "x": 55.265,
+      "y": -50.178,
       "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
@@ -12635,8 +12741,8 @@
     {
       "name": "DP1-328",
       "floor": 1,
-      "x": 188.025,
-      "y": -97.35,
+      "x": 188.037,
+      "y": -97.701,
       "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
@@ -13007,8 +13113,8 @@
     {
       "name": "DP1-359",
       "floor": 1,
-      "x": 185.189,
-      "y": -145.454,
+      "x": 184.449,
+      "y": -144.699,
       "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
@@ -15707,8 +15813,8 @@
     {
       "name": "DP0-263",
       "floor": 0,
-      "x": 214.469,
-      "y": -103.066,
+      "x": 214.473,
+      "y": -102.978,
       "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
@@ -17557,8 +17663,8 @@
       "floor": 0,
       "x": 28.544,
       "y": -87.02,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "1"
@@ -18037,8 +18143,8 @@
       "floor": 5,
       "x": 136.259,
       "y": -198.721,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "41"
@@ -18049,8 +18155,8 @@
       "floor": 5,
       "x": 136.314,
       "y": -200.574,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "41"
@@ -18179,10 +18285,10 @@
     {
       "name": "DP5-165",
       "floor": 5,
-      "x": 140.33,
-      "y": -166.775,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 140.267,
+      "y": -166.674,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "41"
@@ -18191,10 +18297,10 @@
     {
       "name": "DP5-166",
       "floor": 5,
-      "x": 139.413,
-      "y": -154.873,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 139.395,
+      "y": -154.762,
+      "qty": 0,
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "41"
@@ -18203,10 +18309,10 @@
     {
       "name": "DP5-167",
       "floor": 5,
-      "x": 140.238,
-      "y": -152.617,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 140.286,
+      "y": -152.485,
+      "qty": 0,
+      "room_type_id": "RT55",
       "extension_distance_m": 0.0,
       "department_ids": [
         "41"
@@ -18601,8 +18707,8 @@
       "floor": 5,
       "x": 88.946,
       "y": -58.789,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "42"
@@ -18731,8 +18837,8 @@
     {
       "name": "DP5-217",
       "floor": 5,
-      "x": 92.823,
-      "y": -8.156,
+      "x": 92.657,
+      "y": -8.165,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -18755,10 +18861,10 @@
     {
       "name": "DP5-219",
       "floor": 5,
-      "x": 92.806,
-      "y": -24.826,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 92.94,
+      "y": -25.009,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "42"
@@ -18767,10 +18873,10 @@
     {
       "name": "DP5-220",
       "floor": 5,
-      "x": 92.806,
-      "y": -26.754,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 92.863,
+      "y": -26.824,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "42"
@@ -18865,8 +18971,8 @@
       "floor": 5,
       "x": 83.962,
       "y": -80.758,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "42"
@@ -19211,10 +19317,10 @@
     {
       "name": "DP5-261",
       "floor": 5,
-      "x": 60.353,
-      "y": -91.025,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 60.697,
+      "y": -91.134,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "40"
@@ -19259,10 +19365,10 @@
     {
       "name": "DP5-265",
       "floor": 5,
-      "x": 26.706,
-      "y": -87.082,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 26.793,
+      "y": -87.093,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "40"
@@ -19271,10 +19377,10 @@
     {
       "name": "DP5-266",
       "floor": 5,
-      "x": 28.563,
-      "y": -87.058,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 28.769,
+      "y": -87.066,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "40"
@@ -20015,10 +20121,10 @@
     {
       "name": "DP4-267",
       "floor": 4,
-      "x": 26.83,
-      "y": -86.957,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 26.784,
+      "y": -87.051,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "43"
@@ -20027,10 +20133,10 @@
     {
       "name": "DP4-268",
       "floor": 4,
-      "x": 28.493,
-      "y": -87.327,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 28.692,
+      "y": -87.069,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "43"
@@ -20341,8 +20447,8 @@
       "floor": 4,
       "x": 60.63,
       "y": -91.048,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "43"
@@ -20363,8 +20469,8 @@
     {
       "name": "DP4-296",
       "floor": 4,
-      "x": 75.142,
-      "y": -86.804,
+      "x": 74.78,
+      "y": -87.143,
       "qty": 0,
       "room_type_id": "RT55",
       "extension_distance_m": 0.0,
@@ -20375,8 +20481,8 @@
     {
       "name": "DP4-297",
       "floor": 4,
-      "x": 73.86,
-      "y": -90.731,
+      "x": 73.49,
+      "y": -90.801,
       "qty": 0,
       "room_type_id": "RT54",
       "extension_distance_m": 0.0,
@@ -20387,10 +20493,10 @@
     {
       "name": "DP4-298",
       "floor": 4,
-      "x": 72.577,
-      "y": -87.854,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 72.564,
+      "y": -88.312,
+      "qty": 0,
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "43"
@@ -20723,8 +20829,8 @@
     {
       "name": "DP4-326",
       "floor": 4,
-      "x": 101.305,
-      "y": -24.699,
+      "x": 103.782,
+      "y": -25.21,
       "qty": 6,
       "room_type_id": "RT58",
       "extension_distance_m": 0.0,
@@ -20975,10 +21081,10 @@
     {
       "name": "DP4-347",
       "floor": 4,
-      "x": 92.939,
-      "y": -24.917,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 93.048,
+      "y": -25.069,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "44"
@@ -20987,10 +21093,10 @@
     {
       "name": "DP4-348",
       "floor": 4,
-      "x": 92.829,
-      "y": -26.802,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 92.938,
+      "y": -26.954,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "44"
@@ -21049,8 +21155,8 @@
       "floor": 4,
       "x": 88.739,
       "y": -58.768,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "44"
@@ -21059,10 +21165,10 @@
     {
       "name": "DP4-354",
       "floor": 4,
-      "x": 84.005,
-      "y": -80.837,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 83.963,
+      "y": -80.813,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "44"
@@ -22093,8 +22199,8 @@
       "floor": 4,
       "x": 140.419,
       "y": -25.034,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "37"
@@ -22105,8 +22211,8 @@
       "floor": 4,
       "x": 140.309,
       "y": -26.919,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "37"
@@ -22165,8 +22271,8 @@
       "floor": 4,
       "x": 136.219,
       "y": -58.885,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "37"
@@ -23269,8 +23375,8 @@
       "floor": 4,
       "x": 168.618,
       "y": -86.791,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "45"
@@ -23282,7 +23388,7 @@
       "x": 156.653,
       "y": -88.147,
       "qty": 0,
-      "room_type_id": "RT55",
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "45"
@@ -24323,10 +24429,10 @@
     {
       "name": "DP4-626",
       "floor": 4,
-      "x": 202.215,
-      "y": -138.577,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 202.457,
+      "y": -138.589,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "38"
@@ -24335,10 +24441,10 @@
     {
       "name": "DP4-627",
       "floor": 4,
-      "x": 200.33,
-      "y": -138.467,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 200.505,
+      "y": -138.465,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "38"
@@ -24383,8 +24489,8 @@
     {
       "name": "DP4-631",
       "floor": 4,
-      "x": 219.227,
-      "y": -138.385,
+      "x": 219.448,
+      "y": -138.416,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -24395,10 +24501,10 @@
     {
       "name": "DP4-632",
       "floor": 4,
-      "x": 168.364,
-      "y": -134.377,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 168.516,
+      "y": -134.508,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "38"
@@ -25451,10 +25557,10 @@
     {
       "name": "DP4-719",
       "floor": 4,
-      "x": 136.453,
-      "y": -200.191,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 136.252,
+      "y": -200.522,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "39"
@@ -25463,10 +25569,10 @@
     {
       "name": "DP4-720",
       "floor": 4,
-      "x": 136.563,
-      "y": -198.306,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 136.267,
+      "y": -198.678,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "39"
@@ -25523,10 +25629,10 @@
     {
       "name": "DP4-725",
       "floor": 4,
-      "x": 140.653,
-      "y": -166.34,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 140.381,
+      "y": -166.823,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "39"
@@ -25535,10 +25641,10 @@
     {
       "name": "DP4-726",
       "floor": 4,
-      "x": 138.617,
-      "y": -153.856,
+      "x": 139.287,
+      "y": -154.833,
       "qty": 0,
-      "room_type_id": "RT55",
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "39"
@@ -26767,8 +26873,8 @@
     {
       "name": "DP3-347",
       "floor": 3,
-      "x": 9.83,
-      "y": -87.327,
+      "x": 9.953,
+      "y": -87.152,
       "qty": 7,
       "extension_distance_m": 0.0,
       "department_ids": [
@@ -27003,13 +27109,13 @@
       "floor": 3,
       "x": 60.762,
       "y": -90.617,
-      "qty": 7,
+      "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
         "31"
       ],
       "created_locations": [],
-      "room_type_id": "RT62"
+      "room_type_id": "RT56"
     },
     {
       "name": "DP3-368",
@@ -27471,13 +27577,13 @@
       "floor": 3,
       "x": 89.481,
       "y": -47.798,
-      "qty": 7,
+      "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
         "32"
       ],
       "created_locations": [],
-      "room_type_id": "RT62"
+      "room_type_id": "RT56"
     },
     {
       "name": "DP3-415",
@@ -29915,26 +30021,26 @@
       "floor": 3,
       "x": 202.516,
       "y": -91.016,
-      "qty": 7,
+      "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
         "34"
       ],
       "created_locations": [],
-      "room_type_id": "RT62"
+      "room_type_id": "RT56"
     },
     {
       "name": "DP3-606",
       "floor": 3,
       "x": 200.631,
       "y": -90.906,
-      "qty": 7,
+      "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
         "34"
       ],
       "created_locations": [],
-      "room_type_id": "RT62"
+      "room_type_id": "RT56"
     },
     {
       "name": "DP3-607",
@@ -29993,26 +30099,26 @@
       "floor": 3,
       "x": 168.665,
       "y": -86.816,
-      "qty": 7,
-      "extension_distance_m": 0.0,
-      "department_ids": [
-        "34"
-      ],
-      "created_locations": [],
-      "room_type_id": "RT62"
-    },
-    {
-      "name": "DP3-612",
-      "floor": 3,
-      "x": 156.752,
-      "y": -87.912,
       "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
         "34"
       ],
       "created_locations": [],
-      "room_type_id": "RT55"
+      "room_type_id": "RT56"
+    },
+    {
+      "name": "DP3-612",
+      "floor": 3,
+      "x": 156.747,
+      "y": -87.92,
+      "qty": 0,
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "34"
+      ],
+      "created_locations": [],
+      "room_type_id": "RT57"
     },
     {
       "name": "DP3-613",
@@ -30214,10 +30320,10 @@
     {
       "name": "DP1-385",
       "floor": 1,
-      "x": 133.644,
-      "y": -210.803,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 133.526,
+      "y": -210.902,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "10"
@@ -30252,8 +30358,8 @@
       "floor": 1,
       "x": 137.215,
       "y": -199.452,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "10"
@@ -30264,8 +30370,8 @@
       "floor": 1,
       "x": 139.253,
       "y": -199.469,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "10"
@@ -30274,8 +30380,8 @@
     {
       "name": "DP1-390",
       "floor": 1,
-      "x": 131.872,
-      "y": -189.293,
+      "x": 131.884,
+      "y": -189.241,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -30286,10 +30392,10 @@
     {
       "name": "DP1-391",
       "floor": 1,
-      "x": 134.108,
-      "y": -189.31,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 134.015,
+      "y": -189.274,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "8"
@@ -30348,8 +30454,8 @@
       "floor": 1,
       "x": 144.382,
       "y": -181.534,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "8"
@@ -30358,8 +30464,8 @@
     {
       "name": "DP1-397",
       "floor": 1,
-      "x": 127.629,
-      "y": -220.249,
+      "x": 127.701,
+      "y": -220.481,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -30382,10 +30488,10 @@
     {
       "name": "DP1-399",
       "floor": 1,
-      "x": 127.884,
-      "y": -226.185,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 127.458,
+      "y": -226.316,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "10"
@@ -30406,8 +30512,8 @@
     {
       "name": "DP1-401",
       "floor": 1,
-      "x": 137.034,
-      "y": -152.62,
+      "x": 136.984,
+      "y": -152.655,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -30418,8 +30524,8 @@
     {
       "name": "DP1-402",
       "floor": 1,
-      "x": 136.921,
-      "y": -154.643,
+      "x": 136.984,
+      "y": -154.75,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -30516,8 +30622,8 @@
       "floor": 1,
       "x": 211.202,
       "y": -139.182,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -30574,8 +30680,8 @@
     {
       "name": "DP1-411",
       "floor": 1,
-      "x": 195.506,
-      "y": -147.464,
+      "x": 195.419,
+      "y": -144.967,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -30586,10 +30692,10 @@
     {
       "name": "DP1-412",
       "floor": 1,
-      "x": 202.505,
-      "y": -147.35,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 202.309,
+      "y": -147.259,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -30732,8 +30838,8 @@
       "floor": 1,
       "x": 154.967,
       "y": -128.129,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -30778,20 +30884,8 @@
     {
       "name": "DP1-428",
       "floor": 1,
-      "x": 148.752,
-      "y": -129.644,
-      "qty": 7,
-      "room_type_id": "RT62",
-      "extension_distance_m": 0.0,
-      "department_ids": [
-        "13"
-      ]
-    },
-    {
-      "name": "DP1-429",
-      "floor": 1,
-      "x": 150.536,
-      "y": -129.74,
+      "x": 148.444,
+      "y": -127.005,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -30840,8 +30934,8 @@
       "floor": 1,
       "x": 154.756,
       "y": -147.14,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -30852,8 +30946,8 @@
       "floor": 1,
       "x": 160.646,
       "y": -147.236,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -30864,8 +30958,8 @@
       "floor": 1,
       "x": 163.139,
       "y": -147.255,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -30876,8 +30970,8 @@
       "floor": 1,
       "x": 169.125,
       "y": -147.14,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -30888,8 +30982,8 @@
       "floor": 1,
       "x": 171.599,
       "y": -147.198,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -30898,10 +30992,10 @@
     {
       "name": "DP1-438",
       "floor": 1,
-      "x": 177.566,
-      "y": -147.102,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 177.543,
+      "y": -147.173,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -30912,8 +31006,8 @@
       "floor": 1,
       "x": 180.079,
       "y": -147.198,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -30970,8 +31064,8 @@
     {
       "name": "DP1-444",
       "floor": 1,
-      "x": 195.426,
-      "y": -128.206,
+      "x": 195.323,
+      "y": -128.298,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -30982,8 +31076,8 @@
     {
       "name": "DP1-445",
       "floor": 1,
-      "x": 187.369,
-      "y": -128.052,
+      "x": 187.397,
+      "y": -128.27,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -30994,10 +31088,10 @@
     {
       "name": "DP1-446",
       "floor": 1,
-      "x": 177.447,
-      "y": -125.645,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 177.632,
+      "y": -125.637,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -31006,10 +31100,10 @@
     {
       "name": "DP1-447",
       "floor": 1,
-      "x": 179.941,
-      "y": -125.568,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 180.126,
+      "y": -125.56,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -31018,10 +31112,10 @@
     {
       "name": "DP1-448",
       "floor": 1,
-      "x": 171.385,
-      "y": -125.568,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 171.57,
+      "y": -125.56,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -31030,10 +31124,10 @@
     {
       "name": "DP1-449",
       "floor": 1,
-      "x": 169.006,
-      "y": -125.626,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 169.391,
+      "y": -125.788,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -31042,10 +31136,10 @@
     {
       "name": "DP1-450",
       "floor": 1,
-      "x": 163.021,
-      "y": -125.53,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 163.406,
+      "y": -125.692,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -31056,8 +31150,8 @@
       "floor": 1,
       "x": 202.482,
       "y": -125.702,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -31066,10 +31160,10 @@
     {
       "name": "DP1-452",
       "floor": 1,
-      "x": 205.152,
-      "y": -127.457,
+      "x": 205.007,
+      "y": -128.07,
       "qty": 0,
-      "room_type_id": "RT53",
+      "room_type_id": "RT172",
       "extension_distance_m": 0.0,
       "department_ids": [
         "13"
@@ -31150,8 +31244,8 @@
     {
       "name": "DP1-459",
       "floor": 1,
-      "x": 166.968,
-      "y": -8.192,
+      "x": 167.067,
+      "y": -8.217,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -31162,10 +31256,10 @@
     {
       "name": "DP1-460",
       "floor": 1,
-      "x": 169.075,
-      "y": -8.228,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 169.05,
+      "y": -8.267,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
@@ -31188,8 +31282,8 @@
       "floor": 1,
       "x": 172.856,
       "y": -2.917,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
@@ -31212,8 +31306,8 @@
       "floor": 1,
       "x": 172.55,
       "y": -13.539,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
@@ -31236,8 +31330,8 @@
       "floor": 1,
       "x": 165.636,
       "y": -13.539,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
@@ -31270,10 +31364,10 @@
     {
       "name": "DP1-469",
       "floor": 1,
-      "x": 172.712,
-      "y": -36.47,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 172.818,
+      "y": -36.442,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
@@ -31282,10 +31376,10 @@
     {
       "name": "DP1-470",
       "floor": 1,
-      "x": 172.64,
-      "y": -39.117,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 172.685,
+      "y": -38.976,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
@@ -31306,10 +31400,10 @@
     {
       "name": "DP1-472",
       "floor": 1,
-      "x": 160.847,
-      "y": -36.146,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 160.981,
+      "y": -36.175,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
@@ -31320,8 +31414,8 @@
       "floor": 1,
       "x": 158.849,
       "y": -36.056,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
@@ -31366,8 +31460,8 @@
     {
       "name": "DP1-477",
       "floor": 1,
-      "x": 171.901,
-      "y": -54.876,
+      "x": 172.101,
+      "y": -54.864,
       "qty": 0,
       "room_type_id": "RT53",
       "extension_distance_m": 0.0,
@@ -31378,8 +31472,8 @@
     {
       "name": "DP1-478",
       "floor": 1,
-      "x": 178.203,
-      "y": -56.436,
+      "x": 178.17,
+      "y": -56.447,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -31390,8 +31484,8 @@
     {
       "name": "DP1-479",
       "floor": 1,
-      "x": 166.968,
-      "y": -62.798,
+      "x": 167.022,
+      "y": -62.9,
       "qty": 9,
       "room_type_id": "RT7",
       "extension_distance_m": 0.0,
@@ -31426,10 +31520,10 @@
     {
       "name": "DP1-482",
       "floor": 1,
-      "x": 164.214,
-      "y": -69.603,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 164.305,
+      "y": -69.522,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
@@ -31438,10 +31532,10 @@
     {
       "name": "DP1-483",
       "floor": 1,
-      "x": 165.312,
-      "y": -69.747,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 165.403,
+      "y": -69.666,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "51"
@@ -31606,10 +31700,10 @@
     {
       "name": "DP1-497",
       "floor": 1,
-      "x": 180.041,
-      "y": -90.979,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 180.067,
+      "y": -91.006,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "14"
@@ -31654,10 +31748,10 @@
     {
       "name": "DP1-501",
       "floor": 1,
-      "x": 169.178,
-      "y": -87.8,
-      "qty": 9,
-      "room_type_id": "RT59",
+      "x": 169.005,
+      "y": -87.995,
+      "qty": 0,
+      "room_type_id": "RT141",
       "extension_distance_m": 0.0,
       "department_ids": [
         "14"
@@ -31788,8 +31882,8 @@
       "floor": 1,
       "x": 172.838,
       "y": -159.163,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "12"
@@ -31824,8 +31918,8 @@
       "floor": 1,
       "x": 181.465,
       "y": -155.319,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "12"
@@ -31836,8 +31930,8 @@
       "floor": 1,
       "x": 172.418,
       "y": -168.256,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "12"
@@ -31908,8 +32002,8 @@
       "floor": 1,
       "x": 176.195,
       "y": -178.748,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "12"
@@ -31920,8 +32014,8 @@
       "floor": 1,
       "x": 178.503,
       "y": -178.958,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "12"
@@ -31966,8 +32060,8 @@
     {
       "name": "DP1-527",
       "floor": 1,
-      "x": 173.083,
-      "y": -189.1,
+      "x": 173.127,
+      "y": -189.244,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -32136,8 +32230,8 @@
       "floor": 1,
       "x": 172.797,
       "y": -223.328,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "11"
@@ -32146,8 +32240,8 @@
     {
       "name": "DP1-542",
       "floor": 1,
-      "x": 181.805,
-      "y": -223.898,
+      "x": 181.686,
+      "y": -223.825,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -32158,10 +32252,10 @@
     {
       "name": "DP1-543",
       "floor": 1,
-      "x": 181.598,
-      "y": -219.497,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 181.549,
+      "y": -219.454,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "11"
@@ -32194,10 +32288,10 @@
     {
       "name": "DP1-546",
       "floor": 1,
-      "x": 149.001,
-      "y": -226.21,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 148.883,
+      "y": -226.309,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "9"
@@ -32304,8 +32398,8 @@
       "floor": 1,
       "x": 28.679,
       "y": -92.725,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "5"
@@ -32328,8 +32422,8 @@
       "floor": 1,
       "x": 13.042,
       "y": -86.936,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "5"
@@ -32518,10 +32612,10 @@
     {
       "name": "DP1-573",
       "floor": 1,
-      "x": 50.95,
-      "y": -98.656,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 50.723,
+      "y": -98.448,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "4"
@@ -32566,8 +32660,8 @@
     {
       "name": "DP1-577",
       "floor": 1,
-      "x": 74.24,
-      "y": -99.399,
+      "x": 74.247,
+      "y": -99.565,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -32842,10 +32936,10 @@
     {
       "name": "DP1-600",
       "floor": 1,
-      "x": 36.495,
-      "y": -49.224,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 36.47,
+      "y": -49.115,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "6"
@@ -32854,10 +32948,10 @@
     {
       "name": "DP1-601",
       "floor": 1,
-      "x": 34.36,
-      "y": -49.224,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 34.335,
+      "y": -49.115,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "6"
@@ -33010,8 +33104,8 @@
     {
       "name": "DP1-614",
       "floor": 1,
-      "x": 61.771,
-      "y": -51.358,
+      "x": 60.606,
+      "y": -51.506,
       "qty": 10,
       "room_type_id": "RT63",
       "extension_distance_m": 0.0,
@@ -33046,10 +33140,10 @@
     {
       "name": "DP1-617",
       "floor": 1,
-      "x": 68.669,
-      "y": -39.28,
+      "x": 68.769,
+      "y": -39.247,
       "qty": 0,
-      "room_type_id": "RT74",
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "6"
@@ -33060,8 +33154,8 @@
       "floor": 1,
       "x": 68.044,
       "y": -41.18,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "6"
@@ -33070,8 +33164,8 @@
     {
       "name": "DP1-619",
       "floor": 1,
-      "x": 67.784,
-      "y": -43.289,
+      "x": 68.0,
+      "y": -43.334,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -33492,8 +33586,8 @@
       "floor": 1,
       "x": 10.163,
       "y": -12.36,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "7"
@@ -33588,8 +33682,8 @@
       "floor": 1,
       "x": 58.068,
       "y": -18.791,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "7"
@@ -33624,8 +33718,8 @@
       "floor": 1,
       "x": 53.376,
       "y": -9.339,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "7"
@@ -33900,8 +33994,8 @@
       "floor": 1,
       "x": 82.072,
       "y": -7.047,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "29"
@@ -34018,10 +34112,10 @@
     {
       "name": "DP1-698",
       "floor": 0,
-      "x": 43.685,
-      "y": -60.096,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 43.706,
+      "y": -60.039,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
@@ -34044,8 +34138,8 @@
       "floor": 0,
       "x": 14.229,
       "y": -59.903,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "2"
@@ -34140,8 +34234,8 @@
       "floor": 0,
       "x": 136.128,
       "y": -159.546,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
@@ -34152,8 +34246,8 @@
       "floor": 0,
       "x": 137.755,
       "y": -159.677,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
@@ -34164,8 +34258,8 @@
       "floor": 0,
       "x": 138.962,
       "y": -159.586,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
@@ -34176,8 +34270,8 @@
       "floor": 0,
       "x": 140.457,
       "y": -159.454,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
@@ -34200,8 +34294,8 @@
       "floor": 0,
       "x": 142.989,
       "y": -158.287,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "23"
@@ -34318,10 +34412,10 @@
     {
       "name": "DP1-723",
       "floor": 0,
-      "x": 133.926,
-      "y": -210.437,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 133.72,
+      "y": -210.759,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
@@ -34378,10 +34472,10 @@
     {
       "name": "DP1-728",
       "floor": 0,
-      "x": 134.224,
-      "y": -223.091,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 134.174,
+      "y": -223.157,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
@@ -34390,10 +34484,10 @@
     {
       "name": "DP1-729",
       "floor": 0,
-      "x": 142.764,
-      "y": -223.21,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 142.656,
+      "y": -223.262,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "24"
@@ -34714,10 +34808,10 @@
     {
       "name": "DP1-755",
       "floor": 0,
-      "x": 174.962,
-      "y": -195.006,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 175.145,
+      "y": -194.998,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
@@ -34810,10 +34904,10 @@
     {
       "name": "DP1-763",
       "floor": 0,
-      "x": 172.985,
-      "y": -210.374,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 173.168,
+      "y": -210.366,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
@@ -34822,10 +34916,10 @@
     {
       "name": "DP1-764",
       "floor": 0,
-      "x": 173.179,
-      "y": -223.413,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 173.362,
+      "y": -223.405,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
@@ -34834,10 +34928,10 @@
     {
       "name": "DP1-765",
       "floor": 0,
-      "x": 181.825,
-      "y": -223.431,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 182.008,
+      "y": -223.423,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "26"
@@ -35376,8 +35470,8 @@
       "floor": 1,
       "x": 135.244,
       "y": -42.256,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "29"
@@ -35388,8 +35482,8 @@
       "floor": 1,
       "x": 136.823,
       "y": -42.203,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "29"
@@ -35400,8 +35494,8 @@
       "floor": 1,
       "x": 138.41,
       "y": -42.274,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "29"
@@ -35412,8 +35506,8 @@
       "floor": 1,
       "x": 139.918,
       "y": -42.238,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "29"
@@ -35580,8 +35674,8 @@
       "floor": 1,
       "x": 128.364,
       "y": -59.044,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "29"
@@ -35614,8 +35708,8 @@
     {
       "name": "DP1-831",
       "floor": 1,
-      "x": 136.415,
-      "y": -63.824,
+      "x": 136.532,
+      "y": -63.903,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -35626,8 +35720,8 @@
     {
       "name": "DP1-832",
       "floor": 1,
-      "x": 142.375,
-      "y": -63.809,
+      "x": 142.38,
+      "y": -63.803,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -35796,8 +35890,8 @@
       "floor": 1,
       "x": 92.888,
       "y": -27.956,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "29"
@@ -36178,8 +36272,8 @@
     {
       "name": "DP0-575",
       "floor": 0,
-      "x": 10.058,
-      "y": -9.13,
+      "x": 9.855,
+      "y": -9.135,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -36226,10 +36320,10 @@
     {
       "name": "DP0-579",
       "floor": 0,
-      "x": 60.615,
-      "y": -12.359,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 60.572,
+      "y": -13.108,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "3"
@@ -36840,8 +36934,8 @@
       "floor": 0,
       "x": 83.853,
       "y": -69.441,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "3"
@@ -36852,8 +36946,8 @@
       "floor": 0,
       "x": 85.449,
       "y": -69.561,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "3"
@@ -36864,8 +36958,8 @@
       "floor": 0,
       "x": 87.076,
       "y": -69.38,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "3"
@@ -37150,10 +37244,10 @@
     {
       "name": "DP0-658",
       "floor": 0,
-      "x": 162.544,
-      "y": -95.563,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 162.711,
+      "y": -95.596,
+      "qty": 0,
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "55"
@@ -37162,10 +37256,10 @@
     {
       "name": "DP0-659",
       "floor": 0,
-      "x": 162.636,
-      "y": -97.731,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 162.803,
+      "y": -97.764,
+      "qty": 0,
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "55"
@@ -37174,10 +37268,10 @@
     {
       "name": "DP0-660",
       "floor": 0,
-      "x": 162.691,
-      "y": -98.873,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 162.858,
+      "y": -98.906,
+      "qty": 0,
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "55"
@@ -37186,10 +37280,10 @@
     {
       "name": "DP0-661",
       "floor": 0,
-      "x": 162.845,
-      "y": -101.015,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 163.012,
+      "y": -101.048,
+      "qty": 0,
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "55"
@@ -37212,8 +37306,8 @@
       "floor": 0,
       "x": 162.735,
       "y": -103.903,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "55"
@@ -37222,10 +37316,10 @@
     {
       "name": "DP0-664",
       "floor": 0,
-      "x": 162.526,
-      "y": -105.441,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 162.35,
+      "y": -105.451,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "55"
@@ -37258,10 +37352,10 @@
     {
       "name": "DP0-667",
       "floor": 0,
-      "x": 165.676,
-      "y": -107.327,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 165.1,
+      "y": -107.4,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "22"
@@ -37666,10 +37760,10 @@
     {
       "name": "DP0-701",
       "floor": 0,
-      "x": 180.578,
-      "y": -143.533,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 180.438,
+      "y": -143.634,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "22"
@@ -37678,10 +37772,10 @@
     {
       "name": "DP0-702",
       "floor": 0,
-      "x": 179.5,
-      "y": -144.919,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 179.36,
+      "y": -145.02,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "22"
@@ -37752,8 +37846,8 @@
       "floor": 0,
       "x": 152.581,
       "y": -140.105,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "22"
@@ -37764,8 +37858,8 @@
       "floor": 0,
       "x": 152.213,
       "y": -141.56,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "22"
@@ -38088,8 +38182,8 @@
       "floor": 0,
       "x": 199.745,
       "y": -91.234,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "21"
@@ -38196,8 +38290,8 @@
       "floor": 0,
       "x": 229.16,
       "y": -82.901,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "21"
@@ -38268,8 +38362,8 @@
       "floor": 0,
       "x": 169.873,
       "y": -62.007,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "28"
@@ -38280,8 +38374,8 @@
       "floor": 0,
       "x": 171.203,
       "y": -62.124,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "28"
@@ -38317,7 +38411,7 @@
       "x": 183.825,
       "y": -71.15,
       "qty": 0,
-      "room_type_id": "RT74",
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "27"
@@ -38329,7 +38423,7 @@
       "x": 184.018,
       "y": -72.828,
       "qty": 0,
-      "room_type_id": "RT74",
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "27"
@@ -38386,8 +38480,8 @@
     {
       "name": "DP0-762",
       "floor": 0,
-      "x": 205.531,
-      "y": -69.751,
+      "x": 205.518,
+      "y": -69.832,
       "qty": 7,
       "room_type_id": "RT62",
       "extension_distance_m": 0.0,
@@ -38422,10 +38516,10 @@
     {
       "name": "DP0-767",
       "floor": 0,
-      "x": 145.339,
-      "y": -54.781,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 145.425,
+      "y": -54.865,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "3"
@@ -38434,10 +38528,10 @@
     {
       "name": "DP0-768",
       "floor": 0,
-      "x": 145.434,
-      "y": -56.048,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 145.28,
+      "y": -56.183,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "3"
@@ -38602,10 +38696,10 @@
     {
       "name": "DP0-784",
       "floor": 2,
-      "x": 155.713,
-      "y": -95.704,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 155.82,
+      "y": -95.698,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "57"
@@ -38614,10 +38708,10 @@
     {
       "name": "DP0-785",
       "floor": 2,
-      "x": 157.879,
-      "y": -95.62,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 157.748,
+      "y": -95.793,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "57"
@@ -38626,10 +38720,10 @@
     {
       "name": "DP0-786",
       "floor": 2,
-      "x": 159.941,
-      "y": -95.683,
-      "qty": 7,
-      "room_type_id": "RT62",
+      "x": 159.799,
+      "y": -95.955,
+      "qty": 0,
+      "room_type_id": "RT56",
       "extension_distance_m": 0.0,
       "department_ids": [
         "57"
@@ -39909,28 +40003,28 @@
     {
       "name": "DP3-890",
       "floor": 3,
-      "x": 202.232,
-      "y": -138.382,
-      "qty": 7,
+      "x": 202.243,
+      "y": -138.525,
+      "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
         "35"
       ],
       "created_locations": [],
-      "room_type_id": "RT62"
+      "room_type_id": "RT56"
     },
     {
       "name": "DP3-891",
       "floor": 3,
-      "x": 200.347,
-      "y": -138.272,
-      "qty": 7,
+      "x": 200.358,
+      "y": -138.415,
+      "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
         "35"
       ],
       "created_locations": [],
-      "room_type_id": "RT62"
+      "room_type_id": "RT56"
     },
     {
       "name": "DP3-892",
@@ -39987,15 +40081,15 @@
     {
       "name": "DP3-896",
       "floor": 3,
-      "x": 168.381,
-      "y": -134.182,
-      "qty": 7,
+      "x": 168.553,
+      "y": -134.331,
+      "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
         "35"
       ],
       "created_locations": [],
-      "room_type_id": "RT62"
+      "room_type_id": "RT56"
     },
     {
       "name": "DP3-897",
@@ -41105,28 +41199,28 @@
     {
       "name": "DP3-982",
       "floor": 3,
-      "x": 136.363,
-      "y": -200.241,
-      "qty": 7,
+      "x": 136.192,
+      "y": -200.61,
+      "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
         "36"
       ],
       "created_locations": [],
-      "room_type_id": "RT62"
+      "room_type_id": "RT56"
     },
     {
       "name": "DP3-983",
       "floor": 3,
-      "x": 136.473,
-      "y": -198.356,
-      "qty": 7,
+      "x": 136.302,
+      "y": -198.725,
+      "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
         "36"
       ],
       "created_locations": [],
-      "room_type_id": "RT62"
+      "room_type_id": "RT56"
     },
     {
       "name": "DP3-984",
@@ -41185,26 +41279,26 @@
       "floor": 3,
       "x": 140.563,
       "y": -166.39,
-      "qty": 7,
-      "extension_distance_m": 0.0,
-      "department_ids": [
-        "36"
-      ],
-      "created_locations": [],
-      "room_type_id": "RT62"
-    },
-    {
-      "name": "DP3-989",
-      "floor": 3,
-      "x": 139.467,
-      "y": -154.477,
       "qty": 0,
       "extension_distance_m": 0.0,
       "department_ids": [
         "36"
       ],
       "created_locations": [],
-      "room_type_id": "RT55"
+      "room_type_id": "RT56"
+    },
+    {
+      "name": "DP3-989",
+      "floor": 3,
+      "x": 139.37,
+      "y": -154.749,
+      "qty": 0,
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "36"
+      ],
+      "created_locations": [],
+      "room_type_id": "RT57"
     },
     {
       "name": "DP3-990",
@@ -41294,10 +41388,10 @@
     {
       "name": "DP0-809",
       "floor": 0,
-      "x": 146.665,
-      "y": -42.729,
+      "x": 146.67,
+      "y": -42.554,
       "qty": 0,
-      "room_type_id": "RT74",
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "3"
@@ -41306,10 +41400,10 @@
     {
       "name": "DP0-810",
       "floor": 0,
-      "x": 148.211,
-      "y": -42.812,
+      "x": 148.051,
+      "y": -42.62,
       "qty": 0,
-      "room_type_id": "RT74",
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "3"
@@ -41318,10 +41412,10 @@
     {
       "name": "DP0-811",
       "floor": 0,
-      "x": 149.552,
-      "y": -42.75,
+      "x": 149.392,
+      "y": -42.558,
       "qty": 0,
-      "room_type_id": "RT74",
+      "room_type_id": "RT57",
       "extension_distance_m": 0.0,
       "department_ids": [
         "3"
@@ -41637,6 +41731,294 @@
       "extension_distance_m": 0.0,
       "department_ids": [
         "22"
+      ]
+    },
+    {
+      "name": "DP4-729",
+      "floor": 4,
+      "x": 140.203,
+      "y": -152.572,
+      "qty": 0,
+      "room_type_id": "RT55",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "39"
+      ]
+    },
+    {
+      "name": "DP4-730",
+      "floor": 4,
+      "x": 154.313,
+      "y": -87.149,
+      "qty": 0,
+      "room_type_id": "RT55",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "45"
+      ]
+    },
+    {
+      "name": "DP3-991",
+      "floor": 3,
+      "x": 140.225,
+      "y": -152.43,
+      "qty": 0,
+      "room_type_id": "RT55",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "36"
+      ]
+    },
+    {
+      "name": "DP3-992",
+      "floor": 3,
+      "x": 154.351,
+      "y": -87.121,
+      "qty": 0,
+      "room_type_id": "RT55",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "34"
+      ]
+    },
+    {
+      "name": "DP4-731",
+      "floor": 4,
+      "x": 145.216,
+      "y": -80.842,
+      "qty": 0,
+      "room_type_id": "RT56",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "45"
+      ]
+    },
+    {
+      "name": "DP3-993",
+      "floor": 3,
+      "x": 84.415,
+      "y": -80.588,
+      "qty": 0,
+      "room_type_id": "RT56",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "31"
+      ]
+    },
+    {
+      "name": "DP2-1",
+      "floor": 2,
+      "x": 136.506,
+      "y": -169.558,
+      "qty": 0,
+      "room_type_id": "RT56",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "58"
+      ]
+    },
+    {
+      "name": "DP2-2",
+      "floor": 2,
+      "x": 136.541,
+      "y": -171.704,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "58"
+      ]
+    },
+    {
+      "name": "DP1-876",
+      "floor": 1,
+      "x": 186.992,
+      "y": -144.525,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "13"
+      ]
+    },
+    {
+      "name": "DP1-877",
+      "floor": 1,
+      "x": 197.012,
+      "y": -99.275,
+      "qty": 0,
+      "room_type_id": "RT172",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "14"
+      ]
+    },
+    {
+      "name": "DP1-878",
+      "floor": 1,
+      "x": 185.456,
+      "y": -98.603,
+      "qty": 0,
+      "room_type_id": "RT173",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "14"
+      ]
+    },
+    {
+      "name": "DP1-879",
+      "floor": 1,
+      "x": 213.698,
+      "y": -80.569,
+      "qty": 0,
+      "room_type_id": "RT173",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "14"
+      ]
+    },
+    {
+      "name": "DP1-880",
+      "floor": 1,
+      "x": 169.005,
+      "y": -90.52,
+      "qty": 0,
+      "room_type_id": "RT136",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "14"
+      ]
+    },
+    {
+      "name": "DP1-881",
+      "floor": 1,
+      "x": 169.367,
+      "y": -55.33,
+      "qty": 0,
+      "room_type_id": "RT173",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "51"
+      ]
+    },
+    {
+      "name": "DP1-882",
+      "floor": 1,
+      "x": 57.925,
+      "y": -50.47,
+      "qty": 10,
+      "room_type_id": "RT63",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "6"
+      ]
+    },
+    {
+      "name": "DP1-883",
+      "floor": 1,
+      "x": 35.676,
+      "y": -51.691,
+      "qty": 0,
+      "room_type_id": "RT173",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "6"
+      ]
+    },
+    {
+      "name": "DP0-826",
+      "floor": 0,
+      "x": 139.188,
+      "y": -207.307,
+      "qty": 0,
+      "room_type_id": "RT136",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "24"
+      ]
+    },
+    {
+      "name": "DP0-827",
+      "floor": 0,
+      "x": 165.794,
+      "y": -115.696,
+      "qty": 0,
+      "room_type_id": "RT173",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "50"
+      ]
+    },
+    {
+      "name": "DP0-828",
+      "floor": 0,
+      "x": 60.706,
+      "y": -90.974,
+      "qty": 0,
+      "room_type_id": "RT56",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "1"
+      ]
+    },
+    {
+      "name": "DP0-829",
+      "floor": 0,
+      "x": 92.141,
+      "y": -13.973,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "15"
+      ]
+    },
+    {
+      "name": "DP0-830",
+      "floor": 0,
+      "x": 94.517,
+      "y": -13.6,
+      "qty": 0,
+      "room_type_id": "RT56",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "15"
+      ]
+    },
+    {
+      "name": "DP0-831",
+      "floor": 0,
+      "x": 112.126,
+      "y": -18.936,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "3"
+      ]
+    },
+    {
+      "name": "DP0-832",
+      "floor": 0,
+      "x": 109.777,
+      "y": -18.842,
+      "qty": 7,
+      "room_type_id": "RT62",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "3"
+      ]
+    },
+    {
+      "name": "DP0-833",
+      "floor": 0,
+      "x": 139.537,
+      "y": -12.877,
+      "qty": 0,
+      "room_type_id": "RT173",
+      "extension_distance_m": 0.0,
+      "department_ids": [
+        "18"
       ]
     }
   ],
@@ -51379,8 +51761,8 @@
       {
         "name": "C4-90",
         "floor": 4,
-        "x": 77.474,
-        "y": -92.921,
+        "x": 77.466,
+        "y": -93.214,
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": false
@@ -51685,8 +52067,8 @@
       {
         "name": "C4-207",
         "floor": 4,
-        "x": 6.722,
-        "y": -93.465,
+        "x": 6.432,
+        "y": -93.561,
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": true
@@ -51712,8 +52094,8 @@
       {
         "name": "C4-210",
         "floor": 4,
-        "x": 5.907,
-        "y": -91.19,
+        "x": 6.199,
+        "y": -91.178,
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": false
@@ -64676,6 +65058,78 @@
         "height_affl_m": 3.0,
         "cable_limit": 0,
         "restricted": false
+      },
+      {
+        "name": "C4-509",
+        "floor": 4,
+        "x": 142.345,
+        "y": -80.897,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C3-695",
+        "floor": 3,
+        "x": 86.485,
+        "y": -80.749,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C2-95",
+        "floor": 2,
+        "x": 133.97,
+        "y": -169.419,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C1-795",
+        "floor": 1,
+        "x": 197.432,
+        "y": -93.615,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C1-796",
+        "floor": 1,
+        "x": 197.415,
+        "y": -96.756,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C1-797",
+        "floor": 1,
+        "x": 185.993,
+        "y": -93.699,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C1-798",
+        "floor": 1,
+        "x": 169.484,
+        "y": -59.032,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
+      },
+      {
+        "name": "C1-799",
+        "floor": 1,
+        "x": 57.604,
+        "y": -45.985,
+        "height_affl_m": 3.0,
+        "cable_limit": 0,
+        "restricted": false
       }
     ],
     "edges": [
@@ -75668,14 +76122,6 @@
         "to": "C1-168"
       },
       {
-        "from": "C1-169",
-        "to": "C1-170"
-      },
-      {
-        "from": "C1-170",
-        "to": "C1-169"
-      },
-      {
         "from": "C1-164",
         "to": "C1-240"
       },
@@ -77996,28 +78442,12 @@
         "to": "C1-453"
       },
       {
-        "from": "C1-452",
-        "to": "C1-451"
-      },
-      {
-        "from": "C1-451",
-        "to": "C1-452"
-      },
-      {
         "from": "C1-451",
         "to": "C1-450"
       },
       {
         "from": "C1-450",
         "to": "C1-451"
-      },
-      {
-        "from": "C1-450",
-        "to": "C1-449"
-      },
-      {
-        "from": "C1-449",
-        "to": "C1-450"
       },
       {
         "from": "C1-449",
@@ -79642,14 +80072,6 @@
       {
         "from": "C4-218",
         "to": "C4-221"
-      },
-      {
-        "from": "C4-220",
-        "to": "C4-222"
-      },
-      {
-        "from": "C4-222",
-        "to": "C4-220"
       },
       {
         "from": "C4-222",
@@ -98988,14 +99410,6 @@
         "to": "C3-587"
       },
       {
-        "from": "C3-593",
-        "to": "C3-592"
-      },
-      {
-        "from": "C3-592",
-        "to": "C3-593"
-      },
-      {
         "from": "C3-592",
         "to": "C3-332"
       },
@@ -99010,22 +99424,6 @@
       {
         "from": "C3-382",
         "to": "C3-592"
-      },
-      {
-        "from": "C3-592",
-        "to": "DP3-288"
-      },
-      {
-        "from": "DP3-288",
-        "to": "C3-592"
-      },
-      {
-        "from": "DP3-288",
-        "to": "C3-326"
-      },
-      {
-        "from": "C3-326",
-        "to": "DP3-288"
       },
       {
         "from": "C3-326",
@@ -100400,14 +100798,6 @@
         "to": "C1-570"
       },
       {
-        "from": "C1-406",
-        "to": "DP1-429"
-      },
-      {
-        "from": "DP1-429",
-        "to": "C1-406"
-      },
-      {
         "from": "C1-435",
         "to": "DP1-430"
       },
@@ -101062,14 +101452,6 @@
       {
         "from": "DP1-488",
         "to": "C1-590"
-      },
-      {
-        "from": "C1-356",
-        "to": "C1-589"
-      },
-      {
-        "from": "C1-589",
-        "to": "C1-356"
       },
       {
         "from": "C1-589",
@@ -110208,14 +110590,6 @@
         "to": "C2-84"
       },
       {
-        "from": "C2-58",
-        "to": "C2-93"
-      },
-      {
-        "from": "C2-93",
-        "to": "C2-58"
-      },
-      {
         "from": "C2-93",
         "to": "C2-51"
       },
@@ -113270,6 +113644,326 @@
       {
         "from": "DP0-825",
         "to": "C0-424"
+      },
+      {
+        "from": "C4-467",
+        "to": "DP4-729"
+      },
+      {
+        "from": "DP4-729",
+        "to": "C4-467"
+      },
+      {
+        "from": "C4-407",
+        "to": "DP4-730"
+      },
+      {
+        "from": "DP4-730",
+        "to": "C4-407"
+      },
+      {
+        "from": "DP3-991",
+        "to": "C3-654"
+      },
+      {
+        "from": "C3-654",
+        "to": "DP3-991"
+      },
+      {
+        "from": "C3-442",
+        "to": "DP3-992"
+      },
+      {
+        "from": "DP3-992",
+        "to": "C3-442"
+      },
+      {
+        "from": "C4-509",
+        "to": "C4-222"
+      },
+      {
+        "from": "C4-222",
+        "to": "C4-509"
+      },
+      {
+        "from": "C4-509",
+        "to": "C4-220"
+      },
+      {
+        "from": "C4-220",
+        "to": "C4-509"
+      },
+      {
+        "from": "C4-509",
+        "to": "DP4-731"
+      },
+      {
+        "from": "DP4-731",
+        "to": "C4-509"
+      },
+      {
+        "from": "C3-593",
+        "to": "C3-695"
+      },
+      {
+        "from": "C3-695",
+        "to": "C3-593"
+      },
+      {
+        "from": "C3-695",
+        "to": "C3-592"
+      },
+      {
+        "from": "C3-592",
+        "to": "C3-695"
+      },
+      {
+        "from": "C3-695",
+        "to": "DP3-993"
+      },
+      {
+        "from": "DP3-993",
+        "to": "C3-695"
+      },
+      {
+        "from": "C3-592",
+        "to": "DP3-288"
+      },
+      {
+        "from": "DP3-288",
+        "to": "C3-592"
+      },
+      {
+        "from": "C2-93",
+        "to": "C2-95"
+      },
+      {
+        "from": "C2-95",
+        "to": "C2-93"
+      },
+      {
+        "from": "C2-95",
+        "to": "C2-58"
+      },
+      {
+        "from": "C2-58",
+        "to": "C2-95"
+      },
+      {
+        "from": "C2-95",
+        "to": "DP2-1"
+      },
+      {
+        "from": "DP2-1",
+        "to": "C2-95"
+      },
+      {
+        "from": "C2-58",
+        "to": "DP2-2"
+      },
+      {
+        "from": "DP2-2",
+        "to": "C2-58"
+      },
+      {
+        "from": "DP1-876",
+        "to": "C1-408"
+      },
+      {
+        "from": "C1-408",
+        "to": "DP1-876"
+      },
+      {
+        "from": "C1-795",
+        "to": "C1-796"
+      },
+      {
+        "from": "C1-796",
+        "to": "C1-795"
+      },
+      {
+        "from": "C1-796",
+        "to": "DP1-877"
+      },
+      {
+        "from": "DP1-877",
+        "to": "C1-796"
+      },
+      {
+        "from": "C1-450",
+        "to": "C1-795"
+      },
+      {
+        "from": "C1-795",
+        "to": "C1-450"
+      },
+      {
+        "from": "C1-795",
+        "to": "C1-449"
+      },
+      {
+        "from": "C1-449",
+        "to": "C1-795"
+      },
+      {
+        "from": "C1-452",
+        "to": "C1-797"
+      },
+      {
+        "from": "C1-797",
+        "to": "C1-452"
+      },
+      {
+        "from": "C1-797",
+        "to": "C1-451"
+      },
+      {
+        "from": "C1-451",
+        "to": "C1-797"
+      },
+      {
+        "from": "C1-797",
+        "to": "DP1-878"
+      },
+      {
+        "from": "DP1-878",
+        "to": "C1-797"
+      },
+      {
+        "from": "C1-439",
+        "to": "DP1-879"
+      },
+      {
+        "from": "DP1-879",
+        "to": "C1-439"
+      },
+      {
+        "from": "C1-598",
+        "to": "DP1-880"
+      },
+      {
+        "from": "DP1-880",
+        "to": "C1-598"
+      },
+      {
+        "from": "C1-356",
+        "to": "C1-798"
+      },
+      {
+        "from": "C1-798",
+        "to": "C1-356"
+      },
+      {
+        "from": "C1-798",
+        "to": "C1-589"
+      },
+      {
+        "from": "C1-589",
+        "to": "C1-798"
+      },
+      {
+        "from": "C1-798",
+        "to": "DP1-881"
+      },
+      {
+        "from": "DP1-881",
+        "to": "C1-798"
+      },
+      {
+        "from": "C1-799",
+        "to": "DP1-882"
+      },
+      {
+        "from": "DP1-882",
+        "to": "C1-799"
+      },
+      {
+        "from": "C1-170",
+        "to": "C1-799"
+      },
+      {
+        "from": "C1-799",
+        "to": "C1-170"
+      },
+      {
+        "from": "C1-799",
+        "to": "C1-169"
+      },
+      {
+        "from": "C1-169",
+        "to": "C1-799"
+      },
+      {
+        "from": "C1-181",
+        "to": "DP1-883"
+      },
+      {
+        "from": "DP1-883",
+        "to": "C1-181"
+      },
+      {
+        "from": "C0-686",
+        "to": "DP0-826"
+      },
+      {
+        "from": "DP0-826",
+        "to": "C0-686"
+      },
+      {
+        "from": "C0-393",
+        "to": "DP0-827"
+      },
+      {
+        "from": "DP0-827",
+        "to": "C0-393"
+      },
+      {
+        "from": "C0-30",
+        "to": "DP0-828"
+      },
+      {
+        "from": "DP0-828",
+        "to": "C0-30"
+      },
+      {
+        "from": "C0-234",
+        "to": "DP0-830"
+      },
+      {
+        "from": "DP0-830",
+        "to": "C0-234"
+      },
+      {
+        "from": "C0-233",
+        "to": "DP0-829"
+      },
+      {
+        "from": "DP0-829",
+        "to": "C0-233"
+      },
+      {
+        "from": "C0-191",
+        "to": "DP0-832"
+      },
+      {
+        "from": "DP0-832",
+        "to": "C0-191"
+      },
+      {
+        "from": "C0-190",
+        "to": "DP0-831"
+      },
+      {
+        "from": "DP0-831",
+        "to": "C0-190"
+      },
+      {
+        "from": "C0-183",
+        "to": "DP0-833"
+      },
+      {
+        "from": "DP0-833",
+        "to": "C0-183"
       }
     ],
     "auto_connect": false
@@ -121995,7 +122689,7 @@
       "id": "C1444",
       "from": "CR2-F0",
       "to": "DP0-558",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -122282,14 +122976,14 @@
       "id": "C1486",
       "from": "DER3-F5",
       "to": "DP5-153",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C1487",
       "from": "DER3-F5",
       "to": "DP5-154",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -122359,7 +123053,7 @@
       "id": "C1497",
       "from": "DER3-F5",
       "to": "DP5-165",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -122373,14 +123067,14 @@
       "id": "C1499",
       "from": "CR2-F5",
       "to": "DP5-166",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C1500",
       "from": "CR2-F5",
       "to": "DP5-167",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -122618,7 +123312,7 @@
       "id": "C1534",
       "from": "DER2-F5",
       "to": "DP5-203",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -122709,14 +123403,14 @@
       "id": "C1547",
       "from": "DER2-F5",
       "to": "DP5-220",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C1548",
       "from": "DER2-F5",
       "to": "DP5-219",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -122765,7 +123459,7 @@
       "id": "C1555",
       "from": "CR1-F5",
       "to": "DP5-229",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -122961,7 +123655,7 @@
       "id": "C1583",
       "from": "DER1-F5",
       "to": "DP5-261",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -122982,7 +123676,7 @@
       "id": "C1586",
       "from": "DER1-F5",
       "to": "DP5-265",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -123003,7 +123697,7 @@
       "id": "C1589",
       "from": "DER1-F5",
       "to": "DP5-266",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -123437,7 +124131,7 @@
       "id": "C1651",
       "from": "DER1-F4",
       "to": "DP4-267",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -123451,7 +124145,7 @@
       "id": "C1653",
       "from": "DER1-F4",
       "to": "DP4-268",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -123619,7 +124313,7 @@
       "id": "C1677",
       "from": "DER1-F4",
       "to": "DP4-294",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -123654,7 +124348,7 @@
       "id": "C1682",
       "from": "CR1-F4",
       "to": "DP4-298",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -124004,14 +124698,14 @@
       "id": "C1732",
       "from": "DER2-F3",
       "to": "DP4-347",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C1733",
       "from": "DER2-F3",
       "to": "DP4-348",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -124039,14 +124733,14 @@
       "id": "C1737",
       "from": "CR1-F4",
       "to": "DP4-353",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C1738",
       "from": "CR1-F4",
       "to": "DP4-354",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -124648,7 +125342,7 @@
       "id": "C1824",
       "from": "CR2-F4",
       "to": "DP4-440",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -124662,7 +125356,7 @@
       "id": "C1826",
       "from": "CR2-F4",
       "to": "DP4-441",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -124683,7 +125377,7 @@
       "id": "C1829",
       "from": "CR2-F4",
       "to": "DP4-446",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -125334,7 +126028,7 @@
       "id": "C1922",
       "from": "CR2-F4",
       "to": "DP4-538",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -125915,7 +126609,7 @@
       "id": "C850",
       "from": "DER5-F4",
       "to": "DP4-626",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -125985,14 +126679,14 @@
       "id": "C860",
       "from": "DER5-F4",
       "to": "DP4-627",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C861",
       "from": "CR3-F4",
       "to": "DP4-632",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -126608,14 +127302,14 @@
       "id": "C953",
       "from": "DER6-F4",
       "to": "DP4-719",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C954",
       "from": "DER6-F4",
       "to": "DP4-720",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -126650,7 +127344,7 @@
       "id": "C959",
       "from": "DER6-F4",
       "to": "DP4-725",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -127448,7 +128142,7 @@
       "id": "C1165",
       "from": "DER1-F3",
       "to": "DP3-367",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -127700,7 +128394,7 @@
       "id": "C1969",
       "from": "DER2-F3",
       "to": "DP3-414",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129016,7 +129710,7 @@
       "id": "C2160",
       "from": "DER4-F3",
       "to": "DP3-605",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129030,7 +129724,7 @@
       "id": "C2162",
       "from": "DER4-F3",
       "to": "DP3-606",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129051,7 +129745,7 @@
       "id": "C2165",
       "from": "DER4-F3",
       "to": "DP3-611",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129184,7 +129878,7 @@
       "id": "C2372",
       "from": "DER6-F1",
       "to": "DP1-385",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129205,7 +129899,7 @@
       "id": "C2375",
       "from": "DER6-F1",
       "to": "DP1-388",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129219,14 +129913,14 @@
       "id": "C2377",
       "from": "DER6-F1",
       "to": "DP1-389",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2378",
       "from": "DER6-F1",
       "to": "DP1-391",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129261,7 +129955,7 @@
       "id": "C2383",
       "from": "DER6-F1",
       "to": "DP1-396",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129282,7 +129976,7 @@
       "id": "C2386",
       "from": "DER6-F1",
       "to": "DP1-399",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129359,7 +130053,7 @@
       "id": "C2397",
       "from": "DER5-F3",
       "to": "DP1-75",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129401,7 +130095,7 @@
       "id": "C2403",
       "from": "DER5-F3",
       "to": "DP1-412",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129485,7 +130179,7 @@
       "id": "C2415",
       "from": "DER5-F3",
       "to": "DP1-424",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129517,13 +130211,6 @@
       "route_profile": ""
     },
     {
-      "id": "C2420",
-      "from": "DER5-F3",
-      "to": "DP1-429",
-      "qty": 7,
-      "route_profile": ""
-    },
-    {
       "id": "C2421",
       "from": "CR2-F1",
       "to": "DP1-430",
@@ -129548,49 +130235,49 @@
       "id": "C2424",
       "from": "DER5-F3",
       "to": "DP1-433",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2425",
       "from": "DER5-F3",
       "to": "DP1-434",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2426",
       "from": "DER5-F3",
       "to": "DP1-435",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2427",
       "from": "DER5-F3",
       "to": "DP1-436",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2428",
       "from": "DER5-F3",
       "to": "DP1-437",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2429",
       "from": "DER5-F3",
       "to": "DP1-438",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2430",
       "from": "DER5-F3",
       "to": "DP1-439",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129639,42 +130326,42 @@
       "id": "C2437",
       "from": "DER5-F3",
       "to": "DP1-446",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2438",
       "from": "DER5-F3",
       "to": "DP1-447",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2439",
       "from": "DER5-F3",
       "to": "DP1-448",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2440",
       "from": "DER5-F3",
       "to": "DP1-450",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2441",
       "from": "DER5-F3",
       "to": "DP1-449",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2442",
       "from": "DER5-F3",
       "to": "DP1-451",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129716,7 +130403,7 @@
       "id": "C2447",
       "from": "CR3-F1",
       "to": "DP1-469",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129793,7 +130480,7 @@
       "id": "C2458",
       "from": "DER5-F0",
       "to": "DP1-462",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129807,7 +130494,7 @@
       "id": "C2460",
       "from": "CR3-F1",
       "to": "DP1-483",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129842,28 +130529,28 @@
       "id": "C2465",
       "from": "CR3-F1",
       "to": "DP1-482",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2466",
       "from": "DER5-F0",
       "to": "DP1-460",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2467",
       "from": "DER5-F0",
       "to": "DP1-473",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2468",
       "from": "DER5-F0",
       "to": "DP1-466",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129891,7 +130578,7 @@
       "id": "C2472",
       "from": "DER5-F0",
       "to": "DP1-472",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129905,7 +130592,7 @@
       "id": "C2474",
       "from": "DER5-F0",
       "to": "DP1-464",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129926,7 +130613,7 @@
       "id": "C2477",
       "from": "CR3-F1",
       "to": "DP1-470",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -129982,7 +130669,7 @@
       "id": "C2485",
       "from": "DER4-F3",
       "to": "DP1-501",
-      "qty": 9,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130017,7 +130704,7 @@
       "id": "C2490",
       "from": "DER4-F3",
       "to": "DP1-497",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130220,7 +130907,7 @@
       "id": "C2519",
       "from": "DER4-F1",
       "to": "DP1-557",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130311,7 +130998,7 @@
       "id": "C2532",
       "from": "DER7-F1",
       "to": "DP1-512",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130325,7 +131012,7 @@
       "id": "C2534",
       "from": "DER7-F1",
       "to": "DP1-523",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130416,7 +131103,7 @@
       "id": "C2547",
       "from": "DER6-F1",
       "to": "DP1-546",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130444,7 +131131,7 @@
       "id": "C2551",
       "from": "DER7-F1",
       "to": "DP1-516",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130458,14 +131145,14 @@
       "id": "C2553",
       "from": "DER7-F1",
       "to": "DP1-515",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2554",
       "from": "DER7-F1",
       "to": "DP1-543",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130500,7 +131187,7 @@
       "id": "C2559",
       "from": "DER7-F1",
       "to": "DP1-541",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130535,7 +131222,7 @@
       "id": "C2564",
       "from": "DER4-F1",
       "to": "DP1-573",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130549,7 +131236,7 @@
       "id": "C2566",
       "from": "DER7-F1",
       "to": "DP1-522",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130696,14 +131383,14 @@
       "id": "C2587",
       "from": "CR1-F1",
       "to": "DP1-601",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2588",
       "from": "CR1-F1",
       "to": "DP1-600",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130941,7 +131628,7 @@
       "id": "C2622",
       "from": "CR1-F1",
       "to": "DP1-618",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -130997,7 +131684,7 @@
       "id": "C2630",
       "from": "DER4-F1",
       "to": "DP1-555",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -131123,7 +131810,7 @@
       "id": "C2648",
       "from": "DER1-F1",
       "to": "DP1-665",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -131144,7 +131831,7 @@
       "id": "C2651",
       "from": "DER1-F1",
       "to": "DP1-654",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -131221,7 +131908,7 @@
       "id": "C2662",
       "from": "DER1-F1",
       "to": "DP1-662",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -131501,7 +132188,7 @@
       "id": "C2169",
       "from": "DER3-F0",
       "to": "DP1-700",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -131676,7 +132363,7 @@
       "id": "C2196",
       "from": "DER1-F0",
       "to": "DP1-729",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -131760,7 +132447,7 @@
       "id": "C2209",
       "from": "DER1-F0",
       "to": "DP1-728",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -131781,7 +132468,7 @@
       "id": "C2212",
       "from": "DER2-F1",
       "to": "DP1-846",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -131795,7 +132482,7 @@
       "id": "C2214",
       "from": "CR2-F1",
       "to": "DP1-828",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132026,7 +132713,7 @@
       "id": "C2248",
       "from": "DER1-F0",
       "to": "DP1-723",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132089,7 +132776,7 @@
       "id": "C2258",
       "from": "DER2-F0",
       "to": "DP1-755",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132271,7 +132958,7 @@
       "id": "C2284",
       "from": "DER2-F0",
       "to": "DP1-764",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132327,7 +133014,7 @@
       "id": "C2292",
       "from": "DER2-F0",
       "to": "DP1-763",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132341,7 +133028,7 @@
       "id": "C2294",
       "from": "DER3-F3",
       "to": "DP1-813",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132432,7 +133119,7 @@
       "id": "C2307",
       "from": "DER2-F0",
       "to": "DP1-765",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132502,21 +133189,21 @@
       "id": "C2318",
       "from": "CR1-F0",
       "to": "DP0-579",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2319",
       "from": "CR4-F0",
       "to": "DP1-713",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2320",
       "from": "DER3-F3",
       "to": "DP1-814",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132537,14 +133224,14 @@
       "id": "C2323",
       "from": "DER3-F0",
       "to": "DP1-698",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2324",
       "from": "DER2-F1",
       "to": "DP1-688",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132565,14 +133252,14 @@
       "id": "C2327",
       "from": "DER3-F3",
       "to": "DP1-812",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2328",
       "from": "CR4-F0",
       "to": "DP1-711",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132628,14 +133315,14 @@
       "id": "C2336",
       "from": "CR4-F0",
       "to": "DP1-710",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2337",
       "from": "DER3-F3",
       "to": "DP1-811",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132670,7 +133357,7 @@
       "id": "C2342",
       "from": "CR4-F0",
       "to": "DP1-709",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132719,7 +133406,7 @@
       "id": "C2349",
       "from": "CR4-F0",
       "to": "DP1-708",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132943,14 +133630,14 @@
       "id": "C2698",
       "from": "CR2-F0",
       "to": "DP0-631",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2699",
       "from": "CR2-F0",
       "to": "DP0-632",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -132999,7 +133686,7 @@
       "id": "C2706",
       "from": "CR2-F0",
       "to": "DP0-630",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133188,7 +133875,7 @@
       "id": "C2735",
       "from": "CR3-F0",
       "to": "DP0-658",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133202,21 +133889,21 @@
       "id": "C2737",
       "from": "CR3-F0",
       "to": "DP0-659",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2738",
       "from": "CR3-F0",
       "to": "DP0-660",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2739",
       "from": "CR3-F0",
       "to": "DP0-661",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133244,7 +133931,7 @@
       "id": "C2743",
       "from": "CR3-F0",
       "to": "DP0-663",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133300,7 +133987,7 @@
       "id": "C2751",
       "from": "CR3-F0",
       "to": "DP0-664",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133335,7 +134022,7 @@
       "id": "C2756",
       "from": "CR4-F0",
       "to": "DP0-667",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133440,14 +134127,14 @@
       "id": "C2771",
       "from": "CR4-F0",
       "to": "DP0-702",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C2772",
       "from": "CR4-F0",
       "to": "DP0-701",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133552,7 +134239,7 @@
       "id": "C2787",
       "from": "CR4-F0",
       "to": "DP0-709",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133587,7 +134274,7 @@
       "id": "C2792",
       "from": "CR4-F0",
       "to": "DP0-708",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133650,7 +134337,7 @@
       "id": "C2801",
       "from": "DER4-F3",
       "to": "DP0-736",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133769,7 +134456,7 @@
       "id": "C2819",
       "from": "DER4-F3",
       "to": "DP0-746",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133874,7 +134561,7 @@
       "id": "C2834",
       "from": "DER5-F0",
       "to": "DP0-752",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133888,7 +134575,7 @@
       "id": "C2837",
       "from": "DER5-F0",
       "to": "DP0-753",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133930,7 +134617,7 @@
       "id": "C2843",
       "from": "DER4-F0",
       "to": "DP0-768",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -133958,7 +134645,7 @@
       "id": "C2847",
       "from": "DER4-F0",
       "to": "DP0-767",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -134623,7 +135310,7 @@
       "id": "C2945",
       "from": "DER5-F3",
       "to": "DP3-890",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -134707,7 +135394,7 @@
       "id": "C2957",
       "from": "DER5-F3",
       "to": "DP3-891",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -134763,7 +135450,7 @@
       "id": "C2965",
       "from": "CR3-F3",
       "to": "DP3-896",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -135302,7 +135989,7 @@
       "id": "C3042",
       "from": "CR3-F3",
       "to": "DP3-988",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -135330,7 +136017,7 @@
       "id": "C3046",
       "from": "CR3-F3",
       "to": "DP3-982",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -135358,7 +136045,7 @@
       "id": "C3050",
       "from": "CR3-F3",
       "to": "DP3-983",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -135498,7 +136185,7 @@
       "id": "C3070",
       "from": "DER4-F3",
       "to": "DP0-785",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
@@ -135512,14 +136199,14 @@
       "id": "C3072",
       "from": "DER4-F3",
       "to": "DP0-786",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {
       "id": "C3073",
       "from": "DER4-F3",
       "to": "DP0-784",
-      "qty": 7,
+      "qty": 1,
       "route_profile": ""
     },
     {

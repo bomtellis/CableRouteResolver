@@ -1174,6 +1174,12 @@ class AssetEditorDialog(QDialog):
 
         self.id_label = QLabel(str(self.seed.get("id", "") or self.default_id))
         self.name_edit = QLineEdit(str(self.seed.get("name", "")))
+        self.adb_code_edit = QLineEdit(
+            str(self.seed.get("ADB_Code", self.seed.get("adb_code", "")) or "")
+        )
+        self.group_edit = QLineEdit(
+            str(self.seed.get("Group", self.seed.get("group", "")) or "")
+        )
 
         self.qty_spin = QSpinBox()
         self.qty_spin.setRange(1, 100000)
@@ -1213,6 +1219,8 @@ class AssetEditorDialog(QDialog):
 
         form.addRow("Asset ID", self.id_label)
         form.addRow("Asset name", self.name_edit)
+        form.addRow("ADB_Code", self.adb_code_edit)
+        form.addRow("Group", self.group_edit)
         form.addRow("Connection type", self.connection_type_combo)
         form.addRow("Category", self.category_combo)
         form.addRow("Quantity", self.qty_spin)
@@ -1236,6 +1244,8 @@ class AssetEditorDialog(QDialog):
             self.result = {
                 "id": asset_id,
                 "name": name,
+                "ADB_Code": self.adb_code_edit.text().strip(),
+                "Group": self.group_edit.text().strip(),
                 "connection_type": self.connection_type_combo.currentText().strip(),
                 "category_id": str(self.category_combo.currentData() or "").strip(),
                 "qty": int(self.qty_spin.value()),
@@ -1249,7 +1259,7 @@ class AssetsEditorWindow(QMainWindow):
     def __init__(self, master, items, on_save, category_options=None):
         super().__init__(master)
         self.setWindowTitle("Assets")
-        self.resize(820, 520)
+        self.resize(1120, 520)
         self.items = [dict(item) for item in items]
         self.on_save = on_save
 
@@ -1265,7 +1275,7 @@ class AssetsEditorWindow(QMainWindow):
 
         self.asset_search_edit = QLineEdit()
         self.asset_search_edit.setPlaceholderText(
-            "Type to filter by asset name, ID, category, or connection type..."
+            "Type to filter by asset name, ID, ADB code, group, category, or connection type..."
         )
         self.asset_search_edit.setClearButtonEnabled(True)
         search_row.addWidget(self.asset_search_edit, 1)
@@ -1276,9 +1286,18 @@ class AssetsEditorWindow(QMainWindow):
         search_row.addWidget(self.asset_filter_count_label)
         layout.addLayout(search_row)
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
-            ["Name", "Connection", "Category", "Qty", "Data points each", "Total"]
+            [
+                "Name",
+                "ADB_Code",
+                "Group",
+                "Connection",
+                "Category",
+                "Qty",
+                "Data points each",
+                "Total",
+            ]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -1344,6 +1363,8 @@ class AssetsEditorWindow(QMainWindow):
 
             values = [
                 str(asset.get("name", "")),
+                str(asset.get("ADB_Code", asset.get("adb_code", "")) or ""),
+                str(asset.get("Group", asset.get("group", "")) or ""),
                 str(
                     asset.get(
                         "connection_type",
@@ -1382,8 +1403,22 @@ class AssetsEditorWindow(QMainWindow):
         category_name = str(
             self.categories_by_id.get(category_id, category_id) or ""
         ).strip()
+        adb_code = str(
+            asset.get("ADB_Code", asset.get("adb_code", "")) or ""
+        ).strip()
+        group = str(
+            asset.get("Group", asset.get("group", "")) or ""
+        ).strip()
         return " ".join(
-            (asset_id, asset_name, connection_type, category_id, category_name)
+            (
+                asset_id,
+                asset_name,
+                adb_code,
+                group,
+                connection_type,
+                category_id,
+                category_name,
+            )
         ).casefold()
 
     def _apply_asset_filter(self, *_):
@@ -1475,7 +1510,7 @@ class RoomTypeEditorDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Room Type")
-        self.resize(780, 560)
+        self.resize(1120, 560)
         self.seed = seed or {}
         self.default_id = default_id
         self.asset_options = list(asset_options or [])
@@ -1500,7 +1535,7 @@ class RoomTypeEditorDialog(QDialog):
 
         self.asset_search_edit = QLineEdit()
         self.asset_search_edit.setPlaceholderText(
-            "Type to filter by asset name, asset ID, or category..."
+            "Type to filter by asset name, asset ID, ADB code, group, or category..."
         )
         self.asset_search_edit.setClearButtonEnabled(True)
         search_row.addWidget(self.asset_search_edit, 1)
@@ -1512,9 +1547,18 @@ class RoomTypeEditorDialog(QDialog):
 
         layout.addLayout(search_row)
 
-        self.assets_table = QTableWidget(0, 6)
+        self.assets_table = QTableWidget(0, 8)
         self.assets_table.setHorizontalHeaderLabels(
-            ["Use", "Category", "Asset", "Data points each", "Qty in room", "Total"]
+            [
+                "Use",
+                "Category",
+                "Group",
+                "ADB_Code",
+                "Asset",
+                "Data points each",
+                "Qty in room",
+                "Total",
+            ]
         )
 
         self.assets_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1522,11 +1566,13 @@ class RoomTypeEditorDialog(QDialog):
         self.assets_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
 
         self.assets_table.setColumnWidth(0, 55)
-        self.assets_table.setColumnWidth(1, 160)
-        self.assets_table.setColumnWidth(2, 260)
-        self.assets_table.setColumnWidth(3, 120)
-        self.assets_table.setColumnWidth(4, 110)
-        self.assets_table.setColumnWidth(5, 100)
+        self.assets_table.setColumnWidth(1, 150)
+        self.assets_table.setColumnWidth(2, 140)
+        self.assets_table.setColumnWidth(3, 130)
+        self.assets_table.setColumnWidth(4, 240)
+        self.assets_table.setColumnWidth(5, 120)
+        self.assets_table.setColumnWidth(6, 110)
+        self.assets_table.setColumnWidth(7, 100)
 
         grouped_assets = []
         for asset_id, asset_name in self.asset_options:
@@ -1555,13 +1601,19 @@ class RoomTypeEditorDialog(QDialog):
 
                 category_item = QTableWidgetItem(str(category_name))
                 category_item.setFlags(Qt.ItemIsEnabled)
-                self.assets_table.setSpan(row, 0, 1, 6)
+                self.assets_table.setSpan(row, 0, 1, 8)
                 self.assets_table.setItem(row, 0, category_item)
                 self._asset_category_header_rows[str(category_name)] = row
 
                 last_category = category_name
 
             asset = self.assets_by_id.get(asset_id, {})
+            adb_code = str(
+                asset.get("ADB_Code", asset.get("adb_code", "")) or ""
+            ).strip()
+            group = str(
+                asset.get("Group", asset.get("group", "")) or ""
+            ).strip()
             dp = int(asset.get("data_points", 1))
             room_qty = int(self.asset_rows_by_id.get(asset_id, {}).get("qty", 1) or 1)
             checked = asset_id in self.asset_rows_by_id
@@ -1576,16 +1628,18 @@ class RoomTypeEditorDialog(QDialog):
 
             self.assets_table.setItem(row, 0, use_item)
             self.assets_table.setItem(row, 1, QTableWidgetItem(str(category_name)))
-            self.assets_table.setItem(row, 2, QTableWidgetItem(str(asset_name)))
-            self.assets_table.setItem(row, 3, QTableWidgetItem(str(dp)))
+            self.assets_table.setItem(row, 2, QTableWidgetItem(group))
+            self.assets_table.setItem(row, 3, QTableWidgetItem(adb_code))
+            self.assets_table.setItem(row, 4, QTableWidgetItem(str(asset_name)))
+            self.assets_table.setItem(row, 5, QTableWidgetItem(str(dp)))
 
             qty_spin = QSpinBox()
             qty_spin.setRange(1, 100000)
             qty_spin.setValue(room_qty)
             qty_spin.valueChanged.connect(self._refresh_total)
-            self.assets_table.setCellWidget(row, 4, qty_spin)
+            self.assets_table.setCellWidget(row, 6, qty_spin)
 
-            self.assets_table.setItem(row, 5, QTableWidgetItem(str(room_qty * dp)))
+            self.assets_table.setItem(row, 7, QTableWidgetItem(str(room_qty * dp)))
 
             self._asset_table_rows.append(
                 {
@@ -1594,7 +1648,13 @@ class RoomTypeEditorDialog(QDialog):
                     "asset_name": str(asset_name),
                     "category_name": str(category_name),
                     "search_text": " ".join(
-                        (str(asset_id), str(asset_name), str(category_name))
+                        (
+                            str(asset_id),
+                            str(asset_name),
+                            str(adb_code),
+                            str(group),
+                            str(category_name),
+                        )
                     ).casefold(),
                 }
             )
@@ -1695,7 +1755,7 @@ class RoomTypeEditorDialog(QDialog):
             if not asset_id:
                 continue
 
-            qty_spin = self.assets_table.cellWidget(row, 4)
+            qty_spin = self.assets_table.cellWidget(row, 6)
             qty = int(qty_spin.value()) if qty_spin is not None else 1
 
             result.append(
@@ -1719,8 +1779,8 @@ class RoomTypeEditorDialog(QDialog):
                 if use_item is None or use_item.data(Qt.UserRole) is None:
                     continue
 
-                dp_item = self.assets_table.item(row, 3)
-                qty_widget = self.assets_table.cellWidget(row, 4)
+                dp_item = self.assets_table.item(row, 5)
+                qty_widget = self.assets_table.cellWidget(row, 6)
 
                 if dp_item is None or qty_widget is None:
                     continue
@@ -1733,10 +1793,10 @@ class RoomTypeEditorDialog(QDialog):
                     row_total = dp * qty
                     total += row_total
 
-                total_item = self.assets_table.item(row, 5)
+                total_item = self.assets_table.item(row, 7)
                 if total_item is None:
                     total_item = QTableWidgetItem("0")
-                    self.assets_table.setItem(row, 5, total_item)
+                    self.assets_table.setItem(row, 7, total_item)
 
                 total_item.setText(str(row_total))
         finally:
@@ -1930,8 +1990,22 @@ class RoomTypesEditorWindow(QMainWindow):
                 )
                 or ""
             ).strip()
+            adb_code = str(
+                asset.get("ADB_Code", asset.get("adb_code", "")) or ""
+            ).strip()
+            group = str(
+                asset.get("Group", asset.get("group", "")) or ""
+            ).strip()
             tokens.extend(
-                (asset_id, asset_name, category_id, category_name, connection_type)
+                (
+                    asset_id,
+                    asset_name,
+                    adb_code,
+                    group,
+                    category_id,
+                    category_name,
+                    connection_type,
+                )
             )
 
         return " ".join(tokens).casefold()
