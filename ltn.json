@@ -2224,7 +2224,10 @@
       "connection_type": "wired",
       "category_id": "AC8",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 25.0,
+      "expected_packet_rate_pps": 2500.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A2",
@@ -2232,7 +2235,10 @@
       "connection_type": "wired",
       "category_id": "AC8",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 100.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A3",
@@ -2240,7 +2246,10 @@
       "connection_type": "wired",
       "category_id": "AC7",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 8.0,
+      "expected_packet_rate_pps": 800.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A4",
@@ -2248,7 +2257,10 @@
       "connection_type": "wired",
       "category_id": "AC1",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.05,
+      "expected_packet_rate_pps": 25.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A5",
@@ -2256,7 +2268,10 @@
       "connection_type": "wired",
       "category_id": "AC1",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 50.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A6",
@@ -2264,7 +2279,10 @@
       "connection_type": "wired",
       "category_id": "AC4",
       "qty": 1,
-      "data_points": 2
+      "data_points": 2,
+      "expected_bandwidth_mbps": 10.0,
+      "expected_packet_rate_pps": 1000.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A7",
@@ -2272,7 +2290,10 @@
       "connection_type": "wired",
       "category_id": "AC4",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 5.0,
+      "expected_packet_rate_pps": 500.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A8",
@@ -2280,7 +2301,10 @@
       "connection_type": "wired",
       "category_id": "AC1",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.05,
+      "expected_packet_rate_pps": 25.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A9",
@@ -2288,7 +2312,10 @@
       "connection_type": "wired",
       "category_id": "AC2",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.05,
+      "expected_packet_rate_pps": 20.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A10",
@@ -2296,7 +2323,10 @@
       "connection_type": "wired",
       "category_id": "AC2",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.02,
+      "expected_packet_rate_pps": 10.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A11",
@@ -2304,7 +2334,10 @@
       "connection_type": "wired",
       "category_id": "AC5",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 10.0,
+      "expected_packet_rate_pps": 1000.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A12",
@@ -2312,7 +2345,10 @@
       "connection_type": "wired",
       "category_id": "AC5",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 8.0,
+      "expected_packet_rate_pps": 800.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A13",
@@ -2320,7 +2356,10 @@
       "connection_type": "wired",
       "category_id": "AC7",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.02,
+      "expected_packet_rate_pps": 10.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A14",
@@ -2328,7 +2367,10 @@
       "connection_type": "wired",
       "category_id": "AC2",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.02,
+      "expected_packet_rate_pps": 10.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A15",
@@ -2336,7 +2378,10 @@
       "connection_type": "wired",
       "category_id": "AC1",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 50.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A16",
@@ -2344,7 +2389,10 @@
       "connection_type": "wired",
       "category_id": "AC1",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.02,
+      "expected_packet_rate_pps": 10.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A17",
@@ -2352,7 +2400,10 @@
       "connection_type": "wired",
       "category_id": "AC2",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.02,
+      "expected_packet_rate_pps": 10.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A18",
@@ -2360,7 +2411,10 @@
       "connection_type": "wired",
       "category_id": "AC3",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 6.0,
+      "expected_packet_rate_pps": 750.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A19",
@@ -2368,7 +2422,10 @@
       "connection_type": "wired",
       "category_id": "AC4",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.5,
+      "expected_packet_rate_pps": 100.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A20",
@@ -2376,7 +2433,10 @@
       "connection_type": "wired",
       "category_id": "AC5",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 100.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A21",
@@ -2384,7 +2444,10 @@
       "connection_type": "wired",
       "category_id": "AC3",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.2,
+      "expected_packet_rate_pps": 100.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A22",
@@ -2392,7 +2455,10 @@
       "connection_type": "wired",
       "category_id": "AC1",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.02,
+      "expected_packet_rate_pps": 10.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A23",
@@ -2400,7 +2466,10 @@
       "connection_type": "wired",
       "category_id": "AC7",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 3.0,
+      "expected_packet_rate_pps": 300.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A24",
@@ -2408,7 +2477,10 @@
       "connection_type": "wired",
       "category_id": "AC9",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.2,
+      "expected_packet_rate_pps": 50.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A25",
@@ -2416,7 +2488,10 @@
       "connection_type": "wireless",
       "category_id": "",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 50.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A26",
@@ -2424,7 +2499,10 @@
       "connection_type": "wired",
       "category_id": "AC4",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 2.0,
+      "expected_packet_rate_pps": 200.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A27",
@@ -2432,7 +2510,10 @@
       "connection_type": "wired",
       "category_id": "",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 25.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A28",
@@ -2440,7 +2521,10 @@
       "connection_type": "wireless",
       "category_id": "AC4",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 25.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A29",
@@ -2448,7 +2532,10 @@
       "connection_type": "wired",
       "category_id": "",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 50.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A30",
@@ -2456,7 +2543,10 @@
       "connection_type": "wired",
       "category_id": "",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.05,
+      "expected_packet_rate_pps": 20.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A31",
@@ -2464,7 +2554,10 @@
       "connection_type": "wired",
       "category_id": "",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.05,
+      "expected_packet_rate_pps": 20.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A32",
@@ -2472,7 +2565,10 @@
       "connection_type": "wired",
       "category_id": "AC8",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 25.0,
+      "expected_packet_rate_pps": 2500.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A33",
@@ -2480,7 +2576,10 @@
       "connection_type": "wired",
       "category_id": "AC3",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.05,
+      "expected_packet_rate_pps": 25.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A34",
@@ -2488,7 +2587,10 @@
       "connection_type": "wired",
       "category_id": "AC8",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.5,
+      "expected_packet_rate_pps": 100.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A35",
@@ -2496,7 +2598,10 @@
       "connection_type": "wired",
       "category_id": "AC8",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 150.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A36",
@@ -2504,7 +2609,10 @@
       "connection_type": "wired",
       "category_id": "",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 15.0,
+      "expected_packet_rate_pps": 1500.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A37",
@@ -2512,7 +2620,10 @@
       "connection_type": "wired",
       "category_id": "AC1",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 50.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A38",
@@ -2520,7 +2631,10 @@
       "connection_type": "wired",
       "category_id": "AC8",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 10.0,
+      "expected_packet_rate_pps": 1000.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A39",
@@ -2528,7 +2642,10 @@
       "connection_type": "wired",
       "category_id": "AC8",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 20.0,
+      "expected_packet_rate_pps": 2000.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A40",
@@ -2536,7 +2653,10 @@
       "connection_type": "wired",
       "category_id": "AC4",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 2.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A41",
@@ -2544,7 +2664,10 @@
       "connection_type": "wireless",
       "category_id": "AC2",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.02,
+      "expected_packet_rate_pps": 10.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A42",
@@ -2552,7 +2675,10 @@
       "connection_type": "wired",
       "category_id": "",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.05,
+      "expected_packet_rate_pps": 25.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A43",
@@ -2560,7 +2686,10 @@
       "connection_type": "wired",
       "category_id": "AC8",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.5,
+      "expected_packet_rate_pps": 100.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A44",
@@ -2568,7 +2697,10 @@
       "connection_type": "wired",
       "category_id": "AC2",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 0.02,
+      "expected_packet_rate_pps": 10.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     },
     {
       "id": "A45",
@@ -2576,7 +2708,10 @@
       "connection_type": "wired",
       "category_id": "AC6",
       "qty": 1,
-      "data_points": 1
+      "data_points": 1,
+      "expected_bandwidth_mbps": 500.0,
+      "expected_packet_rate_pps": 50000.0,
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available."
     }
   ],
   "locations": [
@@ -182951,8 +183086,64 @@
       "cable_layer": "NET-FIBRE-CABLE",
       "node_layer": "NET-FIBRE-NODE",
       "splice_layer": "NET-FIBRE-SPLICE",
-      "label_layer": "NET-FIBRE-TEXT"
-    }
+      "label_layer": "NET-FIBRE-TEXT",
+      "symbol_scale": 0.32,
+      "label_scale": 0.55,
+      "cable_width_scale": 0.55
+    },
+    "manufacturer_preferences": {
+      "access_switch": {
+        "preferred_manufacturers": [],
+        "strict": false
+      },
+      "aggregation_switch": {
+        "preferred_manufacturers": [],
+        "strict": false
+      },
+      "core_switch": {
+        "preferred_manufacturers": [],
+        "strict": false
+      },
+      "edge_router": {
+        "preferred_manufacturers": [],
+        "strict": false
+      },
+      "wireless_access_point": {
+        "preferred_manufacturers": [],
+        "strict": false
+      },
+      "optical_line_terminal": {
+        "preferred_manufacturers": [],
+        "strict": false
+      },
+      "optical_network_terminal": {
+        "preferred_manufacturers": [],
+        "strict": false
+      },
+      "fibre_splitter": {
+        "preferred_manufacturers": [],
+        "strict": false
+      },
+      "copper_patch_panel": {
+        "preferred_manufacturers": [],
+        "strict": false
+      },
+      "fibre_patch_panel": {
+        "preferred_manufacturers": [],
+        "strict": false
+      },
+      "rack_ups": {
+        "preferred_manufacturers": [],
+        "strict": false
+      },
+      "cable_management": {
+        "preferred_manufacturers": [],
+        "strict": false
+      }
+    },
+    "auto_connect_new_manual_devices": true,
+    "default_expected_bandwidth_mbps": 0.0,
+    "default_expected_packet_rate_pps": 0.0
   },
   "network_assets": [
     {
@@ -182997,7 +183188,15 @@
       "olt_units_per_rack_unit": 1,
       "notes": "Traditional LAN access switch. 48 x 1GbE PoE+ access ports; modular fibre uplinks. PoE budget depends on installed power supplies.",
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "bandwidth_capacity_gbps": 256.0,
+      "packet_throughput_mpps": 190.47,
+      "network_layer": "access",
+      "capacity_data_quality": "manufacturer_published",
+      "capacity_source": "Cisco Catalyst 9300 Series Switches Data Sheet",
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner."
     },
     {
       "id": "NA2",
@@ -183041,7 +183240,15 @@
       "olt_units_per_rack_unit": 1,
       "notes": "48-port 5G/2.5G/1G/100M multigigabit access switch with up to 60W PoE per port; modular uplinks.",
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "bandwidth_capacity_gbps": 640.0,
+      "packet_throughput_mpps": 476.19,
+      "network_layer": "access",
+      "capacity_data_quality": "manufacturer_published",
+      "capacity_source": "Cisco Catalyst 9300 Series Switches Data Sheet",
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner."
     },
     {
       "id": "NA3",
@@ -183085,7 +183292,15 @@
       "olt_units_per_rack_unit": 1,
       "notes": "Core/distribution switch for redundant MER deployment. 24 x 1/10/25G fibre and 4 x 40/100G uplink ports.",
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "bandwidth_capacity_gbps": 2000.0,
+      "packet_throughput_mpps": 1000.0,
+      "network_layer": "core",
+      "capacity_data_quality": "manufacturer_published",
+      "capacity_source": "Cisco Catalyst 9500 Series Switches Data Sheet",
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner."
     },
     {
       "id": "NA4",
@@ -183129,7 +183344,15 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "bandwidth_capacity_gbps": 19.7,
+      "packet_throughput_mpps": 1.758929,
+      "network_layer": "edge",
+      "capacity_data_quality": "engineering_estimate",
+      "capacity_source": "Cisco Catalyst 8300 Series Edge Platforms Data Sheet; packet rate is a 1400-byte equivalent derived from published IPv4 throughput",
+      "expected_bandwidth_mbps": 2.0,
+      "expected_packet_rate_pps": 500.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner."
     },
     {
       "id": "NA5",
@@ -183177,7 +183400,12 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 25.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner.",
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA6",
@@ -183221,7 +183449,15 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "bandwidth_capacity_gbps": 496.0,
+      "packet_throughput_mpps": 369.0,
+      "network_layer": "access",
+      "capacity_data_quality": "manufacturer_published",
+      "capacity_source": "HPE Aruba Networking CX 6300 Switch Series QuickSpecs (JL661A model switching and throughput capacity)",
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner."
     },
     {
       "id": "NA7",
@@ -183262,7 +183498,12 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 25.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner.",
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA8",
@@ -183306,7 +183547,15 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "bandwidth_capacity_gbps": 696.0,
+      "packet_throughput_mpps": 369.0,
+      "network_layer": "access",
+      "capacity_data_quality": "manufacturer_published",
+      "capacity_source": "Juniper EX4400 Ethernet Switch product specifications",
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner."
     },
     {
       "id": "NA9",
@@ -183350,7 +183599,15 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "bandwidth_capacity_gbps": 4800.0,
+      "packet_throughput_mpps": 428.571429,
+      "network_layer": "core",
+      "capacity_data_quality": "engineering_estimate",
+      "capacity_source": "Juniper MX304 Universal Routing Platform specifications; packet rate is a 1400-byte equivalent derived from published throughput",
+      "expected_bandwidth_mbps": 2.0,
+      "expected_packet_rate_pps": 500.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner."
     },
     {
       "id": "NA10",
@@ -183398,7 +183655,12 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 25.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner.",
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA11",
@@ -183435,7 +183697,11 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA12",
@@ -183472,7 +183738,11 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA13",
@@ -183516,7 +183786,12 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner.",
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA14",
@@ -183560,7 +183835,12 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 25.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner.",
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA15",
@@ -183604,7 +183884,12 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 25.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner.",
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA16",
@@ -183648,7 +183933,12 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner.",
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA17",
@@ -183692,7 +183982,12 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner.",
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA18",
@@ -183738,7 +184033,11 @@
         }
       ],
       "split_input_count": 1,
-      "split_output_count": 32
+      "split_output_count": 32,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA19",
@@ -183784,7 +184083,11 @@
         }
       ],
       "split_input_count": 1,
-      "split_output_count": 64
+      "split_output_count": 64,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA20",
@@ -183830,7 +184133,11 @@
         }
       ],
       "split_input_count": 1,
-      "split_output_count": 128
+      "split_output_count": 128,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "NA21",
@@ -183881,7 +184188,15 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "bandwidth_capacity_gbps": 12800.0,
+      "packet_throughput_mpps": 8000.0,
+      "network_layer": "core",
+      "capacity_data_quality": "manufacturer_published",
+      "capacity_source": "Cisco Catalyst 9500 Series Switches Data Sheet (C9500X switching ASIC capacity and forwarding rate)",
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner."
     },
     {
       "id": "NA22",
@@ -183932,7 +184247,15 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "bandwidth_capacity_gbps": 25600.0,
+      "packet_throughput_mpps": 8000.0,
+      "network_layer": "core",
+      "capacity_data_quality": "manufacturer_published",
+      "capacity_source": "Cisco Catalyst 9600 Series Supervisor Engine 2 Data Sheet; aggregate chassis switching capacity",
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner."
     },
     {
       "id": "NA23",
@@ -183983,7 +184306,15 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "bandwidth_capacity_gbps": 3200.0,
+      "packet_throughput_mpps": 2000.0,
+      "network_layer": "core",
+      "capacity_data_quality": "manufacturer_published",
+      "capacity_source": "HPE Aruba Networking CX 10000 Switch Series Data Sheet",
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner."
     },
     {
       "id": "NA24",
@@ -184034,7 +184365,15 @@
         }
       ],
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "bandwidth_capacity_gbps": 4000.0,
+      "packet_throughput_mpps": 2000.0,
+      "network_layer": "core",
+      "capacity_data_quality": "manufacturer_published",
+      "capacity_source": "Juniper QFX5120 Ethernet Switch product specifications",
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner."
     },
     {
       "id": "NA25",
@@ -184078,7 +184417,12 @@
       "olt_units_per_rack_unit": 1,
       "notes": "16 Port OLT",
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 1.0,
+      "expected_packet_rate_pps": 250.0,
+      "traffic_estimate_basis": "Engineering estimate of device management/control traffic only; carried client traffic is calculated separately by the planner.",
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "AUTO-PROTECTED-NA19",
@@ -184125,7 +184469,11 @@
       "olt_units_per_rack_unit": 1,
       "notes": "Passive PLC optical splitter with one input and 64 outputs. Confirm optical budget against OLT class, fibre length, connector losses and ONT sensitivity. Auto-generated 2:N protected splitter/coupler for primary and standby OLT feeder inputs.",
       "split_input_count": 2,
-      "split_output_count": 64
+      "split_output_count": 64,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "AUTO-PROTECTED-NA18",
@@ -184172,7 +184520,11 @@
       "olt_units_per_rack_unit": 1,
       "notes": "Passive PLC optical splitter with one input and 32 outputs. Include connector and insertion-loss allowance in detailed design. Auto-generated 2:N protected splitter/coupler for primary and standby OLT feeder inputs.",
       "split_input_count": 2,
-      "split_output_count": 32
+      "split_output_count": 32,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "AUTO-RACK-UPS-2U",
@@ -184201,7 +184553,11 @@
       "olt_units_per_rack_unit": 1,
       "notes": "Automatically generated dual-UPS rack allowance.",
       "split_input_count": 0,
-      "split_output_count": 0
+      "split_output_count": 0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     },
     {
       "id": "AUTO-CABLE-MANAGER-1U",
@@ -184230,7 +184586,11 @@
       "input_connection_type": "copper",
       "output_connection_type": "copper",
       "uplink_connection_type": "fibre",
-      "port_definitions": []
+      "port_definitions": [],
+      "expected_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "bandwidth_capacity_gbps": 0.0,
+      "packet_throughput_mpps": 0.0
     }
   ],
   "network_asset_instances": [],
@@ -184245,5 +184605,18 @@
   "network_external_networks": [],
   "network_fibre_cables": [],
   "network_fibre_nodes": [],
-  "network_fibre_splices": []
+  "network_fibre_splices": [],
+  "network_racks": [
+    {
+      "id": "NR1",
+      "name": "Rack 1",
+      "location_name": "MER-1",
+      "floor": 2,
+      "capacity_u": 42,
+      "manufacturer": "Generic",
+      "model": "Generic",
+      "notes": "",
+      "auto_generated": false
+    }
+  ]
 }

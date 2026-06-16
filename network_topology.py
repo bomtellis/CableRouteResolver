@@ -54,7 +54,8 @@ from PySide6.QtWidgets import (
 
 from network_schema import ensure_network_schema, next_network_id
 from network_services import circuit_trace, network_traffic_loads
-from network_dialogs import NetworkConnectionEditorDialog, NetworkInstanceEditorDialog
+from network_auto_planner import auto_connect_manual_devices
+from network_dialogs import NetworkConnectionEditorDialog, NetworkInstanceEditorDialog, NetworkRackEditorDialog
 from network_fibre_dialogs import PatchLeadEditorDialog
 
 
@@ -214,6 +215,8 @@ def _role_rank(role: str, asset_type: str) -> int:
         return 5
     if asset_type == "wireless_access_point":
         return 6
+    if asset_type == "rack_cabinet":
+        return 6
     return 7
 
 
@@ -232,6 +235,7 @@ def _type_label(asset_type: str, role: str) -> str:
         "client_group": "Endpoint group",
         "client_device": "Client device",
         "site_group": "Installation",
+        "rack_cabinet": "Rack cabinet",
         "other": "Network asset",
     }
     if role:
@@ -266,6 +270,7 @@ def _icon_text(asset_type: str, role: str) -> str:
         "client_group": "CL",
         "client_device": "END",
         "site_group": "SITE",
+        "rack_cabinet": "RACK",
     }
     if "core" in role:
         return "CORE"
@@ -340,7 +345,7 @@ class TopologyNode:
 
     @property
     def state(self) -> str:
-        if self.pseudo:
+        if self.pseudo or self.asset_type == "rack_cabinet":
             return "online"
         if self.port_capacity and self.ports_used > self.port_capacity:
             return "error"
@@ -533,6 +538,67 @@ class TopologyModel:
                 endpoint_locations=len(endpoint_locations),
             )
             self.nodes[instance_id] = node
+
+        # Explicit empty cabinets are real topology objects even before equipment
+        # is installed.  Represent only genuinely empty racks here; once a device
+        # is mounted the active device cards already identify the cabinet/location.
+        occupied_rack_keys = {
+            (
+                _int(instance.get("floor")),
+                _text(instance.get("location_name")),
+                _text(instance.get("rack_name")),
+            )
+            for instance in self.data.get("network_asset_instances", [])
+            if isinstance(instance, dict) and _text(instance.get("rack_name"))
+        }
+        for rack_index, rack in enumerate(self.data.get("network_racks", []), start=1):
+            if not isinstance(rack, dict):
+                continue
+            rack_name = _text(rack.get("name")) or _text(rack.get("id"))
+            location_name = _text(rack.get("location_name"))
+            floor = _int(rack.get("floor"), _int(self.locations.get(location_name, {}).get("floor")))
+            if not rack_name or (floor, location_name, rack_name) in occupied_rack_keys:
+                continue
+            rack_id = _text(rack.get("id")) or f"{floor}:{location_name}:{rack_name}:{rack_index}"
+            node_id = f"rack::{rack_id}"
+            suffix = 2
+            while node_id in self.nodes:
+                node_id = f"rack::{rack_id}::{suffix}"
+                suffix += 1
+            capacity_u = max(1, _int(rack.get("capacity_u"), 42))
+            synthetic_instance = {
+                "id": node_id,
+                "name": rack_name,
+                "asset_id": "",
+                "location_name": location_name,
+                "floor": floor,
+                "rack_name": rack_name,
+                "rack_size_u": capacity_u,
+                "rack_start_u": 0,
+                "auto_generated": bool(rack.get("auto_generated", False)),
+                "rack_record_id": _text(rack.get("id")),
+            }
+            self.nodes[node_id] = TopologyNode(
+                node_id=node_id,
+                name=rack_name,
+                asset_type="rack_cabinet",
+                role="rack_cabinet",
+                asset={"asset_type": "rack_cabinet", "rack_units": 0},
+                instance=synthetic_instance,
+                location=self.locations.get(location_name, {}),
+                floor=floor,
+                location_name=location_name,
+                manufacturer=_text(rack.get("manufacturer")),
+                model=_text(rack.get("model")),
+                connection_count=0,
+                details={
+                    "rack_record_id": _text(rack.get("id")),
+                    "capacity_u": capacity_u,
+                    "used_u": 0,
+                    "empty_rack": True,
+                    "notes": _text(rack.get("notes")),
+                },
+            )
 
         # Ignore links to missing instances in the diagram while retaining them in validation.
         self.edges = [edge for edge in self.edges if edge.source_id in self.nodes and edge.target_id in self.nodes]
@@ -860,6 +926,7 @@ class TopologyCardItem(QGraphicsObject):
             "client_group": QColor("#48515a"),
             "client_device": QColor("#52606b"),
             "site_group": QColor("#3f596f"),
+            "rack_cabinet": QColor("#596775"),
         }.get(self.node.asset_type, QColor("#53616d"))
         painter.setPen(Qt.NoPen)
         painter.setBrush(icon_fill)
@@ -914,7 +981,9 @@ class TopologyCardItem(QGraphicsObject):
         stat_font.setBold(True)
         painter.setFont(stat_font)
         painter.setPen(QColor("#d7dee5"))
-        if self.node.port_capacity:
+        if self.node.asset_type == "rack_cabinet":
+            left_stat = f"Rack {int(self.node.details.get('used_u', 0))}/{int(self.node.details.get('capacity_u', 0))}U"
+        elif self.node.port_capacity:
             left_stat = f"Ports {self.node.ports_used}/{self.node.port_capacity}"
         elif self.node.endpoint_count:
             left_stat = f"Ports {self.node.endpoint_count}"
@@ -922,7 +991,9 @@ class TopologyCardItem(QGraphicsObject):
             left_stat = f"Links {self.node.connection_count}"
         painter.drawText(QRectF(12.0, 75.0, 104.0, 16.0), Qt.AlignLeft | Qt.AlignVCenter, left_stat)
 
-        if self.node.poe_budget_w:
+        if self.node.asset_type == "rack_cabinet":
+            right_stat = "Empty cabinet"
+        elif self.node.poe_budget_w:
             right_stat = f"PoE {_human_number(self.node.poe_used_w)}/{_human_number(self.node.poe_budget_w)} W"
         elif self.node.endpoint_locations:
             right_stat = f"{self.node.endpoint_locations} points"
@@ -1912,6 +1983,7 @@ class NetworkTopologyDialog(QDialog):
         self.rack_focus: Optional[Tuple[int, str, str]] = None
         self.switch_port_focus: Optional[str] = None
         self._rack_drag_state: Dict[str, object] = {}
+        self._link_draft: Dict[str, str] = {}
         self._rack_client_nodes_by_id: Dict[str, TopologyNode] = {}
         self._rack_port_nodes_by_id: Dict[str, TopologyNode] = {}
         self._switch_port_nodes_by_id: Dict[str, TopologyNode] = {}
@@ -2045,10 +2117,32 @@ class NetworkTopologyDialog(QDialog):
         add_device_button.clicked.connect(self._add_device)
         layout.addWidget(add_device_button)
 
-        add_link_button = QPushButton("Add link")
-        add_link_button.setToolTip("Create a logical connection between installed network assets")
-        add_link_button.clicked.connect(self._add_connection)
-        layout.addWidget(add_link_button)
+        self.add_link_button = QPushButton("Add link")
+        self.add_link_button.setToolTip("Select two topology devices, then choose their physical ports in rack/device views")
+        self.add_link_button.clicked.connect(lambda: self._start_add_link())
+        layout.addWidget(self.add_link_button)
+
+        auto_connect_button = QPushButton("Auto connect")
+        auto_connect_button.setToolTip(
+            "Connect selected manual devices, or all disconnected manual devices, "
+            "to the nearest valid upstream layer using free compatible ports"
+        )
+        auto_connect_button.clicked.connect(self._auto_connect_manual_devices)
+        layout.addWidget(auto_connect_button)
+
+        add_cabinet_button = QPushButton("Add cabinet")
+        add_cabinet_button.setToolTip("Add an explicit rack cabinet, including an empty cabinet")
+        add_cabinet_button.clicked.connect(self._add_cabinet)
+        layout.addWidget(add_cabinet_button)
+
+        self.delete_cabinet_button = QPushButton("Delete cabinet")
+        self.delete_cabinet_button.setToolTip(
+            "Delete the cabinet currently selected in rack view. Occupied cabinets can retain "
+            "their equipment by unassigning it, or delete the contained equipment as well."
+        )
+        self.delete_cabinet_button.clicked.connect(self._delete_cabinet)
+        self.delete_cabinet_button.hide()
+        layout.addWidget(self.delete_cabinet_button)
 
         physical_button = QPushButton("Physical fibre")
         physical_button.setToolTip("Open the separate floor-routed fibre, splice and joint map")
@@ -2181,9 +2275,19 @@ class NetworkTopologyDialog(QDialog):
         if node.manufacturer or node.model:
             self._detail_row("Product", " ".join(value for value in (node.manufacturer, node.model) if value))
         if not node.pseudo:
-            self._detail_row("Instance ID", node.node_id)
-            self._detail_row("Asset ID", _text(node.instance.get("asset_id")))
-            if bool(node.instance.get("logical_stack")):
+            if node.asset_type == "rack_cabinet":
+                self._detail_row("Cabinet ID", _text(node.details.get("rack_record_id")) or node.node_id)
+                self._detail_row("Location", node.location_name)
+                self._detail_row("Floor", str(node.floor))
+                self._detail_row("Capacity", f"{_int(node.details.get('capacity_u'))}U")
+                self._detail_row("Occupied", f"{_int(node.details.get('used_u'))}U")
+                self._detail_row("Status", "Empty cabinet")
+                if _text(node.details.get("notes")):
+                    self._detail_row("Notes", _text(node.details.get("notes")))
+            else:
+                self._detail_row("Instance ID", node.node_id)
+                self._detail_row("Asset ID", _text(node.instance.get("asset_id")))
+            if node.asset_type != "rack_cabinet" and bool(node.instance.get("logical_stack")):
                 members = max(1, _int(node.instance.get("stack_member_count"), 1))
                 max_members = max(1, _int(node.instance.get("stack_max_members"), members))
                 self._detail_row("Logical stack", f"{members} members / {max_members} maximum")
@@ -2193,17 +2297,18 @@ class NetworkTopologyDialog(QDialog):
                 interconnect_spec = _text(node.instance.get("stack_interconnect_specification")) or "Switch stack interconnect"
                 self._detail_row("Stack links", f"{interconnects} {interconnect_medium} links")
                 self._detail_row("Stack link type", interconnect_spec)
-            self._detail_row("Location", node.location_name)
-            self._detail_row("Floor", str(node.floor))
-            self._detail_row("Management IP", node.management_ip)
-            self._detail_row("Rack", _text(node.instance.get("rack_name")))
-            self._detail_row("Rack position", str(_int(node.instance.get("rack_start_u"))) if _int(node.instance.get("rack_start_u")) else "")
-            key = self._switch_group_key(node.node_id)
-            if key != (0, "", ""):
-                self._detail_row("Rack use", f"{self._rack_used_for_key(key)} / {self._rack_capacity_for_key(key)}U")
-                self._detail_row("Device rack use", f"{self._node_rack_units(node.node_id)}U")
-            self._detail_row("Power feed", _text(node.instance.get("power_feed")))
-            self._detail_row("UPS source", _text(node.instance.get("ups_source")))
+            if node.asset_type != "rack_cabinet":
+                self._detail_row("Location", node.location_name)
+                self._detail_row("Floor", str(node.floor))
+                self._detail_row("Management IP", node.management_ip)
+                self._detail_row("Rack", _text(node.instance.get("rack_name")))
+                self._detail_row("Rack position", str(_int(node.instance.get("rack_start_u"))) if _int(node.instance.get("rack_start_u")) else "")
+                key = self._switch_group_key(node.node_id)
+                if key != (0, "", ""):
+                    self._detail_row("Rack use", f"{self._rack_used_for_key(key)} / {self._rack_capacity_for_key(key)}U")
+                    self._detail_row("Device rack use", f"{self._node_rack_units(node.node_id)}U")
+                self._detail_row("Power feed", _text(node.instance.get("power_feed")))
+                self._detail_row("UPS source", _text(node.instance.get("ups_source")))
         else:
             if node.role == "switch_port":
                 self._detail_row("Port", _text(node.details.get("port_name")), True)
@@ -2368,7 +2473,7 @@ class NetworkTopologyDialog(QDialog):
         asset_type = _text(node.asset_type).lower()
         # Fibre splitters are passive, but they are an essential logical PoLAN
         # stage between OLTs and ONTs and must remain visible in the topology.
-        if asset_type == "fibre_splitter":
+        if asset_type in {"fibre_splitter", "rack_cabinet"}:
             return True
         role = _text(node.role).lower()
         name = _text(node.name).lower()
@@ -2620,6 +2725,7 @@ class NetworkTopologyDialog(QDialog):
             _text(node.instance.get("rack_name"))
             for node in self.model.nodes.values()
             if not node.pseudo
+            and node.asset_type != "rack_cabinet"
             and node.floor == floor
             and node.location_name == location
             and _text(node.instance.get("rack_name"))
@@ -2628,6 +2734,7 @@ class NetworkTopologyDialog(QDialog):
             node_id
             for node_id, node in self.model.nodes.items()
             if not node.pseudo
+            and node.asset_type != "rack_cabinet"
             and _text(node.instance.get("rack_name"))
             and (
                 (node.floor == floor and node.location_name == location)
@@ -3508,7 +3615,7 @@ class NetworkTopologyDialog(QDialog):
             return 3
         if asset_type == "network_switch" or "access_switch" in role:
             return 3
-        if asset_type in {"optical_network_terminal", "wireless_access_point"} or role == "ont":
+        if asset_type in {"optical_network_terminal", "wireless_access_point", "rack_cabinet"} or role == "ont":
             return 4
 
         rank = self.model._hierarchy_rank(node_id)
@@ -4048,6 +4155,14 @@ class NetworkTopologyDialog(QDialog):
             and node.location_name == location
             and _text(node.instance.get("rack_name"))
         }
+        names.update(
+            _text(rack.get("name"))
+            for rack in self.data.get("network_racks", [])
+            if isinstance(rack, dict)
+            and _int(rack.get("floor")) == int(floor)
+            and _text(rack.get("location_name")) == location
+            and _text(rack.get("name"))
+        )
         # Support equipment generated into the same named rack can have legacy
         # or blank location metadata. Keep it visible with the active equipment.
         if self.rack_focus is not None and self.rack_focus[2]:
@@ -4057,8 +4172,14 @@ class NetworkTopologyDialog(QDialog):
     def _rack_capacity_for_key(self, key: Tuple[int, str, str]) -> int:
         default_capacity = max(1, _int(self.data.get("network_settings", {}).get("default_rack_size_u"), 42))
         explicit_capacity = 0
+        for rack in self.data.get("network_racks", []):
+            if not isinstance(rack, dict):
+                continue
+            rack_key = (_int(rack.get("floor")), _text(rack.get("location_name")), _text(rack.get("name")))
+            if rack_key == key:
+                explicit_capacity = max(explicit_capacity, _int(rack.get("capacity_u"), 0))
         for node in self.model.nodes.values():
-            if node.pseudo or not _text(node.instance.get("rack_name")):
+            if node.pseudo or node.asset_type == "rack_cabinet" or not _text(node.instance.get("rack_name")):
                 continue
             node_key = (node.floor, node.location_name, _text(node.instance.get("rack_name")))
             if node_key == key:
@@ -4066,15 +4187,28 @@ class NetworkTopologyDialog(QDialog):
         return explicit_capacity or default_capacity
 
     def _rack_used_for_key(self, key: Tuple[int, str, str]) -> int:
-        used = 0
+        """Return actual occupied rack-unit capacity, not the highest mounted U.
+
+        A rack with one 1U device at U42 consumes 1U, not 42U.  Counting the
+        union of occupied integer rack positions also handles intentional
+        shared-width equipment: several devices mounted in subdivisions of the
+        same rack unit still consume one physical U.
+        """
+        occupied_units: Set[int] = set()
+        capacity = self._rack_capacity_for_key(key)
         for node_id, node in self.model.nodes.items():
-            if node.pseudo or not _text(node.instance.get("rack_name")):
+            if node.pseudo or node.asset_type == "rack_cabinet" or not _text(node.instance.get("rack_name")):
                 continue
             node_key = (node.floor, node.location_name, _text(node.instance.get("rack_name")))
-            if node_key == key:
-                start_u = max(1, _int(node.instance.get("rack_start_u"), 1))
-                used = max(used, start_u + max(1, self._node_rack_units(node_id)) - 1)
-        return used
+            if node_key != key:
+                continue
+            start_u = max(1, _int(node.instance.get("rack_start_u"), 1))
+            units = max(1, self._node_rack_units(node_id))
+            end_u = start_u + units - 1
+            for rack_u in range(start_u, end_u + 1):
+                if 1 <= rack_u <= capacity:
+                    occupied_units.add(rack_u)
+        return len(occupied_units)
 
     def _add_rack_elevation(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         key = self.rack_focus
@@ -4898,6 +5032,8 @@ class NetworkTopologyDialog(QDialog):
             self._add_link_label(edge.label, colour, label_point, edge)
 
     def _card_activated(self, node_id: str) -> None:
+        if self._link_draft and self._handle_link_selection(node_id):
+            return
         item = self.node_items.get(node_id)
         if item is not None and not item.isSelected():
             self.scene.clearSelection()
@@ -4945,16 +5081,19 @@ class NetworkTopologyDialog(QDialog):
             else:
                 self.breadcrumb_button.setText(f"Topology / {label} ports")
             self.breadcrumb_button.show()
+            self.delete_cabinet_button.hide()
             self.floor_combo.setEnabled(False)
             self.show_clients_check.setEnabled(False)
             return
         if self.rack_focus is None:
             self.breadcrumb_button.hide()
+            self.delete_cabinet_button.hide()
             self.floor_combo.setEnabled(True)
             self.show_clients_check.setEnabled(True)
             return
         self.breadcrumb_button.setText(f"Topology / {self._rack_label(self.rack_focus)}")
         self.breadcrumb_button.show()
+        self.delete_cabinet_button.show()
         self.floor_combo.setEnabled(False)
         self.show_clients_check.setEnabled(False)
 
@@ -5004,6 +5143,12 @@ class NetworkTopologyDialog(QDialog):
                     self.rack_focus = key
                     self.rebuild_scene(fit=True)
                     return
+        if node is not None and node.asset_type == "rack_cabinet":
+            key = self._rack_group_key(node_id)
+            if key != (0, "", ""):
+                self.rack_focus = key
+                self.rebuild_scene(fit=True)
+                return
         if node is not None and node.asset_type == "network_switch":
             key = self._switch_group_key(node_id)
             if key != (0, "", ""):
@@ -5044,12 +5189,56 @@ class NetworkTopologyDialog(QDialog):
         if refresh:
             self.refresh_from_data()
 
+    def _auto_connect_manual_devices(self, instance_ids: Optional[Sequence[str]] = None) -> None:
+        """Auto-connect selected, or all manual, devices using topology rules."""
+
+        selected_ids = {
+            _text(getattr(getattr(item, "node", None), "node_id", ""))
+            for item in self.scene.selectedItems()
+        }
+        installed_ids = {
+            _text(row.get("id"))
+            for row in self.data.get("network_asset_instances", [])
+            if isinstance(row, dict) and _text(row.get("id"))
+        }
+        requested = [
+            _text(value)
+            for value in (instance_ids or selected_ids)
+            if _text(value) in installed_ids
+        ]
+        result = auto_connect_manual_devices(self.data, requested or None)
+        created = list(result.get("created_connection_ids", []))
+        warnings = list(result.get("warnings", []))
+        if created:
+            self.status_label.setText(
+                f"Auto connect created {len(created)} logical link{'s' if len(created) != 1 else ''}."
+            )
+            self._commit_changes()
+            if warnings:
+                QMessageBox.information(
+                    self,
+                    "Auto connect completed with advisories",
+                    "\n".join(warnings),
+                )
+            return
+        message = (
+            "No additional links were required."
+            if not warnings
+            else "\n".join(warnings)
+        )
+        QMessageBox.information(self, "Auto connect", message)
+
     def _add_device(self, default_location: str = "", default_rack: str = "") -> None:
         dialog = NetworkInstanceEditorDialog(
             self,
             assets=self.data.get("network_assets", []),
             locations=self.data.get("locations", []),
             suggested_id=next_network_id(self.data.get("network_asset_instances", []), "NI"),
+            default_auto_connect=bool(
+                self.data.get("network_settings", {}).get(
+                    "auto_connect_new_manual_devices", True
+                )
+            ),
         )
         if default_location:
             index = dialog.location_combo.findData(default_location)
@@ -5059,6 +5248,10 @@ class NetworkTopologyDialog(QDialog):
             dialog.rack_name_edit.setText(default_rack)
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self.data.setdefault("network_asset_instances", []).append(dialog.result)
+            if dialog.auto_connect_requested:
+                auto_connect_manual_devices(
+                    self.data, [_text(dialog.result.get("id"))]
+                )
             self._commit_changes()
 
     def _edit_device(self, instance_id: str) -> None:
@@ -5091,7 +5284,118 @@ class NetworkTopologyDialog(QDialog):
             for node in self.data.get("network_fibre_nodes", []):
                 if _text(node.get("linked_instance_id")) == instance_id:
                     node["linked_instance_id"] = new_id
+        if dialog.auto_connect_requested:
+            auto_connect_manual_devices(self.data, [new_id])
         self._commit_changes()
+
+    def _remove_device_records(self, instance_ids: Iterable[str]) -> None:
+        """Remove installed devices and dependent network records without prompting."""
+        remove_ids = {_text(value) for value in instance_ids if _text(value)}
+        if not remove_ids:
+            return
+
+        connection_ids = {
+            _text(row.get("id"))
+            for row in self.data.get("network_connections", [])
+            if _text(row.get("from_instance_id")) in remove_ids
+            or _text(row.get("to_instance_id")) in remove_ids
+        }
+        self.data["network_asset_instances"] = [
+            row
+            for row in self.data.get("network_asset_instances", [])
+            if _text(row.get("id")) not in remove_ids
+        ]
+        self.data["network_connections"] = [
+            row
+            for row in self.data.get("network_connections", [])
+            if _text(row.get("id")) not in connection_ids
+        ]
+        self.data["network_patch_leads"] = [
+            row
+            for row in self.data.get("network_patch_leads", [])
+            if _text(row.get("instance_id")) not in remove_ids
+            and _text(row.get("peer_instance_id")) not in remove_ids
+            and _text(row.get("connection_id")) not in connection_ids
+        ]
+        self.data["network_endpoint_assignments"] = [
+            row
+            for row in self.data.get("network_endpoint_assignments", [])
+            if _text(row.get("network_instance_id")) not in remove_ids
+            and _text(row.get("physical_patch_panel_instance_id")) not in remove_ids
+            and _text(row.get("horizontal_cable_from_instance_id")) not in remove_ids
+        ]
+        self.data["network_ip_allocations"] = [
+            row
+            for row in self.data.get("network_ip_allocations", [])
+            if _text(row.get("instance_id")) not in remove_ids
+        ]
+
+        node_ids = {
+            _text(row.get("id"))
+            for row in self.data.get("network_fibre_nodes", [])
+            if _text(row.get("linked_instance_id")) in remove_ids
+        }
+        self.data["network_fibre_nodes"] = [
+            row
+            for row in self.data.get("network_fibre_nodes", [])
+            if _text(row.get("id")) not in node_ids
+        ]
+        removed_splice_ids = {
+            _text(row.get("id"))
+            for row in self.data.get("network_fibre_splices", [])
+            if _text(row.get("node_id")) in node_ids
+            or _text(row.get("cassette_id")) in node_ids
+        }
+        self.data["network_fibre_splices"] = [
+            row
+            for row in self.data.get("network_fibre_splices", [])
+            if _text(row.get("id")) not in removed_splice_ids
+        ]
+
+        retained_cables = []
+        for cable in self.data.get("network_fibre_cables", []):
+            if _text(cable.get("from_instance_id")) in remove_ids or _text(cable.get("to_instance_id")) in remove_ids:
+                continue
+            cable["logical_connection_ids"] = [
+                value
+                for value in cable.get("logical_connection_ids", [])
+                if _text(value) not in connection_ids
+            ]
+            cable["splice_ids"] = [
+                value
+                for value in cable.get("splice_ids", [])
+                if _text(value) not in removed_splice_ids
+            ]
+            retained_cables.append(cable)
+        self.data["network_fibre_cables"] = retained_cables
+
+        retained_groups = []
+        for group in self.data.get("network_redundancy_groups", []):
+            critical = {
+                _text(group.get("protected_instance_id")),
+                _text(group.get("primary_olt_instance_id")),
+                _text(group.get("secondary_olt_instance_id")),
+            }
+            if remove_ids.intersection(value for value in critical if value):
+                continue
+            group["source_instance_ids"] = [
+                value for value in group.get("source_instance_ids", [])
+                if _text(value) not in remove_ids
+            ]
+            group["source_core_instance_ids"] = [
+                value for value in group.get("source_core_instance_ids", [])
+                if _text(value) not in remove_ids
+            ]
+            retained_groups.append(group)
+        self.data["network_redundancy_groups"] = retained_groups
+
+        for external in self.data.get("network_external_networks", []):
+            if _text(external.get("demarcation_instance_id")) in remove_ids:
+                external["demarcation_instance_id"] = ""
+            external["peer_instance_ids"] = [
+                value for value in external.get("peer_instance_ids", [])
+                if _text(value) not in remove_ids
+            ]
 
     def _delete_device(self, instance_id: str) -> None:
         if QMessageBox.question(
@@ -5099,20 +5403,323 @@ class NetworkTopologyDialog(QDialog):
             f"Delete {instance_id}, its logical connections, patch cables and linked physical fibre terminations?"
         ) != QMessageBox.Yes:
             return
-        connection_ids = {
-            _text(row.get("id")) for row in self.data.get("network_connections", [])
-            if _text(row.get("from_instance_id")) == instance_id or _text(row.get("to_instance_id")) == instance_id
-        }
-        self.data["network_asset_instances"] = [row for row in self.data.get("network_asset_instances", []) if _text(row.get("id")) != instance_id]
-        self.data["network_connections"] = [row for row in self.data.get("network_connections", []) if _text(row.get("id")) not in connection_ids]
-        self.data["network_patch_leads"] = [row for row in self.data.get("network_patch_leads", []) if _text(row.get("instance_id")) != instance_id and _text(row.get("peer_instance_id")) != instance_id and _text(row.get("connection_id")) not in connection_ids]
-        self.data["network_endpoint_assignments"] = [row for row in self.data.get("network_endpoint_assignments", []) if _text(row.get("network_instance_id")) != instance_id]
-        node_ids = {_text(row.get("id")) for row in self.data.get("network_fibre_nodes", []) if _text(row.get("linked_instance_id")) == instance_id}
-        self.data["network_fibre_nodes"] = [row for row in self.data.get("network_fibre_nodes", []) if _text(row.get("id")) not in node_ids]
-        self.data["network_fibre_splices"] = [row for row in self.data.get("network_fibre_splices", []) if _text(row.get("node_id")) not in node_ids and _text(row.get("cassette_id")) not in node_ids]
-        for cable in self.data.get("network_fibre_cables", []):
-            cable["logical_connection_ids"] = [value for value in cable.get("logical_connection_ids", []) if _text(value) not in connection_ids]
+        self._remove_device_records([instance_id])
         self._commit_changes()
+
+    def _add_cabinet(self) -> None:
+        default_location = ""
+        default_floor = 0
+        if self.rack_focus is not None:
+            default_floor, default_location, _rack = self.rack_focus
+        else:
+            for item in self.scene.selectedItems():
+                node = getattr(item, "node", None)
+                if node is not None and not node.pseudo and node.location_name:
+                    default_location = node.location_name
+                    default_floor = node.floor
+                    break
+        locations = [row for row in self.data.get("locations", []) if isinstance(row, dict) and _text(row.get("name"))]
+        if not default_location and locations:
+            preferred = next((row for row in locations if _text(row.get("kind")).lower() in {"mer", "comms_room", "polan"}), locations[0])
+            default_location = _text(preferred.get("name")); default_floor = _int(preferred.get("floor"))
+        dialog = NetworkRackEditorDialog(
+            self,
+            locations=locations,
+            suggested_id=next_network_id(self.data.get("network_racks", []), "NR"),
+            default_location=default_location,
+            default_floor=default_floor,
+            default_capacity_u=max(1, _int(self.data.get("network_settings", {}).get("default_rack_size_u"), 42)),
+        )
+        existing_at_location = [rack for rack in self.data.get("network_racks", []) if _text(rack.get("location_name")) == default_location]
+        dialog.name_edit.setText(f"Rack {len(existing_at_location) + 1}")
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+        result = dialog.result
+        if any(_text(row.get("id")) == _text(result.get("id")) for row in self.data.get("network_racks", [])):
+            QMessageBox.critical(self, "Duplicate cabinet", f"Cabinet ID {_text(result.get('id'))} already exists.")
+            return
+        if any(_text(row.get("name")) == _text(result.get("name")) and _text(row.get("location_name")) == _text(result.get("location_name")) for row in self.data.get("network_racks", [])):
+            QMessageBox.critical(self, "Duplicate cabinet", "A cabinet with that name already exists at the selected location.")
+            return
+        self.data.setdefault("network_racks", []).append(result)
+        # An empty cabinet belongs in the topology immediately. Return to the
+        # topology overview rather than opening a blank rack elevation, then
+        # select the generated rack card so its location is obvious.
+        self.rack_focus = None
+        self.switch_port_focus = None
+        if self.floor_combo.currentIndex() != 0:
+            self.floor_combo.setCurrentIndex(0)
+        self._commit_changes()
+        rack_record_id = _text(result.get("id"))
+        rack_name = _text(result.get("name"))
+        rack_location = _text(result.get("location_name"))
+        rack_floor = _int(result.get("floor"))
+        rack_node_id = next(
+            (
+                node_id
+                for node_id, node in self.model.nodes.items()
+                if node.asset_type == "rack_cabinet"
+                and (
+                    (rack_record_id and _text(node.details.get("rack_record_id")) == rack_record_id)
+                    or (
+                        node.name == rack_name
+                        and node.location_name == rack_location
+                        and node.floor == rack_floor
+                    )
+                )
+            ),
+            "",
+        )
+        item = self.node_items.get(rack_node_id)
+        if item is not None:
+            self.scene.clearSelection()
+            item.setSelected(True)
+            self._show_node_details(rack_node_id)
+            self.view.centerOn(item)
+        self.status_label.setText(
+            f"Added empty cabinet {rack_name} at {rack_location or f'Floor {rack_floor}'}. "
+            "Double-click the rack card to open its rack view."
+        )
+
+    def _delete_cabinet(self, rack_key: Optional[Tuple[int, str, str]] = None) -> None:
+        """Delete a cabinet from rack view while protecting or removing its contents."""
+        key = rack_key or self.rack_focus
+        if key is None:
+            QMessageBox.information(self, "Delete cabinet", "Open a rack view before deleting a cabinet.")
+            return
+        floor, location, rack_name = key
+        rack_name = _text(rack_name)
+        if not rack_name:
+            QMessageBox.warning(self, "Delete cabinet", "The selected rack has no cabinet name.")
+            return
+
+        equipment = [
+            row
+            for row in self.data.get("network_asset_instances", [])
+            if _int(row.get("floor")) == int(floor)
+            and _text(row.get("location_name")) == _text(location)
+            and _text(row.get("rack_name")) == rack_name
+        ]
+        equipment_ids = [_text(row.get("id")) for row in equipment if _text(row.get("id"))]
+        delete_equipment = False
+        unassign_equipment = False
+
+        if equipment:
+            box = QMessageBox(self)
+            box.setWindowTitle("Delete occupied cabinet")
+            box.setIcon(QMessageBox.Warning)
+            box.setText(
+                f"{rack_name} contains {len(equipment)} installed equipment "
+                f"item{'s' if len(equipment) != 1 else ''}."
+            )
+            box.setInformativeText(
+                "Unassign keeps the equipment and its connections but removes its rack mounting. "
+                "Delete equipment also removes the contained devices and their dependent network records."
+            )
+            unassign_button = box.addButton("Unassign equipment", QMessageBox.ActionRole)
+            delete_button = box.addButton("Delete equipment and cabinet", QMessageBox.DestructiveRole)
+            cancel_button = box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(cancel_button)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is unassign_button:
+                unassign_equipment = True
+            elif clicked is delete_button:
+                delete_equipment = True
+            else:
+                return
+        elif QMessageBox.question(
+            self,
+            "Delete cabinet",
+            f"Delete empty cabinet {rack_name} at {location or f'Floor {floor}'}?",
+        ) != QMessageBox.Yes:
+            return
+
+        self.data["network_racks"] = [
+            rack
+            for rack in self.data.get("network_racks", [])
+            if not (
+                _int(rack.get("floor")) == int(floor)
+                and _text(rack.get("location_name")) == _text(location)
+                and _text(rack.get("name")) == rack_name
+            )
+        ]
+
+        if unassign_equipment:
+            equipment_id_set = set(equipment_ids)
+            for row in equipment:
+                row["rack_name"] = ""
+                row["rack_start_u"] = 0
+                row["rack_size_u"] = 0
+                row["shared_rack_unit_group"] = ""
+                row["shared_rack_unit_position"] = 1
+                row["shared_rack_unit_capacity"] = 1
+            for node in self.data.get("network_fibre_nodes", []):
+                linked_id = _text(node.get("linked_instance_id"))
+                if linked_id in equipment_id_set or (
+                    _int(node.get("floor")) == int(floor)
+                    and _text(node.get("location_name")) == _text(location)
+                    and _text(node.get("rack_name")) == rack_name
+                ):
+                    node["rack_name"] = ""
+        elif delete_equipment:
+            self._remove_device_records(equipment_ids)
+
+        remaining_names = {
+            _text(rack.get("name"))
+            for rack in self.data.get("network_racks", [])
+            if _int(rack.get("floor")) == int(floor)
+            and _text(rack.get("location_name")) == _text(location)
+            and _text(rack.get("name"))
+        }
+        remaining_names.update(
+            _text(row.get("rack_name"))
+            for row in self.data.get("network_asset_instances", [])
+            if _int(row.get("floor")) == int(floor)
+            and _text(row.get("location_name")) == _text(location)
+            and _text(row.get("rack_name"))
+        )
+        if remaining_names:
+            next_rack = sorted(remaining_names, key=str.lower)[0]
+            self.rack_focus = (int(floor), _text(location), next_rack)
+        else:
+            self.rack_focus = None
+        self.switch_port_focus = None
+        self._commit_changes()
+
+    def _start_add_link(self, default_from: str = "", default_port: str = "") -> None:
+        if self._link_draft:
+            self._cancel_add_link()
+            return
+        if len(self.data.get("network_asset_instances", [])) < 2:
+            QMessageBox.information(self, "Network connection", "Install at least two network assets first.")
+            return
+        self.rack_focus = None
+        self.switch_port_focus = None
+        self._link_draft = {
+            "stage": "target_device" if default_from else "source_device",
+            "source_instance_id": _text(default_from),
+            "source_port": _text(default_port),
+            "target_instance_id": "",
+            "target_port": "",
+        }
+        self.add_link_button.setText("Cancel link")
+        self.rebuild_scene(fit=False)
+        self.status_label.setText(
+            "Add link: select the destination device in the topology"
+            if default_from else "Add link: select the first device in the topology"
+        )
+
+    def _cancel_add_link(self) -> None:
+        self._link_draft = {}
+        self.add_link_button.setText("Add link")
+        self.rack_focus = None
+        self.switch_port_focus = None
+        self.rebuild_scene(fit=False)
+
+    def _begin_link_port_selection(self, side: str) -> None:
+        instance_id = _text(self._link_draft.get(f"{side}_instance_id"))
+        key = self._rack_group_key(instance_id)
+        self.switch_port_focus = None
+        if key != (0, "", ""):
+            self.rack_focus = key
+            self._link_draft["stage"] = f"{side}_rack_device"
+            self.rebuild_scene(fit=True)
+            self.status_label.setText(f"Add link: select {side} device {instance_id} in the rack, then select its port")
+        else:
+            self.rack_focus = None
+            self.switch_port_focus = instance_id
+            self._link_draft["stage"] = f"{side}_port"
+            self.rebuild_scene(fit=True)
+            self.status_label.setText(f"Add link: select an available port on {instance_id}")
+
+    def _handle_link_selection(self, node_id: str) -> bool:
+        stage = _text(self._link_draft.get("stage"))
+        node = self._node_for(node_id)
+        if node is None:
+            return False
+        if stage in {"source_device", "target_device"}:
+            if node.pseudo:
+                return True
+            if stage == "source_device":
+                self._link_draft["source_instance_id"] = node.node_id
+                self._link_draft["stage"] = "target_device"
+                self.status_label.setText("Add link: select the second device in the topology")
+                return True
+            if node.node_id == _text(self._link_draft.get("source_instance_id")):
+                self.status_label.setText("Add link: source and destination must be different devices")
+                return True
+            self._link_draft["target_instance_id"] = node.node_id
+            if self._link_draft.get("source_port"):
+                self._begin_link_port_selection("target")
+            else:
+                self._begin_link_port_selection("source")
+            return True
+        if stage.endswith("_rack_device"):
+            side = stage.split("_", 1)[0]
+            expected = _text(self._link_draft.get(f"{side}_instance_id"))
+            if node.pseudo or node.node_id != expected:
+                self.status_label.setText(f"Add link: select {expected} in this rack")
+                return True
+            self.switch_port_focus = expected
+            self._link_draft["stage"] = f"{side}_port"
+            self.rebuild_scene(fit=True)
+            self.status_label.setText(f"Add link: select an available port on {expected}")
+            return True
+        if stage in {"source_port", "target_port"}:
+            side = stage.split("_", 1)[0]
+            if node.role != "switch_port":
+                return True
+            expected = _text(self._link_draft.get(f"{side}_instance_id"))
+            parent_id = _text(node.details.get("parent_instance_id"))
+            if parent_id != expected:
+                self.status_label.setText(f"Add link: select a port on {expected}")
+                return True
+            if bool(node.details.get("occupied")):
+                self.status_label.setText(f"Add link: {_text(node.details.get('port_name'))} is already occupied; select an available port")
+                return True
+            self._link_draft[f"{side}_port"] = _text(node.details.get("port_name"))
+            if side == "source":
+                self._begin_link_port_selection("target")
+            else:
+                self._finish_add_link()
+            return True
+        return False
+
+    def _finish_add_link(self) -> None:
+        draft = dict(self._link_draft)
+        connection = {
+            "id": next_network_id(self.data.get("network_connections", []), "NC"),
+            "from_instance_id": _text(draft.get("source_instance_id")),
+            "from_port": _text(draft.get("source_port")),
+            "to_instance_id": _text(draft.get("target_instance_id")),
+            "to_port": _text(draft.get("target_port")),
+            "connection_role": "uplink",
+            "medium": "fibre",
+            "cable_specification": "",
+            "fibre_count": 2,
+            "vlan_ids": [],
+            "route_profile": "",
+            "route_path": [],
+            "notes": "",
+        }
+        dialog = NetworkConnectionEditorDialog(
+            self,
+            connection=connection,
+            instances=self.data.get("network_asset_instances", []),
+            vlans=self.data.get("network_vlans", []),
+            route_profiles=list(self.data.get("route_profiles", {}).keys()),
+            suggested_id=connection["id"],
+        )
+        self._link_draft = {}
+        self.add_link_button.setText("Add link")
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self.data.setdefault("network_connections", []).append(dialog.result)
+            self.rack_focus = None; self.switch_port_focus = None
+            self._commit_changes()
+        else:
+            self.rack_focus = None; self.switch_port_focus = None
+            self.rebuild_scene(fit=False)
 
     def _add_connection(self, default_from: str = "", default_to: str = "") -> None:
         if len(self.data.get("network_asset_instances", [])) < 2:
@@ -5546,9 +6153,28 @@ class NetworkTopologyDialog(QDialog):
         node = self.model.nodes.get(node_id)
         if node is None or node.pseudo:
             return
+        if node.asset_type == "rack_cabinet":
+            menu = QMenu(self)
+            open_rack = menu.addAction("Open rack view")
+            add_equipment = menu.addAction("Add equipment to this cabinet")
+            menu.addSeparator()
+            delete_rack = menu.addAction("Delete this cabinet")
+            action = menu.exec(screen_pos)
+            key = self._rack_group_key(node_id)
+            if action == open_rack and key != (0, "", ""):
+                self.rack_focus = key
+                self.switch_port_focus = None
+                self.rebuild_scene(fit=True)
+            elif action == add_equipment:
+                self._add_device(node.location_name, _text(node.instance.get("rack_name")))
+            elif action == delete_rack:
+                self._delete_cabinet(key)
+            return
         menu = QMenu(self)
         edit = menu.addAction("Edit installed element")
         connect = menu.addAction("Add logical connection from this element")
+        auto_connect = menu.addAction("Auto connect this element")
+        auto_connect.setEnabled(not bool(node.instance.get("auto_generated")))
         physical = menu.addAction("Open linked physical fibre")
         if self.rack_focus is not None:
             menu.addSeparator()
@@ -5559,14 +6185,17 @@ class NetworkTopologyDialog(QDialog):
             previous_rack = menu.addAction(f"Move {prefix} to previous cabinet")
             next_rack = menu.addAction(f"Move {prefix} to next cabinet")
             add_to_rack = menu.addAction("Add equipment to this location/rack")
+            delete_rack = menu.addAction("Delete this cabinet")
         else:
-            up = down = previous_rack = next_rack = add_to_rack = None
+            up = down = previous_rack = next_rack = add_to_rack = delete_rack = None
         menu.addSeparator(); delete = menu.addAction("Delete installed element")
         action = menu.exec(screen_pos)
         if action == edit:
             self._edit_device(node_id)
         elif action == connect:
-            self._add_connection(default_from=node_id)
+            self._start_add_link(default_from=node_id)
+        elif action == auto_connect:
+            self._auto_connect_manual_devices([node_id])
         elif action == physical:
             connection = next((edge.edge_id for edge in self.model.edges if edge.source_id == node_id or edge.target_id == node_id), "")
             self._open_physical_fibre(connection)
@@ -5580,6 +6209,10 @@ class NetworkTopologyDialog(QDialog):
             self._move_rack_item(node_id, rack_delta=1)
         elif action == add_to_rack:
             self._add_device(node.location_name, _text(node.instance.get("rack_name")))
+        elif action == delete_rack:
+            self._delete_cabinet(
+                (node.floor, node.location_name, _text(node.instance.get("rack_name")))
+            )
         elif action == delete:
             self._delete_device(node_id)
 
@@ -5630,7 +6263,7 @@ class NetworkTopologyDialog(QDialog):
             self.data["network_patch_leads"] = [row for row in self.data.get("network_patch_leads", []) if _text(row.get("id")) not in lead_ids]
             self._commit_changes()
         elif action == add_connection:
-            self._add_connection(default_from=instance_id)
+            self._start_add_link(default_from=instance_id, default_port=port)
         elif trace is not None and action == trace:
             self._trace_circuit(_text(connections[0].get("id")))
 

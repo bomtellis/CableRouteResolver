@@ -61,15 +61,21 @@ NETWORK_TECHNOLOGIES = ["Traditional", "PoLAN"]
 PORT_TYPE_OPTIONS = ["rj45", "sfp", "sfp+", "qsfp", "qsfp28", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"]
 PORT_USE_OPTIONS = ["input", "output", "uplink", "downlink", "management", "console", "pon", "client", "patch", "stacking", "power", "spare", "other"]
 
-from network_auto_planner import NetworkPlanningError, generate_network_design
+from network_auto_planner import (
+    NetworkPlanningError,
+    auto_connect_manual_devices,
+    generate_network_design,
+)
 from network_services import cable_core_statistics, ensure_physical_fibre_for_design, generate_ip_address_plan, set_core_status_from_splices
 from network_fibre_dialogs import (
     ExternalNetworkEditorDialog, FibreCableEditorDialog, FibreNodeEditorDialog,
     FibreSpliceEditorDialog, PatchLeadEditorDialog,
 )
 from network_schema import (
+    MANUFACTURER_PREFERENCE_COMPONENTS,
     default_layer_connection_rules,
     normalise_layer_connection_rules,
+    normalise_manufacturer_preferences,
 )
 
 
@@ -628,6 +634,7 @@ class NetworkInstanceEditorDialog(QDialog):
         default_floor: int = 0,
         default_x: float = 0.0,
         default_y: float = 0.0,
+        default_auto_connect: bool = True,
     ):
         super().__init__(parent)
         self.setWindowTitle("Installed Network Asset")
@@ -635,6 +642,7 @@ class NetworkInstanceEditorDialog(QDialog):
         self.assets = list(assets or [])
         self.locations = list(locations or [])
         self.result: Optional[dict] = None
+        self.auto_connect_requested = False
         self.resize(560, 620)
 
         layout = QVBoxLayout(self)
@@ -656,6 +664,35 @@ class NetworkInstanceEditorDialog(QDialog):
         asset_index = self.asset_combo.findData(_text(self.instance.get("asset_id")))
         if asset_index >= 0:
             self.asset_combo.setCurrentIndex(asset_index)
+
+        self.network_layer_combo = QComboBox()
+        self.network_layer_combo.addItem("Automatic from asset", "")
+        self.network_layer_combo.addItem("Edge / router", "edge")
+        self.network_layer_combo.addItem("Core", "core")
+        self.network_layer_combo.addItem("Aggregation / distribution", "aggregation")
+        self.network_layer_combo.addItem("Access", "access")
+        self.network_layer_combo.addItem("Endpoint", "endpoint")
+        self.network_layer_combo.addItem("OLT", "olt")
+        self.network_layer_combo.addItem("Fibre splitter", "splitter")
+        self.network_layer_combo.addItem("ONT", "ont")
+        current_layer = _text(
+            self.instance.get("network_layer")
+            or self.instance.get("design_layer")
+        ).lower()
+        layer_index = self.network_layer_combo.findData(current_layer)
+        if layer_index >= 0:
+            self.network_layer_combo.setCurrentIndex(layer_index)
+
+        self.auto_connect_check = QCheckBox(
+            "Auto-connect this device using the configured topology rules"
+        )
+        self.auto_connect_check.setChecked(
+            bool(default_auto_connect) and not bool(self.instance)
+        )
+        self.auto_connect_check.setToolTip(
+            "Find the nearest valid upstream device, allocate compatible free ports, "
+            "and route the new link along the existing cable graph."
+        )
 
         self.location_combo = QComboBox()
         self.location_combo.addItem("No linked location", "")
@@ -709,6 +746,8 @@ class NetworkInstanceEditorDialog(QDialog):
         form.addRow("Instance ID", self.id_edit)
         form.addRow("Instance name", self.name_edit)
         form.addRow("Network asset", self.asset_combo)
+        form.addRow("Network layer", self.network_layer_combo)
+        form.addRow("Automatic connection", self.auto_connect_check)
         form.addRow("Location", self.location_combo)
         form.addRow("Floor", self.floor_spin)
         form.addRow("X", self.x_spin)
@@ -758,6 +797,7 @@ class NetworkInstanceEditorDialog(QDialog):
             "id": instance_id,
             "name": name,
             "asset_id": asset_id,
+            "network_layer": _text(self.network_layer_combo.currentData()),
             "location_name": _text(self.location_combo.currentData()),
             "floor": int(self.floor_spin.value()),
             "x": float(self.x_spin.value()),
@@ -770,6 +810,70 @@ class NetworkInstanceEditorDialog(QDialog):
             "power_feed": self.power_feed_edit.text().strip(),
             "ups_source": self.ups_source_edit.text().strip(),
             "notes": self.notes_edit.toPlainText().strip(),
+        }
+        self.auto_connect_requested = bool(self.auto_connect_check.isChecked())
+        super().accept()
+
+
+class NetworkRackEditorDialog(QDialog):
+    """Create or edit an explicit rack cabinet, including empty cabinets."""
+
+    def __init__(self, parent=None, rack: Optional[dict] = None, locations: Optional[Sequence[dict]] = None, suggested_id: str = "NR1", default_location: str = "", default_floor: int = 0, default_capacity_u: int = 42):
+        super().__init__(parent)
+        self.setWindowTitle("Rack Cabinet")
+        self.rack = deepcopy(rack or {})
+        self.locations = list(locations or [])
+        self.result: Optional[dict] = None
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        layout.addLayout(form)
+        self.id_edit = QLineEdit(_text(self.rack.get("id")) or suggested_id)
+        self.name_edit = QLineEdit(_text(self.rack.get("name")))
+        self.location_combo = QComboBox()
+        for location in sorted(self.locations, key=lambda row: (int(row.get("floor", 0) or 0), _text(row.get("name")))):
+            name = _text(location.get("name"))
+            if name:
+                self.location_combo.addItem(f"{name} - Floor {int(location.get('floor', 0) or 0)}", name)
+        wanted = _text(self.rack.get("location_name")) or default_location
+        index = self.location_combo.findData(wanted)
+        if index >= 0:
+            self.location_combo.setCurrentIndex(index)
+        self.floor_spin = QSpinBox(); self.floor_spin.setRange(-20, 200); self.floor_spin.setValue(int(self.rack.get("floor", default_floor) or 0))
+        self.capacity_spin = QSpinBox(); self.capacity_spin.setRange(1, 200); self.capacity_spin.setSuffix("U"); self.capacity_spin.setValue(max(1, int(self.rack.get("capacity_u", default_capacity_u) or default_capacity_u)))
+        self.manufacturer_edit = QLineEdit(_text(self.rack.get("manufacturer")))
+        self.model_edit = QLineEdit(_text(self.rack.get("model")))
+        self.notes_edit = QTextEdit(_text(self.rack.get("notes"))); self.notes_edit.setMinimumHeight(80)
+        form.addRow("Cabinet ID", self.id_edit)
+        form.addRow("Cabinet name", self.name_edit)
+        form.addRow("Location", self.location_combo)
+        form.addRow("Floor", self.floor_spin)
+        form.addRow("Capacity", self.capacity_spin)
+        form.addRow("Manufacturer", self.manufacturer_edit)
+        form.addRow("Model", self.model_edit)
+        form.addRow("Notes", self.notes_edit)
+        self.location_combo.currentIndexChanged.connect(self._location_changed)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _location_changed(self) -> None:
+        name = _text(self.location_combo.currentData())
+        location = next((row for row in self.locations if _text(row.get("name")) == name), None)
+        if location is not None:
+            self.floor_spin.setValue(int(location.get("floor", 0) or 0))
+
+    def accept(self) -> None:
+        rack_id = self.id_edit.text().strip()
+        name = self.name_edit.text().strip()
+        location_name = _text(self.location_combo.currentData())
+        if not rack_id or not name or not location_name:
+            QMessageBox.critical(self, "Invalid cabinet", "Cabinet ID, name and location are required.")
+            return
+        self.result = {
+            "id": rack_id, "name": name, "location_name": location_name,
+            "floor": int(self.floor_spin.value()), "capacity_u": int(self.capacity_spin.value()),
+            "manufacturer": self.manufacturer_edit.text().strip(), "model": self.model_edit.text().strip(),
+            "notes": self.notes_edit.toPlainText().strip(), "auto_generated": bool(self.rack.get("auto_generated", False)),
         }
         super().accept()
 
@@ -1300,6 +1404,17 @@ class NetworkPlannerDialog(QDialog):
             bool(settings.get("polan_olt_failover", True))
         )
 
+        self.auto_connect_manual_check = QCheckBox(
+            "Auto-connect newly placed manual devices"
+        )
+        self.auto_connect_manual_check.setChecked(
+            bool(settings.get("auto_connect_new_manual_devices", True))
+        )
+        self.auto_connect_manual_check.setToolTip(
+            "Use the configured layer rules, nearest routed upstream device and "
+            "compatible free ports after a device is placed manually."
+        )
+
         self.auto_design_button = QPushButton("Generate Minimum-Component Network")
         self.auto_design_button.clicked.connect(self.generate_automatic_design)
 
@@ -1351,6 +1466,7 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("IP planning base CIDR", self.ip_plan_base_edit)
         settings_layout.addRow("", self.redundant_core_check)
         settings_layout.addRow("", self.olt_failover_check)
+        settings_layout.addRow("", self.auto_connect_manual_check)
         settings_layout.addRow("", self.auto_design_button)
         settings_layout.addRow("", self.sync_physical_fibre_button)
         settings_layout.addRow("", self.generate_ip_plan_button)
@@ -1414,6 +1530,38 @@ class NetworkPlannerDialog(QDialog):
         for rule in initial_rules:
             self._append_layer_rule_row(rule)
         self.tabs.addTab(layer_rules_tab, "Layer Rules")
+
+        manufacturer_tab = QWidget()
+        manufacturer_layout = QVBoxLayout(manufacturer_tab)
+        manufacturer_info = QLabel(
+            "Set an ordered manufacturer preference for each generated component. "
+            "Non-strict preferences rank matching products first but allow another manufacturer when needed for capacity. "
+            "Strict preferences prevent the planner from selecting an unlisted manufacturer."
+        )
+        manufacturer_info.setWordWrap(True)
+        manufacturer_layout.addWidget(manufacturer_info)
+        self.manufacturer_preferences_table = QTableWidget(0, 3)
+        self.manufacturer_preferences_table.setHorizontalHeaderLabels(
+            ["Component", "Preferred manufacturers (ordered, comma separated)", "Strict"]
+        )
+        self.manufacturer_preferences_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.manufacturer_preferences_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.manufacturer_preferences_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        preferences = normalise_manufacturer_preferences(settings.get("manufacturer_preferences"))
+        for component, label in MANUFACTURER_PREFERENCE_COMPONENTS.items():
+            row = self.manufacturer_preferences_table.rowCount()
+            self.manufacturer_preferences_table.insertRow(row)
+            component_item = QTableWidgetItem(label)
+            component_item.setData(Qt.UserRole, component)
+            component_item.setFlags(component_item.flags() & ~Qt.ItemIsEditable)
+            self.manufacturer_preferences_table.setItem(row, 0, component_item)
+            self.manufacturer_preferences_table.setItem(row, 1, QTableWidgetItem(", ".join(preferences[component]["preferred_manufacturers"])))
+            strict_check = QCheckBox(); strict_check.setChecked(bool(preferences[component]["strict"])); strict_check.setToolTip("Require one of the preferred manufacturers")
+            wrapper = QWidget(); wrapper_layout = QHBoxLayout(wrapper); wrapper_layout.setContentsMargins(0, 0, 0, 0); wrapper_layout.addWidget(strict_check, 0, Qt.AlignCenter)
+            wrapper._strict_check = strict_check
+            self.manufacturer_preferences_table.setCellWidget(row, 2, wrapper)
+        manufacturer_layout.addWidget(self.manufacturer_preferences_table, 1)
+        self.tabs.addTab(manufacturer_tab, "Manufacturer Preferences")
 
         self.topology_model_combo.currentIndexChanged.connect(
             self._load_layer_profile_defaults
@@ -1973,6 +2121,19 @@ class NetworkPlannerDialog(QDialog):
         ):
             widget.setEnabled(enabled)
 
+    def _manufacturer_preferences_from_table(self) -> Dict[str, dict]:
+        result: Dict[str, dict] = {}
+        for row in range(self.manufacturer_preferences_table.rowCount()):
+            component_item = self.manufacturer_preferences_table.item(row, 0)
+            names_item = self.manufacturer_preferences_table.item(row, 1)
+            component = _text(component_item.data(Qt.UserRole) if component_item else "")
+            wrapper = self.manufacturer_preferences_table.cellWidget(row, 2)
+            strict_check = getattr(wrapper, "_strict_check", None) if wrapper is not None else None
+            names = _csv_list(names_item.text() if names_item else "")
+            if component:
+                result[component] = {"preferred_manufacturers": names, "strict": bool(strict_check.isChecked()) if strict_check else False}
+        return normalise_manufacturer_preferences(result)
+
     def _sync_planner_settings(self) -> None:
         settings = self.data.setdefault("network_settings", {})
         settings["technology"] = self.technology_combo.currentText().strip()
@@ -1989,6 +2150,10 @@ class NetworkPlannerDialog(QDialog):
             settings["topology_model"],
             settings["redundant_core"],
             settings["independent_link_count"],
+        )
+        settings["manufacturer_preferences"] = self._manufacturer_preferences_from_table()
+        settings["auto_connect_new_manual_devices"] = bool(
+            self.auto_connect_manual_check.isChecked()
         )
         settings["spare_capacity_percent"] = float(self.spare_capacity_spin.value())
         settings["default_expected_bandwidth_mbps"] = float(self.default_expected_bandwidth_spin.value())
@@ -2232,9 +2397,25 @@ class NetworkPlannerDialog(QDialog):
             assets=self._items("network_assets"),
             locations=self.data.get("locations", []),
             suggested_id=_next_id(self._items("network_asset_instances"), "NI"),
+            default_auto_connect=bool(
+                self.data.get("network_settings", {}).get(
+                    "auto_connect_new_manual_devices", True
+                )
+            ),
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self._replace_or_append("network_asset_instances", -1, dialog.result)
+            if dialog.auto_connect_requested:
+                result = auto_connect_manual_devices(
+                    self.data, [_text(dialog.result.get("id"))]
+                )
+                self.refresh_tables()
+                if result.get("warnings") and not result.get("created_connection_ids"):
+                    QMessageBox.information(
+                        self,
+                        "Auto connect",
+                        "\n".join(result.get("warnings", [])),
+                    )
 
     def edit_instance(self) -> None:
         index, item = self._selected(self.instances_tab, "network_asset_instances")
@@ -2249,6 +2430,17 @@ class NetworkPlannerDialog(QDialog):
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self._replace_or_append("network_asset_instances", index, dialog.result)
+            if dialog.auto_connect_requested:
+                result = auto_connect_manual_devices(
+                    self.data, [_text(dialog.result.get("id"))]
+                )
+                self.refresh_tables()
+                if result.get("warnings") and not result.get("created_connection_ids"):
+                    QMessageBox.information(
+                        self,
+                        "Auto connect",
+                        "\n".join(result.get("warnings", [])),
+                    )
 
     def delete_instance(self) -> None:
         index, item = self._selected(self.instances_tab, "network_asset_instances")

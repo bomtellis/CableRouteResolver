@@ -20,6 +20,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from network_schema import (
     ensure_network_schema,
     normalise_layer_connection_rules,
+    normalise_manufacturer_preferences,
 )
 from network_services import ensure_physical_fibre_for_design
 
@@ -620,6 +621,36 @@ def _candidate_assets(data: dict, asset_type: str, predicate=None) -> List[dict]
             continue
         rows.append(asset)
     return rows
+
+
+def _apply_manufacturer_preference(data: dict, candidates: Sequence[dict], component: str, label: str) -> List[dict]:
+    """Order or constrain candidates using the configured manufacturer policy."""
+    rows = list(candidates)
+    preferences = normalise_manufacturer_preferences(
+        data.get("network_settings", {}).get("manufacturer_preferences")
+    )
+    policy = preferences.get(component, {"preferred_manufacturers": [], "strict": False})
+    preferred = [_text(value) for value in policy.get("preferred_manufacturers", []) if _text(value)]
+    if not preferred:
+        return rows
+    order = {name.casefold(): index for index, name in enumerate(preferred)}
+    matching = [row for row in rows if _text(row.get("manufacturer")).casefold() in order]
+    if bool(policy.get("strict")):
+        if not matching:
+            raise NetworkPlanningError(
+                f"No {label} asset matches the strict manufacturer preference: "
+                + ", ".join(preferred)
+            )
+        rows = matching
+    return sorted(
+        rows,
+        key=lambda row: (
+            order.get(_text(row.get("manufacturer")).casefold(), len(order) + 1),
+            _text(row.get("manufacturer")).casefold(),
+            _text(row.get("model")).casefold(),
+            _text(row.get("id")),
+        ),
+    )
 
 
 def _usable_ports(asset: dict, spare_fraction: float) -> int:
@@ -1295,7 +1326,7 @@ def _choose_core_candidates(data: dict) -> List[dict]:
         and not is_access_asset(asset),
     )
     if explicit:
-        return explicit
+        return _apply_manufacturer_preference(data, explicit, "core_switch", "core switch")
 
     candidates = _candidate_assets(
         data,
@@ -1314,7 +1345,7 @@ def _choose_core_candidates(data: dict) -> List[dict]:
         candidates = _candidate_assets(
             data, "network_switch", lambda asset: not is_access_asset(asset)
         )
-    return candidates
+    return _apply_manufacturer_preference(data, candidates, "core_switch", "core switch")
 
 
 
@@ -1336,7 +1367,8 @@ def _choose_aggregation_candidates(data: dict) -> List[dict]:
             )
         ),
     )
-    return candidates or _choose_core_candidates(data)
+    candidates = candidates or _choose_core_candidates(data)
+    return _apply_manufacturer_preference(data, candidates, "aggregation_switch", "aggregation switch")
 
 
 def _layer_rule(settings: dict, source: str, target: str) -> Optional[dict]:
@@ -2224,6 +2256,9 @@ def _traditional_design(
         raise NetworkPlanningError(
             "No copper-output network switch assets are available for Traditional design."
         )
+    switch_candidates = _apply_manufacturer_preference(
+        builder.data, switch_candidates, "access_switch", "access switch"
+    )
 
     access_switches: List[dict] = []
     for room_name in sorted(room_ports):
@@ -2637,6 +2672,9 @@ def _polan_design(
         raise NetworkPlanningError(
             "No copper-output ONT assets exist in the network asset library."
         )
+    ont_candidates = _apply_manufacturer_preference(
+        builder.data, ont_candidates, "optical_network_terminal", "ONT"
+    )
 
     clusters = _cluster_polan_ports(
         endpoints, ont_candidates, spare_fraction, max_copper_m, builder.graph
@@ -2713,6 +2751,9 @@ def _polan_design(
         raise NetworkPlanningError(
             "No OLT with a defined PON-port count exists in the network asset library."
         )
+    olt_candidates = _apply_manufacturer_preference(
+        builder.data, olt_candidates, "optical_line_terminal", "OLT"
+    )
     declared_olt_split_limits = [
         _olt_supported_split_outputs(asset)
         for asset in olt_candidates
@@ -2727,6 +2768,10 @@ def _polan_design(
             and (olt_max_split <= 0 or _split_ratio_outputs(asset) <= olt_max_split)
         ),
     )
+    if splitter_candidates:
+        splitter_candidates = _apply_manufacturer_preference(
+            builder.data, splitter_candidates, "fibre_splitter", "fibre splitter"
+        )
     if not splitter_candidates:
         available_ratios = sorted(
             {
@@ -3118,6 +3163,7 @@ def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
         lambda asset: _text(asset.get("patch_panel_type")).lower() == "fibre"
         and max(_int(asset.get("number_of_ports")), _int(asset.get("connections_in")), _int(asset.get("connections_out"))) > 0,
     )
+    candidates = _apply_manufacturer_preference(builder.data, candidates, "fibre_patch_panel", "fibre patch panel")
     if candidates:
         return min(
             candidates,
@@ -3370,6 +3416,7 @@ def _copper_patch_panel_asset(builder: DesignBuilder) -> dict:
         lambda asset: _text(asset.get("patch_panel_type")).lower() == "copper"
         and _int(asset.get("number_of_ports")) > 0,
     )
+    candidates = _apply_manufacturer_preference(builder.data, candidates, "copper_patch_panel", "copper patch panel")
     if candidates:
         return min(candidates, key=lambda a: (max(1, _int(a.get("rack_units"), 1)), -_int(a.get("number_of_ports")), _text(a.get("id"))))
     asset = {
@@ -3543,6 +3590,7 @@ def _ups_asset(builder: DesignBuilder) -> dict:
         and _asset_type(asset) in {"ups", "rack_ups", "uninterruptible_power_supply"}
         and _int(asset.get("rack_units"), 0) > 0
     ]
+    candidates = _apply_manufacturer_preference(builder.data, candidates, "rack_ups", "rack UPS")
     if candidates:
         return min(
             candidates,
@@ -3575,6 +3623,7 @@ def _cable_manager_asset(builder: DesignBuilder) -> dict:
         )
         and _int(asset.get("rack_units"), 0) > 0
     ]
+    candidates = _apply_manufacturer_preference(builder.data, candidates, "cable_management", "cable-management panel")
     if candidates:
         return min(
             candidates,
@@ -3780,6 +3829,476 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
             instance.pop("_calculated_rack_units", None)
             instance.pop("_powered_rack_item", None)
 
+
+
+_AUTO_FIBRE_PORT_TYPES = {"sfp", "sfp+", "qsfp", "qsfp28", "lc", "sc", "mpo", "pon"}
+
+
+def _auto_connect_layer(instance: dict, asset: dict) -> str:
+    """Infer the logical layer of an installed element for guided auto-connect."""
+
+    declared = _text(
+        instance.get("network_layer")
+        or instance.get("design_layer")
+        or asset.get("network_layer")
+        or asset.get("design_layer")
+    ).lower()
+    aliases = {
+        "distribution": "aggregation",
+        "distribution_switch": "aggregation",
+        "aggregation_switch": "aggregation",
+        "access_switch": "access",
+        "core_switch": "core",
+        "edge_router": "edge",
+        "router": "edge",
+        "firewall": "edge",
+        "wireless": "endpoint",
+        "client": "endpoint",
+    }
+    if declared:
+        return aliases.get(declared, declared)
+
+    role = _text(instance.get("design_role")).lower()
+    for token, layer in (
+        ("core", "core"),
+        ("aggregation", "aggregation"),
+        ("distribution", "aggregation"),
+        ("access", "access"),
+        ("router", "edge"),
+        ("firewall", "edge"),
+        ("olt", "olt"),
+        ("splitter", "splitter"),
+        ("ont", "ont"),
+    ):
+        if token in role:
+            return layer
+
+    asset_type = _asset_type(asset)
+    if asset_type in {"network_router", "firewall", "telco_pop", "external_network"}:
+        return "edge"
+    if asset_type == "optical_line_terminal":
+        return "olt"
+    if asset_type == "fibre_splitter":
+        return "splitter"
+    if asset_type == "optical_network_terminal":
+        return "ont"
+    if asset_type == "network_switch":
+        name = (_text(asset.get("name")) + " " + _text(asset.get("model"))).lower()
+        if "core" in name:
+            return "core"
+        if "aggregation" in name or "distribution" in name:
+            return "aggregation"
+        return "access"
+    if asset_type in {"wireless_access_point"}:
+        return "endpoint"
+    return ""
+
+
+def _auto_connect_expanded_ports(instance: dict, asset: dict) -> List[dict]:
+    """Expand structured port rows into the physical names used by rack/device views."""
+
+    rows = [
+        row
+        for row in asset.get("port_definitions", [])
+        if isinstance(row, dict) and _int(row.get("port_count")) > 0
+    ]
+    if not rows and _int(asset.get("number_of_ports")) > 0:
+        port_type = (
+            "pon"
+            if _asset_type(asset) in {"optical_line_terminal", "optical_network_terminal"}
+            else "lc"
+            if _asset_type(asset) == "fibre_splitter"
+            or _text(asset.get("patch_panel_type")).lower() == "fibre"
+            else "rj45"
+        )
+        rows = [
+            {
+                "port_type": port_type,
+                "port_count": _int(asset.get("number_of_ports")),
+                "port_use": "client",
+                "name_prefix": "",
+                "explicit_names": [],
+            }
+        ]
+
+    base_ports: List[dict] = []
+    counters: Dict[str, int] = defaultdict(int)
+    for row in rows:
+        port_type = _text(row.get("port_type")).lower() or "other"
+        port_use = _text(row.get("port_use")).lower() or "other"
+        count = max(0, _int(row.get("port_count")))
+        explicit = (
+            [_text(value) for value in row.get("explicit_names", []) if _text(value)]
+            if isinstance(row.get("explicit_names", []), list)
+            else []
+        )
+        for name in explicit[:count]:
+            base_ports.append(
+                {
+                    "name": name,
+                    "port_type": port_type,
+                    "port_use": port_use,
+                    "medium": "fibre" if port_type in _AUTO_FIBRE_PORT_TYPES else "copper",
+                }
+            )
+        remaining = count - min(count, len(explicit))
+        prefix = _text(row.get("name_prefix")) or {
+            "pon": "PON",
+            "sfp": "SFP",
+            "sfp+": "SFP+",
+            "qsfp": "QSFP",
+            "qsfp28": "QSFP28",
+            "lc": "LC",
+            "sc": "SC",
+            "mpo": "MPO",
+            "rj45": "",
+        }.get(port_type, port_type.upper())
+        for _ in range(remaining):
+            counters[prefix] += 1
+            name = (
+                prefix
+                if remaining == 1
+                and counters[prefix] == 1
+                and prefix.lower().startswith("input-")
+                else f"{prefix}-{counters[prefix]}"
+                if prefix
+                else str(counters[prefix])
+            )
+            base_ports.append(
+                {
+                    "name": name,
+                    "port_type": port_type,
+                    "port_use": port_use,
+                    "medium": "fibre" if port_type in _AUTO_FIBRE_PORT_TYPES else "copper",
+                }
+            )
+
+    members = (
+        max(1, _int(instance.get("stack_member_count"), 1))
+        if bool(instance.get("logical_stack"))
+        else 1
+    )
+    if members <= 1:
+        return base_ports
+    return [
+        {**port, "name": f"{member}/{port['name']}"}
+        for member in range(1, members + 1)
+        for port in base_ports
+    ]
+
+
+def auto_connect_manual_devices(
+    data: dict,
+    instance_ids: Optional[Sequence[str]] = None,
+) -> dict:
+    """Connect manually installed devices to the nearest valid upstream layer.
+
+    The configured collapsed-core/three-tier rules determine link count and
+    source diversity for access and aggregation devices. Other supported
+    element types use deterministic parent relationships (router/core,
+    core/OLT, OLT/splitter, splitter/ONT and access/endpoint). Existing logical
+    links are retained and count towards the required links. Only free,
+    compatible physical ports are allocated.
+    """
+
+    ensure_network_schema(data)
+    assets = {
+        _text(row.get("id")): row
+        for row in data.get("network_assets", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    instances = {
+        _text(row.get("id")): row
+        for row in data.get("network_asset_instances", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    requested_ids = {
+        _text(value) for value in (instance_ids or []) if _text(value)
+    }
+    if requested_ids:
+        selected = [
+            instances[value]
+            for value in requested_ids
+            if value in instances and not bool(instances[value].get("auto_generated"))
+        ]
+    else:
+        selected = [
+            row for row in instances.values() if not bool(row.get("auto_generated"))
+        ]
+
+    result = {
+        "created_connection_ids": [],
+        "connected_instance_ids": [],
+        "skipped_instance_ids": [],
+        "warnings": [],
+    }
+    if not selected:
+        return result
+
+    settings = data.setdefault("network_settings", {})
+    rules = normalise_layer_connection_rules(
+        settings.get("layer_connection_rules"),
+        _text(settings.get("topology_model")) or "collapsed_core",
+        bool(settings.get("redundant_core", True)),
+        _int(settings.get("independent_link_count"), 2),
+    )
+    graph = RoutingGraph(data)
+    layers = {
+        instance_id: _auto_connect_layer(instance, assets.get(_text(instance.get("asset_id")), {}))
+        for instance_id, instance in instances.items()
+    }
+
+    occupied: Dict[str, set[str]] = defaultdict(set)
+    logical_connections: List[dict] = []
+    for connection in data.get("network_connections", []):
+        if not isinstance(connection, dict):
+            continue
+        source_id = _text(connection.get("from_instance_id"))
+        target_id = _text(connection.get("to_instance_id"))
+        source_port = _text(connection.get("from_port"))
+        target_port = _text(connection.get("to_port"))
+        if source_id and source_port:
+            occupied[source_id].add(source_port)
+        if target_id and target_port:
+            occupied[target_id].add(target_port)
+        if not bool(connection.get("topology_hidden")) and not bool(connection.get("physical_connection")):
+            logical_connections.append(connection)
+    for assignment in data.get("network_endpoint_assignments", []):
+        if isinstance(assignment, dict):
+            instance_id = _text(assignment.get("network_instance_id"))
+            port = _text(assignment.get("network_port"))
+            if instance_id and port:
+                occupied[instance_id].add(port)
+    for lead in data.get("network_patch_leads", []):
+        if isinstance(lead, dict):
+            instance_id = _text(lead.get("instance_id"))
+            port = _text(lead.get("port"))
+            if instance_id and port:
+                occupied[instance_id].add(port)
+
+    expanded_ports = {
+        instance_id: _auto_connect_expanded_ports(
+            instance, assets.get(_text(instance.get("asset_id")), {})
+        )
+        for instance_id, instance in instances.items()
+    }
+
+    def anchor(instance: dict) -> str:
+        return _text(instance.get("route_anchor")) or _text(instance.get("location_name"))
+
+    def rule_for_target(target_layer: str) -> Optional[dict]:
+        matches = [
+            row
+            for row in rules
+            if bool(row.get("enabled", True))
+            and _text(row.get("target_layer")).lower() == target_layer
+            and _text(row.get("source_layer")).lower() != target_layer
+        ]
+        return matches[0] if matches else None
+
+    def connection_plan(device_id: str) -> Optional[dict]:
+        layer = layers.get(device_id, "")
+        if layer in {"access", "aggregation"}:
+            rule = rule_for_target(layer)
+            if rule:
+                return {
+                    "source_layer": _text(rule.get("source_layer")).lower(),
+                    "target_layer": layer,
+                    "links": max(1, _int(rule.get("links_per_target"), 1)),
+                    "distinct": max(1, _int(rule.get("minimum_distinct_sources"), 1)),
+                    "direction": "candidate_to_device",
+                }
+        if layer == "core":
+            if any(value == "edge" for value in layers.values()):
+                return {"source_layer": "edge", "target_layer": "core", "links": 1, "distinct": 1, "direction": "candidate_to_device"}
+            peer = next(
+                (
+                    row
+                    for row in rules
+                    if bool(row.get("enabled", True))
+                    and _text(row.get("source_layer")).lower() == "core"
+                    and _text(row.get("target_layer")).lower() == "core"
+                ),
+                None,
+            )
+            if peer:
+                return {"source_layer": "core", "target_layer": "core", "links": max(1, _int(peer.get("links_per_target"), 1)), "distinct": 1, "direction": "candidate_to_device"}
+        if layer == "edge":
+            links = max(1, _int(settings.get("independent_link_count"), 2 if settings.get("redundant_core") else 1))
+            if not bool(settings.get("redundant_core", True)):
+                links = 1
+            return {"source_layer": "core", "target_layer": "edge", "links": links, "distinct": min(links, 2), "direction": "device_to_candidate"}
+        if layer == "olt":
+            source_layer = "edge" if any(value == "edge" for value in layers.values()) else "core"
+            return {"source_layer": source_layer, "target_layer": "olt", "links": 1, "distinct": 1, "direction": "candidate_to_device"}
+        if layer == "splitter":
+            asset = assets.get(_text(instances[device_id].get("asset_id")), {})
+            links = max(1, _int(asset.get("connections_in"), 1))
+            return {"source_layer": "olt", "target_layer": "splitter", "links": links, "distinct": min(links, 2), "direction": "candidate_to_device"}
+        if layer == "ont":
+            return {"source_layer": "splitter", "target_layer": "ont", "links": 1, "distinct": 1, "direction": "candidate_to_device"}
+        if layer == "endpoint":
+            return {"source_layer": "access", "target_layer": "endpoint", "links": 1, "distinct": 1, "direction": "candidate_to_device"}
+        return None
+
+    def port_preferences(source_layer: str, target_layer: str) -> Tuple[List[str], List[str], List[str]]:
+        if source_layer == "olt" and target_layer == "splitter":
+            return ["pon", "output", "downlink"], ["input", "uplink"], ["fibre"]
+        if source_layer == "splitter" and target_layer == "ont":
+            return ["output", "downlink"], ["uplink", "input", "pon"], ["fibre"]
+        if target_layer == "endpoint":
+            return ["client", "downlink", "output"], ["uplink", "client", "input"], ["copper", "fibre"]
+        return ["downlink", "output", "uplink"], ["uplink", "input", "downlink"], ["fibre", "copper"]
+
+    def free_ports(instance_id: str, preferred_uses: Sequence[str], preferred_media: Sequence[str]) -> List[dict]:
+        use_rank = {value: index for index, value in enumerate(preferred_uses)}
+        medium_rank = {value: index for index, value in enumerate(preferred_media)}
+        rows = [row for row in expanded_ports.get(instance_id, []) if _text(row.get("name")) not in occupied.get(instance_id, set())]
+        return sorted(
+            rows,
+            key=lambda row: (
+                use_rank.get(_text(row.get("port_use")).lower(), len(use_rank) + 1),
+                medium_rank.get(_text(row.get("medium")).lower(), len(medium_rank) + 1),
+                _text(row.get("name")).lower(),
+            ),
+        )
+
+    def compatible_pair(source_id: str, target_id: str, source_layer: str, target_layer: str) -> Optional[Tuple[dict, dict, str]]:
+        source_uses, target_uses, media = port_preferences(source_layer, target_layer)
+        source_ports = free_ports(source_id, source_uses, media)
+        target_ports = free_ports(target_id, target_uses, media)
+        for medium in media:
+            source_options = [row for row in source_ports if _text(row.get("medium")) == medium]
+            target_options = [row for row in target_ports if _text(row.get("medium")) == medium]
+            if source_options and target_options:
+                return source_options[0], target_options[0], medium
+        return None
+
+    connection_ids = {
+        _text(row.get("id"))
+        for row in data.get("network_connections", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+
+    order = {"edge": 0, "core": 1, "aggregation": 2, "access": 3, "olt": 4, "splitter": 5, "ont": 6, "endpoint": 7}
+    selected.sort(key=lambda row: (order.get(layers.get(_text(row.get("id")), ""), 99), _text(row.get("id"))))
+
+    for device in selected:
+        device_id = _text(device.get("id"))
+        plan = connection_plan(device_id)
+        if plan is None:
+            result["skipped_instance_ids"].append(device_id)
+            result["warnings"].append(f"{device_id}: unable to infer a supported network layer for auto-connect.")
+            continue
+
+        candidate_ids = [
+            instance_id
+            for instance_id, layer in layers.items()
+            if instance_id != device_id and layer == plan["source_layer"]
+        ]
+        if not candidate_ids:
+            result["skipped_instance_ids"].append(device_id)
+            result["warnings"].append(
+                f"{device_id}: no {plan['source_layer']} device is available for auto-connect."
+            )
+            continue
+
+        existing_candidates: List[str] = []
+        for connection in logical_connections:
+            source_id = _text(connection.get("from_instance_id"))
+            target_id = _text(connection.get("to_instance_id"))
+            if device_id not in {source_id, target_id}:
+                continue
+            peer_id = target_id if source_id == device_id else source_id
+            if peer_id in candidate_ids:
+                existing_candidates.append(peer_id)
+        links_needed = max(0, int(plan["links"]) - len(existing_candidates))
+        if links_needed <= 0:
+            result["skipped_instance_ids"].append(device_id)
+            continue
+
+        used_candidate_ids = set(existing_candidates)
+        scored_candidates: List[Tuple[float, str, List[str]]] = []
+        for candidate_id in candidate_ids:
+            candidate = instances[candidate_id]
+            if plan["direction"] == "candidate_to_device":
+                source_id, target_id = candidate_id, device_id
+            else:
+                source_id, target_id = device_id, candidate_id
+            pair = compatible_pair(source_id, target_id, layers.get(source_id, ""), layers.get(target_id, ""))
+            if pair is None:
+                continue
+            distance, route_path = graph.route(anchor(instances[source_id]), anchor(instances[target_id]))
+            scored_candidates.append((distance, candidate_id, route_path))
+        scored_candidates.sort(key=lambda row: (row[0], row[1]))
+
+        created_for_device = 0
+        while links_needed > 0:
+            candidates = [row for row in scored_candidates if row[1] not in used_candidate_ids]
+            if not candidates and len(used_candidate_ids) >= int(plan["distinct"]):
+                candidates = list(scored_candidates)
+            if not candidates:
+                break
+            _distance_m, candidate_id, _route = candidates[0]
+            if plan["direction"] == "candidate_to_device":
+                source_id, target_id = candidate_id, device_id
+            else:
+                source_id, target_id = device_id, candidate_id
+            pair = compatible_pair(source_id, target_id, layers.get(source_id, ""), layers.get(target_id, ""))
+            if pair is None:
+                scored_candidates = [row for row in scored_candidates if row[1] != candidate_id]
+                continue
+            source_port, target_port, medium = pair
+            length_m, route_path = graph.route(anchor(instances[source_id]), anchor(instances[target_id]))
+            connection_id = _next_identifier(connection_ids, "NC")
+            link_number = len(existing_candidates) + created_for_device + 1
+            connection = {
+                "id": connection_id,
+                "from_instance_id": source_id,
+                "from_port": _text(source_port.get("name")),
+                "to_instance_id": target_id,
+                "to_port": _text(target_port.get("name")),
+                "connection_role": "uplink",
+                "medium": medium,
+                "cable_specification": "OS2 single-mode fibre" if medium == "fibre" else "Category 6A",
+                "fibre_count": 1 if plan["source_layer"] in {"olt", "splitter"} else 2 if medium == "fibre" else 0,
+                "vlan_ids": [],
+                "route_profile": "fibre_optic" if medium == "fibre" and "fibre_optic" in data.get("route_profiles", {}) else "",
+                "route_path": route_path,
+                "length_m": round(max(0.0, length_m), 3),
+                "expected_bandwidth_mbps": round(max(0.0, _float(device.get("expected_bandwidth_mbps"), _float(assets.get(_text(device.get("asset_id")), {}).get("expected_bandwidth_mbps")))), 6),
+                "expected_packet_rate_pps": round(max(0.0, _float(device.get("expected_packet_rate_pps"), _float(assets.get(_text(device.get("asset_id")), {}).get("expected_packet_rate_pps")))), 3),
+                "source_layer": layers.get(source_id, ""),
+                "target_layer": layers.get(target_id, ""),
+                "independent_link_index": link_number,
+                "protection_group": f"MANUAL-AUTO-{device_id}" if int(plan["links"]) > 1 else "",
+                "redundancy_role": "primary" if link_number == 1 else "secondary" if link_number == 2 else f"path-{link_number}",
+                "standby": bool(link_number > 1),
+                "notes": "Automatically connected after manual device placement using the configured topology rules and routing graph.",
+                "auto_generated": False,
+                "auto_connected": True,
+            }
+            data.setdefault("network_connections", []).append(connection)
+            logical_connections.append(connection)
+            occupied[source_id].add(connection["from_port"])
+            occupied[target_id].add(connection["to_port"])
+            result["created_connection_ids"].append(connection_id)
+            created_for_device += 1
+            links_needed -= 1
+            used_candidate_ids.add(candidate_id)
+
+        if created_for_device:
+            result["connected_instance_ids"].append(device_id)
+        else:
+            result["skipped_instance_ids"].append(device_id)
+            result["warnings"].append(
+                f"{device_id}: compatible free ports were not available on the device and its candidate upstream equipment."
+            )
+
+    if result["created_connection_ids"]:
+        ensure_physical_fibre_for_design(data, replace_auto=False)
+    ensure_network_schema(data)
+    return result
 
 def generate_network_design(data: dict, technology: Optional[str] = None) -> dict:
     """Generate and install an optimised network design into ``data``.

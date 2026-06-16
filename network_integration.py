@@ -41,6 +41,7 @@ from network_dialogs import (
     NetworkInstanceEditorDialog,
     NetworkPlannerDialog,
 )
+from network_auto_planner import auto_connect_manual_devices
 from network_reports import write_network_schedules
 from network_topology import NetworkTopologyDialog
 from network_physical_fibre import PhysicalFibreTopologyDialog
@@ -357,6 +358,7 @@ def _open_network_planner(editor) -> None:
             "assets",
             "network_assets",
             "network_asset_instances",
+            "network_racks",
             "network_connections",
             "network_endpoint_assignments",
             "network_redundancy_groups",
@@ -412,7 +414,7 @@ def _apply_network_payload(editor, payload: dict) -> None:
     """Apply edits made in topology/rack/fibre dialogs and refresh the plan."""
     _safe_push_undo(editor, "Edit network topology")
     for key in (
-        "network_settings", "network_assets", "network_asset_instances",
+        "network_settings", "network_assets", "network_asset_instances", "network_racks",
         "network_connections", "network_endpoint_assignments", "network_patch_leads",
         "network_redundancy_groups", "network_vlans", "network_routes",
         "network_ip_allocations", "network_external_networks",
@@ -807,6 +809,11 @@ def _place_fibre_node(editor, x: float, y: float) -> None:
         default_floor=int(editor.floor_spin.value()),
         default_x=float(x),
         default_y=float(y),
+        default_auto_connect=bool(
+            editor.store.data.get("network_settings", {}).get(
+                "auto_connect_new_manual_devices", True
+            )
+        ),
     )
     if dialog.exec() != QDialog.Accepted or not dialog.result:
         return
@@ -855,10 +862,17 @@ def _place_or_select_network_asset(editor, x: float, y: float) -> None:
         return
     _safe_push_undo(editor, "Place network asset")
     editor.store.data["network_asset_instances"].append(dialog.result)
+    auto_result = None
+    if dialog.auto_connect_requested:
+        auto_result = auto_connect_manual_devices(
+            editor.store.data, [_text(dialog.result.get("id"))]
+        )
     editor.selected_point_name = dialog.result["id"]
     editor.refresh_canvas()
     if hasattr(editor, "set_status"):
-        editor.set_status(f"Placed network asset {dialog.result['id']}")
+        created = len((auto_result or {}).get("created_connection_ids", []))
+        suffix = f" and auto-connected {created} link(s)" if created else ""
+        editor.set_status(f"Placed network asset {dialog.result['id']}{suffix}")
 
 
 def _connect_network_asset(editor, x: float, y: float) -> None:
@@ -937,6 +951,8 @@ def _edit_network_instance(editor, instance_id: str) -> None:
                 connection["from_instance_id"] = new_id
             if _text(connection.get("to_instance_id")) == instance_id:
                 connection["to_instance_id"] = new_id
+    if dialog.auto_connect_requested:
+        auto_connect_manual_devices(editor.store.data, [new_id])
     editor.selected_point_name = new_id
     editor.refresh_canvas()
 

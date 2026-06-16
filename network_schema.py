@@ -16,6 +16,8 @@ NETWORK_DEFAULTS = {
         "topology_model": "collapsed_core",
         "independent_link_count": 2,
         "layer_connection_rules": [],
+        "manufacturer_preferences": {},
+        "auto_connect_new_manual_devices": True,
         "spare_capacity_percent": 15.0,
         "traditional_max_copper_m": 90.0,
         "polan_max_ont_copper_m": 30.0,
@@ -33,6 +35,7 @@ NETWORK_DEFAULTS = {
     },
     "network_assets": [],
     "network_asset_instances": [],
+    "network_racks": [],
     "network_connections": [],
     "network_endpoint_assignments": [],
     "network_patch_leads": [],
@@ -82,6 +85,21 @@ NETWORK_LAYER_RULE_PAIRS = {
     ("aggregation", "aggregation"),
     ("aggregation", "access"),
     ("core", "access"),
+}
+
+MANUFACTURER_PREFERENCE_COMPONENTS = {
+    "access_switch": "Access switches",
+    "aggregation_switch": "Aggregation/distribution switches",
+    "core_switch": "Core switches",
+    "edge_router": "Routers / WAN edge",
+    "wireless_access_point": "Wireless access points",
+    "optical_line_terminal": "Optical line terminals (OLT)",
+    "optical_network_terminal": "Optical network terminals (ONT)",
+    "fibre_splitter": "Fibre splitters",
+    "copper_patch_panel": "Copper patch panels",
+    "fibre_patch_panel": "Fibre patch panels",
+    "rack_ups": "Rack UPS equipment",
+    "cable_management": "Cable-management panels",
 }
 
 
@@ -257,6 +275,35 @@ def _normalise_string_list(values) -> List[str]:
     return result
 
 
+def normalise_manufacturer_preferences(value) -> Dict[str, dict]:
+    """Return role-specific manufacturer priorities used by the auto-planner.
+
+    Each component key stores an ordered manufacturer list and an optional
+    strict flag.  Non-strict preferences rank matching equipment first but
+    allow another manufacturer when the preferred library cannot meet the
+    required capacity.  Strict preferences exclude all unlisted manufacturers.
+    """
+
+    source = value if isinstance(value, dict) else {}
+    result: Dict[str, dict] = {}
+    for component in MANUFACTURER_PREFERENCE_COMPONENTS:
+        raw = source.get(component, {})
+        strict = False
+        preferred = []
+        if isinstance(raw, dict):
+            preferred = _normalise_string_list(
+                raw.get("preferred_manufacturers", raw.get("manufacturers", []))
+            )
+            strict = bool(raw.get("strict", False))
+        elif isinstance(raw, (list, tuple, str)):
+            preferred = _normalise_string_list(raw)
+        result[component] = {
+            "preferred_manufacturers": preferred,
+            "strict": strict,
+        }
+    return result
+
+
 def ensure_network_schema(data: dict) -> dict:
     """Ensure that *data* contains a complete, backwards-compatible network schema."""
 
@@ -273,6 +320,8 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("topology_model", "collapsed_core")
     settings.setdefault("independent_link_count", 2)
     settings.setdefault("layer_connection_rules", [])
+    settings.setdefault("manufacturer_preferences", {})
+    settings.setdefault("auto_connect_new_manual_devices", True)
     settings.setdefault("spare_capacity_percent", 15.0)
     settings.setdefault("traditional_max_copper_m", 90.0)
     settings.setdefault("polan_max_ont_copper_m", 30.0)
@@ -305,6 +354,12 @@ def ensure_network_schema(data: dict) -> dict:
         settings["topology_model"],
         settings["redundant_core"],
         settings["independent_link_count"],
+    )
+    settings["manufacturer_preferences"] = normalise_manufacturer_preferences(
+        settings.get("manufacturer_preferences")
+    )
+    settings["auto_connect_new_manual_devices"] = bool(
+        settings.get("auto_connect_new_manual_devices", True)
     )
     settings["spare_capacity_percent"] = max(
         0.0, _as_float(settings.get("spare_capacity_percent"), 15.0)
@@ -361,6 +416,7 @@ def ensure_network_schema(data: dict) -> dict:
     for key in (
         "network_assets",
         "network_asset_instances",
+        "network_racks",
         "network_connections",
         "network_endpoint_assignments",
         "network_patch_leads",
@@ -632,6 +688,20 @@ def ensure_network_schema(data: dict) -> dict:
         instance.setdefault("rack_name", "")
         instance["rack_start_u"] = max(0, _as_int(instance.get("rack_start_u")))
         instance["rack_size_u"] = max(0, _as_int(instance.get("rack_size_u")))
+        layer = _text(instance.get("network_layer") or instance.get("design_layer")).lower()
+        layer = {
+            "distribution": "aggregation",
+            "distribution_switch": "aggregation",
+            "aggregation_switch": "aggregation",
+            "access_switch": "access",
+            "core_switch": "core",
+            "edge_router": "edge",
+        }.get(layer, layer)
+        instance["network_layer"] = (
+            layer
+            if layer in {"", "edge", "core", "aggregation", "access", "endpoint", "olt", "splitter", "ont"}
+            else ""
+        )
         instance.setdefault("management_ip", "")
         instance.setdefault("management_vlan", "")
         instance.setdefault("power_feed", "")
@@ -659,6 +729,26 @@ def ensure_network_schema(data: dict) -> dict:
         if not isinstance(instance.get("router_ip_addresses"), list):
             instance["router_ip_addresses"] = []
 
+    rack_ids: set[str] = set()
+    for rack in data["network_racks"]:
+        if not isinstance(rack, dict):
+            continue
+        rack.setdefault("id", "")
+        rack.setdefault("name", rack.get("id", ""))
+        rack.setdefault("location_name", "")
+        linked_location = locations.get(_text(rack.get("location_name")), {})
+        rack["floor"] = _as_int(rack.get("floor", linked_location.get("floor", 0)))
+        rack["capacity_u"] = max(
+            1, _as_int(rack.get("capacity_u"), settings["default_rack_size_u"])
+        )
+        rack.setdefault("manufacturer", "")
+        rack.setdefault("model", "")
+        rack.setdefault("notes", "")
+        rack["auto_generated"] = bool(rack.get("auto_generated", False))
+        rack_id = _text(rack.get("id"))
+        if rack_id:
+            rack_ids.add(rack_id)
+
     for connection in data["network_connections"]:
         if not isinstance(connection, dict):
             continue
@@ -681,6 +771,7 @@ def ensure_network_schema(data: dict) -> dict:
             connection.get("route_path", [])
         )
         connection.setdefault("notes", "")
+        connection["auto_connected"] = bool(connection.get("auto_connected", False))
         connection["topology_hidden"] = bool(connection.get("topology_hidden", False))
         connection["physical_connection"] = bool(connection.get("physical_connection", False))
         connection.setdefault("physical_segment", "")
@@ -1024,6 +1115,28 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             messages.append(
                 f"Wireless access point {asset_id} requires at least one frequency."
             )
+
+    seen_rack_ids: set[str] = set()
+    seen_rack_names: set[tuple[int, str, str]] = set()
+    for rack in data.get("network_racks", []):
+        if not isinstance(rack, dict):
+            continue
+        rack_id = _text(rack.get("id")) or "(unnamed)"
+        if rack_id in seen_rack_ids:
+            messages.append(f"Rack cabinet ID {rack_id!r} is duplicated.")
+        seen_rack_ids.add(rack_id)
+        location_name = _text(rack.get("location_name"))
+        if location_name and location_name not in locations:
+            messages.append(f"Rack cabinet {rack_id} references missing location {location_name!r}.")
+        capacity = _as_int(rack.get("capacity_u"))
+        if capacity < 1:
+            messages.append(f"Rack cabinet {rack_id} must have a positive rack-unit capacity.")
+        name_key = (_as_int(rack.get("floor")), location_name, _text(rack.get("name")).lower())
+        if name_key in seen_rack_names:
+            messages.append(
+                f"Rack cabinet name {_text(rack.get('name'))!r} is duplicated at {location_name or 'the unassigned location'}."
+            )
+        seen_rack_names.add(name_key)
 
     for instance in data.get("network_asset_instances", []):
         if not isinstance(instance, dict):

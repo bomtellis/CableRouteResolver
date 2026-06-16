@@ -2549,7 +2549,7 @@ class CableRouteEditor(QMainWindow):
     def snap(self, x, y):
         if self.snap_check.isChecked():
             return round(x), round(y)
-        return round(x, 3), round(y, 3)
+        return round(x, 1), round(y, 1)
 
     def _content_bounds(self, floor):
         bounds = []
@@ -3257,7 +3257,7 @@ class CableRouteEditor(QMainWindow):
         x,
         y,
         floor,
-        radius_world=1.0,
+        radius_world=0.1,
     ):
         best_name = None
         best_dist = None
@@ -5554,41 +5554,40 @@ class CableRouteEditor(QMainWindow):
                     self.refresh_canvas()
                     return
 
-                self.set_status("No nearby point found for edge delete")
-                return
 
-            if self.edge_delete_start is None:
-                self.edge_delete_start = picked
-                self.selected_for_edge = None
-                self.selected_point_name = picked
-                self.set_status(f"Edge delete start selected: {picked}")
-                self.refresh_canvas()
-                return
+            if picked:
+                if self.edge_delete_start is None:
+                    self.edge_delete_start = picked
+                    self.selected_for_edge = None
+                    self.selected_point_name = picked
+                    self.set_status(f"Edge delete start selected: {picked}")
+                    self.refresh_canvas()
+                    return
 
-            removed = False
+                removed = False
 
-            before = len(self.store.data.get("corridors", {}).get("edges", []))
-            self.store.remove_edge(self.edge_delete_start, picked)
-            after = len(self.store.data.get("corridors", {}).get("edges", []))
-            removed = removed or (after < before)
-
-            if self.bidirectional_check.isChecked():
                 before = len(self.store.data.get("corridors", {}).get("edges", []))
-                self.store.remove_edge(picked, self.edge_delete_start)
+                self.store.remove_edge(self.edge_delete_start, picked)
                 after = len(self.store.data.get("corridors", {}).get("edges", []))
                 removed = removed or (after < before)
 
-            self.edge_delete_start = None
-            self.selected_for_edge = None
-            self.selected_point_name = picked
-            self.set_status("Edge removed" if removed else "No matching edge to remove")
+                if self.bidirectional_check.isChecked():
+                    before = len(self.store.data.get("corridors", {}).get("edges", []))
+                    self.store.remove_edge(picked, self.edge_delete_start)
+                    after = len(self.store.data.get("corridors", {}).get("edges", []))
+                    removed = removed or (after < before)
 
-            if removed:
-                if hasattr(self.canvas, "invalidate_dxf_cache"):
-                    self.canvas.invalidate_dxf_cache()
+                self.edge_delete_start = None
+                self.selected_for_edge = None
+                self.selected_point_name = picked
+                self.set_status("Edge removed" if removed else "No matching edge to remove")
 
-            self.refresh_canvas()
-            return
+                if removed:
+                    if hasattr(self.canvas, "invalidate_dxf_cache"):
+                        self.canvas.invalidate_dxf_cache()
+
+                self.refresh_canvas()
+                return
 
         if picked:
             self.selected_point_name = picked
