@@ -1260,6 +1260,22 @@ class AssetsEditorWindow(QMainWindow):
         self.category_options = list(category_options or [])
         self.categories_by_id = {category_id: name for category_id, name in self.category_options}
 
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("Search assets"))
+
+        self.asset_search_edit = QLineEdit()
+        self.asset_search_edit.setPlaceholderText(
+            "Type to filter by asset name, ID, category, or connection type..."
+        )
+        self.asset_search_edit.setClearButtonEnabled(True)
+        search_row.addWidget(self.asset_search_edit, 1)
+
+        self.asset_filter_count_label = QLabel()
+        self.asset_filter_count_label.setMinimumWidth(110)
+        self.asset_filter_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        search_row.addWidget(self.asset_filter_count_label)
+        layout.addLayout(search_row)
+
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
             ["Name", "Connection", "Category", "Qty", "Data points each", "Total"]
@@ -1269,6 +1285,7 @@ class AssetsEditorWindow(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.doubleClicked.connect(self.edit_asset)
         layout.addWidget(self.table, 1)
+        self.asset_search_edit.textChanged.connect(self._apply_asset_filter)
 
         row = QHBoxLayout()
         layout.addLayout(row)
@@ -1347,6 +1364,51 @@ class AssetsEditorWindow(QMainWindow):
                 )
 
         self.table.resizeColumnsToContents()
+        self._apply_asset_filter()
+
+    def _asset_search_text(self, asset):
+        asset_id = str(asset.get("id", "") or "").strip()
+        asset_name = str(asset.get("name", "") or "").strip()
+        connection_type = str(
+            asset.get(
+                "connection_type",
+                asset.get("type_of_connection", "wired"),
+            )
+            or ""
+        ).strip()
+        category_id = str(
+            asset.get("category_id", asset.get("category", "")) or ""
+        ).strip()
+        category_name = str(
+            self.categories_by_id.get(category_id, category_id) or ""
+        ).strip()
+        return " ".join(
+            (asset_id, asset_name, connection_type, category_id, category_name)
+        ).casefold()
+
+    def _apply_asset_filter(self, *_):
+        if _:
+            self.table.clearSelection()
+
+        terms = [
+            term
+            for term in self.asset_search_edit.text().casefold().split()
+            if term
+        ]
+        visible_count = 0
+
+        for row, asset in enumerate(self.items):
+            searchable = self._asset_search_text(asset)
+            matches = all(term in searchable for term in terms)
+            self.table.setRowHidden(row, not matches)
+            if matches:
+                visible_count += 1
+
+        total = len(self.items)
+        if terms:
+            self.asset_filter_count_label.setText(f"{visible_count} of {total} assets")
+        else:
+            self.asset_filter_count_label.setText(f"{total} assets")
 
     def add_asset(self):
         dialog = AssetEditorDialog(
@@ -1728,6 +1790,24 @@ class RoomTypesEditorWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("Search room types"))
+
+        self.room_type_search_edit = QLineEdit()
+        self.room_type_search_edit.setPlaceholderText(
+            "Type to filter by room name, room ID, asset, or category..."
+        )
+        self.room_type_search_edit.setClearButtonEnabled(True)
+        search_row.addWidget(self.room_type_search_edit, 1)
+
+        self.room_type_filter_count_label = QLabel()
+        self.room_type_filter_count_label.setMinimumWidth(125)
+        self.room_type_filter_count_label.setAlignment(
+            Qt.AlignRight | Qt.AlignVCenter
+        )
+        search_row.addWidget(self.room_type_filter_count_label)
+        layout.addLayout(search_row)
+
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Name", "Items", "Total data points"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1742,6 +1822,9 @@ class RoomTypesEditorWindow(QMainWindow):
         self.table.setColumnWidth(2, 100)
         self.table.setColumnWidth(3, 150)
         layout.addWidget(self.table, 1)
+        self.room_type_search_edit.textChanged.connect(
+            self._apply_room_type_filter
+        )
 
         buttons = QHBoxLayout()
         layout.addLayout(buttons)
@@ -1822,6 +1905,62 @@ class RoomTypesEditorWindow(QMainWindow):
 
             for col, value in enumerate(values):
                 self.table.setItem(row, col, QTableWidgetItem(str(value)))
+
+        self._apply_room_type_filter()
+
+    def _room_type_search_text(self, room_type):
+        room_type_id = str(room_type.get("id", "") or "").strip()
+        room_name = str(room_type.get("name", "") or "").strip()
+        tokens = [room_type_id, room_name]
+
+        for room_asset in self._room_asset_rows(room_type):
+            asset_id = str(room_asset.get("asset_id", "") or "").strip()
+            asset = self.assets_by_id.get(asset_id, {})
+            asset_name = str(asset.get("name", "") or "").strip()
+            category_id = str(
+                asset.get("category_id", asset.get("category", "")) or ""
+            ).strip()
+            category_name = str(
+                self.asset_categories_by_id.get(category_id, category_id) or ""
+            ).strip()
+            connection_type = str(
+                asset.get(
+                    "connection_type",
+                    asset.get("type_of_connection", ""),
+                )
+                or ""
+            ).strip()
+            tokens.extend(
+                (asset_id, asset_name, category_id, category_name, connection_type)
+            )
+
+        return " ".join(tokens).casefold()
+
+    def _apply_room_type_filter(self, *_):
+        if _:
+            self.table.clearSelection()
+
+        terms = [
+            term
+            for term in self.room_type_search_edit.text().casefold().split()
+            if term
+        ]
+        visible_count = 0
+
+        for row, room_type in enumerate(self.items):
+            searchable = self._room_type_search_text(room_type)
+            matches = all(term in searchable for term in terms)
+            self.table.setRowHidden(row, not matches)
+            if matches:
+                visible_count += 1
+
+        total = len(self.items)
+        if terms:
+            self.room_type_filter_count_label.setText(
+                f"{visible_count} of {total} room types"
+            )
+        else:
+            self.room_type_filter_count_label.setText(f"{total} room types")
 
     def add_room_type(self):
         dialog = RoomTypeEditorDialog(
