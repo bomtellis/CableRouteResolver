@@ -197,27 +197,41 @@ def _port_group_sort_key(port: dict, fallback_name: str = "") -> Tuple[int, int,
             _text(port.get("port_use")).lower(), name.lower())
 
 def _role_rank(role: str, asset_type: str) -> int:
+    """Return the logical upstream-to-downstream tier.
+
+    External services, edge routers, core, distribution/OLT, access/splitter and
+    ONT/client tiers are deliberately distinct.  The previous ranking placed
+    external networks, routers and firewalls in one tier and placed OLTs beside
+    aggregation devices, which allowed spanning-tree roots to split connected
+    areas into visually isolated branches.
+    """
     role = role.lower()
     asset_type = asset_type.lower()
-    if asset_type in {"firewall", "network_router", "telco_pop", "external_network"} or any(word in role for word in ("gateway", "router", "firewall", "telco", "peering", "external")):
+    if asset_type in {"telco_pop", "external_network"} or any(
+        word in role for word in ("external", "carrier", "internet", "peering", "telco")
+    ):
         return 0
-    if "core" in role:
+    if asset_type in {"firewall", "network_router"} or any(
+        word in role for word in ("gateway", "router", "firewall", "edge")
+    ):
         return 1
+    if "core" in role:
+        return 2
     if "aggregation" in role or "distribution" in role:
-        return 2
-    if asset_type == "optical_line_terminal" or role.startswith("olt_"):
-        return 2
-    if asset_type == "network_switch" or "access_switch" in role:
         return 3
-    if asset_type in {"fibre_splitter", "patch_panel"} or "splitter" in role:
+    if asset_type == "optical_line_terminal" or role.startswith("olt_"):
         return 4
-    if asset_type == "optical_network_terminal" or role == "ont":
+    if asset_type == "network_switch" or "access_switch" in role:
         return 5
+    if asset_type in {"fibre_splitter", "patch_panel"} or "splitter" in role:
+        return 5
+    if asset_type == "optical_network_terminal" or role == "ont":
+        return 6
     if asset_type == "wireless_access_point":
         return 6
     if asset_type == "rack_cabinet":
-        return 6
-    return 7
+        return 7
+    return 8
 
 
 def _type_label(asset_type: str, role: str) -> str:
@@ -653,63 +667,113 @@ class TopologyModel:
         return True
 
     def _build_hierarchy(self) -> None:
+        """Orient every connected component into one coherent rank-aware forest.
+
+        All minimum-rank devices in a component are roots (for example two
+        independent carrier services).  Descendants are first attached only to
+        a strictly upstream tier.  Any malformed/equal-tier remainder is then
+        attached by the least-violating real edge, preventing connected areas
+        from becoming isolated pseudo-roots while peer and standby links remain
+        cross-links.
+        """
         sorted_adjacency = {
             node_id: sorted(edges, key=self._edge_sort_key)
             for node_id, edges in self.adjacency.items()
         }
-        unvisited = set(self.nodes)
-        ordered_nodes = sorted(self.nodes, key=lambda node_id: self._node_root_key(node_id))
-        for seed in ordered_nodes:
-            if seed not in unvisited:
+        unseen = set(self.nodes)
+        components: List[Set[str]] = []
+        for seed in sorted(self.nodes, key=lambda node_id: self._node_root_key(node_id)):
+            if seed not in unseen:
                 continue
-            component: Set[str] = set()
+            component: Set[str] = {seed}
             queue = deque([seed])
-            component.add(seed)
+            unseen.remove(seed)
             while queue:
                 current = queue.popleft()
                 for neighbour, _edge in self.adjacency.get(current, []):
-                    if neighbour not in component:
+                    if neighbour in unseen:
+                        unseen.remove(neighbour)
                         component.add(neighbour)
                         queue.append(neighbour)
-            unvisited.difference_update(component)
+            components.append(component)
 
-            discovered: Set[str] = set()
-            remaining = set(component)
-            ordered_component = sorted(component, key=lambda node_id: self._node_root_key(node_id))
-            for root in ordered_component:
-                if root not in remaining:
-                    continue
+        for component in components:
+            minimum_rank = min(self._hierarchy_rank(node_id) for node_id in component)
+            roots = sorted(
+                [node_id for node_id in component if self._hierarchy_rank(node_id) == minimum_rank],
+                key=lambda node_id: self._node_root_key(node_id),
+            )
+            assigned: Set[str] = set(roots)
+            frontier = deque(roots)
+            for root in roots:
                 self.roots.append(root)
                 self.level[root] = 0
-                bfs = deque([root])
-                discovered.add(root)
-                remaining.discard(root)
-                while bfs:
-                    current = bfs.popleft()
-                    for neighbour, edge in sorted_adjacency.get(current, []):
-                        if neighbour not in component or neighbour in discovered:
+
+            while frontier:
+                current = frontier.popleft()
+                current_rank = self._hierarchy_rank(current)
+                for neighbour, edge in sorted_adjacency.get(current, []):
+                    if neighbour not in component or neighbour in assigned:
+                        continue
+                    if self._hierarchy_rank(neighbour) <= current_rank:
+                        continue
+                    assigned.add(neighbour)
+                    self.parent[neighbour] = current
+                    self.parent_edge[neighbour] = edge.edge_id
+                    self.children[current].append(neighbour)
+                    self.level[neighbour] = self.level[current] + 1
+                    self.tree_edge_ids.add(edge.edge_id)
+                    frontier.append(neighbour)
+
+            remaining = set(component) - assigned
+            while remaining:
+                choices = []
+                for child_id in remaining:
+                    child_rank = self._hierarchy_rank(child_id)
+                    for parent_id, edge in self.adjacency.get(child_id, []):
+                        if parent_id not in assigned:
                             continue
-                        if not self._can_descend(current, neighbour):
-                            continue
-                        discovered.add(neighbour)
-                        remaining.discard(neighbour)
-                        self.parent[neighbour] = current
-                        self.parent_edge[neighbour] = edge.edge_id
-                        self.children[current].append(neighbour)
-                        self.level[neighbour] = self.level[current] + 1
-                        self.tree_edge_ids.add(edge.edge_id)
-                        bfs.append(neighbour)
+                        parent_rank = self._hierarchy_rank(parent_id)
+                        penalty = 0 if parent_rank < child_rank else (1 if parent_rank == child_rank else 2)
+                        choices.append(
+                            (
+                                penalty,
+                                self.level.get(parent_id, 0),
+                                parent_rank,
+                                self._node_root_key(parent_id),
+                                self._node_root_key(child_id),
+                                parent_id,
+                                child_id,
+                                edge,
+                            )
+                        )
+                if not choices:
+                    # A truly edgeless node is its own component root.
+                    child_id = min(remaining, key=lambda node_id: self._node_root_key(node_id))
+                    self.roots.append(child_id)
+                    self.level[child_id] = 0
+                    assigned.add(child_id)
+                    remaining.remove(child_id)
+                    continue
+                *_sort, parent_id, child_id, edge = min(choices)
+                self.parent[child_id] = parent_id
+                self.parent_edge[child_id] = edge.edge_id
+                self.children[parent_id].append(child_id)
+                self.level[child_id] = self.level.get(parent_id, 0) + 1
+                self.tree_edge_ids.add(edge.edge_id)
+                assigned.add(child_id)
+                remaining.remove(child_id)
 
         for parent_id, child_ids in self.children.items():
             child_ids.sort(
                 key=lambda child_id: (
+                    self._hierarchy_rank(child_id),
                     self.nodes[child_id].floor,
                     self.nodes[child_id].location_name.lower(),
-                    _role_rank(self.nodes[child_id].role, self.nodes[child_id].asset_type),
                     self.nodes[child_id].name.lower(),
                 )
             )
-        self.roots.sort(key=lambda node_id: self._node_root_key(node_id))
+        self.roots = sorted(dict.fromkeys(self.roots), key=lambda node_id: self._node_root_key(node_id))
 
     def _add_installation_root(self) -> None:
         """Group disconnected components under one installation card for a coherent overview."""
@@ -2495,14 +2559,14 @@ class NetworkTopologyDialog(QDialog):
         if asset_type in {
             "network_router", "firewall", "network_switch",
             "wireless_access_point", "optical_line_terminal",
-            "optical_network_terminal",
+            "optical_network_terminal", "telco_pop", "external_network",
         }:
             return True
 
         logical_role_tokens = (
             "core", "distribution", "aggregation", "access",
             "gateway", "router", "firewall", "olt", "ont",
-            "wireless", "client",
+            "wireless", "client", "external", "carrier", "internet", "peering", "telco",
         )
         return any(token in role for token in logical_role_tokens)
 
@@ -3587,47 +3651,38 @@ class NetworkTopologyDialog(QDialog):
         return positions
 
     def _topology_layer(self, node_id: str) -> int:
-        """Return the fixed left-to-right visual column for a node.
-
-        PoLAN needs one more visual stage than a traditional LAN.  Splitters and
-        access switches remain in the access column, ONTs/downstream network
-        devices are placed in their own column, and endpoint groups occupy the
-        final client column.  Keeping these stages separate prevents expanded
-        splitter branches from being drawn on top of the access layer.
-        """
+        """Return a fixed parent-to-child visual column."""
         node = self._node_for(node_id)
         if node is None:
             return 9
         if node.asset_type == "site_group":
             return 0
         if node.asset_type in {"client_group", "client_device"}:
-            return 5
+            return 7
 
         role = _text(node.role).lower()
         asset_type = _text(node.asset_type).lower()
-        if asset_type in {"firewall", "network_router"} or any(
-            word in role for word in ("gateway", "router", "firewall", "core", "aggregation")
+        if asset_type in {"telco_pop", "external_network"} or any(
+            word in role for word in ("external", "carrier", "internet", "peering", "telco")
         ):
             return 1
-        if "distribution" in role or asset_type == "optical_line_terminal" or role.startswith("olt_"):
+        if asset_type in {"firewall", "network_router"} or any(
+            word in role for word in ("gateway", "router", "firewall", "edge")
+        ):
             return 2
+        if "core" in role:
+            return 3
+        if "aggregation" in role or "distribution" in role:
+            return 4
+        if asset_type == "optical_line_terminal" or role.startswith("olt_"):
+            return 4
         if asset_type in {"fibre_splitter", "patch_panel"} or "splitter" in role:
-            return 3
+            return 5
         if asset_type == "network_switch" or "access_switch" in role:
-            return 3
+            return 5
         if asset_type in {"optical_network_terminal", "wireless_access_point", "rack_cabinet"} or role == "ont":
-            return 4
-
-        rank = self.model._hierarchy_rank(node_id)
-        if rank <= 1:
-            return 1
-        if rank == 2:
-            return 2
-        if rank <= 4:
-            return 3
-        if rank <= 6:
-            return 4
-        return 5
+            return 6
+        return min(7, max(1, self.model._hierarchy_rank(node_id) + 1))
 
     def _pack_layered_topology(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         self._layer_bounds: Dict[int, QRectF] = {}
@@ -3665,11 +3720,11 @@ class NetworkTopologyDialog(QDialog):
         def gap_after(layer: int) -> float:
             next_count = layer_item_counts.get(layer + 1, 0)
             expansion_allowance = min(300.0, max(0, next_count - 1) * 14.0)
-            if layer == 2:
-                return 520.0 + expansion_allowance
-            if layer == 3:
-                return 560.0 + expansion_allowance
             if layer == 4:
+                return 520.0 + expansion_allowance
+            if layer == 5:
+                return 560.0 + expansion_allowance
+            if layer == 6:
                 return 480.0 + expansion_allowance
             return layer_gap + min(160.0, expansion_allowance)
         bus_lane_h = 96.0
@@ -3684,7 +3739,7 @@ class NetworkTopologyDialog(QDialog):
         def group_layout_size(layer: int, node_ids: Sequence[str]) -> Tuple[float, float, int, int, float]:
             heights = [self._node_card_height(node_id) for node_id in node_ids]
             max_height = max(heights) if heights else self.CARD_H
-            if layer == 2 and len(node_ids) > 1:
+            if layer == 4 and len(node_ids) > 1:
                 rows = min(distribution_rows_per_column, len(node_ids))
                 columns = int(math.ceil(len(node_ids) / rows))
                 width = columns * self.CARD_W + max(0, columns - 1) * self.X_GAP
@@ -3705,7 +3760,7 @@ class NetworkTopologyDialog(QDialog):
         for layer in all_layers:
             column_lefts[layer] = cursor_x
             cursor_x += column_widths[layer] + gap_after(layer)
-        access_layer = 3 if 3 in column_lefts else max(all_layers)
+        access_layer = 5 if 5 in column_lefts else max(all_layers)
         # Reserve distinct X-axis routing lanes.  Primary fibre uses the lane
         # nearest the access layer; failover fibre uses a separate lane further
         # upstream so the blue solid and orange dashed trunks never overlap.
@@ -3728,10 +3783,10 @@ class NetworkTopologyDialog(QDialog):
                 )
                 group_width, group_height, grid_rows, _grid_columns, grid_card_h = group_layout_size(layer, ordered)
                 group_left = column_lefts[layer] + max(0.0, (column_widths[layer] - group_width) / 2.0)
-                is_switch_group = layer == 3 and any((self._node_for(node_id) and self._node_for(node_id).asset_type == "network_switch") for node_id in ordered)
+                is_switch_group = layer == 5 and any((self._node_for(node_id) and self._node_for(node_id).asset_type == "network_switch") for node_id in ordered)
                 card_top = group_top + (bus_lane_h if is_switch_group else 0.0)
                 for index, node_id in enumerate(ordered):
-                    if layer == 2 and len(ordered) > 1:
+                    if layer == 4 and len(ordered) > 1:
                         column = index // grid_rows
                         row = index % grid_rows
                         y_offset = row * (grid_card_h + distribution_row_gap)
@@ -4080,11 +4135,13 @@ class NetworkTopologyDialog(QDialog):
     def _add_layer_headers(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         labels = {
             0: "Site",
-            1: "Core layer",
-            2: "Distribution layer",
-            3: "Access / splitter layer",
-            4: "Downstream devices",
-            5: "Client devices",
+            1: "External services",
+            2: "Edge routing / security",
+            3: "Core layer",
+            4: "Distribution / OLT layer",
+            5: "Access / splitter layer",
+            6: "Downstream devices",
+            7: "Client devices",
         }
         layer_rects: Dict[int, QRectF] = {}
         for node_id in visible_ids:

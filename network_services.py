@@ -1,6 +1,7 @@
 """Shared services for physical fibre, circuit tracing and IP address planning."""
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from copy import deepcopy
 import ipaddress
 import math
@@ -79,27 +80,88 @@ def build_fibre_cores(
     return result
 
 
-def sync_fibre_cables_from_connections(data: dict, replace_auto: bool = False) -> List[dict]:
-    """Create or refresh physical cable records for logical fibre connections.
+def _optional_float(value):
+    return None if _text(value) == "" else _float(value)
 
-    The logical connection remains the authoritative network edge. The physical
-    cable stores the graph route and individual cores so splice and dark-fibre
-    reporting can be performed without exposing passive joints in logical views.
-    """
-    cables = data.setdefault("network_fibre_cables", [])
-    if replace_auto:
-        cables[:] = [item for item in cables if not bool(item.get("auto_generated"))]
-    by_logical: Dict[str, dict] = {}
-    for cable in cables:
-        if not isinstance(cable, dict):
+
+def _fibre_cable_type_map(data: dict) -> Dict[str, dict]:
+    return {
+        _text(row.get("id")): row
+        for row in data.get("network_fibre_cable_types", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+
+
+def _select_fibre_cable_type(
+    data: dict, required_cores: int, preferred_id: str = ""
+) -> dict:
+    cable_types = list(_fibre_cable_type_map(data).values())
+    preferred = next(
+        (row for row in cable_types if _text(row.get("id")) == _text(preferred_id)),
+        None,
+    )
+    if preferred is not None and _int(preferred.get("core_count")) >= required_cores:
+        return preferred
+    eligible = [row for row in cable_types if _int(row.get("core_count")) >= required_cores]
+    if eligible:
+        return min(eligible, key=lambda row: (_int(row.get("core_count")), _text(row.get("id"))))
+    if cable_types:
+        # Retain the declared construction/loss values but allow a project-specific
+        # core count when the library has not yet defined a large enough cable.
+        return max(cable_types, key=lambda row: (_int(row.get("core_count")), _text(row.get("id"))))
+    return {
+        "id": "",
+        "name": "OS2 fixed installation fibre",
+        "fibre_standard": "OS2",
+        "core_count": max(1, required_cores),
+        "attenuation_db_per_m": 0.00035,
+        "connector_loss_db": 0.5,
+        "reflection_loss_db": 55.0,
+        "splice_loss_db": 0.1,
+        "wavelength_nm": 1310,
+    }
+
+
+def _route_point_map(data: dict) -> Dict[str, dict]:
+    points: Dict[str, dict] = {}
+    for collection in (
+        data.get("locations", []),
+        data.get("data_points", []),
+        data.get("corridors", {}).get("nodes", []),
+    ):
+        for row in collection:
+            if isinstance(row, dict) and _text(row.get("name")):
+                points[_text(row.get("name"))] = row
+    for transition in data.get("transitions", []):
+        if not isinstance(transition, dict):
             continue
-        for connection_id in cable.get("logical_connection_ids", []):
-            if _text(connection_id):
-                by_logical[_text(connection_id)] = cable
+        transition_id = _text(transition.get("id"))
+        for floor_text, coordinates in (transition.get("floor_locations") or {}).items():
+            if not isinstance(coordinates, dict):
+                continue
+            row = dict(coordinates)
+            row["floor"] = _int(floor_text)
+            row["name"] = f"{transition_id}-F{floor_text}"
+            points[row["name"]] = row
+    return points
 
-    settings = data.setdefault("network_settings", {})
-    default_count = max(2, _int(settings.get("default_fibre_core_count"), 12))
-    created: List[dict] = []
+
+def _route_path_length(data: dict, route_path: Sequence[str], fallback: float = 0.0) -> float:
+    points = _route_point_map(data)
+    rows = [points.get(_text(name)) for name in route_path]
+    if len(rows) < 2 or any(row is None for row in rows):
+        return max(0.0, fallback)
+    floor_height = max(0.0, _float(data.get("building", {}).get("floor_height_m"), 4.0))
+    total = 0.0
+    for a, b in zip(rows, rows[1:]):
+        dx = _float(a.get("x")) - _float(b.get("x"))
+        dy = _float(a.get("y")) - _float(b.get("y"))
+        dz = (_int(a.get("floor")) - _int(b.get("floor"))) * floor_height
+        total += math.sqrt(dx * dx + dy * dy + dz * dz)
+    return total
+
+
+def _fibre_connection_demands(data: dict) -> List[dict]:
     routed_physical_parents = {
         _text(connection.get("parent_logical_connection_id"))
         for connection in data.get("network_connections", [])
@@ -109,14 +171,12 @@ def sync_fibre_cables_from_connections(data: dict, replace_auto: bool = False) -
         and connection.get("route_path")
         and _text(connection.get("parent_logical_connection_id"))
     }
+    demands: List[dict] = []
     for connection in data.get("network_connections", []):
         if not isinstance(connection, dict) or _text(connection.get("medium")).lower() != "fibre":
             continue
-        # Rack patch leads and zero-length panel jumpers are represented by
-        # network_patch_leads/hidden physical segments, not as routed fibre
-        # sheaths on the floor drawing.  Keep routed panel-to-panel backbones.
         cable_spec = _text(connection.get("cable_specification")).lower()
-        route_path = [value for value in connection.get("route_path", []) if _text(value)]
+        route_path = [_text(value) for value in connection.get("route_path", []) if _text(value)]
         if "patch lead" in cable_spec or "patch cord" in cable_spec:
             continue
         if not route_path and max(0.0, _float(connection.get("length_m"))) <= 0.0:
@@ -127,60 +187,683 @@ def sync_fibre_cables_from_connections(data: dict, replace_auto: bool = False) -
         if connection_id in routed_physical_parents and not bool(connection.get("physical_connection")):
             continue
         logical_id = _text(connection.get("parent_logical_connection_id")) or connection_id
-        used_cores = max(1, _int(connection.get("fibre_count"), 2))
-        declared_cable_cores = max(
-            default_count,
-            used_cores,
-            _int(connection.get("cable_core_count"), 0),
-        )
-        cable = by_logical.get(logical_id)
-        if cable is None:
-            cable = {
-                "id": next_record_id(cables, "FOC"),
-                "name": f"Fibre cable for {connection_id}",
-                "cable_type": _text(connection.get("cable_specification")) or "OS2 single-mode fibre",
+        demands.append(
+            {
+                "id": logical_id,
+                "connection_id": connection_id,
                 "from_instance_id": _text(connection.get("from_instance_id")),
                 "from_port": _text(connection.get("from_port")),
                 "to_instance_id": _text(connection.get("to_instance_id")),
                 "to_port": _text(connection.get("to_port")),
-                "from_location": _record_location(data, _text(connection.get("from_instance_id")))[0],
-                "to_location": _record_location(data, _text(connection.get("to_instance_id")))[0],
-                "route_path": list(connection.get("route_path", [])),
+                "route_path": route_path,
                 "length_m": max(0.0, _float(connection.get("length_m"))),
-                "core_count": declared_cable_cores,
-                "logical_connection_ids": [logical_id],
-                "splice_ids": [],
-                "installation_status": "planned" if connection.get("auto_generated") else "installed",
-                "owner": "",
-                "notes": "Generated from the logical network connection.",
+                "used_cores": max(1, _int(connection.get("fibre_count"), 2)),
                 "auto_generated": bool(connection.get("auto_generated", False)),
+                "redundancy_role": _text(connection.get("redundancy_role")),
+                "protection_group": _text(connection.get("protection_group")),
             }
-            cable["cores"] = build_fibre_cores(cable["core_count"], used_cores, logical_id)
-            cables.append(cable)
-            by_logical[logical_id] = cable
-            created.append(cable)
-        else:
-            cable["from_instance_id"] = _text(connection.get("from_instance_id"))
-            cable["from_port"] = _text(connection.get("from_port"))
-            cable["to_instance_id"] = _text(connection.get("to_instance_id"))
-            cable["to_port"] = _text(connection.get("to_port"))
-            cable["from_location"] = _record_location(data, cable["from_instance_id"])[0]
-            cable["to_location"] = _record_location(data, cable["to_instance_id"])[0]
-            cable["route_path"] = list(connection.get("route_path", []))
-            cable["length_m"] = max(0.0, _float(connection.get("length_m")))
-            cable["core_count"] = max(
-                _int(cable.get("core_count"), default_count),
-                declared_cable_cores,
-            )
-            cable["cores"] = build_fibre_cores(
-                cable["core_count"], used_cores, logical_id, cable.get("cores", [])
-            )
-            ids = [_text(value) for value in cable.get("logical_connection_ids", []) if _text(value)]
-            if logical_id not in ids:
-                ids.append(logical_id)
-            cable["logical_connection_ids"] = ids
+        )
+    # Parent logical IDs can occur on hidden panel-to-panel records only once;
+    # retain the routed/longest representation when malformed data duplicates it.
+    result: Dict[str, dict] = {}
+    for row in demands:
+        existing = result.get(row["id"])
+        score = (len(row["route_path"]), row["length_m"], int(bool(row["connection_id"])))
+        old_score = (len(existing["route_path"]), existing["length_m"], int(bool(existing["connection_id"]))) if existing else (-1, -1.0, -1)
+        if existing is None or score > old_score:
+            result[row["id"]] = row
+    return list(result.values())
+
+
+def _apply_cable_type(cable: dict, cable_type: dict, core_count: int) -> None:
+    cable["cable_type_id"] = _text(cable_type.get("id"))
+    cable["cable_type"] = _text(cable_type.get("name")) or _text(cable_type.get("fibre_standard")) or "OS2 fixed installation fibre"
+    cable["core_count"] = max(1, int(core_count))
+    cable["attenuation_db_per_m"] = max(0.0, _float(cable_type.get("attenuation_db_per_m"), 0.00035))
+    cable["connector_loss_db"] = max(0.0, _float(cable_type.get("connector_loss_db"), 0.5))
+    cable["reflection_loss_db"] = max(0.0, _float(cable_type.get("reflection_loss_db"), 55.0))
+    cable["minimum_return_loss_db"] = cable["reflection_loss_db"]
+    cable["splice_loss_db"] = max(0.0, _float(cable_type.get("splice_loss_db"), 0.1))
+    cable["wavelength_nm"] = max(0, _int(cable_type.get("wavelength_nm"), 1310))
+
+
+def update_fibre_cable_loss(cable: dict) -> dict:
+    cable["connector_count"] = max(0, _int(cable.get("connector_count")))
+    cable["splice_count"] = max(0, _int(cable.get("splice_count")))
+    cable["estimated_attenuation_db"] = round(
+        max(0.0, _float(cable.get("length_m")))
+        * max(0.0, _float(cable.get("attenuation_db_per_m"))),
+        6,
+    )
+    cable["estimated_connector_loss_db"] = round(
+        cable["connector_count"] * max(0.0, _float(cable.get("connector_loss_db"))), 6
+    )
+    cable["estimated_splice_loss_db"] = round(
+        cable["splice_count"] * max(0.0, _float(cable.get("splice_loss_db"))), 6
+    )
+    cable["estimated_total_loss_db"] = round(
+        cable["estimated_attenuation_db"]
+        + cable["estimated_connector_loss_db"]
+        + cable["estimated_splice_loss_db"],
+        6,
+    )
+    return cable
+
+
+def _designate_cable_cores(cable: dict, demands: Sequence[dict]) -> Dict[str, List[int]]:
+    cores = build_fibre_cores(max(1, _int(cable.get("core_count"))))
+    allocation: Dict[str, List[int]] = {}
+    cursor = 1
+    for demand in sorted(demands, key=lambda row: row["id"]):
+        count = max(1, _int(demand.get("used_cores"), 1))
+        numbers = list(range(cursor, min(cursor + count, len(cores) + 1)))
+        if len(numbers) != count:
+            raise ValueError(f"Cable {cable.get('id')} has insufficient cores for circuit {demand['id']}.")
+        allocation[demand["id"]] = numbers
+        for number in numbers:
+            core = cores[number - 1]
+            core["status"] = "allocated"
+            core["circuit_id"] = demand["id"]
+            core["from_termination"] = _text(cable.get("from_instance_id")) or _text(cable.get("from_location"))
+            core["to_termination"] = _text(cable.get("to_instance_id")) or _text(cable.get("to_location"))
+        cursor += count
+    cable["cores"] = cores
+    cable["core_designations"] = [
+        {"circuit_id": circuit_id, "core_numbers": numbers}
+        for circuit_id, numbers in sorted(allocation.items())
+    ]
+    return allocation
+
+
+def _new_fibre_cable(
+    data: dict,
+    cables: List[dict],
+    demands: Sequence[dict],
+    route_path: Sequence[str],
+    routing_role: str,
+    preferred_type_id: str,
+    required_cores: int,
+    *,
+    from_instance_id: str = "",
+    from_port: str = "",
+    to_instance_id: str = "",
+    to_port: str = "",
+    parent_cable_id: str = "",
+    branch_node_id: str = "",
+    from_method: str = "connectorised",
+    to_method: str = "connectorised",
+) -> Tuple[dict, Dict[str, List[int]]]:
+    cable_type = _select_fibre_cable_type(data, required_cores, preferred_type_id)
+    declared = max(required_cores, _int(cable_type.get("core_count"), required_cores))
+    logical_ids = sorted({_text(row.get("id")) for row in demands if _text(row.get("id"))})
+    fallback_length = max((_float(row.get("length_m")) for row in demands), default=0.0)
+    cable_id = next_record_id(cables, "FOC")
+    from_location = _record_location(data, from_instance_id)[0] if from_instance_id else (_text(route_path[0]) if route_path else "")
+    to_location = _record_location(data, to_instance_id)[0] if to_instance_id else (_text(route_path[-1]) if route_path else "")
+    cable = {
+        "id": cable_id,
+        "name": f"{routing_role.replace('_', ' ').title()} fibre {cable_id}",
+        "from_instance_id": from_instance_id,
+        "from_port": from_port,
+        "to_instance_id": to_instance_id,
+        "to_port": to_port,
+        "from_location": from_location,
+        "to_location": to_location,
+        "route_path": list(route_path),
+        "length_m": _route_path_length(data, route_path, fallback_length),
+        "slack_length_m": 0.0,
+        "logical_connection_ids": logical_ids,
+        "splice_ids": [],
+        "routing_role": routing_role,
+        "parent_cable_id": parent_cable_id,
+        "branch_node_id": branch_node_id,
+        "from_termination_method": from_method,
+        "to_termination_method": to_method,
+        "connector_count": int(from_method == "connectorised") + int(to_method == "connectorised"),
+        "splice_count": int(from_method == "spliced") + int(to_method == "spliced"),
+        "installation_status": "planned" if any(row.get("auto_generated") for row in demands) else "installed",
+        "owner": "",
+        "drawing_layer": "NET-FIBRE-CABLE",
+        "sheath_colour": _text(cable_type.get("sheath_colour")) or "Black",
+        "label": cable_id,
+        "notes": "Generated from designated logical fibre circuits.",
+        "auto_generated": any(bool(row.get("auto_generated")) for row in demands),
+    }
+    _apply_cable_type(cable, cable_type, declared)
+    allocation = _designate_cable_cores(cable, demands)
+    update_fibre_cable_loss(cable)
+    cables.append(cable)
+    return cable, allocation
+
+
+def _ensure_branch_enclosure(
+    data: dict,
+    node_name: str,
+    incoming_cable: dict,
+    max_splices_per_cassette: int,
+) -> Tuple[dict, List[dict]]:
+    nodes = data.setdefault("network_fibre_nodes", [])
+    point = _route_point_map(data).get(node_name, {})
+    enclosure = next(
+        (
+            row for row in nodes
+            if isinstance(row, dict)
+            and _text(row.get("node_type")) == "splice_enclosure"
+            and _text(row.get("route_anchor")) == node_name
+            and bool(row.get("auto_generated"))
+        ),
+        None,
+    )
+    if enclosure is None:
+        enclosure = {
+            "id": next_record_id(nodes, "FSE"),
+            "name": f"Splice enclosure at {node_name}",
+            "node_type": "splice_enclosure",
+            "location_name": node_name if _text(point.get("kind")) == "location" else "",
+            "floor": _int(point.get("floor")),
+            "x": _float(point.get("x")),
+            "y": _float(point.get("y")),
+            "rack_name": "",
+            "rack_start_u": 0,
+            "rack_units": 0,
+            "parent_node_id": "",
+            "linked_instance_id": "",
+            "route_anchor": node_name,
+            "incoming_cable_id": _text(incoming_cable.get("id")),
+            "splice_capacity": max(1, _int(incoming_cable.get("core_count"))),
+            "cassette_capacity": max(1, _int(incoming_cable.get("core_count"))),
+            "drawing_layer": "NET-FIBRE-NODE",
+            "symbol": "splice_enclosure",
+            "label": f"SE {node_name}",
+            "notes": "Auto-generated spine branch enclosure.",
+            "auto_generated": True,
+        }
+        nodes.append(enclosure)
+    required_trays = max(1, int(math.ceil(max(1, _int(incoming_cable.get("core_count"))) / max_splices_per_cassette)))
+    cassettes = [
+        row for row in nodes
+        if isinstance(row, dict)
+        and _text(row.get("node_type")) == "splice_cassette"
+        and _text(row.get("parent_node_id")) == _text(enclosure.get("id"))
+    ]
+    while len(cassettes) < required_trays:
+        tray_number = len(cassettes) + 1
+        cassette = {
+            "id": next_record_id(nodes, "FSC"),
+            "name": f"{enclosure['name']} tray {tray_number}",
+            "node_type": "splice_cassette",
+            "location_name": _text(enclosure.get("location_name")),
+            "floor": _int(enclosure.get("floor")),
+            "x": _float(enclosure.get("x")),
+            "y": _float(enclosure.get("y")),
+            "rack_name": "",
+            "rack_start_u": 0,
+            "rack_units": 0,
+            "parent_node_id": _text(enclosure.get("id")),
+            "linked_instance_id": "",
+            "route_anchor": node_name,
+            "incoming_cable_id": _text(incoming_cable.get("id")),
+            "tray_number": tray_number,
+            "max_splices_per_tray": max_splices_per_cassette,
+            "cassette_capacity": max_splices_per_cassette,
+            "splice_capacity": max_splices_per_cassette,
+            "drawing_layer": "NET-FIBRE-SPLICE",
+            "symbol": "splice_cassette",
+            "label": f"Tray {tray_number}",
+            "notes": "Maximum 24 splice positions per cassette tray.",
+            "auto_generated": True,
+        }
+        nodes.append(cassette)
+        cassettes.append(cassette)
+    cassettes.sort(key=lambda row: (_int(row.get("tray_number")), _text(row.get("id"))))
+    return enclosure, cassettes
+
+
+def _add_splice_record(
+    data: dict,
+    enclosure: dict,
+    cassette: dict,
+    incoming_cable: dict,
+    incoming_core: int,
+    outgoing_cable: Optional[dict],
+    outgoing_core: int,
+    circuit_id: str,
+    loss_db: float,
+    *,
+    pigtail: bool = False,
+    connectorised: bool = False,
+    termination_instance_id: str = "",
+    termination_port: str = "",
+) -> dict:
+    splices = data.setdefault("network_fibre_splices", [])
+    splice = {
+        "id": next_record_id(splices, "FS"),
+        "node_id": _text(enclosure.get("id")),
+        "cassette_id": _text(cassette.get("id")),
+        "incoming_cable_id": _text(incoming_cable.get("id")),
+        "incoming_core": incoming_core,
+        "outgoing_cable_id": _text((outgoing_cable or {}).get("id")),
+        "outgoing_core": max(1, outgoing_core),
+        "splice_type": "pigtail" if pigtail else ("connectorised" if connectorised else "fusion"),
+        "circuit_id": circuit_id,
+        "loss_db": max(0.0, loss_db),
+        "pigtail": bool(pigtail),
+        "connectorised": bool(connectorised),
+        "termination_instance_id": termination_instance_id,
+        "termination_port": termination_port,
+        "drawing_layer": "NET-FIBRE-SPLICE",
+        "label": "",
+        "notes": "Auto-generated designated fibre splice.",
+        "auto_generated": True,
+    }
+    splice["label"] = splice["id"]
+    splices.append(splice)
+    for cable in (incoming_cable, outgoing_cable):
+        if not cable:
+            continue
+        ids = [_text(value) for value in cable.get("splice_ids", []) if _text(value)]
+        if splice["id"] not in ids:
+            ids.append(splice["id"])
+        cable["splice_ids"] = ids
+        cable["splice_count"] = max(_int(cable.get("splice_count")), len(ids))
+        update_fibre_cable_loss(cable)
+    return splice
+
+
+def _sync_direct_fibre_cables(data: dict, cables: List[dict], demands: Sequence[dict]) -> List[dict]:
+    planning = data.get("network_settings", {}).get("physical_fibre_planning", {})
+    preferred = _text(planning.get("default_cable_type_id"))
+    spare = max(0.0, _float(planning.get("spare_core_percent"), 15.0)) / 100.0
+    created: List[dict] = []
+    assets = {_text(row.get("id")): row for row in data.get("network_assets", []) if isinstance(row, dict)}
+    instances = {_text(row.get("id")): row for row in data.get("network_asset_instances", []) if isinstance(row, dict)}
+    for demand in sorted(demands, key=lambda row: row["id"]):
+        required = max(demand["used_cores"], int(math.ceil(demand["used_cores"] * (1.0 + spare))))
+        target_asset = assets.get(_text(instances.get(demand["to_instance_id"], {}).get("asset_id")), {})
+        target_is_splitter = _text(target_asset.get("asset_type")) == "fibre_splitter"
+        to_method = _text(planning.get("splitter_termination_method")) if target_is_splitter else "connectorised"
+        cable, _allocation = _new_fibre_cable(
+            data, cables, [demand], demand["route_path"], "direct", preferred, required,
+            from_instance_id=demand["from_instance_id"], from_port=demand["from_port"],
+            to_instance_id=demand["to_instance_id"], to_port=demand["to_port"],
+            from_method="connectorised", to_method=to_method or "connectorised",
+        )
+        created.append(cable)
     return created
 
+
+def _sync_spine_and_spur_cables(data: dict, cables: List[dict], demands: Sequence[dict]) -> List[dict]:
+    planning = data.get("network_settings", {}).get("physical_fibre_planning", {})
+    spare = max(0.0, _float(planning.get("spare_core_percent"), 15.0)) / 100.0
+    max_per_tray = max(1, min(24, _int(planning.get("max_splices_per_cassette"), 24)))
+    branch_method = _text(planning.get("branch_termination_method")) or "spliced"
+    splitter_method = _text(planning.get("splitter_termination_method")) or "connectorised"
+    created: List[dict] = []
+    demand_by_id = {row["id"]: row for row in demands}
+    assets = {_text(row.get("id")): row for row in data.get("network_assets", []) if isinstance(row, dict)}
+    instances = {_text(row.get("id")): row for row in data.get("network_asset_instances", []) if isinstance(row, dict)}
+
+    grouped: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
+    direct_fallback: List[dict] = []
+    for demand in demands:
+        if len(demand["route_path"]) < 2:
+            direct_fallback.append(demand)
+            continue
+        grouped[(demand["from_instance_id"], demand["route_path"][0])].append(demand)
+
+    created.extend(_sync_direct_fibre_cables(data, cables, direct_fallback))
+    for (_source_instance_id, root), group in sorted(grouped.items()):
+        if len(group) < 2:
+            created.extend(_sync_direct_fibre_cables(data, cables, group))
+            continue
+        edge_demands: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
+        outgoing: Dict[str, Set[str]] = defaultdict(set)
+        incoming: Dict[str, Set[str]] = defaultdict(set)
+        destinations: Dict[str, Set[str]] = defaultdict(set)
+        for demand in group:
+            path = demand["route_path"]
+            destinations[path[-1]].add(demand["id"])
+            for a, b in zip(path, path[1:]):
+                edge_demands[(a, b)].add(demand["id"])
+                outgoing[a].add(b)
+                incoming[b].add(a)
+
+        segments: List[dict] = []
+        visited: Set[Tuple[str, str]] = set()
+
+        def walk(a: str, b: str) -> None:
+            if (a, b) in visited:
+                return
+            visited.add((a, b))
+            demand_ids = set(edge_demands[(a, b)])
+            path = [a, b]
+            current = b
+            while True:
+                candidates = sorted(outgoing.get(current, set()))
+                if len(candidates) != 1:
+                    break
+                nxt = candidates[0]
+                if (current, nxt) in visited or set(edge_demands[(current, nxt)]) != demand_ids:
+                    break
+                visited.add((current, nxt))
+                path.append(nxt)
+                current = nxt
+            segments.append({"path": path, "demand_ids": demand_ids})
+            for nxt in sorted(outgoing.get(current, set())):
+                walk(current, nxt)
+
+        for child in sorted(outgoing.get(root, set())):
+            walk(root, child)
+        for edge in sorted(edge_demands):
+            if edge not in visited:
+                walk(*edge)
+
+        segment_by_start: Dict[str, List[dict]] = defaultdict(list)
+        segment_by_end: Dict[str, List[dict]] = defaultdict(list)
+        for segment in segments:
+            segment_by_start[segment["path"][0]].append(segment)
+            segment_by_end[segment["path"][-1]].append(segment)
+
+        cable_for_segment: Dict[int, dict] = {}
+        allocation_for_segment: Dict[int, Dict[str, List[int]]] = {}
+        for index, segment in enumerate(segments):
+            segment_demands = [demand_by_id[value] for value in sorted(segment["demand_ids"])]
+            used = sum(row["used_cores"] for row in segment_demands)
+            required = max(used, int(math.ceil(used * (1.0 + spare))))
+            role = "spine" if len(segment["demand_ids"]) > 1 else "spur"
+            preferred = _text(planning.get("spine_cable_type_id" if role == "spine" else "spur_cable_type_id"))
+            first = segment["path"][0] == root
+            final_demands = [row for row in segment_demands if row["route_path"][-1] == segment["path"][-1]]
+            sole_final = final_demands[0] if len(final_demands) == 1 and len(segment["demand_ids"]) == 1 else None
+            target_asset = assets.get(_text(instances.get(_text((sole_final or {}).get("to_instance_id")), {}).get("asset_id")), {})
+            target_is_splitter = _text(target_asset.get("asset_type")) == "fibre_splitter"
+            to_method = splitter_method if target_is_splitter else ("connectorised" if sole_final else branch_method)
+            parent_cable_id = ""
+            parent_segments = segment_by_end.get(segment["path"][0], [])
+            if parent_segments:
+                parent_index = segments.index(parent_segments[0])
+                parent_cable_id = _text(cable_for_segment.get(parent_index, {}).get("id"))
+            cable, allocation = _new_fibre_cable(
+                data, cables, segment_demands, segment["path"], role, preferred, required,
+                from_instance_id=segment_demands[0]["from_instance_id"] if first else "",
+                from_port=segment_demands[0]["from_port"] if first else "",
+                to_instance_id=_text((sole_final or {}).get("to_instance_id")),
+                to_port=_text((sole_final or {}).get("to_port")),
+                parent_cable_id=parent_cable_id,
+                branch_node_id=segment["path"][0] if not first else "",
+                from_method="connectorised" if first else branch_method,
+                to_method=to_method,
+            )
+            cable_for_segment[index] = cable
+            allocation_for_segment[index] = allocation
+            created.append(cable)
+
+        # Map core designations through each branch. Every circuit is explicitly
+        # spliced from its incoming spine core to the designated outgoing core.
+        for node_name, parent_segments in sorted(segment_by_end.items()):
+            child_segments = segment_by_start.get(node_name, [])
+            if not child_segments:
+                continue
+            for parent_segment in parent_segments:
+                parent_index = segments.index(parent_segment)
+                parent_cable = cable_for_segment[parent_index]
+                enclosure, cassettes = _ensure_branch_enclosure(data, node_name, parent_cable, max_per_tray)
+                splice_position = 0
+                for child_segment in child_segments:
+                    child_index = segments.index(child_segment)
+                    child_cable = cable_for_segment[child_index]
+                    common_ids = sorted(parent_segment["demand_ids"] & child_segment["demand_ids"])
+                    for circuit_id in common_ids:
+                        in_numbers = allocation_for_segment[parent_index][circuit_id]
+                        out_numbers = allocation_for_segment[child_index][circuit_id]
+                        for in_core, out_core in zip(in_numbers, out_numbers):
+                            cassette = cassettes[min(len(cassettes) - 1, splice_position // max_per_tray)]
+                            _add_splice_record(
+                                data, enclosure, cassette, parent_cable, in_core,
+                                child_cable, out_core, circuit_id,
+                                _float(parent_cable.get("splice_loss_db"), 0.1),
+                            )
+                            splice_position += 1
+
+        # A spliced splitter termination uses a designated pigtail in the final
+        # cassette. Connectorised splitter spurs terminate directly and create no
+        # pigtail splice record.
+        if splitter_method == "spliced" and bool(planning.get("splitter_pigtail", True)):
+            for index, segment in enumerate(segments):
+                cable = cable_for_segment[index]
+                for circuit_id in sorted(segment["demand_ids"]):
+                    demand = demand_by_id[circuit_id]
+                    if demand["route_path"][-1] != segment["path"][-1]:
+                        continue
+                    target_instance = instances.get(demand["to_instance_id"], {})
+                    target_asset = assets.get(_text(target_instance.get("asset_id")), {})
+                    if _text(target_asset.get("asset_type")) != "fibre_splitter":
+                        continue
+                    enclosure, cassettes = _ensure_branch_enclosure(data, segment["path"][-1], cable, max_per_tray)
+                    for ordinal, in_core in enumerate(allocation_for_segment[index][circuit_id]):
+                        cassette = cassettes[min(len(cassettes) - 1, ordinal // max_per_tray)]
+                        _add_splice_record(
+                            data, enclosure, cassette, cable, in_core, None, 1,
+                            circuit_id, _float(cable.get("splice_loss_db"), 0.1),
+                            pigtail=True,
+                            termination_instance_id=demand["to_instance_id"],
+                            termination_port=demand["to_port"],
+                        )
+    return created
+
+
+def sync_fibre_cables_from_connections(data: dict, replace_auto: bool = False) -> List[dict]:
+    """Build designated fixed-installation fibre from logical connections.
+
+    ``direct`` creates one home-run cable per logical circuit. ``spine_and_spur``
+    constructs a routed trunk, reduces cable core count after each branch, creates
+    24-position cassette trays, and records every through-splice/pigtail so field
+    schedules can identify the exact cable, tube and core.
+    """
+    cables = data.setdefault("network_fibre_cables", [])
+    if replace_auto:
+        cables[:] = [item for item in cables if not bool(item.get("auto_generated"))]
+        data["network_fibre_nodes"] = [item for item in data.get("network_fibre_nodes", []) if not bool(item.get("auto_generated"))]
+        data["network_fibre_splices"] = [item for item in data.get("network_fibre_splices", []) if not bool(item.get("auto_generated"))]
+    demands = _fibre_connection_demands(data)
+    mode = _text(
+        data.get("network_settings", {})
+        .get("physical_fibre_planning", {})
+        .get("routing_mode")
+    ).lower()
+    if mode == "spine_and_spur":
+        created = _sync_spine_and_spur_cables(data, cables, demands)
+    else:
+        created = _sync_direct_fibre_cables(data, cables, demands)
+    set_core_status_from_splices(data)
+    calculate_optical_budgets(data)
+    return created
+
+
+def calculate_optical_budgets(data: dict) -> List[dict]:
+    """Calculate directed active-optic paths through passive fibre plant.
+
+    Cable attenuation, connector and splice losses are summed. Intermediate
+    passive insertion losses (for example splitters) are added. Return loss is
+    reported as the minimum declared value; it is not incorrectly added to the
+    forward attenuation total.
+    """
+    assets = {_text(row.get("id")): row for row in data.get("network_assets", []) if isinstance(row, dict)}
+    instances = {_text(row.get("id")): row for row in data.get("network_asset_instances", []) if isinstance(row, dict)}
+    cable_loss_by_connection: Dict[str, float] = defaultdict(float)
+    cable_ids_by_connection: Dict[str, List[str]] = defaultdict(list)
+    return_loss_by_connection: Dict[str, List[float]] = defaultdict(list)
+    for cable in data.get("network_fibre_cables", []):
+        if not isinstance(cable, dict):
+            continue
+        update_fibre_cable_loss(cable)
+        for connection_id in cable.get("logical_connection_ids", []):
+            cid = _text(connection_id)
+            if not cid:
+                continue
+            cable_loss_by_connection[cid] += max(0.0, _float(cable.get("estimated_total_loss_db")))
+            cable_ids_by_connection[cid].append(_text(cable.get("id")))
+            value = max(0.0, _float(cable.get("minimum_return_loss_db", cable.get("reflection_loss_db"))))
+            if value:
+                return_loss_by_connection[cid].append(value)
+
+    adjacency: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    logical_connections: Dict[str, dict] = {}
+    for connection in data.get("network_connections", []):
+        if not isinstance(connection, dict) or _text(connection.get("medium")).lower() != "fibre":
+            continue
+        if bool(connection.get("physical_connection")) or bool(connection.get("topology_hidden")):
+            continue
+        cid = _text(connection.get("id"))
+        a = _text(connection.get("from_instance_id")); b = _text(connection.get("to_instance_id"))
+        if not cid or a not in instances or b not in instances or a == b:
+            continue
+        logical_connections[cid] = connection
+        adjacency[a].append((b, cid)); adjacency[b].append((a, cid))
+
+    def optic_values(instance_id: str) -> Tuple[Optional[float], Optional[float], float, float]:
+        asset = assets.get(_text(instances.get(instance_id, {}).get("asset_id")), {})
+        return (
+            _optional_float(asset.get("optical_tx_power_dbm")),
+            _optional_float(asset.get("optical_receiver_sensitivity_dbm")),
+            max(0.0, _float(asset.get("optical_insertion_loss_db"))),
+            max(0.0, _float(asset.get("optical_return_loss_db"))),
+        )
+
+    optical_paths: List[dict] = []
+    seen: Set[Tuple[str, str, Tuple[str, ...]]] = set()
+    for source_id in sorted(instances):
+        tx, _source_rx, _source_loss, _source_return = optic_values(source_id)
+        if tx is None:
+            continue
+        queue = deque([(source_id, [], [source_id], 0.0, [], [])])
+        while queue and len(optical_paths) < 10000:
+            current, connection_ids, visited_instances, passive_loss, passive_returns, missing_properties = queue.popleft()
+            if len(connection_ids) > 32:
+                continue
+            for neighbour, cid in adjacency.get(current, []):
+                if neighbour in visited_instances:
+                    continue
+                next_connection_ids = connection_ids + [cid]
+                next_visited = visited_instances + [neighbour]
+                _n_tx, n_rx, n_loss, n_return = optic_values(neighbour)
+                asset = assets.get(_text(instances.get(neighbour, {}).get("asset_id")), {})
+                asset_type = _text(asset.get("asset_type")).lower()
+                passive = asset_type in {"fibre_splitter", "patch_panel"} or (
+                    n_rx is None and _n_tx is None and n_loss > 0.0
+                )
+                next_missing = list(missing_properties)
+                if passive:
+                    if _text(asset.get("optical_insertion_loss_db")) == "":
+                        next_missing.append(f"{_text(instances.get(neighbour, {}).get('name')) or neighbour} insertion loss")
+                    if _text(asset.get("optical_return_loss_db")) == "":
+                        next_missing.append(f"{_text(instances.get(neighbour, {}).get('name')) or neighbour} return loss")
+                next_passive_loss = passive_loss + (n_loss if passive else 0.0)
+                next_returns = passive_returns + ([n_return] if n_return else [])
+                if neighbour != source_id and n_rx is not None and not passive:
+                    key = (source_id, neighbour, tuple(next_connection_ids))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    cable_loss = sum(cable_loss_by_connection.get(value, 0.0) for value in next_connection_ids)
+                    total_loss = cable_loss + next_passive_loss
+                    available = tx - n_rx
+                    margin = available - total_loss
+                    return_values = list(next_returns)
+                    for value in next_connection_ids:
+                        return_values.extend(return_loss_by_connection.get(value, []))
+                    minimum_return = min(return_values) if return_values else 0.0
+                    path = {
+                        "id": f"OP{len(optical_paths) + 1}",
+                        "source_instance_id": source_id,
+                        "destination_instance_id": neighbour,
+                        "connection_ids": next_connection_ids,
+                        "fibre_cable_ids": sorted({cable_id for value in next_connection_ids for cable_id in cable_ids_by_connection.get(value, []) if cable_id}),
+                        "transmit_power_dbm": round(tx, 3),
+                        "receiver_sensitivity_dbm": round(n_rx, 3),
+                        "cable_loss_db": round(cable_loss, 6),
+                        "passive_loss_db": round(next_passive_loss, 6),
+                        "path_loss_db": round(total_loss, 6),
+                        "available_budget_db": round(available, 6),
+                        "margin_db": "" if next_missing else round(margin, 6),
+                        "minimum_return_loss_db": round(minimum_return, 3),
+                        "status": "unconfigured" if next_missing else ("pass" if margin >= 0.0 else "fail"),
+                        "missing_properties": ", ".join(dict.fromkeys(next_missing)),
+                        "notes": (
+                            "Optical budget cannot be verified until all passive loss values are configured."
+                            if next_missing
+                            else "Calculated from configured optic transmit power, receiver sensitivity and designated physical fibre losses."
+                        ),
+                    }
+                    optical_paths.append(path)
+                    continue
+                queue.append((neighbour, next_connection_ids, next_visited, next_passive_loss, next_returns, next_missing))
+
+    # Every logical fibre connection must participate in a calculable optical
+    # path.  Add explicit unconfigured records instead of silently omitting
+    # links whose active optics or passive insertion/return-loss data is absent.
+    covered_connection_ids = {
+        _text(cid)
+        for path in optical_paths
+        for cid in path.get("connection_ids", [])
+        if _text(cid)
+    }
+    passive_types = {"fibre_splitter", "patch_panel"}
+    for cid, connection in sorted(logical_connections.items()):
+        if cid in covered_connection_ids:
+            continue
+        source_id = _text(connection.get("from_instance_id"))
+        destination_id = _text(connection.get("to_instance_id"))
+        missing: List[str] = []
+        for instance_id, side in ((source_id, "source"), (destination_id, "destination")):
+            asset = assets.get(_text(instances.get(instance_id, {}).get("asset_id")), {})
+            asset_type = _text(asset.get("asset_type")).lower()
+            passive = asset_type in passive_types
+            if passive:
+                if _text(asset.get("optical_insertion_loss_db")) == "":
+                    missing.append(f"{side} passive insertion loss")
+                if _text(asset.get("optical_return_loss_db")) == "":
+                    missing.append(f"{side} passive return loss")
+            else:
+                if _text(asset.get("optical_tx_power_dbm")) == "":
+                    missing.append(f"{side} transmit power")
+                if _text(asset.get("optical_receiver_sensitivity_dbm")) == "":
+                    missing.append(f"{side} receiver sensitivity")
+        cable_loss = cable_loss_by_connection.get(cid, 0.0)
+        return_values = return_loss_by_connection.get(cid, [])
+        optical_paths.append({
+            "id": f"OP{len(optical_paths) + 1}",
+            "source_instance_id": source_id,
+            "destination_instance_id": destination_id,
+            "connection_ids": [cid],
+            "fibre_cable_ids": sorted({value for value in cable_ids_by_connection.get(cid, []) if value}),
+            "transmit_power_dbm": "",
+            "receiver_sensitivity_dbm": "",
+            "cable_loss_db": round(cable_loss, 6),
+            "passive_loss_db": 0.0,
+            "path_loss_db": round(cable_loss, 6),
+            "available_budget_db": "",
+            "margin_db": "",
+            "minimum_return_loss_db": round(min(return_values), 3) if return_values else 0.0,
+            "status": "unconfigured",
+            "missing_properties": ", ".join(missing) or "complete active optical path",
+            "notes": "Optical budget cannot be verified until the listed optic/passive properties are configured.",
+        })
+
+    data["network_optical_paths"] = optical_paths
+    margins_by_connection: Dict[str, List[float]] = defaultdict(list)
+    for path in optical_paths:
+        if _text(path.get("status")).lower() not in {"pass", "fail"} or _text(path.get("margin_db")) == "":
+            continue
+        for cid in path.get("connection_ids", []):
+            margins_by_connection[_text(cid)].append(_float(path.get("margin_db")))
+    for cid, connection in logical_connections.items():
+        margins = margins_by_connection.get(cid, [])
+        connection["optical_budget_status"] = (
+            "unconfigured" if not margins else ("pass" if min(margins) >= 0.0 else "fail")
+        )
+        connection["optical_minimum_margin_db"] = round(min(margins), 6) if margins else ""
+    return optical_paths
 
 def circuit_trace(data: dict, connection_id: str) -> dict:
     """Return all logical and physical records participating in a circuit."""
@@ -594,12 +1277,18 @@ def sync_fibre_nodes_from_design(data: dict, replace_auto: bool = False) -> List
 def ensure_physical_fibre_for_design(data: dict, replace_auto: bool = False) -> dict:
     """Synchronise logical fibre links into the separate physical-fibre layer."""
     created_cables = sync_fibre_cables_from_connections(data, replace_auto=replace_auto)
-    created_nodes = sync_fibre_nodes_from_design(data, replace_auto=replace_auto)
+    # The cable planner creates branch enclosures and cassette trays.  It has
+    # already cleared stale auto-generated nodes when requested, so the endpoint
+    # termination pass must preserve the newly created branch plant.
+    created_nodes = sync_fibre_nodes_from_design(data, replace_auto=False)
+    optical_paths = calculate_optical_budgets(data)
     return {
         "created_cables": len(created_cables),
         "created_nodes": len(created_nodes),
         "cable_count": len(data.get("network_fibre_cables", [])),
         "node_count": len(data.get("network_fibre_nodes", [])),
+        "optical_path_count": len(optical_paths),
+        "optical_path_failures": len([row for row in optical_paths if _text(row.get("status")) == "fail"]),
     }
 
 

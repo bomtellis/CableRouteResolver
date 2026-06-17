@@ -8,6 +8,111 @@ from typing import Dict, Iterable, List, Optional
 
 from network_services import FIBRE_COLOURS, build_fibre_cores, fibre_layer_defaults, set_core_status_from_splices
 
+
+NETWORK_SCHEMA_VERSION = 2
+
+
+DEFAULT_FIBRE_CABLE_TYPES = [
+    {
+        "id": "OS2-2F",
+        "name": "OS2 2-core fixed installation cable",
+        "fibre_standard": "OS2",
+        "core_count": 2,
+        "attenuation_db_per_m": 0.00035,
+        "connector_loss_db": 0.5,
+        "reflection_loss_db": 55.0,
+        "splice_loss_db": 0.1,
+        "wavelength_nm": 1310,
+        "notes": "Editable planning default for point-to-point and final spur fibre.",
+    },
+    {
+        "id": "OS2-4F",
+        "name": "OS2 4-core fixed installation cable",
+        "fibre_standard": "OS2",
+        "core_count": 4,
+        "attenuation_db_per_m": 0.00035,
+        "connector_loss_db": 0.5,
+        "reflection_loss_db": 55.0,
+        "splice_loss_db": 0.1,
+        "wavelength_nm": 1310,
+        "notes": "Editable planning default for reduced-count branch fibre.",
+    },
+    {
+        "id": "OS2-8F",
+        "name": "OS2 8-core fixed installation cable",
+        "fibre_standard": "OS2",
+        "core_count": 8,
+        "attenuation_db_per_m": 0.00035,
+        "connector_loss_db": 0.5,
+        "reflection_loss_db": 55.0,
+        "splice_loss_db": 0.1,
+        "wavelength_nm": 1310,
+        "notes": "Editable planning default for reduced-count branch fibre.",
+    },
+    {
+        "id": "OS2-12F",
+        "name": "OS2 12-core fixed installation cable",
+        "fibre_standard": "OS2",
+        "core_count": 12,
+        "attenuation_db_per_m": 0.00035,
+        "connector_loss_db": 0.5,
+        "reflection_loss_db": 55.0,
+        "splice_loss_db": 0.1,
+        "wavelength_nm": 1310,
+        "notes": "Editable planning default for fixed installation single-mode fibre.",
+    },
+    {
+        "id": "OS2-24F",
+        "name": "OS2 24-core fixed installation cable",
+        "fibre_standard": "OS2",
+        "core_count": 24,
+        "attenuation_db_per_m": 0.00035,
+        "connector_loss_db": 0.5,
+        "reflection_loss_db": 55.0,
+        "splice_loss_db": 0.1,
+        "wavelength_nm": 1310,
+        "notes": "Editable planning default for fixed installation single-mode fibre.",
+    },
+    {
+        "id": "OS2-48F",
+        "name": "OS2 48-core fixed installation cable",
+        "fibre_standard": "OS2",
+        "core_count": 48,
+        "attenuation_db_per_m": 0.00035,
+        "connector_loss_db": 0.5,
+        "reflection_loss_db": 55.0,
+        "splice_loss_db": 0.1,
+        "wavelength_nm": 1310,
+        "notes": "Editable planning default for spine fibre routes.",
+    },
+    {
+        "id": "OS2-96F",
+        "name": "OS2 96-core fixed installation cable",
+        "fibre_standard": "OS2",
+        "core_count": 96,
+        "attenuation_db_per_m": 0.00035,
+        "connector_loss_db": 0.5,
+        "reflection_loss_db": 55.0,
+        "splice_loss_db": 0.1,
+        "wavelength_nm": 1310,
+        "notes": "Editable planning default for high-capacity spine fibre routes.",
+    },
+]
+
+
+def default_physical_fibre_planning() -> dict:
+    return {
+        "routing_mode": "direct",
+        "default_cable_type_id": "OS2-2F",
+        "spine_cable_type_id": "OS2-48F",
+        "spur_cable_type_id": "OS2-2F",
+        "branch_termination_method": "spliced",
+        "splitter_termination_method": "connectorised",
+        "max_splices_per_cassette": 24,
+        "spare_core_percent": 15.0,
+        "splitter_pigtail": True,
+    }
+
 NETWORK_DEFAULTS = {
     "network_settings": {
         "technology": "Traditional",
@@ -24,6 +129,8 @@ NETWORK_DEFAULTS = {
         "polan_max_onts_per_splitter": 8,
         "polan_max_splitter_ont_route_m": 120.0,
         "polan_olt_failover": True,
+        "external_network_redundancy": True,
+        "external_network_link_count": 2,
         "default_poe_power_w": 0.0,
         "default_expected_bandwidth_mbps": 0.0,
         "default_expected_packet_rate_pps": 0.0,
@@ -32,6 +139,7 @@ NETWORK_DEFAULTS = {
         "default_fibre_core_count": 12,
         "ip_plan_base_cidr": "10.0.0.0/8",
         "physical_fibre_layer": fibre_layer_defaults(),
+        "physical_fibre_planning": default_physical_fibre_planning(),
     },
     "network_assets": [],
     "network_asset_instances": [],
@@ -44,6 +152,8 @@ NETWORK_DEFAULTS = {
     "network_routes": [],
     "network_ip_allocations": [],
     "network_external_networks": [],
+    "network_optical_paths": [],
+    "network_fibre_cable_types": deepcopy(DEFAULT_FIBRE_CABLE_TYPES),
     "network_fibre_cables": [],
     "network_fibre_nodes": [],
     "network_fibre_splices": [],
@@ -326,8 +436,14 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("traditional_max_copper_m", 90.0)
     settings.setdefault("polan_max_ont_copper_m", 30.0)
     settings.setdefault("polan_max_onts_per_splitter", 8)
+    # Migrate the retired pre-v2 key before applying the canonical default.
+    legacy_splitter_route = settings.pop("polan_max_splitter_to_ont_m", None)
+    if "polan_max_splitter_ont_route_m" not in settings and legacy_splitter_route is not None:
+        settings["polan_max_splitter_ont_route_m"] = legacy_splitter_route
     settings.setdefault("polan_max_splitter_ont_route_m", 120.0)
     settings.setdefault("polan_olt_failover", True)
+    settings.setdefault("external_network_redundancy", True)
+    settings.setdefault("external_network_link_count", 2)
     settings.setdefault("default_poe_power_w", 0.0)
     settings.setdefault("default_expected_bandwidth_mbps", 0.0)
     settings.setdefault("default_expected_packet_rate_pps", 0.0)
@@ -336,6 +452,7 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("default_fibre_core_count", 12)
     settings.setdefault("ip_plan_base_cidr", "10.0.0.0/8")
     settings.setdefault("physical_fibre_layer", fibre_layer_defaults())
+    settings.setdefault("physical_fibre_planning", default_physical_fibre_planning())
     technology = _text(settings.get("technology")) or "Traditional"
     settings["technology"] = "PoLAN" if technology.lower() == "polan" else "Traditional"
     settings["expected_mer_count"] = max(
@@ -377,6 +494,8 @@ def ensure_network_schema(data: dict) -> dict:
         0.0, _as_float(settings.get("polan_max_splitter_ont_route_m"), 120.0)
     )
     settings["polan_olt_failover"] = bool(settings.get("polan_olt_failover", True))
+    settings["external_network_redundancy"] = bool(settings.get("external_network_redundancy", True))
+    settings["external_network_link_count"] = max(1, min(8, _as_int(settings.get("external_network_link_count"), 2)))
     settings["default_poe_power_w"] = max(
         0.0, _as_float(settings.get("default_poe_power_w"), 0.0)
     )
@@ -410,6 +529,29 @@ def ensure_network_schema(data: dict) -> dict:
         0.2, min(2.0, _as_float(merged_layer_settings.get("cable_width_scale"), 0.55))
     )
     settings["physical_fibre_layer"] = merged_layer_settings
+    raw_fibre_planning = settings.get("physical_fibre_planning")
+    if not isinstance(raw_fibre_planning, dict):
+        raw_fibre_planning = {}
+    fibre_planning = default_physical_fibre_planning()
+    fibre_planning.update(raw_fibre_planning)
+    mode = _text(fibre_planning.get("routing_mode")).lower()
+    fibre_planning["routing_mode"] = mode if mode in {"direct", "spine_and_spur"} else "direct"
+    for field, fallback in (
+        ("default_cable_type_id", "OS2-12F"),
+        ("spine_cable_type_id", "OS2-48F"),
+        ("spur_cable_type_id", "OS2-12F"),
+    ):
+        fibre_planning[field] = _text(fibre_planning.get(field)) or fallback
+    for field, fallback in (
+        ("branch_termination_method", "spliced"),
+        ("splitter_termination_method", "connectorised"),
+    ):
+        value = _text(fibre_planning.get(field)).lower()
+        fibre_planning[field] = value if value in {"spliced", "connectorised"} else fallback
+    fibre_planning["max_splices_per_cassette"] = max(1, min(24, _as_int(fibre_planning.get("max_splices_per_cassette"), 24)))
+    fibre_planning["spare_core_percent"] = max(0.0, min(200.0, _as_float(fibre_planning.get("spare_core_percent"), 15.0)))
+    fibre_planning["splitter_pigtail"] = bool(fibre_planning.get("splitter_pigtail", True))
+    settings["physical_fibre_planning"] = fibre_planning
     if not isinstance(settings.get("poe_power_defaults"), dict):
         settings["poe_power_defaults"] = {}
 
@@ -425,6 +567,8 @@ def ensure_network_schema(data: dict) -> dict:
         "network_routes",
         "network_ip_allocations",
         "network_external_networks",
+        "network_optical_paths",
+        "network_fibre_cable_types",
         "network_fibre_cables",
         "network_fibre_nodes",
         "network_fibre_splices",
@@ -549,6 +693,16 @@ def ensure_network_schema(data: dict) -> dict:
         ):
             value = _text(asset.get(field)).lower() or default
             asset[field] = value if value in NETWORK_MEDIA else default
+        # Optical characteristics are asset-level defaults. Blank values mean
+        # the optic has not yet been configured and are not silently treated as 0 dBm.
+        for field in ("optical_tx_power_dbm", "optical_receiver_sensitivity_dbm"):
+            value = asset.get(field, "")
+            asset[field] = "" if _text(value) == "" else _as_float(value)
+        for field in ("optical_insertion_loss_db", "optical_return_loss_db"):
+            value = asset.get(field, "")
+            asset[field] = "" if _text(value) == "" else max(0.0, _as_float(value))
+        asset["optical_wavelength_nm"] = max(0, _as_int(asset.get("optical_wavelength_nm"), 0))
+        asset.setdefault("optical_standard", "")
         asset.setdefault("notes", "")
 
         # Structured physical ports are authoritative. Fibre splitters use a
@@ -573,6 +727,11 @@ def ensure_network_schema(data: dict) -> dict:
                     "port_use": port_use if port_use in NETWORK_PORT_USES else "other",
                     "name_prefix": _text(row.get("name_prefix")),
                     "explicit_names": [_text(value) for value in names if _text(value)],
+                    "transmit_power_dbm": "" if _text(row.get("transmit_power_dbm")) == "" else _as_float(row.get("transmit_power_dbm")),
+                    "receiver_sensitivity_dbm": "" if _text(row.get("receiver_sensitivity_dbm")) == "" else _as_float(row.get("receiver_sensitivity_dbm")),
+                    "insertion_loss_db": "" if _text(row.get("insertion_loss_db")) == "" else max(0.0, _as_float(row.get("insertion_loss_db"))),
+                    "return_loss_db": "" if _text(row.get("return_loss_db")) == "" else max(0.0, _as_float(row.get("return_loss_db"))),
+                    "wavelength_nm": max(0, _as_int(row.get("wavelength_nm"), 0)),
                 }
             )
         port_definitions = [row for row in port_definitions if row["port_count"] > 0]
@@ -911,10 +1070,16 @@ def ensure_network_schema(data: dict) -> dict:
     for external in data["network_external_networks"]:
         if not isinstance(external, dict):
             continue
-        for field in ("id", "name", "network_type", "provider", "asn", "location_name", "demarcation_instance_id", "notes"):
+        for field in ("id", "name", "network_type", "provider", "asn", "location_name", "demarcation_instance_id", "notes", "service_type"):
             external.setdefault(field, "")
         external["prefixes"] = _normalise_string_list(external.get("prefixes", []))
         external["peer_instance_ids"] = _normalise_string_list(external.get("peer_instance_ids", []))
+        external["redundant"] = bool(external.get("redundant", settings.get("external_network_redundancy", True)))
+        external["required_links"] = max(1, min(8, _as_int(external.get("required_links"), settings.get("external_network_link_count", 2) if external["redundant"] else 1)))
+        external["medium"] = _text(external.get("medium")).lower() or "fibre"
+        if external["medium"] not in {"fibre", "copper", "wireless"}:
+            external["medium"] = "fibre"
+        external["bandwidth_mbps"] = max(0.0, _as_float(external.get("bandwidth_mbps")))
 
     for node in data["network_fibre_nodes"]:
         if not isinstance(node, dict):
@@ -931,7 +1096,45 @@ def ensure_network_schema(data: dict) -> dict:
         node["drawing_layer"] = _text(node.get("drawing_layer")) or settings["physical_fibre_layer"]["node_layer"]
         node["symbol"] = _text(node.get("symbol")) or node.get("node_type", "fibre_joint")
         node["label"] = _text(node.get("label")) or _text(node.get("name"))
+        node["tray_number"] = max(0, _as_int(node.get("tray_number")))
+        node["max_splices_per_tray"] = max(1, min(24, _as_int(node.get("max_splices_per_tray"), 24)))
+        node["incoming_cable_id"] = _text(node.get("incoming_cable_id"))
         node["auto_generated"] = bool(node.get("auto_generated", False))
+
+    # Fixed-installation fibre cable definitions are reusable planner inputs.
+    if not data.get("network_fibre_cable_types"):
+        data["network_fibre_cable_types"] = deepcopy(DEFAULT_FIBRE_CABLE_TYPES)
+    normalised_cable_types = []
+    seen_cable_type_ids = set()
+    for index, cable_type in enumerate(data.get("network_fibre_cable_types", []), start=1):
+        if not isinstance(cable_type, dict):
+            continue
+        type_id = _text(cable_type.get("id")) or f"FCT{index}"
+        if type_id in seen_cable_type_ids:
+            suffix = 2
+            while f"{type_id}-{suffix}" in seen_cable_type_ids:
+                suffix += 1
+            type_id = f"{type_id}-{suffix}"
+        seen_cable_type_ids.add(type_id)
+        normalised_cable_types.append({
+            **cable_type,
+            "id": type_id,
+            "name": _text(cable_type.get("name")) or type_id,
+            "fibre_standard": _text(cable_type.get("fibre_standard")) or _text(cable_type.get("cable_type")) or "OS2",
+            "core_count": max(1, _as_int(cable_type.get("core_count"), 12)),
+            "attenuation_db_per_m": max(0.0, _as_float(cable_type.get("attenuation_db_per_m"), 0.00035)),
+            "connector_loss_db": max(0.0, _as_float(cable_type.get("connector_loss_db"), 0.5)),
+            "reflection_loss_db": max(0.0, _as_float(cable_type.get("reflection_loss_db"), 55.0)),
+            "splice_loss_db": max(0.0, _as_float(cable_type.get("splice_loss_db"), 0.1)),
+            "wavelength_nm": max(0, _as_int(cable_type.get("wavelength_nm"), 1310)),
+            "manufacturer": _text(cable_type.get("manufacturer")),
+            "model": _text(cable_type.get("model")),
+            "construction": _text(cable_type.get("construction")),
+            "sheath_type": _text(cable_type.get("sheath_type")),
+            "notes": _text(cable_type.get("notes")),
+        })
+    data["network_fibre_cable_types"] = normalised_cable_types or deepcopy(DEFAULT_FIBRE_CABLE_TYPES)
+    cable_types_by_id = {_text(row.get("id")): row for row in data["network_fibre_cable_types"]}
 
     for cable in data["network_fibre_cables"]:
         if not isinstance(cable, dict):
@@ -947,21 +1150,68 @@ def ensure_network_schema(data: dict) -> dict:
         cable["drawing_layer"] = _text(cable.get("drawing_layer")) or settings["physical_fibre_layer"]["cable_layer"]
         cable["sheath_colour"] = _text(cable.get("sheath_colour")) or "Black"
         cable["label"] = _text(cable.get("label")) or _text(cable.get("name"))
-        cable["core_count"] = max(1, _as_int(cable.get("core_count"), settings["default_fibre_core_count"]))
+        cable_type_id = _text(cable.get("cable_type_id"))
+        cable_type = cable_types_by_id.get(cable_type_id, {})
+        cable["cable_type_id"] = cable_type_id
+        cable["core_count"] = max(1, _as_int(cable.get("core_count"), _as_int(cable_type.get("core_count"), settings["default_fibre_core_count"])))
+        cable["cable_type"] = _text(cable.get("cable_type")) or _text(cable_type.get("name")) or _text(cable_type.get("fibre_standard")) or "OS2 single-mode fibre"
+        cable["attenuation_db_per_m"] = max(0.0, _as_float(cable.get("attenuation_db_per_m"), _as_float(cable_type.get("attenuation_db_per_m"), 0.00035)))
+        cable["connector_loss_db"] = max(0.0, _as_float(cable.get("connector_loss_db"), _as_float(cable_type.get("connector_loss_db"), 0.5)))
+        cable["reflection_loss_db"] = max(0.0, _as_float(cable.get("reflection_loss_db"), _as_float(cable_type.get("reflection_loss_db"), 55.0)))
+        cable["splice_loss_db"] = max(0.0, _as_float(cable.get("splice_loss_db"), _as_float(cable_type.get("splice_loss_db"), 0.1)))
+        cable["wavelength_nm"] = max(0, _as_int(cable.get("wavelength_nm"), _as_int(cable_type.get("wavelength_nm"), 1310)))
+        cable["routing_role"] = _text(cable.get("routing_role")) or "direct"
+        cable["parent_cable_id"] = _text(cable.get("parent_cable_id"))
+        cable["branch_node_id"] = _text(cable.get("branch_node_id"))
+        cable["from_termination_method"] = _text(cable.get("from_termination_method")) or "connectorised"
+        cable["to_termination_method"] = _text(cable.get("to_termination_method")) or "connectorised"
+        cable["connector_count"] = max(0, _as_int(cable.get("connector_count"), int(cable["from_termination_method"] == "connectorised") + int(cable["to_termination_method"] == "connectorised")))
+        cable["splice_count"] = max(0, _as_int(cable.get("splice_count")))
+        cable["estimated_attenuation_db"] = round(cable["length_m"] * cable["attenuation_db_per_m"], 6)
+        cable["estimated_connector_loss_db"] = round(cable["connector_count"] * cable["connector_loss_db"], 6)
+        cable["estimated_splice_loss_db"] = round(cable["splice_count"] * cable["splice_loss_db"], 6)
+        cable["estimated_total_loss_db"] = round(cable["estimated_attenuation_db"] + cable["estimated_connector_loss_db"] + cable["estimated_splice_loss_db"], 6)
+        cable["minimum_return_loss_db"] = max(0.0, _as_float(cable.get("minimum_return_loss_db"), cable["reflection_loss_db"]))
         cable["cores"] = build_fibre_cores(cable["core_count"], 0, "", cable.get("cores", []))
         cable["auto_generated"] = bool(cable.get("auto_generated", False))
 
     for splice in data["network_fibre_splices"]:
         if not isinstance(splice, dict):
             continue
-        for field in ("id", "node_id", "cassette_id", "incoming_cable_id", "outgoing_cable_id", "splice_type", "circuit_id", "drawing_layer", "label", "loss_db", "notes"):
+        for field in ("id", "node_id", "cassette_id", "incoming_cable_id", "outgoing_cable_id", "splice_type", "circuit_id", "drawing_layer", "label", "loss_db", "notes", "termination_instance_id", "termination_port"):
             splice.setdefault(field, "")
         splice["incoming_core"] = max(1, _as_int(splice.get("incoming_core"), 1))
         splice["outgoing_core"] = max(1, _as_int(splice.get("outgoing_core"), 1))
         splice["loss_db"] = max(0.0, _as_float(splice.get("loss_db"), 0.1))
+        splice["pigtail"] = bool(splice.get("pigtail", False))
+        splice["connectorised"] = bool(splice.get("connectorised", False))
         splice["drawing_layer"] = _text(splice.get("drawing_layer")) or settings["physical_fibre_layer"]["splice_layer"]
         splice["label"] = _text(splice.get("label")) or _text(splice.get("id"))
         splice["auto_generated"] = bool(splice.get("auto_generated", False))
+
+    normalised_optical_paths = []
+    for path in data.get("network_optical_paths", []):
+        if not isinstance(path, dict):
+            continue
+        normalised_optical_paths.append({
+            **path,
+            "id": _text(path.get("id")),
+            "source_instance_id": _text(path.get("source_instance_id")),
+            "destination_instance_id": _text(path.get("destination_instance_id")),
+            "connection_ids": _normalise_string_list(path.get("connection_ids", [])),
+            "fibre_cable_ids": _normalise_string_list(path.get("fibre_cable_ids", [])),
+            "transmit_power_dbm": "" if _text(path.get("transmit_power_dbm")) == "" else _as_float(path.get("transmit_power_dbm")),
+            "receiver_sensitivity_dbm": "" if _text(path.get("receiver_sensitivity_dbm")) == "" else _as_float(path.get("receiver_sensitivity_dbm")),
+            "path_loss_db": max(0.0, _as_float(path.get("path_loss_db"))),
+            "available_budget_db": "" if _text(path.get("available_budget_db")) == "" else _as_float(path.get("available_budget_db")),
+            "margin_db": "" if _text(path.get("margin_db")) == "" else _as_float(path.get("margin_db")),
+            "minimum_return_loss_db": max(0.0, _as_float(path.get("minimum_return_loss_db"))),
+            "status": _text(path.get("status")) or "unconfigured",
+            "missing_properties": _text(path.get("missing_properties")),
+            "notes": _text(path.get("notes")),
+        })
+    data["network_optical_paths"] = normalised_optical_paths
+    data["network_schema_version"] = NETWORK_SCHEMA_VERSION
 
     set_core_status_from_splices(data)
     return data
@@ -1065,6 +1315,7 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     validate_unique_id("network_routes", "Network route")
     validate_unique_id("network_ip_allocations", "IP allocation")
     validate_unique_id("network_external_networks", "External network")
+    fibre_cable_type_ids = validate_unique_id("network_fibre_cable_types", "Fibre cable type")
     fibre_cable_ids = validate_unique_id("network_fibre_cables", "Fibre cable")
     fibre_node_ids = validate_unique_id("network_fibre_nodes", "Fibre node")
     fibre_splice_ids = validate_unique_id("network_fibre_splices", "Fibre splice")
@@ -1083,6 +1334,18 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         _text(item.get("id")): item
         for item in data.get("network_asset_instances", [])
         if isinstance(item, dict) and _text(item.get("id"))
+    }
+    fibre_connected_instance_ids = {
+        _text(connection.get(key))
+        for connection in data.get("network_connections", [])
+        if isinstance(connection, dict) and _text(connection.get("medium")).lower() == "fibre"
+        for key in ("from_instance_id", "to_instance_id")
+        if _text(connection.get(key))
+    }
+    fibre_connected_asset_ids = {
+        _text(instances_by_id.get(instance_id, {}).get("asset_id"))
+        for instance_id in fibre_connected_instance_ids
+        if _text(instances_by_id.get(instance_id, {}).get("asset_id"))
     }
 
     for asset in data.get("network_assets", []):
@@ -1115,6 +1378,20 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             messages.append(
                 f"Wireless access point {asset_id} requires at least one frequency."
             )
+        if asset_id in fibre_connected_asset_ids:
+            is_passive_optic = asset_type == "fibre_splitter" or (
+                asset_type == "patch_panel" and _text(asset.get("patch_panel_type")).lower() == "fibre"
+            )
+            if is_passive_optic:
+                if _text(asset.get("optical_insertion_loss_db")) == "":
+                    messages.append(f"Passive optical asset {asset_id} requires insertion loss in dB.")
+                if _text(asset.get("optical_return_loss_db")) == "":
+                    messages.append(f"Passive optical asset {asset_id} requires return loss in dB.")
+            else:
+                if _text(asset.get("optical_tx_power_dbm")) == "":
+                    messages.append(f"Active optical asset {asset_id} requires transmit power in dBm.")
+                if _text(asset.get("optical_receiver_sensitivity_dbm")) == "":
+                    messages.append(f"Active optical asset {asset_id} requires receiver sensitivity in dBm.")
 
     seen_rack_ids: set[str] = set()
     seen_rack_names: set[tuple[int, str, str]] = set()
@@ -1559,6 +1836,13 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             messages.append(f"Advisory: fibre cable {cable_id} has no graph route path.")
         if not _text(cable.get("drawing_layer")):
             messages.append(f"Fibre cable {cable_id} has no physical drawing layer.")
+        cable_type_id = _text(cable.get("cable_type_id"))
+        if cable_type_id and cable_type_id not in fibre_cable_type_ids:
+            messages.append(f"Fibre cable {cable_id} references missing cable type {cable_type_id!r}.")
+        if _as_float(cable.get("attenuation_db_per_m")) <= 0.0:
+            messages.append(f"Fibre cable {cable_id} requires a positive attenuation value in dB/m.")
+        if _text(cable.get("reflection_loss_db")) == "":
+            messages.append(f"Fibre cable {cable_id} requires a configured reflection/return-loss value.")
         for field in ("from_instance_id", "to_instance_id"):
             endpoint_id = _text(cable.get(field))
             if endpoint_id and endpoint_id not in instance_ids:
@@ -1610,10 +1894,27 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             messages.append(f"Fibre splice {splice_id} references a missing incoming cable.")
         elif _as_int(splice.get("incoming_core")) > _as_int(incoming.get("core_count")):
             messages.append(f"Fibre splice {splice_id} incoming core exceeds cable capacity.")
-        if outgoing is None:
-            messages.append(f"Fibre splice {splice_id} references a missing outgoing cable.")
-        elif _as_int(splice.get("outgoing_core")) > _as_int(outgoing.get("core_count")):
+        termination_instance_id = _text(splice.get("termination_instance_id"))
+        if outgoing is None and not termination_instance_id:
+            messages.append(f"Fibre splice {splice_id} references a missing outgoing cable or termination.")
+        elif outgoing is not None and _as_int(splice.get("outgoing_core")) > _as_int(outgoing.get("core_count")):
             messages.append(f"Fibre splice {splice_id} outgoing core exceeds cable capacity.")
+        if termination_instance_id and termination_instance_id not in instance_ids:
+            messages.append(f"Fibre splice {splice_id} references missing termination instance {termination_instance_id!r}.")
+
+    for optical_path in data.get("network_optical_paths", []):
+        if not isinstance(optical_path, dict):
+            continue
+        path_id = _text(optical_path.get("id")) or "(unnamed)"
+        status = _text(optical_path.get("status")).lower()
+        if status == "fail":
+            messages.append(
+                f"Optical path {path_id} fails its light budget with margin "
+                f"{_as_float(optical_path.get('margin_db')):.3f} dB."
+            )
+        elif status == "unconfigured":
+            missing = _text(optical_path.get("missing_properties")) or "optic/passive properties"
+            messages.append(f"Optical path {path_id} is unconfigured: {missing}.")
 
     vlan_numbers: set[int] = set()
     for vlan in data.get("network_vlans", []):

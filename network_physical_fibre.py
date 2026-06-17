@@ -13,9 +13,24 @@ from PySide6.QtWidgets import (
     QMenu, QMessageBox, QPushButton, QToolButton, QVBoxLayout, QWidget,
 )
 
-from network_fibre_dialogs import FibreCableEditorDialog, FibreNodeEditorDialog, FibreSpliceEditorDialog
+from network_fibre_dialogs import (
+    FibreCableEditorDialog,
+    FibreCableTypeLibraryDialog,
+    FibreNodeEditorDialog,
+    FibreSpliceEditorDialog,
+    OpticalPropertiesDialog,
+    PhysicalFibrePlanningDialog,
+    SpliceCassetteViewDialog,
+)
 from network_schema import ensure_network_schema, next_network_id
-from network_services import cable_core_statistics, cable_route_points, circuit_trace, set_core_status_from_splices, splice_arrangement_rows
+from network_services import (
+    cable_core_statistics,
+    cable_route_points,
+    calculate_optical_budgets,
+    circuit_trace,
+    set_core_status_from_splices,
+    splice_arrangement_rows,
+)
 
 
 def _text(value) -> str:
@@ -117,7 +132,13 @@ class FibreCableItem(QGraphicsPathItem):
         self.setFlags(QGraphicsItem.ItemIsSelectable); self.setAcceptHoverEvents(True); self.setZValue(-0.2)
         self._update_pen(False)
         stats = cable_core_statistics(cable)
-        self.setToolTip(f"{_text(cable.get('name'))}\n{stats['used']}/{stats['total']} cores used · {stats['dark']} dark\n{_float(cable.get('length_m')):.1f} m")
+        role = _text(cable.get("routing_role")) or "direct"
+        loss = _float(cable.get("estimated_total_loss_db"))
+        self.setToolTip(
+            f"{_text(cable.get('name'))}\n"
+            f"{stats['used']}/{stats['total']} cores used · {stats['dark']} dark\n"
+            f"{role.replace('_', ' ').title()} · {_float(cable.get('length_m')):.1f} m · {loss:.3f} dB"
+        )
 
     def _update_pen(self, hover: bool):
         colour = QColor("#ff8a24") if self.traced else QColor("#6f8dff")
@@ -138,7 +159,18 @@ class PhysicalFibreTopologyDialog(QDialog):
         layout = QVBoxLayout(self); toolbar = QHBoxLayout(); layout.addLayout(toolbar)
         title = QLabel("Physical fibre overlay"); title.setFont(QFont("Arial", 13, QFont.Bold)); toolbar.addWidget(title)
         self.floor_combo = QComboBox(); toolbar.addWidget(self.floor_combo)
-        for label, handler in (("Add enclosure / cassette", self.add_node), ("Add fibre cable", self.add_cable), ("Add splice", self.add_splice), ("Clear trace", self.clear_trace), ("Fit", self._fit), ("Refresh", self.refresh)):
+        for label, handler in (
+            ("Add enclosure / cassette", self.add_node),
+            ("Add fibre cable", self.add_cable),
+            ("Add splice", self.add_splice),
+            ("Cable library", self.edit_cable_types),
+            ("Fibre planning", self.edit_fibre_planning),
+            ("Optical properties", self.edit_optical_properties),
+            ("Cassette view", self.view_cassettes),
+            ("Clear trace", self.clear_trace),
+            ("Fit", self._fit),
+            ("Refresh", self.refresh),
+        ):
             button = QPushButton(label); button.clicked.connect(handler); toolbar.addWidget(button)
         toolbar.addStretch(1)
         self.layer_label = QLabel(); toolbar.addWidget(self.layer_label)
@@ -186,8 +218,11 @@ class PhysicalFibreTopologyDialog(QDialog):
             for point in points[1:]: path.lineTo(QPointF(_float(point.get("x")),-_float(point.get("y"))))
             item=FibreCableItem(cable,path,_text(cable.get("id")) in traced_cables,self._cable_context,width_scale); self.scene.addItem(item); cable_count+=1
             midpoint=path.pointAtPercent(0.5); stats=cable_core_statistics(cable)
-            label_text=f"{_text(cable.get('id'))} · {_int(cable.get('core_count'))}F"
+            role = _text(cable.get("routing_role")) or "direct"
+            label_text=f"{_text(cable.get('id'))} · {_int(cable.get('core_count'))}F · {role.replace('_', ' ')}"
             if layer.get("show_dark_fibre",True): label_text+=f" · {stats['dark']} dark"
+            if _float(cable.get("estimated_total_loss_db")) > 0:
+                label_text += f" · {_float(cable.get('estimated_total_loss_db')):.2f} dB"
             label=QGraphicsSimpleTextItem(label_text); label.setBrush(QBrush(QColor("#ffb25f") if item.traced else QColor("#b8c8ff"))); label.setFont(QFont("Arial",max(1,int(round(7*label_scale))),QFont.Bold)); label.setPos(midpoint+QPointF(5*label_scale,-18*label_scale)); label.setZValue(0.3); self.scene.addItem(label)
         node_count=0
         for node in self.data.get("network_fibre_nodes",[]):
@@ -199,7 +234,14 @@ class PhysicalFibreTopologyDialog(QDialog):
                 if rows:
                     splice_label=QGraphicsSimpleTextItem(f"{len(rows)} splice{'s' if len(rows)!=1 else ''}"); splice_label.setBrush(QBrush(QColor("#d5a5f1"))); splice_label.setFont(QFont("Arial",max(1,int(round(6*label_scale))))); splice_label.setPos(item.pos()+QPointF(15*symbol_scale,2*symbol_scale)); self.scene.addItem(splice_label)
         margin=max(20.0,40.0*max(symbol_scale,label_scale)); rect=self.scene.itemsBoundingRect().adjusted(-margin,-margin,margin,margin); self.scene.setSceneRect(rect if not rect.isEmpty() else QRectF(-100,-100,200,200))
-        self.status.setText(f"Floor {floor}: {cable_count} routed fibre cables, {node_count} fibre nodes, {len([s for s in self.data.get('network_fibre_splices',[]) if _text(s.get('node_id')) in {_text(n.get('id')) for n in self.data.get('network_fibre_nodes',[]) if _int(n.get('floor'))==floor}])} core splices · Drag fibre nodes to reposition · Right-click cables and nodes to edit or trace")
+        floor_node_ids={_text(n.get('id')) for n in self.data.get('network_fibre_nodes',[]) if isinstance(n,dict) and _int(n.get('floor'))==floor}
+        floor_splices=len([s for s in self.data.get('network_fibre_splices',[]) if _text(s.get('node_id')) in floor_node_ids])
+        failed_paths=sum(1 for row in self.data.get("network_optical_paths",[]) if _text(row.get("status")).lower() not in {"pass","ok"})
+        self.status.setText(
+            f"Floor {floor}: {cable_count} routed fibre cables, {node_count} fibre nodes, {floor_splices} core splices · "
+            f"{failed_paths} optical path{'s' if failed_paths != 1 else ''} outside budget · "
+            "Drag fibre nodes to reposition · Right-click cables and nodes to edit, trace or view trays"
+        )
 
     def _draw_base_graph(self,floor):
         points=self._all_route_points(); pen=QPen(QColor("#2d3740"),0.8)
@@ -237,17 +279,81 @@ class PhysicalFibreTopologyDialog(QDialog):
         if node: node["x"]=round(x,3); node["y"]=round(y,3); node["floor"]=self._floor(); self._commit()
 
     def add_cable(self):
-        dialog=FibreCableEditorDialog(self,instances=self.data.get("network_asset_instances",[]),suggested_id=next_network_id(self.data.get("network_fibre_cables",[]),"FOC"))
-        if dialog.exec()==QDialog.Accepted and dialog.result: self.data.setdefault("network_fibre_cables",[]).append(dialog.result); self._commit()
+        dialog=FibreCableEditorDialog(
+            self,
+            instances=self.data.get("network_asset_instances",[]),
+            suggested_id=next_network_id(self.data.get("network_fibre_cables",[]),"FOC"),
+            cable_types=self.data.get("network_fibre_cable_types",[]),
+        )
+        if dialog.exec()==QDialog.Accepted and dialog.result:
+            self.data.setdefault("network_fibre_cables",[]).append(dialog.result)
+            calculate_optical_budgets(self.data)
+            self._commit()
+
     def edit_cable(self,cable_id):
-        cables=self.data.get("network_fibre_cables",[]); index=next((i for i,c in enumerate(cables) if _text(c.get("id"))==cable_id),-1)
+        cables=self.data.get("network_fibre_cables",[])
+        index=next((i for i,c in enumerate(cables) if _text(c.get("id"))==cable_id),-1)
         if index<0:return
-        dialog=FibreCableEditorDialog(self,cables[index],self.data.get("network_asset_instances",[]),cable_id)
-        if dialog.exec()==QDialog.Accepted and dialog.result: cables[index]=dialog.result; self._commit()
+        dialog=FibreCableEditorDialog(
+            self,
+            cables[index],
+            self.data.get("network_asset_instances",[]),
+            cable_id,
+            self.data.get("network_fibre_cable_types",[]),
+        )
+        if dialog.exec()==QDialog.Accepted and dialog.result:
+            cables[index]=dialog.result
+            calculate_optical_budgets(self.data)
+            self._commit()
+
+    def edit_cable_types(self):
+        dialog=FibreCableTypeLibraryDialog(self,self.data.get("network_fibre_cable_types",[]))
+        if dialog.exec()==QDialog.Accepted and dialog.result is not None:
+            self.data["network_fibre_cable_types"]=dialog.result
+            ensure_network_schema(self.data)
+            calculate_optical_budgets(self.data)
+            self._commit()
+
+    def edit_fibre_planning(self):
+        settings=self.data.setdefault("network_settings",{}).get("physical_fibre_planning",{})
+        dialog=PhysicalFibrePlanningDialog(self,settings,self.data.get("network_fibre_cable_types",[]))
+        if dialog.exec()==QDialog.Accepted and dialog.result is not None:
+            self.data.setdefault("network_settings",{})["physical_fibre_planning"]=dialog.result
+            ensure_network_schema(self.data)
+            self._commit()
+
+    def edit_optical_properties(self):
+        dialog=OpticalPropertiesDialog(self,self.data.get("network_assets",[]))
+        if dialog.exec()==QDialog.Accepted and dialog.result is not None:
+            self.data["network_assets"]=dialog.result
+            ensure_network_schema(self.data)
+            calculate_optical_budgets(self.data)
+            self._commit()
+
+    def view_cassettes(self,enclosure_id=""):
+        if not enclosure_id:
+            enclosure_id=next(
+                (
+                    _text(node.get("id"))
+                    for node in self.data.get("network_fibre_nodes",[])
+                    if isinstance(node,dict)
+                    and _int(node.get("floor"))==self._floor()
+                    and _text(node.get("node_type")) in {"splice_enclosure","fibre_joint","termination"}
+                ),
+                "",
+            )
+        dialog=SpliceCassetteViewDialog(
+            self,
+            self.data.get("network_fibre_nodes",[]),
+            self.data.get("network_fibre_cables",[]),
+            self.data.get("network_fibre_splices",[]),
+            enclosure_id,
+        )
+        dialog.exec()
     def delete_cable(self,cable_id):
         if QMessageBox.question(self,"Delete fibre cable",f"Delete fibre cable {cable_id} and its splice records?")!=QMessageBox.Yes:return
         self.data["network_fibre_cables"]=[c for c in self.data.get("network_fibre_cables",[]) if _text(c.get("id"))!=cable_id]
-        self.data["network_fibre_splices"]=[s for s in self.data.get("network_fibre_splices",[]) if _text(s.get("incoming_cable_id"))!=cable_id and _text(s.get("outgoing_cable_id"))!=cable_id]; self._commit()
+        self.data["network_fibre_splices"]=[s for s in self.data.get("network_fibre_splices",[]) if _text(s.get("incoming_cable_id"))!=cable_id and _text(s.get("outgoing_cable_id"))!=cable_id]; calculate_optical_budgets(self.data); self._commit()
 
     def add_splice(self,node_id="",incoming_cable_id=""):
         seed={"node_id":node_id,"incoming_cable_id":incoming_cable_id}
@@ -259,22 +365,26 @@ class PhysicalFibreTopologyDialog(QDialog):
                     ids=[_text(v) for v in cable.get("splice_ids",[]) if _text(v)]
                     if _text(dialog.result.get("id")) not in ids: ids.append(_text(dialog.result.get("id")))
                     cable["splice_ids"]=ids
-            set_core_status_from_splices(self.data); self._commit()
+            set_core_status_from_splices(self.data); calculate_optical_budgets(self.data); self._commit()
     def edit_splice(self,splice_id):
         splices=self.data.get("network_fibre_splices",[]); index=next((i for i,s in enumerate(splices) if _text(s.get("id"))==splice_id),-1)
         if index<0:return
         dialog=FibreSpliceEditorDialog(self,splices[index],self.data.get("network_fibre_nodes",[]),self.data.get("network_fibre_cables",[]),splice_id)
-        if dialog.exec()==QDialog.Accepted and dialog.result: splices[index]=dialog.result; set_core_status_from_splices(self.data); self._commit()
+        if dialog.exec()==QDialog.Accepted and dialog.result: splices[index]=dialog.result; set_core_status_from_splices(self.data); calculate_optical_budgets(self.data); self._commit()
     def delete_splice(self,splice_id):
         if QMessageBox.question(self,"Delete splice",f"Delete splice {splice_id}?")!=QMessageBox.Yes:return
         self.data["network_fibre_splices"]=[s for s in self.data.get("network_fibre_splices",[]) if _text(s.get("id"))!=splice_id]
         for cable in self.data.get("network_fibre_cables",[]): cable["splice_ids"]=[v for v in cable.get("splice_ids",[]) if _text(v)!=splice_id]
-        self._commit()
+        calculate_optical_budgets(self.data); self._commit()
 
     def _node_context(self,node_id,screen_pos):
-        menu=QMenu(self); edit=menu.addAction("Edit fibre node"); cassette=menu.addAction("Add splice cassette inside"); splice=menu.addAction("Add splice at this node"); menu.addSeparator(); delete=menu.addAction("Delete fibre node")
+        node=next((n for n in self.data.get("network_fibre_nodes",[]) if _text(n.get("id"))==node_id),{})
+        menu=QMenu(self); edit=menu.addAction("Edit fibre node"); cassette=menu.addAction("Add splice cassette inside"); splice=menu.addAction("Add splice at this node")
+        view_trays=menu.addAction("View splice cassettes") if _text(node.get("node_type")) in {"splice_enclosure","fibre_joint","termination"} else None
+        menu.addSeparator(); delete=menu.addAction("Delete fibre node")
         action=menu.exec(screen_pos)
         if action==edit:self.edit_node(node_id)
+        elif view_trays is not None and action==view_trays:self.view_cassettes(node_id)
         elif action==cassette:
             parent=next((n for n in self.data.get("network_fibre_nodes",[]) if _text(n.get("id"))==node_id),{})
             seed={"node_type":"splice_cassette","parent_node_id":node_id,"location_name":parent.get("location_name", ""),"floor":parent.get("floor",0),"x":parent.get("x",0.0),"y":parent.get("y",0.0)}

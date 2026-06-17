@@ -4,7 +4,12 @@ import csv
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-from network_services import cable_core_statistics, splice_arrangement_rows, network_traffic_loads
+from network_services import (
+    cable_core_statistics,
+    calculate_optical_budgets,
+    splice_arrangement_rows,
+    network_traffic_loads,
+)
 
 
 def _text(value) -> str:
@@ -536,21 +541,40 @@ def _power_schedule(data: dict) -> List[dict]:
 
 
 def _fibre_cable_schedule(data: dict) -> List[dict]:
+    type_map = {
+        _text(row.get("id")): row
+        for row in data.get("network_fibre_cable_types", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
     rows = []
     for cable in data.get("network_fibre_cables", []):
         if not isinstance(cable, dict):
             continue
         stats = cable_core_statistics(cable)
+        cable_type = type_map.get(_text(cable.get("cable_type_id")), {})
+        designations = []
+        for designation in cable.get("core_designations", []):
+            if not isinstance(designation, dict):
+                continue
+            numbers = ",".join(str(_int(value)) for value in designation.get("core_numbers", []))
+            designations.append(f"{_text(designation.get('circuit_id'))}:{numbers}")
         rows.append({
             "cable_id": _text(cable.get("id")),
             "name": _text(cable.get("name")),
-            "cable_type": _text(cable.get("cable_type")),
+            "cable_type_id": _text(cable.get("cable_type_id")),
+            "cable_type": _text(cable.get("cable_type")) or _text(cable_type.get("name")),
+            "fibre_standard": _text(cable_type.get("fibre_standard")),
+            "routing_role": _text(cable.get("routing_role")) or "direct",
+            "parent_cable_id": _text(cable.get("parent_cable_id")),
+            "branch_node_id": _text(cable.get("branch_node_id")),
             "from_instance_id": _text(cable.get("from_instance_id")),
             "from_port": _text(cable.get("from_port")),
             "to_instance_id": _text(cable.get("to_instance_id")),
             "to_port": _text(cable.get("to_port")),
             "from_location": _text(cable.get("from_location")),
             "to_location": _text(cable.get("to_location")),
+            "from_termination_method": _text(cable.get("from_termination_method")),
+            "to_termination_method": _text(cable.get("to_termination_method")),
             "length_m": _float(cable.get("length_m")),
             "slack_length_m": _float(cable.get("slack_length_m")),
             "core_count": stats["total"],
@@ -560,6 +584,19 @@ def _fibre_cable_schedule(data: dict) -> List[dict]:
             "reserved_cores": stats["reserved"],
             "dark_fibre_count": stats["dark"],
             "fault_cores": stats["fault"],
+            "core_designations": "; ".join(designations),
+            "attenuation_db_per_m": _float(cable.get("attenuation_db_per_m")),
+            "connector_loss_db": _float(cable.get("connector_loss_db")),
+            "reflection_loss_db": _float(cable.get("reflection_loss_db")),
+            "splice_loss_db": _float(cable.get("splice_loss_db")),
+            "wavelength_nm": _int(cable.get("wavelength_nm")),
+            "connector_count": _int(cable.get("connector_count")),
+            "splice_count": _int(cable.get("splice_count")),
+            "estimated_attenuation_db": _float(cable.get("estimated_attenuation_db")),
+            "estimated_connector_loss_db": _float(cable.get("estimated_connector_loss_db")),
+            "estimated_splice_loss_db": _float(cable.get("estimated_splice_loss_db")),
+            "estimated_total_loss_db": _float(cable.get("estimated_total_loss_db")),
+            "minimum_return_loss_db": _float(cable.get("minimum_return_loss_db", cable.get("reflection_loss_db"))),
             "route_path": " -> ".join(_text(v) for v in cable.get("route_path", []) if _text(v)),
             "logical_connection_ids": ", ".join(_text(v) for v in cable.get("logical_connection_ids", []) if _text(v)),
             "splice_ids": ", ".join(_text(v) for v in cable.get("splice_ids", []) if _text(v)),
@@ -571,6 +608,28 @@ def _fibre_cable_schedule(data: dict) -> List[dict]:
         })
     return sorted(rows, key=lambda row: row["cable_id"])
 
+
+def _fibre_cable_type_schedule(data: dict) -> List[dict]:
+    return sorted([
+        {
+            "cable_type_id": _text(row.get("id")),
+            "name": _text(row.get("name")),
+            "fibre_standard": _text(row.get("fibre_standard")),
+            "manufacturer": _text(row.get("manufacturer")),
+            "model": _text(row.get("model")),
+            "core_count": _int(row.get("core_count")),
+            "attenuation_db_per_m": _float(row.get("attenuation_db_per_m")),
+            "connector_loss_db": _float(row.get("connector_loss_db")),
+            "reflection_loss_db": _float(row.get("reflection_loss_db")),
+            "splice_loss_db": _float(row.get("splice_loss_db")),
+            "wavelength_nm": _int(row.get("wavelength_nm")),
+            "construction": _text(row.get("construction")),
+            "sheath_type": _text(row.get("sheath_type")),
+            "notes": _text(row.get("notes")),
+        }
+        for row in data.get("network_fibre_cable_types", [])
+        if isinstance(row, dict)
+    ], key=lambda row: (row["core_count"], row["cable_type_id"]))
 
 def _fibre_core_schedule(data: dict) -> List[dict]:
     rows = []
@@ -630,7 +689,75 @@ def _fibre_node_schedule(data: dict) -> List[dict]:
 
 
 def _fibre_splice_schedule(data: dict) -> List[dict]:
-    return splice_arrangement_rows(data)
+    rows = splice_arrangement_rows(data)
+    by_id = {_text(row.get("id")): row for row in data.get("network_fibre_splices", []) if isinstance(row, dict)}
+    for row in rows:
+        source = by_id.get(_text(row.get("splice_id")), {})
+        row.update({
+            "pigtail": "Yes" if bool(source.get("pigtail")) else "No",
+            "connectorised": "Yes" if bool(source.get("connectorised")) else "No",
+            "termination_instance_id": _text(source.get("termination_instance_id")),
+            "termination_port": _text(source.get("termination_port")),
+        })
+    return rows
+
+
+def _splice_cassette_schedule(data: dict) -> List[dict]:
+    nodes = {_text(row.get("id")): row for row in data.get("network_fibre_nodes", []) if isinstance(row, dict)}
+    cables = {_text(row.get("id")): row for row in data.get("network_fibre_cables", []) if isinstance(row, dict)}
+    rows = []
+    for cassette in nodes.values():
+        if _text(cassette.get("node_type")) != "splice_cassette":
+            continue
+        cassette_id = _text(cassette.get("id"))
+        enclosure = nodes.get(_text(cassette.get("parent_node_id")), {})
+        splices = [row for row in data.get("network_fibre_splices", []) if isinstance(row, dict) and _text(row.get("cassette_id")) == cassette_id]
+        capacity = max(1, min(24, _int(cassette.get("max_splices_per_tray"), cassette.get("splice_capacity", 24))))
+        incoming_id = _text(cassette.get("incoming_cable_id")) or next((_text(row.get("incoming_cable_id")) for row in splices if _text(row.get("incoming_cable_id"))), "")
+        incoming = cables.get(incoming_id, {})
+        rows.append({
+            "enclosure_id": _text(enclosure.get("id")),
+            "enclosure_name": _text(enclosure.get("name")),
+            "cassette_id": cassette_id,
+            "cassette_name": _text(cassette.get("name")),
+            "tray_number": _int(cassette.get("tray_number"), 1),
+            "floor": _int(cassette.get("floor", enclosure.get("floor"))),
+            "location_name": _text(cassette.get("location_name")) or _text(enclosure.get("location_name")),
+            "incoming_cable_id": incoming_id,
+            "incoming_cable_core_count": _int(incoming.get("core_count")),
+            "capacity": capacity,
+            "used_positions": len(splices),
+            "available_positions": max(0, capacity - len(splices)),
+            "circuit_ids": ", ".join(sorted({_text(row.get("circuit_id")) for row in splices if _text(row.get("circuit_id"))})),
+            "notes": _text(cassette.get("notes")),
+        })
+    return sorted(rows, key=lambda row: (row["floor"], row["enclosure_id"], row["tray_number"], row["cassette_id"]))
+
+
+def _optical_budget_schedule(data: dict) -> List[dict]:
+    calculate_optical_budgets(data)
+    return sorted([
+        {
+            "path_id": _text(row.get("id")),
+            "source_instance_id": _text(row.get("source_instance_id")),
+            "destination_instance_id": _text(row.get("destination_instance_id")),
+            "connection_ids": ", ".join(_text(v) for v in row.get("connection_ids", []) if _text(v)),
+            "fibre_cable_ids": ", ".join(_text(v) for v in row.get("fibre_cable_ids", []) if _text(v)),
+            "transmit_power_dbm": "" if _text(row.get("transmit_power_dbm")) == "" else _float(row.get("transmit_power_dbm")),
+            "receiver_sensitivity_dbm": "" if _text(row.get("receiver_sensitivity_dbm")) == "" else _float(row.get("receiver_sensitivity_dbm")),
+            "cable_loss_db": _float(row.get("cable_loss_db")),
+            "passive_loss_db": _float(row.get("passive_loss_db")),
+            "path_loss_db": _float(row.get("path_loss_db")),
+            "available_budget_db": "" if _text(row.get("available_budget_db")) == "" else _float(row.get("available_budget_db")),
+            "margin_db": "" if _text(row.get("margin_db")) == "" else _float(row.get("margin_db")),
+            "minimum_return_loss_db": _float(row.get("minimum_return_loss_db")),
+            "status": _text(row.get("status")),
+            "missing_properties": _text(row.get("missing_properties")),
+            "notes": _text(row.get("notes")),
+        }
+        for row in data.get("network_optical_paths", [])
+        if isinstance(row, dict)
+    ], key=lambda row: (row["status"], row["source_instance_id"], row["destination_instance_id"], row["path_id"]))
 
 
 def _dark_fibre_summary(data: dict) -> List[dict]:
@@ -666,9 +793,15 @@ def _external_network_schedule(data: dict) -> List[dict]:
             "id": _text(item.get("id")), "name": _text(item.get("name")),
             "network_type": _text(item.get("network_type")), "provider": _text(item.get("provider")),
             "asn": _text(item.get("asn")), "location_name": _text(item.get("location_name")),
+            "service_type": _text(item.get("service_type")),
+            "redundant": "Yes" if bool(item.get("redundant")) else "No",
+            "required_links": _int(item.get("required_links"), 1),
+            "medium": _text(item.get("medium")),
+            "bandwidth_mbps": _float(item.get("bandwidth_mbps")),
             "demarcation_instance_id": _text(item.get("demarcation_instance_id")),
             "prefixes": ", ".join(_text(v) for v in item.get("prefixes", []) if _text(v)),
             "peer_instance_ids": ", ".join(_text(v) for v in item.get("peer_instance_ids", []) if _text(v)),
+            "redundancy_group_id": _text(item.get("redundancy_group_id")),
             "notes": _text(item.get("notes")),
         }
         for item in data.get("network_external_networks", []) if isinstance(item, dict)
@@ -796,8 +929,13 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
             _power_schedule(data),
         ),
         (
+            "physical_fibre_cable_type_schedule",
+            ["cable_type_id", "name", "fibre_standard", "manufacturer", "model", "core_count", "attenuation_db_per_m", "connector_loss_db", "reflection_loss_db", "splice_loss_db", "wavelength_nm", "construction", "sheath_type", "notes"],
+            _fibre_cable_type_schedule(data),
+        ),
+        (
             "physical_fibre_cable_schedule",
-            ["cable_id", "name", "cable_type", "from_instance_id", "from_port", "to_instance_id", "to_port", "from_location", "to_location", "length_m", "slack_length_m", "core_count", "used_cores", "allocated_cores", "spliced_cores", "reserved_cores", "dark_fibre_count", "fault_cores", "route_path", "logical_connection_ids", "splice_ids", "installation_status", "drawing_layer", "sheath_colour", "owner", "notes"],
+            ["cable_id", "name", "cable_type_id", "cable_type", "fibre_standard", "routing_role", "parent_cable_id", "branch_node_id", "from_instance_id", "from_port", "to_instance_id", "to_port", "from_location", "to_location", "from_termination_method", "to_termination_method", "length_m", "slack_length_m", "core_count", "used_cores", "allocated_cores", "spliced_cores", "reserved_cores", "dark_fibre_count", "fault_cores", "core_designations", "attenuation_db_per_m", "connector_loss_db", "reflection_loss_db", "splice_loss_db", "wavelength_nm", "connector_count", "splice_count", "estimated_attenuation_db", "estimated_connector_loss_db", "estimated_splice_loss_db", "estimated_total_loss_db", "minimum_return_loss_db", "route_path", "logical_connection_ids", "splice_ids", "installation_status", "drawing_layer", "sheath_colour", "owner", "notes"],
             _fibre_cable_schedule(data),
         ),
         (
@@ -812,8 +950,18 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
         ),
         (
             "fibre_splice_schedule",
-            ["splice_id", "node_id", "node_name", "node_type", "cassette_id", "incoming_cable_id", "incoming_core", "incoming_colour", "incoming_tube", "incoming_tube_colour", "outgoing_cable_id", "outgoing_core", "outgoing_colour", "outgoing_tube", "outgoing_tube_colour", "splice_type", "circuit_id", "loss_db", "notes"],
+            ["splice_id", "node_id", "node_name", "node_type", "cassette_id", "incoming_cable_id", "incoming_core", "incoming_colour", "incoming_tube", "incoming_tube_colour", "outgoing_cable_id", "outgoing_core", "outgoing_colour", "outgoing_tube", "outgoing_tube_colour", "splice_type", "pigtail", "connectorised", "termination_instance_id", "termination_port", "circuit_id", "loss_db", "notes"],
             _fibre_splice_schedule(data),
+        ),
+        (
+            "splice_cassette_schedule",
+            ["enclosure_id", "enclosure_name", "cassette_id", "cassette_name", "tray_number", "floor", "location_name", "incoming_cable_id", "incoming_cable_core_count", "capacity", "used_positions", "available_positions", "circuit_ids", "notes"],
+            _splice_cassette_schedule(data),
+        ),
+        (
+            "optical_budget_schedule",
+            ["path_id", "source_instance_id", "destination_instance_id", "connection_ids", "fibre_cable_ids", "transmit_power_dbm", "receiver_sensitivity_dbm", "cable_loss_db", "passive_loss_db", "path_loss_db", "available_budget_db", "margin_db", "minimum_return_loss_db", "status", "missing_properties", "notes"],
+            _optical_budget_schedule(data),
         ),
         (
             "dark_fibre_summary",
@@ -822,7 +970,7 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
         ),
         (
             "external_network_peering_schedule",
-            ["id", "name", "network_type", "provider", "asn", "location_name", "demarcation_instance_id", "prefixes", "peer_instance_ids", "notes"],
+            ["id", "name", "network_type", "provider", "asn", "location_name", "service_type", "redundant", "required_links", "medium", "bandwidth_mbps", "demarcation_instance_id", "prefixes", "peer_instance_ids", "redundancy_group_id", "notes"],
             _external_network_schedule(data),
         ),
         (

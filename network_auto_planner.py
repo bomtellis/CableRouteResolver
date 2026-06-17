@@ -1002,6 +1002,9 @@ def _clear_previous_auto_design(data: dict) -> None:
         item for item in data.get("network_fibre_splices", [])
         if not bool(item.get("auto_generated"))
     ]
+    # Optical paths are derived from the current logical and physical design.
+    # Never carry calculated paths across a fresh automatic design pass.
+    data["network_optical_paths"] = []
 
 
 class DesignBuilder:
@@ -2091,7 +2094,17 @@ def _build_core_layer(
     leaves_by_root: Dict[str, List[dict]],
     roots: Dict[str, dict],
     spare_fraction: float,
+    *,
+    links_per_leaf: int = 1,
+    minimum_distinct_cores: int = 1,
+    protection_prefix: str = "AUTO-CORE-UPLINK",
 ) -> List[dict]:
+    """Build core switches and connect each leaf with independent uplinks.
+
+    PoLAN OLTs use this with two distinct core switches.  The older allocator
+    reserved only one core port per OLT, so a redundant OLT pair still had a
+    single upstream failure point.
+    """
     cores: List[dict] = []
     candidates = _choose_core_candidates(builder.data)
     if not candidates:
@@ -2100,20 +2113,21 @@ def _build_core_layer(
         )
         return cores
 
+    desired_links = max(1, int(links_per_leaf or 1))
+    minimum_distinct = max(1, min(desired_links, int(minimum_distinct_cores or 1)))
     for root_name, leaves in leaves_by_root.items():
         if not leaves:
             continue
         root = roots[root_name]
         expected_bandwidth_mbps = sum(
-            max(0.0, _float(item.get("expected_bandwidth_mbps")))
-            for item in leaves
+            max(0.0, _float(item.get("expected_bandwidth_mbps"))) for item in leaves
         )
         expected_packet_rate_pps = sum(
-            max(0.0, _float(item.get("expected_packet_rate_pps")))
-            for item in leaves
+            max(0.0, _float(item.get("expected_packet_rate_pps"))) for item in leaves
         )
+        required_ports = len(leaves) * desired_links
         mix = _minimum_asset_mix(
-            candidates, len(leaves), 0.0, spare_fraction, "core switch"
+            candidates, required_ports, 0.0, spare_fraction, "core switch"
         )
         mix = _ensure_aggregate_traffic_capacity(
             candidates,
@@ -2123,10 +2137,22 @@ def _build_core_layer(
             spare_fraction,
             "core switch",
         )
+        while len(mix) < minimum_distinct:
+            mix.append(
+                min(
+                    candidates,
+                    key=lambda asset: (
+                        max(1, _rack_units_for_asset(asset, 1)),
+                        -_int(asset.get("number_of_ports")),
+                        _text(asset.get("id")),
+                    ),
+                )
+            )
+
         rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
         rack_index = 1
         next_rack_u = 1
-        core_instances = []
+        core_instances: List[dict] = []
         for index, asset in enumerate(mix):
             rack_u = _rack_units_for_asset(asset, 1)
             if next_rack_u + rack_u - 1 > rack_size_u and next_rack_u > 1:
@@ -2145,39 +2171,70 @@ def _build_core_layer(
                     ),
                     rack_start_u=next_rack_u,
                     rack_size_u=rack_size_u,
+                    route_anchor=root_name,
+                    network_layer="core",
                     expected_bandwidth_mbps=round(expected_bandwidth_mbps, 6),
                     expected_packet_rate_pps=round(expected_packet_rate_pps, 3),
                 )
             )
             next_rack_u += rack_u
-        # Spare capacity is already included in the selected aggregate mix.
+
         capacities = [max(0, _int(asset.get("number_of_ports"))) for asset in mix]
-        core_index = 0
-        core_port = 1
-        for leaf in leaves:
-            while core_index < len(capacities) and core_port > capacities[core_index]:
-                core_index += 1
-                core_port = 1
-            if core_index >= len(core_instances):
+        used_ports = [0 for _ in core_instances]
+        for leaf_index, leaf in enumerate(leaves, start=1):
+            available = [
+                index for index, capacity in enumerate(capacities)
+                if used_ports[index] < capacity
+            ]
+            if len(available) < minimum_distinct:
                 raise NetworkPlanningError(
-                    "Core switch port allocation exceeded the selected capacity."
+                    f"Core switch capacity at {root_name} cannot provide {minimum_distinct} "
+                    f"distinct uplinks for {leaf.get('name') or leaf.get('id')}."
                 )
-            leaf_location = _text(leaf.get("route_anchor")) or _text(
-                leaf.get("location_name")
+            available.sort(
+                key=lambda index: (
+                    used_ports[index] / max(1, capacities[index]),
+                    (index - leaf_index) % max(1, len(core_instances)),
+                    index,
+                )
             )
-            builder.add_connection(
-                leaf,
-                f"Uplink-{_int(leaf.get('_uplinks_used'), 0) + 1}",
-                core_instances[core_index],
-                str(core_port),
-                "fibre",
-                leaf_location,
-                root_name,
-                redundancy_role=_text(leaf.get("core_redundancy_role")),
-                fibre_count=1,
-            )
-            leaf["_uplinks_used"] = _int(leaf.get("_uplinks_used"), 0) + 1
-            core_port += 1
+            selected = available[: min(desired_links, len(available))]
+            protection_group = f"{protection_prefix}-{_text(leaf.get('id')) or leaf_index}"
+            source_ids: List[str] = []
+            connection_ids: List[str] = []
+            for link_index, core_index in enumerate(selected, start=1):
+                used_ports[core_index] += 1
+                leaf_location = _text(leaf.get("route_anchor")) or _text(leaf.get("location_name"))
+                connection = builder.add_connection(
+                    leaf,
+                    f"Uplink-{_int(leaf.get('_uplinks_used'), 0) + 1}",
+                    core_instances[core_index],
+                    str(used_ports[core_index]),
+                    "fibre",
+                    leaf_location,
+                    root_name,
+                    redundancy_role="primary" if link_index == 1 else "secondary",
+                    protection_group=protection_group if len(selected) > 1 else "",
+                    standby=link_index > 1,
+                    fibre_count=2,
+                )
+                leaf["_uplinks_used"] = _int(leaf.get("_uplinks_used"), 0) + 1
+                source_ids.append(_text(core_instances[core_index].get("id")))
+                connection_ids.append(_text(connection.get("id")))
+            if len(selected) > 1:
+                builder.redundancy_groups.append(
+                    {
+                        "id": protection_group,
+                        "technology": builder.technology,
+                        "protected_instance_id": _text(leaf.get("id")),
+                        "source_instance_ids": source_ids,
+                        "source_core_instance_ids": source_ids,
+                        "connection_ids": connection_ids,
+                        "required_distinct_sources": minimum_distinct,
+                        "protection_type": "independent_core_uplinks",
+                        "auto_generated": True,
+                    }
+                )
         cores.extend(core_instances)
     return cores
 
@@ -3151,8 +3208,214 @@ def _polan_design(
         leaves_by_root.setdefault(_text(secondary_root.get("name")), []).extend(
             secondary_olts
         )
-    _build_core_layer(builder, leaves_by_root, roots, spare_fraction)
+    olt_core_links = max(
+        2 if bool(builder.settings.get("redundant_core", True)) else 1,
+        _int(builder.settings.get("independent_link_count"), 2)
+        if bool(builder.settings.get("redundant_core", True)) else 1,
+    )
+    _build_core_layer(
+        builder,
+        leaves_by_root,
+        roots,
+        spare_fraction,
+        links_per_leaf=olt_core_links,
+        minimum_distinct_cores=2 if olt_core_links > 1 else 1,
+        protection_prefix="AUTO-OLT-CORE",
+    )
 
+
+
+def _external_network_asset(builder: DesignBuilder, record: dict, port_count: int) -> dict:
+    candidates = _candidate_assets(
+        builder.data,
+        "external_network",
+        lambda asset: max(_int(asset.get("number_of_ports")), _int(asset.get("connections_out"))) >= port_count,
+    )
+    if candidates:
+        return min(candidates, key=lambda asset: (_int(asset.get("rack_units")), _text(asset.get("id"))))
+    asset_id = f"AUTO-EXTERNAL-{_text(record.get('id')) or len(builder.asset_ids) + 1}"
+    asset = {
+        "id": asset_id,
+        "name": _text(record.get("name")) or "External network",
+        "asset_type": "external_network",
+        "number_of_ports": max(1, port_count),
+        "connections_in": max(1, port_count),
+        "connections_out": max(1, port_count),
+        "uplink_ports": max(1, port_count),
+        "input_connection_type": _text(record.get("medium")) or "fibre",
+        "output_connection_type": _text(record.get("medium")) or "fibre",
+        "uplink_connection_type": _text(record.get("medium")) or "fibre",
+        "rack_units": 0,
+        "power_input_w": 0.0,
+        "notes": "Auto-generated external carrier / internet demarcation object.",
+        "auto_network_asset": True,
+    }
+    builder.data.setdefault("network_assets", []).append(asset)
+    builder.asset_ids.add(asset_id)
+    return asset
+
+
+def _install_external_network_connections(builder: DesignBuilder, spare_fraction: float) -> None:
+    """Install edge routers and independent carrier/internet connections."""
+    external_records = [
+        row for row in builder.data.get("network_external_networks", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    ]
+    if not external_records:
+        return
+    router_candidates = _candidate_assets(
+        builder.data,
+        "network_router",
+        lambda asset: max(_int(asset.get("number_of_ports")), _int(asset.get("uplink_ports")), _int(asset.get("connections_in")) + _int(asset.get("connections_out"))) >= 2,
+    )
+    if not router_candidates:
+        router_candidates = _candidate_assets(
+            builder.data,
+            "firewall",
+            lambda asset: max(_int(asset.get("number_of_ports")), _int(asset.get("uplink_ports")), _int(asset.get("connections_in")) + _int(asset.get("connections_out"))) >= 2,
+        )
+    if not router_candidates:
+        builder.warnings.append(
+            "External networks are configured but no router/firewall asset with at least two ports is available."
+        )
+        return
+    router_candidates = _apply_manufacturer_preference(
+        builder.data, router_candidates, "edge_router", "edge router"
+    )
+    default_links = max(1, _int(builder.settings.get("external_network_link_count"), 2))
+    required_router_count = max(
+        max(
+            1,
+            _int(record.get("required_links"), default_links if bool(record.get("redundant", True)) else 1),
+        )
+        for record in external_records
+    )
+    if any(bool(record.get("redundant", True)) for record in external_records):
+        required_router_count = max(2, required_router_count)
+
+    roots = _locations_by_kind(builder.data, {"mer", "comms_room", "telco_pop"})
+    if not roots:
+        builder.warnings.append("External networks were not connected because no MER/comms-room location exists.")
+        return
+    best_router = min(
+        router_candidates,
+        key=lambda asset: (
+            max(1, _rack_units_for_asset(asset, 1)),
+            -_int(asset.get("number_of_ports")),
+            _text(asset.get("id")),
+        ),
+    )
+    routers: List[dict] = []
+    for index in range(required_router_count):
+        root = roots[index % len(roots)]
+        router = builder.add_instance(
+            best_router,
+            f"AUTO Edge Router {index + 1}",
+            root,
+            "edge_router",
+            rack_name=f"AUTO-RACK-{_text(root.get('name'))}",
+            rack_start_u=index + 1,
+            rack_size_u=max(1, _int(builder.settings.get("default_rack_size_u"), 42)),
+            route_anchor=_text(root.get("name")),
+            network_layer="edge",
+        )
+        routers.append(router)
+
+    cores = [
+        row for row in builder.instances
+        if _text(row.get("design_role")) == "core_switch"
+    ]
+    if cores:
+        for index, router in enumerate(routers):
+            core = cores[index % len(cores)]
+            group_id = f"AUTO-EDGE-CORE-{index + 1}"
+            builder.add_connection(
+                router,
+                "LAN-1",
+                core,
+                f"Edge-{index + 1}",
+                "fibre",
+                _text(router.get("route_anchor")),
+                _text(core.get("route_anchor")) or _text(core.get("location_name")),
+                connection_role="output",
+                redundancy_role="primary" if index == 0 else "secondary",
+                protection_group=group_id if len(routers) > 1 else "",
+                standby=index > 0,
+                fibre_count=2,
+            )
+    else:
+        builder.warnings.append("Edge routers were generated without a core connection because no generated core switch exists.")
+
+    existing_instances = {
+        _text(row.get("id")): row
+        for row in builder.data.get("network_asset_instances", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    existing_instances.update({_text(row.get("id")): row for row in builder.instances})
+    locations = {
+        _text(row.get("name")): row
+        for row in builder.data.get("locations", [])
+        if isinstance(row, dict) and _text(row.get("name"))
+    }
+    for record_index, record in enumerate(external_records, start=1):
+        desired_links = max(
+            1,
+            _int(record.get("required_links"), default_links if bool(record.get("redundant", True)) else 1),
+        )
+        desired_links = min(desired_links, len(routers))
+        location = locations.get(_text(record.get("location_name"))) or roots[(record_index - 1) % len(roots)]
+        demarcation = existing_instances.get(_text(record.get("demarcation_instance_id")))
+        if demarcation is None:
+            external_asset = _external_network_asset(builder, record, desired_links)
+            demarcation = builder.add_instance(
+                external_asset,
+                f"AUTO {_text(record.get('name')) or 'External Network'} Demarcation",
+                location,
+                "external_network",
+                route_anchor=_text(location.get("name")),
+                network_layer="external",
+                external_network_id=_text(record.get("id")),
+            )
+            record["demarcation_instance_id"] = _text(demarcation.get("id"))
+            existing_instances[_text(demarcation.get("id"))] = demarcation
+        selected_routers = routers[:desired_links]
+        peer_ids: List[str] = []
+        connection_ids: List[str] = []
+        protection_group = f"AUTO-EXT-PG-{_text(record.get('id'))}"
+        medium = _text(record.get("medium")).lower() or "fibre"
+        for link_index, router in enumerate(selected_routers, start=1):
+            connection = builder.add_connection(
+                demarcation,
+                f"Service-{link_index}",
+                router,
+                f"WAN-{record_index}-{link_index}",
+                medium,
+                _text(demarcation.get("route_anchor")) or _text(demarcation.get("location_name")),
+                _text(router.get("route_anchor")) or _text(router.get("location_name")),
+                connection_role="uplink",
+                redundancy_role="primary" if link_index == 1 else "secondary",
+                protection_group=protection_group if desired_links > 1 else "",
+                standby=link_index > 1,
+                fibre_count=2 if medium == "fibre" else 0,
+                external_network_id=_text(record.get("id")),
+            )
+            peer_ids.append(_text(router.get("id")))
+            connection_ids.append(_text(connection.get("id")))
+        record["peer_instance_ids"] = peer_ids
+        record["redundancy_group_id"] = protection_group if desired_links > 1 else ""
+        if desired_links > 1:
+            builder.redundancy_groups.append(
+                {
+                    "id": protection_group,
+                    "technology": builder.technology,
+                    "protected_instance_id": _text(demarcation.get("id")),
+                    "source_instance_ids": peer_ids,
+                    "connection_ids": connection_ids,
+                    "required_distinct_sources": desired_links,
+                    "protection_type": "redundant_external_network_links",
+                    "auto_generated": True,
+                }
+            )
 
 
 def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
@@ -3332,7 +3595,13 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             )
         ports = [f"LC-{port_index + offset + 1}" for offset in range(count)]
         next_port[key] = index + count
-        return panels[panel_index], ports[0], ports
+        panel = panels[panel_index]
+        associated = [_text(value) for value in panel.get("associated_instance_ids", []) if _text(value)]
+        instance_id = _text(instance.get("id"))
+        if instance_id and instance_id not in associated:
+            associated.append(instance_id)
+        panel["associated_instance_ids"] = associated
+        return panel, ports[0], ports
 
     for logical, a, b in eligible:
         parent_id = _text(logical.get("id"))
@@ -3755,34 +4024,102 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
             instance["rack_size_u"] = rack_size_u
             rack["bottom_next"] += units
 
-        equipment.sort(key=lambda i: (_text(i.get("target_rack_name") or i.get("rack_name")), _text(i.get("design_role")), _text(i.get("name"))))
+        equipment_by_id = {_text(row.get("id")): row for row in equipment}
+        fibre_by_owner: Dict[str, List[dict]] = defaultdict(list)
+        unowned_fibre: List[dict] = []
+        for panel in fibre_panels:
+            associated = [
+                _text(value) for value in panel.get("associated_instance_ids", [])
+                if _text(value) in equipment_by_id
+            ]
+            if associated:
+                # A panel was created for one pre-repack cabinet. Keep it with a
+                # real terminating device after repack instead of recreating the
+                # stale cabinet name as a new mostly-empty rack.
+                owner_id = sorted(
+                    associated,
+                    key=lambda value: (
+                        0 if _text(equipment_by_id[value].get("design_role")) in {"core_switch", "edge_router", "olt_primary", "olt_secondary"} else 1,
+                        _text(equipment_by_id[value].get("name")),
+                    ),
+                )[0]
+                fibre_by_owner[owner_id].append(panel)
+                panel["rack_owner_instance_id"] = owner_id
+            else:
+                unowned_fibre.append(panel)
+
+        fibre_manager_index = 0
+
+        def place_fibre_panel(panel: dict, rack: dict) -> None:
+            nonlocal fibre_manager_index
+            panel_u = max(1, _int(panel.get("_calculated_rack_units"), 1))
+            if rack["top_next"] - panel_u - manager_u + 1 < rack["bottom_next"]:
+                raise NetworkPlanningError(
+                    f"Rack {rack['name']} at {location_name} has insufficient top space for its fibre termination panel."
+                )
+            panel_start = rack["top_next"] - panel_u + 1
+            manager_start = panel_start - manager_u
+            panel["rack_name"] = rack["name"]
+            panel["target_rack_name"] = rack["name"]
+            panel["rack_start_u"] = panel_start
+            panel["rack_size_u"] = rack_size_u
+            fibre_manager_index += 1
+            builder.add_instance(
+                manager_asset,
+                f"AUTO {location_name} Fibre Cable Manager {fibre_manager_index}",
+                location,
+                "cable_management",
+                rack_name=rack["name"],
+                rack_start_u=manager_start,
+                rack_size_u=rack_size_u,
+                route_anchor=location_name,
+                associated_patch_panel_id=_text(panel.get("id")),
+            )
+            rack["top_next"] = manager_start - 1
+
+        equipment.sort(
+            key=lambda i: (
+                _text(i.get("target_rack_name") or i.get("rack_name")),
+                _text(i.get("design_role")),
+                _text(i.get("name")),
+            )
+        )
         for instance in equipment:
-            asset = assets.get(_text(instance.get("asset_id")), {})
             units = max(1, _int(instance.get("_calculated_rack_units"), 1))
             powered = bool(instance.get("_powered_rack_item"))
             preferred = _text(instance.get("target_rack_name") or instance.get("rack_name"))
-            assembly_extra = 0
-            panels = copper_by_switch.get(_text(instance.get("id")), [])
-            if panels:
-                assembly_extra = sum(max(1, _int(p.get("_calculated_rack_units"), 1)) + manager_u for p in panels)
-            rack = choose_bottom(units + assembly_extra, powered, preferred)
+            copper_rows = copper_by_switch.get(_text(instance.get("id")), [])
+            fibre_rows = fibre_by_owner.get(_text(instance.get("id")), [])
+            copper_extra = sum(
+                max(1, _int(panel.get("_calculated_rack_units"), 1)) + manager_u
+                for panel in copper_rows
+            )
+            fibre_extra = sum(
+                max(1, _int(panel.get("_calculated_rack_units"), 1)) + manager_u
+                for panel in fibre_rows
+            )
+            rack = choose_bottom(units + copper_extra + fibre_extra, powered, preferred)
             place_bottom(instance, rack, units, powered)
             # Bottom-to-top order is switch, cable manager, copper patch panel;
             # therefore the rack elevation reads panel / manager / switch.
-            for panel_index, panel in enumerate(panels, start=1):
-                manager = builder.add_instance(
+            for panel_index, panel in enumerate(copper_rows, start=1):
+                builder.add_instance(
                     manager_asset,
                     f"AUTO {location_name} Copper Cable Manager {instance.get('id')} {panel_index}",
                     location,
                     "cable_management",
-                    rack_name=rack["name"], rack_start_u=rack["bottom_next"],
-                    rack_size_u=rack_size_u, route_anchor=location_name,
+                    rack_name=rack["name"],
+                    rack_start_u=rack["bottom_next"],
+                    rack_size_u=rack_size_u,
+                    route_anchor=location_name,
                     associated_patch_panel_id=_text(panel.get("id")),
                     associated_switch_id=_text(instance.get("id")),
                 )
                 rack["bottom_next"] += manager_u
                 panel_u = max(1, _int(panel.get("_calculated_rack_units"), 1))
                 place_bottom(panel, rack, panel_u, False)
+            for panel in fibre_rows:
+                place_fibre_panel(panel, rack)
 
         # Any unassociated copper panels are still installed with a manager.
         associated_ids = {id(p) for rows in copper_by_switch.values() for p in rows}
@@ -3790,40 +4127,35 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
             if id(panel) in associated_ids:
                 continue
             panel_u = max(1, _int(panel.get("_calculated_rack_units"), 1))
-            rack = choose_bottom(panel_u + manager_u, False, _text(panel.get("target_rack_name")))
+            rack = choose_bottom(panel_u + manager_u, False)
             builder.add_instance(
-                manager_asset, f"AUTO {location_name} Copper Cable Manager {_text(panel.get('id'))}",
-                location, "cable_management", rack_name=rack["name"],
-                rack_start_u=rack["bottom_next"], rack_size_u=rack_size_u,
-                route_anchor=location_name, associated_patch_panel_id=_text(panel.get("id")),
+                manager_asset,
+                f"AUTO {location_name} Copper Cable Manager {_text(panel.get('id'))}",
+                location,
+                "cable_management",
+                rack_name=rack["name"],
+                rack_start_u=rack["bottom_next"],
+                rack_size_u=rack_size_u,
+                route_anchor=location_name,
+                associated_patch_panel_id=_text(panel.get("id")),
             )
             rack["bottom_next"] += manager_u
             place_bottom(panel, rack, panel_u, False)
 
-        # Fibre panels are always mounted at the top of their intended rack,
-        # with a horizontal manager directly beneath each panel.
-        fibre_panels.sort(key=lambda p: (_text(p.get("target_rack_name")), _text(p.get("name"))))
-        for index, panel in enumerate(fibre_panels, start=1):
-            preferred = _text(panel.get("target_rack_name") or panel.get("rack_name"))
-            rack = create_rack(preferred) if preferred else (racks[0] if racks else create_rack())
+        # Unowned fibre panels use an existing rack with genuine spare space.
+        # A stale pre-repack target name is never allowed to create a new rack.
+        for panel in sorted(unowned_fibre, key=lambda row: _text(row.get("name"))):
             panel_u = max(1, _int(panel.get("_calculated_rack_units"), 1))
-            if rack["top_next"] - panel_u - manager_u + 1 < rack["bottom_next"]:
-                rack = create_rack()
-            panel_start = rack["top_next"] - panel_u + 1
-            manager_start = panel_start - manager_u
-            panel["rack_name"] = rack["name"]
-            panel["rack_start_u"] = panel_start
-            panel["rack_size_u"] = rack_size_u
-            builder.add_instance(
-                manager_asset,
-                f"AUTO {location_name} Fibre Cable Manager {index}",
-                location,
-                "cable_management",
-                rack_name=rack["name"], rack_start_u=manager_start,
-                rack_size_u=rack_size_u, route_anchor=location_name,
-                associated_patch_panel_id=_text(panel.get("id")),
+            rack = next(
+                (
+                    row for row in racks
+                    if row["top_next"] - panel_u - manager_u + 1 >= row["bottom_next"]
+                ),
+                None,
             )
-            rack["top_next"] = manager_start - 1
+            if rack is None:
+                rack = create_rack()
+            place_fibre_panel(panel, rack)
 
         for instance in items:
             instance.pop("_calculated_rack_units", None)
@@ -4327,7 +4659,7 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
     settings.setdefault("independent_link_count", 2)
     settings.setdefault("layer_connection_rules", [])
     settings.setdefault("polan_max_onts_per_splitter", 16)
-    settings.setdefault("polan_max_splitter_to_ont_m", 150.0)
+    settings.setdefault("polan_max_splitter_ont_route_m", 120.0)
     settings.setdefault("auto_planner_max_workers", 0)
     settings.setdefault("auto_planner_parallel_threshold", 4)
     spare_fraction = (
@@ -4378,6 +4710,8 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         _traditional_design(builder, endpoints, spare_fraction)
     else:
         _polan_design(builder, endpoints, spare_fraction)
+
+    _install_external_network_connections(builder, spare_fraction)
 
     # Fibre terminations require physical patch-panel capacity and rack space.
     # Repack the complete generated equipment set afterwards so OLTs, cores and
@@ -4469,7 +4803,11 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         "independent_link_count": (
             _int(settings.get("independent_link_count"), 2)
             if technology_value == "Traditional"
-            else 1
+            else max(
+                2 if bool(settings.get("redundant_core", True)) else 1,
+                _int(settings.get("independent_link_count"), 2)
+                if bool(settings.get("redundant_core", True)) else 1,
+            )
         ),
         "layer_connection_rules": (
             deepcopy(settings.get("layer_connection_rules", []))
@@ -4498,12 +4836,15 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         "physical_fibre_cables": physical_fibre_summary.get("cable_count", 0),
         "physical_fibre_nodes": physical_fibre_summary.get("node_count", 0),
         "physical_fibre_layer": deepcopy(settings.get("physical_fibre_layer", {})),
+        "physical_fibre_planning": deepcopy(settings.get("physical_fibre_planning", {})),
+        "optical_path_count": physical_fibre_summary.get("optical_path_count", 0),
+        "optical_path_failures": physical_fibre_summary.get("optical_path_failures", 0),
         "polan_max_ont_copper_m": _float(settings.get("polan_max_ont_copper_m"), 30.0),
         "polan_max_onts_per_splitter": _int(
             settings.get("polan_max_onts_per_splitter"), 16
         ),
-        "polan_max_splitter_to_ont_m": _float(
-            settings.get("polan_max_splitter_to_ont_m"), 150.0
+        "polan_max_splitter_ont_route_m": _float(
+            settings.get("polan_max_splitter_ont_route_m"), 120.0
         ),
         "olt_failover_enabled": (
             bool(settings.get("polan_olt_failover", True))
