@@ -32,6 +32,7 @@ from PySide6.QtCore import (
     QPointF,
     QRect,
     QRectF,
+    QSize,
     Qt,
     QTimer,
     QUrl,
@@ -420,6 +421,37 @@ class GpuDxfGraphView(_ViewBase):
             self._cache_margin_max_y_px,
             self._cache_base_height_px * self._cache_margin_factor,
         )
+
+        # QQuickPaintedItem normally allocates one texture per retained layer at
+        # the item size multiplied by the display device-pixel ratio. A large
+        # maximised HiDPI window can therefore request several very large
+        # textures at once. Keep every layer inside a configurable physical
+        # texture budget and reduce overscan before reducing visible-resolution.
+        self._max_layer_texture_side_px = max(
+            1024,
+            int(
+                os.environ.get(
+                    "CABLE_ROUTER_MAX_LAYER_TEXTURE_SIDE_PX", "4096"
+                )
+                or 4096
+            ),
+        )
+        self._max_layer_texture_pixels = max(
+            1_048_576,
+            int(
+                os.environ.get(
+                    "CABLE_ROUTER_MAX_LAYER_TEXTURE_PIXELS", "6291456"
+                )
+                or 6_291_456
+            ),
+        )
+        self._resize_settle_ms = max(
+            30,
+            int(
+                os.environ.get("CABLE_ROUTER_RESIZE_SETTLE_MS", "90")
+                or 90
+            ),
+        )
         self._pan_rebake_pending = False
 
         # Label dimensions are fixed in model space.  These constants never
@@ -461,6 +493,15 @@ class GpuDxfGraphView(_ViewBase):
         self._quality_timer.timeout.connect(self._end_fast_interaction)
         self._fast_interaction = False
         self._interaction_finish_layers = 0
+
+        # Maximise/full-screen transitions can emit a burst of resize events.
+        # Reallocating four retained layer textures for every intermediate size
+        # can exhaust graphics memory. Rebuild the textures once resizing settles.
+        self._resize_settle_timer = QTimer(self)
+        self._resize_settle_timer.setSingleShot(True)
+        self._resize_settle_timer.setInterval(self._resize_settle_ms)
+        self._resize_settle_timer.timeout.connect(self._finish_deferred_resize)
+        self._screen_change_connected = False
 
         self._drag_timer = QTimer(self)
         self._drag_timer.setSingleShot(True)
@@ -554,6 +595,82 @@ class GpuDxfGraphView(_ViewBase):
                 "backend, or update the graphics driver."
             ) from exc
 
+    def _device_pixel_ratio(self) -> float:
+        try:
+            value = float(self.devicePixelRatioF())
+        except (AttributeError, TypeError, ValueError):
+            value = 1.0
+        if not math.isfinite(value) or value <= 0.0:
+            return 1.0
+        return value
+
+    def _texture_scale_for_size(self, width: float, height: float) -> float:
+        """Return a uniform logical-size scale that stays in the GPU budget."""
+        width = max(1.0, float(width))
+        height = max(1.0, float(height))
+        dpr = self._device_pixel_ratio()
+        physical_width = width * dpr
+        physical_height = height * dpr
+        physical_pixels = physical_width * physical_height
+
+        scale = 1.0
+        if physical_width > self._max_layer_texture_side_px:
+            scale = min(scale, self._max_layer_texture_side_px / physical_width)
+        if physical_height > self._max_layer_texture_side_px:
+            scale = min(scale, self._max_layer_texture_side_px / physical_height)
+        if physical_pixels > self._max_layer_texture_pixels:
+            scale = min(
+                scale,
+                math.sqrt(self._max_layer_texture_pixels / physical_pixels),
+            )
+        return max(0.001, min(1.0, scale))
+
+    def _bounded_texture_size(self, width: float, height: float) -> QSize:
+        # QQuickPaintedItem multiplies textureSize by the window DPR. Supply a
+        # reduced logical texture size when the requested physical texture would
+        # exceed the configured side or total-pixel limit. Painting coordinates
+        # remain in item space, so no drawing code needs to change.
+        scale = self._texture_scale_for_size(width, height)
+        return QSize(
+            max(1, int(round(max(1.0, float(width)) * scale))),
+            max(1, int(round(max(1.0, float(height)) * scale))),
+        )
+
+    def _bounded_cache_margins(
+        self,
+        width: float,
+        height: float,
+        margin_x: float,
+        margin_y: float,
+    ) -> Tuple[float, float]:
+        """Reduce overscan first so the visible viewport stays at full detail."""
+        margin_x = max(0.0, float(margin_x))
+        margin_y = max(0.0, float(margin_y))
+        if not margin_x and not margin_y:
+            return 0.0, 0.0
+
+        # If the visible viewport alone exceeds the budget, margins cannot help;
+        # _bounded_texture_size() will safely lower the retained resolution.
+        if self._texture_scale_for_size(width, height) < 0.999:
+            return 0.0, 0.0
+
+        requested_width = width + margin_x * 2.0
+        requested_height = height + margin_y * 2.0
+        if self._texture_scale_for_size(requested_width, requested_height) >= 0.999:
+            return margin_x, margin_y
+
+        low = 0.0
+        high = 1.0
+        for _ in range(18):
+            factor = (low + high) / 2.0
+            candidate_width = width + margin_x * factor * 2.0
+            candidate_height = height + margin_y * factor * 2.0
+            if self._texture_scale_for_size(candidate_width, candidate_height) >= 0.999:
+                low = factor
+            else:
+                high = factor
+        return margin_x * low, margin_y * low
+
     def _resize_quick_layers(self) -> None:
         if not self._quick_mode:
             return
@@ -561,13 +678,19 @@ class GpuDxfGraphView(_ViewBase):
         height = max(1.0, float(self.height()))
         base_width = max(width, self._cache_base_width_px)
         base_height = max(height, self._cache_base_height_px)
-        self._cache_margin_x = min(
+        requested_margin_x = min(
             self._cache_margin_max_x_px,
             base_width * self._cache_margin_factor,
         )
-        self._cache_margin_y = min(
+        requested_margin_y = min(
             self._cache_margin_max_y_px,
             base_height * self._cache_margin_factor,
+        )
+        self._cache_margin_x, self._cache_margin_y = self._bounded_cache_margins(
+            width,
+            height,
+            requested_margin_x,
+            requested_margin_y,
         )
         if self._quick_root is not None:
             try:
@@ -577,15 +700,37 @@ class GpuDxfGraphView(_ViewBase):
                 pass
         for mask, item in self._layer_items.items():
             if mask == DirtyLayer.OVERLAY:
-                item.setX(0.0)
-                item.setY(0.0)
-                item.setWidth(width)
-                item.setHeight(height)
-                continue
-            item.setX(-self._cache_margin_x)
-            item.setY(-self._cache_margin_y)
-            item.setWidth(width + (self._cache_margin_x * 2.0))
-            item.setHeight(height + (self._cache_margin_y * 2.0))
+                item_width = width
+                item_height = height
+                item_x = 0.0
+                item_y = 0.0
+            else:
+                item_width = width + (self._cache_margin_x * 2.0)
+                item_height = height + (self._cache_margin_y * 2.0)
+                item_x = -self._cache_margin_x
+                item_y = -self._cache_margin_y
+
+            # Set the bounded backing texture before changing the item size so
+            # the scene graph never briefly creates the unrestricted allocation.
+            try:
+                item.setTextureSize(
+                    self._bounded_texture_size(item_width, item_height)
+                )
+            except (AttributeError, RuntimeError):
+                pass
+            item.setX(item_x)
+            item.setY(item_y)
+            item.setWidth(item_width)
+            item.setHeight(item_height)
+
+    def _finish_deferred_resize(self) -> None:
+        self._resize_quick_layers()
+        self.request_redraw(DirtyLayer.ALL)
+
+    def _screen_changed(self, *_args) -> None:
+        # Recalculate the physical texture budget when moved between displays
+        # with different DPI scaling.
+        self._resize_settle_timer.start(self._resize_settle_ms)
 
     def request_redraw(self, layers: int = DirtyLayer.ALL) -> None:
         self._dirty_layers |= int(layers)
@@ -681,6 +826,11 @@ class GpuDxfGraphView(_ViewBase):
 
     def _flush_redraw(self) -> None:
         if not self.isVisible():
+            self._frame_timer.stop()
+            return
+        if self._quick_mode and self._resize_settle_timer.isActive():
+            # Keep dirty flags intact; the settle callback will resize once and
+            # then schedule the final repaint.
             self._frame_timer.stop()
             return
         layers = self._dirty_layers
@@ -1073,12 +1223,26 @@ class GpuDxfGraphView(_ViewBase):
     # ------------------------------------------------------------------
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._resize_quick_layers()
-        self.request_redraw(DirtyLayer.ALL)
+        if self._quick_mode:
+            self._frame_timer.stop()
+            self._resize_settle_timer.start(self._resize_settle_ms)
+        else:
+            self.request_redraw(DirtyLayer.ALL)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self.request_redraw(DirtyLayer.ALL)
+        if self._quick_mode:
+            if not self._screen_change_connected:
+                try:
+                    top_level = self.window().windowHandle()
+                    if top_level is not None:
+                        top_level.screenChanged.connect(self._screen_changed)
+                        self._screen_change_connected = True
+                except (AttributeError, RuntimeError):
+                    pass
+            self._resize_settle_timer.start(0)
+        else:
+            self.request_redraw(DirtyLayer.ALL)
 
     def paintGL(self) -> None:  # OpenGL compatibility fallback.
         if self._quick_mode:

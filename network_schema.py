@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional
 from network_services import FIBRE_COLOURS, build_fibre_cores, fibre_layer_defaults, set_core_status_from_splices
 
 
-NETWORK_SCHEMA_VERSION = 4
+NETWORK_SCHEMA_VERSION = 5
 
 
 DEFAULT_FIBRE_CABLE_TYPES = [
@@ -1131,6 +1131,23 @@ def ensure_network_schema(data: dict) -> dict:
         connection.setdefault("physical_segment", "")
         connection.setdefault("parent_logical_connection_id", "")
         connection["link_speed_mbps"] = max(0, _as_int(connection.get("link_speed_mbps")))
+        connection.setdefault("link_aggregation_group_id", "")
+        connection.setdefault("link_aggregation_mode", "")
+        connection["link_aggregation_member_index"] = max(
+            0, _as_int(connection.get("link_aggregation_member_index"))
+        )
+        connection["link_aggregation_member_count"] = max(
+            0, _as_int(connection.get("link_aggregation_member_count"))
+        )
+        connection["aggregate_link_speed_mbps"] = max(
+            0, _as_int(connection.get("aggregate_link_speed_mbps"))
+        )
+        connection["aggregate_expected_bandwidth_mbps"] = max(
+            0.0, _as_float(connection.get("aggregate_expected_bandwidth_mbps"))
+        )
+        connection["aggregate_expected_packet_rate_pps"] = max(
+            0.0, _as_float(connection.get("aggregate_expected_packet_rate_pps"))
+        )
         connection.setdefault("from_optic_module_id", "")
         connection.setdefault("to_optic_module_id", "")
 
@@ -1699,6 +1716,90 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
         if left and right and speed not in set(left) & set(right):
             messages.append(f"Network connection {_text(connection.get('id'))} has no common port speed at {port_speed_label(speed)}.")
 
+    lag_groups: Dict[str, List[dict]] = {}
+    for connection in data.get("network_connections", []):
+        if not isinstance(connection, dict):
+            continue
+        if bool(connection.get("physical_connection")):
+            continue
+        lag_id = _text(connection.get("link_aggregation_group_id"))
+        if lag_id:
+            lag_groups.setdefault(lag_id, []).append(connection)
+
+    for lag_id, members in lag_groups.items():
+        if len(members) < 2:
+            messages.append(
+                f"Link aggregation group {lag_id} contains only one member connection."
+            )
+            continue
+        endpoint_pairs = {
+            tuple(
+                sorted(
+                    (
+                        _text(row.get("from_instance_id")),
+                        _text(row.get("to_instance_id")),
+                    )
+                )
+            )
+            for row in members
+        }
+        media = {_text(row.get("medium")).lower() for row in members}
+        speeds = {max(0, _as_int(row.get("link_speed_mbps"))) for row in members}
+        if len(endpoint_pairs) != 1:
+            messages.append(
+                f"Link aggregation group {lag_id} spans more than one device pair."
+            )
+        if len(media) != 1:
+            messages.append(
+                f"Link aggregation group {lag_id} mixes connection media."
+            )
+        if len(speeds) != 1 or 0 in speeds:
+            messages.append(
+                f"Link aggregation group {lag_id} must use the same declared speed on every member."
+            )
+        indices = sorted(
+            max(0, _as_int(row.get("link_aggregation_member_index")))
+            for row in members
+        )
+        expected_indices = list(range(1, len(members) + 1))
+        if indices != expected_indices:
+            messages.append(
+                f"Link aggregation group {lag_id} has invalid member indexes {indices}; "
+                f"expected {expected_indices}."
+            )
+        declared_counts = {
+            max(0, _as_int(row.get("link_aggregation_member_count")))
+            for row in members
+        }
+        if declared_counts != {len(members)}:
+            messages.append(
+                f"Link aggregation group {lag_id} declares member counts "
+                f"{sorted(declared_counts)} but contains {len(members)} connections."
+            )
+        member_speed = next(iter(speeds)) if len(speeds) == 1 else 0
+        aggregate_capacity = member_speed * len(members)
+        declared_aggregate = {
+            max(0, _as_int(row.get("aggregate_link_speed_mbps")))
+            for row in members
+        }
+        if declared_aggregate != {aggregate_capacity}:
+            messages.append(
+                f"Link aggregation group {lag_id} should declare "
+                f"{port_speed_label(aggregate_capacity)} aggregate capacity."
+            )
+        expected_load = max(
+            [
+                max(0.0, _as_float(row.get("aggregate_expected_bandwidth_mbps")))
+                for row in members
+            ]
+            or [0.0]
+        )
+        if aggregate_capacity and expected_load > aggregate_capacity + 1e-9:
+            messages.append(
+                f"Link aggregation group {lag_id} expects {expected_load:g} Mbps but "
+                f"provides only {aggregate_capacity:g} Mbps aggregate capacity."
+            )
+
     for assignment in data.get("network_endpoint_assignments", []):
         if not isinstance(assignment, dict):
             continue
@@ -2054,7 +2155,8 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     try:
         from network_services import network_traffic_loads
 
-        carried = network_traffic_loads(data).get("carried_by_instance", {})
+        traffic = network_traffic_loads(data)
+        carried = traffic.get("carried_by_instance", {})
         for instance_id, load in carried.items():
             instance = instances_by_id.get(instance_id, {})
             asset = assets_by_id.get(_text(instance.get("asset_id")), {})
@@ -2084,6 +2186,47 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                 messages.append(
                     f"Network instance {instance_id} carries {packet_load:.0f} packets/s "
                     f"but only provides {packet_capacity:.0f} packets/s throughput."
+                )
+
+
+        connection_loads = traffic.get("by_connection", {})
+        for connection in data.get("network_connections", []):
+            if not isinstance(connection, dict):
+                continue
+            if bool(connection.get("physical_connection")):
+                continue
+            connection_id = _text(connection.get("id"))
+            speed = max(0, _as_int(connection.get("link_speed_mbps")))
+            if not connection_id or speed <= 0:
+                continue
+            bandwidth_load = max(
+                0.0,
+                _as_float(
+                    connection_loads.get(connection_id, {}).get("bandwidth_mbps")
+                ),
+            )
+            if bandwidth_load > speed + 1e-9:
+                messages.append(
+                    f"Network connection {connection_id} carries "
+                    f"{bandwidth_load:.3f} Mbps but its member speed is only "
+                    f"{port_speed_label(speed)}."
+                )
+
+        for lag_id, load in traffic.get(
+            "by_link_aggregation_group", {}
+        ).items():
+            aggregate_capacity = max(
+                0.0, _as_float(load.get("aggregate_capacity_mbps"))
+            )
+            bandwidth_load = max(0.0, _as_float(load.get("bandwidth_mbps")))
+            if (
+                aggregate_capacity > 0.0
+                and bandwidth_load > aggregate_capacity + 1e-9
+            ):
+                messages.append(
+                    f"Link aggregation group {lag_id} carries "
+                    f"{bandwidth_load:.3f} Mbps but provides only "
+                    f"{aggregate_capacity:.3f} Mbps aggregate capacity."
                 )
     except Exception:
         # Validation must remain available in restricted runtimes even if a

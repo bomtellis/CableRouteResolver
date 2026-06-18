@@ -9,9 +9,9 @@ from typing import Callable, Dict, List, Optional, Sequence
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFrame, QGraphicsItem, QGraphicsObject, QGraphicsPathItem,
-    QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QMenu, QMessageBox,
-    QPushButton, QVBoxLayout,
+    QApplication, QComboBox, QDialog, QFrame, QGraphicsItem, QGraphicsObject,
+    QGraphicsPathItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QMenu,
+    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from network_fibre_dialogs import (
@@ -270,9 +270,42 @@ class PhysicalFibreTopologyDialog(QDialog):
         self._instances_cache: Optional[Dict[str, dict]] = None
         self._building = False
         self._initial_build_pending = True
-        self.setWindowTitle("Physical Fibre Topology"); self.setWindowFlag(Qt.Window, True); self.resize(1500, 900)
+        self.setWindowTitle("Physical Fibre Topology")
+        self.setWindowFlag(Qt.Window, True)
+        screen = (
+            parent.screen()
+            if parent is not None and hasattr(parent, "screen")
+            else QApplication.primaryScreen()
+        )
+        available = screen.availableGeometry() if screen is not None else None
+        target_width = (
+            min(1500, max(620, int(available.width() * 0.96)), available.width())
+            if available is not None
+            else 1500
+        )
+        target_height = (
+            min(900, max(440, int(available.height() * 0.92)), available.height())
+            if available is not None
+            else 900
+        )
+        self.setMinimumSize(min(620, target_width), min(440, target_height))
+        self.resize(target_width, target_height)
         self.setStyleSheet("QDialog{background:#10161c;color:#e8edf1} QPushButton,QComboBox{background:#25303b;color:#e8edf1;border:1px solid #46535e;padding:5px;border-radius:4px} QLabel{color:#d8e0e6}")
-        layout = QVBoxLayout(self); toolbar = QHBoxLayout(); layout.addLayout(toolbar)
+        layout = QVBoxLayout(self)
+
+        toolbar_widget = QWidget()
+        toolbar_widget.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        toolbar = QHBoxLayout(toolbar_widget)
+        toolbar.setContentsMargins(4, 2, 4, 2)
+        toolbar_scroll = QScrollArea()
+        toolbar_scroll.setObjectName("PhysicalFibreToolbarScrollArea")
+        toolbar_scroll.setFrameShape(QFrame.NoFrame)
+        toolbar_scroll.setWidgetResizable(True)
+        toolbar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        toolbar_scroll.setWidget(toolbar_widget)
+        layout.addWidget(toolbar_scroll)
+
         title = QLabel("Physical fibre overlay"); title.setFont(QFont("Arial", 13, QFont.Bold)); toolbar.addWidget(title)
         self.floor_combo = QComboBox(); toolbar.addWidget(self.floor_combo)
         for label, handler in (
@@ -290,6 +323,9 @@ class PhysicalFibreTopologyDialog(QDialog):
             button = QPushButton(label); button.clicked.connect(handler); toolbar.addWidget(button)
         toolbar.addStretch(1)
         self.layer_label = QLabel(); toolbar.addWidget(self.layer_label)
+        toolbar_widget.setMinimumWidth(toolbar_widget.sizeHint().width())
+        toolbar_scroll.setMinimumHeight(max(58, toolbar_widget.sizeHint().height() + 18))
+        toolbar_scroll.setMaximumHeight(max(76, toolbar_widget.sizeHint().height() + 24))
         self.scene = QGraphicsScene(self); self.scene.setItemIndexMethod(QGraphicsScene.NoIndex); self.view = FibreMapView(self); self.view.setScene(self.scene); layout.addWidget(self.view, 1)
         self.status = QLabel("Loading physical fibre…"); self.status.setStyleSheet("padding:7px;background:#182028;color:#aeb9c2"); layout.addWidget(self.status)
         self.floor_combo.currentIndexChanged.connect(self.rebuild)

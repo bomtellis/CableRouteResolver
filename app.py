@@ -77,6 +77,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QTabWidget,
     QGridLayout,
+    QLayout,
     QSizePolicy,
     QToolButton,
     QStyle,
@@ -1005,7 +1006,7 @@ class CableRouteEditor(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Cable Routing Graph Editor")
-        self.resize(1500, 920)
+        self.setMinimumSize(600, 420)
 
         self._render_data_revision = 0
         self._last_overlay_signature = None
@@ -1079,7 +1080,17 @@ class CableRouteEditor(QMainWindow):
         self._viewport_refresh_timer.timeout.connect(self.refresh_canvas)
         self._show_render_stats = True
 
+        self._ribbon_buttons = []
+        self._ribbon_scroll_areas = []
+        self._responsive_compact = None
+        self._responsive_layout_timer = QTimer(self)
+        self._responsive_layout_timer.setSingleShot(True)
+        self._responsive_layout_timer.setInterval(60)
+        self._responsive_layout_timer.timeout.connect(self._apply_responsive_layout)
+
         self._build_ui()
+        self._fit_initial_window_to_screen()
+        self._apply_responsive_layout(force=True)
         self.refresh_canvas()
 
     def _invalidate_static_scene_cache(self):
@@ -1390,8 +1401,7 @@ class CableRouteEditor(QMainWindow):
         btn.setIconSize(QSize(18, 18))
         btn.setText(text)
         btn.setToolTip(f"Set mode: {text}")
-        btn.setFixedSize(125, 30)
-        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._configure_ribbon_button(btn)
         btn.clicked.connect(lambda checked=False, m=mode: self._set_editor_mode(m))
         return btn
 
@@ -1412,6 +1422,89 @@ class CableRouteEditor(QMainWindow):
 
         self._set_editor_mode("select_move")
         return buttons
+
+    def _fit_initial_window_to_screen(self):
+        """Choose a useful initial size without exceeding the active desktop."""
+        screen = self.screen() if hasattr(self, "screen") else None
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        if available is None or available.width() <= 0 or available.height() <= 0:
+            self.resize(1500, 920)
+            return
+
+        target_width = min(1500, max(600, int(available.width() * 0.94)))
+        target_height = min(920, max(420, int(available.height() * 0.92)))
+        self.resize(
+            min(target_width, available.width()),
+            min(target_height, available.height()),
+        )
+
+        # On genuinely narrow logical desktops, start with the dock collapsed so
+        # the drawing area remains usable. It remains available from View.
+        if hasattr(self, "search_dock") and available.width() < 1100:
+            self.search_dock.hide()
+
+    def _configure_ribbon_button(self, button):
+        button.setMinimumSize(86, 28)
+        button.setMaximumSize(125, 32)
+        button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self._ribbon_buttons.append(button)
+        return button
+
+    def _add_scrollable_ribbon_tab(self, ribbon, content, title):
+        content_layout = content.layout()
+        if content_layout is not None:
+            content_layout.setSizeConstraint(QLayout.SetMinimumSize)
+        content.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("RibbonTabScrollArea")
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        self._ribbon_scroll_areas.append(scroll)
+        ribbon.addTab(scroll, title)
+        return scroll
+
+    def _apply_responsive_layout(self, force=False):
+        compact = self.width() < 1500 or self.height() < 850
+        if not force and compact == self._responsive_compact:
+            return
+        self._responsive_compact = compact
+
+        minimum_width = 78 if compact else 86
+        maximum_width = 108 if compact else 125
+        button_height = 28 if compact else 30
+        for button in self._ribbon_buttons:
+            try:
+                button.setMinimumSize(minimum_width, button_height)
+                button.setMaximumSize(maximum_width, button_height + 2)
+            except RuntimeError:
+                continue
+
+        ribbon = getattr(self, "ribbon", None)
+        if ribbon is not None:
+            ribbon.setMinimumHeight(142 if compact else 150)
+            ribbon.setMaximumHeight(178 if compact else 195)
+
+        dock = getattr(self, "search_dock", None)
+        if dock is not None:
+            dock.setMinimumWidth(205 if compact else 230)
+            if dock.isVisible():
+                target = max(220, min(360, int(self.width() * (0.19 if compact else 0.22))))
+                try:
+                    self.resizeDocks([dock], [target], Qt.Horizontal)
+                except RuntimeError:
+                    pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        timer = getattr(self, "_responsive_layout_timer", None)
+        if timer is not None:
+            timer.start()
 
     def _build_ui(self):
         central = QWidget(self)
@@ -1461,6 +1554,7 @@ class CableRouteEditor(QMainWindow):
     def _build_rhs_search_sidebar(self):
         self.search_dock = QDockWidget("Search", self)
         self.search_dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        self.search_dock.setMinimumWidth(230)
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -1508,6 +1602,12 @@ class CableRouteEditor(QMainWindow):
 
         self.search_dock.setWidget(container)
         self.addDockWidget(Qt.RightDockWidgetArea, self.search_dock)
+
+        toggle_action = self.search_dock.toggleViewAction()
+        toggle_action.setText("Search panel")
+        if hasattr(self, "_view_menu"):
+            self._view_menu.addSeparator()
+            self._view_menu.addAction(toggle_action)
 
         self.refresh_rhs_search_sidebar()
 
@@ -1815,6 +1915,7 @@ class CableRouteEditor(QMainWindow):
         redo_action.triggered.connect(self.redo)
 
         view_menu = self.menuBar().addMenu("View")
+        self._view_menu = view_menu
 
         fit_action = view_menu.addAction("Fit View")
         fit_action.triggered.connect(self.fit_view)
@@ -1861,8 +1962,7 @@ class CableRouteEditor(QMainWindow):
         btn.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         btn.setIconSize(QSize(16, 16))
         btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        btn.setFixedSize(125, 30)
-        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._configure_ribbon_button(btn)
         btn.clicked.connect(self.show_layer_visibility_dialog)
         return btn
 
@@ -1932,8 +2032,7 @@ class CableRouteEditor(QMainWindow):
         btn.setText(text)
         btn.setToolTip(tooltip)
 
-        btn.setFixedSize(125, 30)
-        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._configure_ribbon_button(btn)
 
         btn.clicked.connect(handler)
         return btn
@@ -1948,8 +2047,7 @@ class CableRouteEditor(QMainWindow):
         btn.setText(text)
         btn.setToolTip(text)
 
-        btn.setFixedSize(125, 30)
-        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._configure_ribbon_button(btn)
 
         return btn
 
@@ -2083,9 +2181,10 @@ class CableRouteEditor(QMainWindow):
         self.default_corridor_cable_limit_spin.setValue(0)
 
         ribbon = QTabWidget()
+        self.ribbon = ribbon
         ribbon.setObjectName("AeroRibbon")
-        ribbon.setMinimumHeight(135)
-        ribbon.setMaximumHeight(180)
+        ribbon.setMinimumHeight(150)
+        ribbon.setMaximumHeight(195)
         main_layout.addWidget(ribbon)
 
         # ---------------- Home tab ----------------
@@ -2121,7 +2220,7 @@ class CableRouteEditor(QMainWindow):
                 ],
             ],
         )
-        ribbon.addTab(home_tab, "Home")
+        self._add_scrollable_ribbon_tab(ribbon, home_tab, "Home")
 
         # ---------------- Data tab ----------------
         data_tab = QWidget()
@@ -2245,7 +2344,7 @@ class CableRouteEditor(QMainWindow):
         )
         data_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
 
-        ribbon.addTab(data_tab, "Data")
+        self._add_scrollable_ribbon_tab(ribbon, data_tab, "Data")
 
         # ---------------- Routing tab ----------------
         routing_tab = QWidget()
@@ -2315,7 +2414,7 @@ class CableRouteEditor(QMainWindow):
             columns=2,
         )
 
-        ribbon.addTab(routing_tab, "Routing")
+        self._add_scrollable_ribbon_tab(ribbon, routing_tab, "Routing")
 
         # ---------------- Map tab ----------------
         map_tab = QWidget()
@@ -2354,7 +2453,7 @@ class CableRouteEditor(QMainWindow):
             columns=2,
         )        
 
-        ribbon.addTab(map_tab, "Maps")
+        self._add_scrollable_ribbon_tab(ribbon, map_tab, "Maps")
 
         # ---------------- Output tab ----------------
         output_tab = QWidget()
@@ -2379,7 +2478,7 @@ class CableRouteEditor(QMainWindow):
         data_layout.addStretch(1)
         routing_layout.addStretch(1)
 
-        ribbon.addTab(output_tab, "Output")
+        self._add_scrollable_ribbon_tab(ribbon, output_tab, "Output")
 
         ribbon.setStyleSheet("""
         QTabWidget::pane {

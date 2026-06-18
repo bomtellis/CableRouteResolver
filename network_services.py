@@ -1522,9 +1522,12 @@ def network_traffic_loads(data: dict) -> dict:
         direct[instance_id]["packet_rate_pps"] += packets
         assignment_counts[instance_id] += 1
 
-    # downstream -> [(upstream, connection_id)]
-    upstream_by_instance: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    # downstream -> logical upstream routes.  A same-speed LAG is one route
+    # with several physical/logical member connections, not several protected
+    # paths carrying the full demand independently.
+    upstream_by_instance: Dict[str, List[dict]] = defaultdict(list)
     downstream_count: Dict[str, int] = defaultdict(int)
+    route_groups: Dict[str, dict] = {}
 
     def orient_connection(source: str, target: str, row: dict) -> Optional[Tuple[str, str]]:
         source_tier = tier(source)
@@ -1574,8 +1577,31 @@ def network_traffic_loads(data: dict) -> dict:
         if oriented is None:
             continue
         upstream, downstream = oriented
-        upstream_by_instance[downstream].append((upstream, connection_id))
-        downstream_count[upstream] += 1
+        lag_id = _text(connection.get("link_aggregation_group_id"))
+        route_key = (
+            f"lag::{lag_id}::{upstream}::{downstream}"
+            if lag_id
+            else f"connection::{connection_id}"
+        )
+        route = route_groups.setdefault(
+            route_key,
+            {
+                "route_id": route_key,
+                "upstream": upstream,
+                "downstream": downstream,
+                "lag_id": lag_id,
+                "members": [],
+            },
+        )
+        if connection_id and all(
+            _text(member.get("id")) != connection_id
+            for member in route["members"]
+        ):
+            route["members"].append(connection)
+
+    for route in route_groups.values():
+        upstream_by_instance[route["downstream"]].append(route)
+        downstream_count[route["upstream"]] += 1
 
     # A manually installed leaf device may have an expected load stored on the
     # instance rather than endpoint assignments. Use that value only when the
@@ -1607,6 +1633,29 @@ def network_traffic_loads(data: dict) -> dict:
     connection_loads: Dict[str, Dict[str, float]] = defaultdict(
         lambda: {"bandwidth_mbps": 0.0, "packet_rate_pps": 0.0}
     )
+    lag_loads: Dict[str, Dict[str, object]] = {}
+    for route in route_groups.values():
+        lag_id = _text(route.get("lag_id"))
+        if not lag_id:
+            continue
+        members = list(route.get("members", []))
+        lag_loads[lag_id] = {
+            "bandwidth_mbps": 0.0,
+            "packet_rate_pps": 0.0,
+            "member_connection_ids": [
+                _text(member.get("id")) for member in members if _text(member.get("id"))
+            ],
+            "member_count": len(members),
+            "member_speed_mbps": max(
+                [max(0, _int(member.get("link_speed_mbps"))) for member in members]
+                or [0]
+            ),
+            "aggregate_capacity_mbps": sum(
+                max(0, _int(member.get("link_speed_mbps"))) for member in members
+            ),
+            "upstream_instance_id": _text(route.get("upstream")),
+            "downstream_instance_id": _text(route.get("downstream")),
+        }
     unique_by_tier: Dict[int, Dict[str, float]] = defaultdict(
         lambda: {"bandwidth_mbps": 0.0, "packet_rate_pps": 0.0}
     )
@@ -1621,7 +1670,7 @@ def network_traffic_loads(data: dict) -> dict:
             continue
         queue = deque([origin_id])
         visited_nodes: Set[str] = set()
-        visited_edges: Set[str] = set()
+        visited_routes: Set[str] = set()
         while queue:
             current = queue.popleft()
             if current in visited_nodes:
@@ -1629,12 +1678,42 @@ def network_traffic_loads(data: dict) -> dict:
             visited_nodes.add(current)
             carried[current]["bandwidth_mbps"] += bandwidth
             carried[current]["packet_rate_pps"] += packets
-            for upstream, connection_id in upstream_by_instance.get(current, []):
-                if connection_id and connection_id not in visited_edges:
-                    visited_edges.add(connection_id)
-                    connection_loads[connection_id]["bandwidth_mbps"] += bandwidth
-                    connection_loads[connection_id]["packet_rate_pps"] += packets
-                if upstream not in visited_nodes:
+            for route in upstream_by_instance.get(current, []):
+                route_id = _text(route.get("route_id"))
+                upstream = _text(route.get("upstream"))
+                if route_id and route_id not in visited_routes:
+                    visited_routes.add(route_id)
+                    members = list(route.get("members", []))
+                    weights = [
+                        max(0.0, _float(member.get("link_speed_mbps")))
+                        for member in members
+                    ]
+                    total_weight = sum(weights)
+                    if total_weight <= 0.0:
+                        weights = [1.0 for _member in members]
+                        total_weight = float(len(weights) or 1)
+                    for member, weight in zip(members, weights):
+                        connection_id = _text(member.get("id"))
+                        if not connection_id:
+                            continue
+                        fraction = weight / total_weight
+                        connection_loads[connection_id]["bandwidth_mbps"] += (
+                            bandwidth * fraction
+                        )
+                        connection_loads[connection_id]["packet_rate_pps"] += (
+                            packets * fraction
+                        )
+                    lag_id = _text(route.get("lag_id"))
+                    if lag_id and lag_id in lag_loads:
+                        lag_loads[lag_id]["bandwidth_mbps"] = (
+                            _float(lag_loads[lag_id].get("bandwidth_mbps"))
+                            + bandwidth
+                        )
+                        lag_loads[lag_id]["packet_rate_pps"] = (
+                            _float(lag_loads[lag_id].get("packet_rate_pps"))
+                            + packets
+                        )
+                if upstream and upstream not in visited_nodes:
                     queue.append(upstream)
 
         # One endpoint demand may traverse two protected devices at the same
@@ -1648,6 +1727,7 @@ def network_traffic_loads(data: dict) -> dict:
         "direct_by_instance": direct,
         "carried_by_instance": carried,
         "by_connection": dict(connection_loads),
+        "by_link_aggregation_group": lag_loads,
         "unique_by_tier": dict(unique_by_tier),
         "tier_by_instance": {
             instance_id: tier(instance_id) for instance_id in instances

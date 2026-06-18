@@ -1152,6 +1152,11 @@ class DesignBuilder:
             for item in data.get("network_connections", [])
             if _text(item.get("id"))
         }
+        self.link_aggregation_ids = {
+            _text(item.get("link_aggregation_group_id"))
+            for item in data.get("network_connections", [])
+            if isinstance(item, dict) and _text(item.get("link_aggregation_group_id"))
+        }
         self.power_connection_ids = {
             _text(item.get("id"))
             for item in data.get("network_power_connections", [])
@@ -1279,54 +1284,227 @@ class DesignBuilder:
                 return use
         return fallback
 
-    def _select_connection_ports(self, from_instance: dict, requested_from: str, to_instance: dict, requested_to: str, medium: str, requested_speed: int, required_bandwidth_mbps: float) -> Tuple[dict, dict, int]:
-        def candidates(instance: dict, requested: str, fallback_use: str) -> List[dict]:
-            instance_id = _text(instance.get("id"))
-            rows = [row for row in self._expanded_ports(instance) if _text(row.get("medium")) == medium and _text(row.get("name")) not in self._reserved_ports.get(instance_id, set())]
-            exact = [row for row in rows if _text(row.get("name")).lower() == _text(requested).lower()]
-            if exact:
-                return exact
-            wanted = self._requested_use(requested, fallback_use)
-            preferred = [row for row in rows if _text(row.get("port_use")) == wanted]
-            return preferred or rows
+    def _connection_port_candidates(
+        self,
+        instance: dict,
+        requested: str,
+        medium: str,
+        fallback_use: str,
+    ) -> List[dict]:
+        """Return free ports ordered by the requested name and intended use."""
 
-        left_rows = candidates(from_instance, requested_from, "uplink")
-        right_rows = candidates(to_instance, requested_to, "input")
-        if not left_rows and not self._expanded_ports(from_instance):
-            left_rows = [{"name": requested_from, "port_type": "lc" if medium == "fibre" else "rj45", "port_use": "uplink", "medium": medium, "supported_speeds_mbps": []}]
-        if not right_rows and not self._expanded_ports(to_instance):
-            right_rows = [{"name": requested_to, "port_type": "lc" if medium == "fibre" else "rj45", "port_use": "input", "medium": medium, "supported_speeds_mbps": []}]
-        choices = []
+        instance_id = _text(instance.get("id"))
+        expanded = self._expanded_ports(instance)
+        rows = [
+            row
+            for row in expanded
+            if _text(row.get("medium")) == medium
+            and _text(row.get("name"))
+            not in self._reserved_ports.get(instance_id, set())
+        ]
+        if not rows and not expanded:
+            rows = [
+                {
+                    "name": requested,
+                    "port_type": "lc" if medium == "fibre" else "rj45",
+                    "port_use": fallback_use,
+                    "medium": medium,
+                    "supported_speeds_mbps": [],
+                }
+            ]
+        wanted = self._requested_use(requested, fallback_use)
+        requested_lower = _text(requested).lower()
+        exact_rows = [
+            row
+            for row in rows
+            if _text(row.get("name")).lower() == requested_lower
+        ]
+        preferred_rows = [
+            row
+            for row in rows
+            if _text(row.get("port_use")).lower() == wanted
+        ]
+        if preferred_rows:
+            exact_ids = {id(row) for row in exact_rows}
+            rows = exact_rows + [
+                row for row in preferred_rows if id(row) not in exact_ids
+            ]
+        indexed_rows = list(enumerate(rows))
+        indexed_rows.sort(
+            key=lambda indexed: (
+                0
+                if _text(indexed[1].get("name")).lower() == requested_lower
+                else 1,
+                0
+                if _text(indexed[1].get("port_use")).lower() == wanted
+                else 1,
+                indexed[0],
+            )
+        )
+        return [row for _index, row in indexed_rows]
+
+    def _select_connection_port_bundle(
+        self,
+        from_instance: dict,
+        requested_from: str,
+        to_instance: dict,
+        requested_to: str,
+        medium: str,
+        requested_speed: int,
+        required_bandwidth_mbps: float,
+        *,
+        reserve: bool = True,
+    ) -> Tuple[List[Tuple[dict, dict]], int]:
+        """Select one link or a same-speed bundle able to carry the demand."""
+
+        left_rows = self._connection_port_candidates(
+            from_instance, requested_from, medium, "uplink"
+        )
+        right_rows = self._connection_port_candidates(
+            to_instance, requested_to, medium, "input"
+        )
+
+        speed_candidates: Set[int] = set()
         for left in left_rows:
+            left_speeds = normalise_port_speeds(
+                left.get("supported_speeds_mbps")
+            )
             for right in right_rows:
-                left_speeds = normalise_port_speeds(left.get("supported_speeds_mbps"))
-                right_speeds = normalise_port_speeds(right.get("supported_speeds_mbps"))
+                right_speeds = normalise_port_speeds(
+                    right.get("supported_speeds_mbps")
+                )
                 common = compatible_port_speeds(left_speeds, right_speeds)
-                if left_speeds and right_speeds and not common:
-                    continue
                 if requested_speed > 0:
-                    if common and requested_speed not in common:
-                        continue
-                    selected_speed = requested_speed
-                elif common:
-                    eligible = [value for value in common if value + 1e-9 >= required_bandwidth_mbps]
-                    if not eligible:
-                        continue
-                    selected_speed = min(eligible)
+                    if not common or requested_speed in common:
+                        speed_candidates.add(requested_speed)
                 else:
-                    selected_speed = 0
-                choices.append((0 if _text(left.get("name")) == _text(requested_from) else 1, 0 if _text(right.get("name")) == _text(requested_to) else 1, selected_speed if selected_speed else 10**12, _text(left.get("name")), _text(right.get("name")), left, right, selected_speed))
+                    speed_candidates.update(common)
+
+        choices: List[tuple] = []
+        required = max(0.0, float(required_bandwidth_mbps or 0.0))
+        for speed in sorted(speed_candidates):
+            if speed <= 0:
+                continue
+            left_eligible = [
+                row
+                for row in left_rows
+                if not normalise_port_speeds(row.get("supported_speeds_mbps"))
+                or speed
+                in normalise_port_speeds(row.get("supported_speeds_mbps"))
+            ]
+            right_eligible = [
+                row
+                for row in right_rows
+                if not normalise_port_speeds(row.get("supported_speeds_mbps"))
+                or speed
+                in normalise_port_speeds(row.get("supported_speeds_mbps"))
+            ]
+            member_count = max(
+                1,
+                int(math.ceil(required / float(speed) - 1e-12))
+                if required > 0.0
+                else 1,
+            )
+            if member_count > min(len(left_eligible), len(right_eligible)):
+                continue
+            pairs = list(
+                zip(
+                    left_eligible[:member_count],
+                    right_eligible[:member_count],
+                )
+            )
+            aggregate_capacity = speed * member_count
+            choices.append(
+                (
+                    member_count,
+                    max(0.0, aggregate_capacity - required),
+                    aggregate_capacity,
+                    speed,
+                    tuple(_text(row.get("name")) for row in left_eligible[:member_count]),
+                    tuple(_text(row.get("name")) for row in right_eligible[:member_count]),
+                    pairs,
+                )
+            )
+
+        # Preserve legacy support for unstructured or speed-transparent devices.
+        # Their capacity is unknown, so only one logical connection can be made.
+        if not choices:
+            for left in left_rows:
+                for right in right_rows:
+                    left_speeds = normalise_port_speeds(
+                        left.get("supported_speeds_mbps")
+                    )
+                    right_speeds = normalise_port_speeds(
+                        right.get("supported_speeds_mbps")
+                    )
+                    common = compatible_port_speeds(left_speeds, right_speeds)
+                    if left_speeds and right_speeds and not common:
+                        continue
+                    if requested_speed > 0 and common and requested_speed not in common:
+                        continue
+                    if not common and not left_speeds and not right_speeds:
+                        choices.append(
+                            (
+                                1,
+                                float("inf"),
+                                0,
+                                requested_speed,
+                                (_text(left.get("name")),),
+                                (_text(right.get("name")),),
+                                [(left, right)],
+                            )
+                        )
+                        break
+                if choices:
+                    break
+
         if not choices:
             from_name = from_instance.get("name") or from_instance.get("id")
             to_name = to_instance.get("name") or to_instance.get("id")
-            raise NetworkPlanningError(
-                f"No compatible free {medium} ports exist between {from_name} and {to_name} for "
-                f"{port_speed_label(requested_speed) if requested_speed else f'{required_bandwidth_mbps:g} Mbps required traffic'}."
+            requirement = (
+                port_speed_label(requested_speed)
+                if requested_speed
+                else f"{required_bandwidth_mbps:g} Mbps required traffic"
             )
-        *_, left, right, selected_speed = min(choices, key=lambda row: row[:5])
-        self._reserved_ports[_text(from_instance.get("id"))].add(_text(left.get("name")))
-        self._reserved_ports[_text(to_instance.get("id"))].add(_text(right.get("name")))
-        return left, right, selected_speed
+            raise NetworkPlanningError(
+                f"No compatible free {medium} port or same-speed link aggregation "
+                f"group exists between {from_name} and {to_name} for {requirement}."
+            )
+
+        selected_choice = min(choices, key=lambda row: row[:-1])
+        selected_speed = selected_choice[3]
+        pairs = selected_choice[-1]
+        if reserve:
+            from_id = _text(from_instance.get("id"))
+            to_id = _text(to_instance.get("id"))
+            for left, right in pairs:
+                self._reserved_ports[from_id].add(_text(left.get("name")))
+                self._reserved_ports[to_id].add(_text(right.get("name")))
+        return pairs, selected_speed
+
+    def preview_connection_bundle(
+        self,
+        from_instance: dict,
+        requested_from: str,
+        to_instance: dict,
+        requested_to: str,
+        medium: str,
+        requested_speed: int,
+        required_bandwidth_mbps: float,
+    ) -> Tuple[int, int]:
+        """Return the required member count and speed without reserving ports."""
+
+        pairs, selected_speed = self._select_connection_port_bundle(
+            from_instance,
+            requested_from,
+            to_instance,
+            requested_to,
+            medium,
+            requested_speed,
+            required_bandwidth_mbps,
+            reserve=False,
+        )
+        return len(pairs), selected_speed
 
     def _matching_optic_assets(
         self, host_asset: dict, port: dict, speed_mbps: int, required_reach_m: float
@@ -1687,6 +1865,7 @@ class DesignBuilder:
         physical_connection = bool(extra.get("physical_connection"))
         parent_logical_id = _text(extra.get("parent_logical_connection_id"))
         explicit_bandwidth = extra.get("expected_bandwidth_mbps", None)
+        explicit_packets = extra.get("expected_packet_rate_pps", None)
         required_bandwidth = (
             max(0.0, _float(explicit_bandwidth))
             if explicit_bandwidth is not None and _text(explicit_bandwidth) != ""
@@ -1696,6 +1875,16 @@ class DesignBuilder:
                 _float(to_instance.get("expected_bandwidth_mbps")),
             )
         )
+        required_packets = (
+            max(0.0, _float(explicit_packets))
+            if explicit_packets is not None and _text(explicit_packets) != ""
+            else max(
+                0.0,
+                _float(from_instance.get("expected_packet_rate_pps")),
+                _float(to_instance.get("expected_packet_rate_pps")),
+            )
+        )
+
         if physical_connection:
             selected_from = self._port_definition(from_instance, from_port, medium, self._requested_use(from_port, "uplink"))
             selected_to = self._port_definition(to_instance, to_port, medium, self._requested_use(to_port, "input"))
@@ -1703,49 +1892,108 @@ class DesignBuilder:
             selected_to = {**selected_to, "name": _text(to_port)}
             parent = next((row for row in self.connections if _text(row.get("id")) == parent_logical_id), None) or next((row for row in self.data.get("network_connections", []) if _text(row.get("id")) == parent_logical_id), None)
             link_speed = requested_speed or max(0, _int((parent or {}).get("link_speed_mbps")))
+            selected_pairs = [(selected_from, selected_to)]
         else:
-            selected_from, selected_to, link_speed = self._select_connection_ports(from_instance, from_port, to_instance, to_port, medium, requested_speed, required_bandwidth)
-            from_port = _text(selected_from.get("name")); to_port = _text(selected_to.get("name"))
-        connection_id = _next_identifier(self.connection_ids, "AUTO-NC-")
+            selected_pairs, link_speed = self._select_connection_port_bundle(
+                from_instance,
+                from_port,
+                to_instance,
+                to_port,
+                medium,
+                requested_speed,
+                required_bandwidth,
+            )
+
+        member_count = len(selected_pairs)
+        lag_id = (
+            _next_identifier(self.link_aggregation_ids, "AUTO-LAG-")
+            if not physical_connection and member_count > 1
+            else ""
+        )
+        aggregate_capacity = max(0, link_speed) * member_count
         length_m, route_path = self.graph.route(route_source, route_destination) if route_source and route_destination else (0.0, [])
         cable_specification = {"fibre": "OS2 single-mode fibre", "copper": "Category 6A", "stacking": "Switch stack interconnect"}.get(medium, "")
-        connection = {
-            "id": connection_id, "from_instance_id": _text(from_instance.get("id")), "from_port": from_port,
-            "to_instance_id": _text(to_instance.get("id")), "to_port": to_port, "connection_role": "uplink",
-            "medium": medium, "link_speed_mbps": link_speed, "cable_specification": cable_specification,
-            "fibre_count": 2 if medium == "fibre" else 0, "vlan_ids": [], "route_profile": "",
-            "route_path": route_path, "length_m": round(length_m, 3),
-            "notes": "Automatically generated network topology connection.", "auto_generated": True, **extra,
-        }
-        if medium == "fibre" and not physical_connection:
-            from_optic, to_optic, estimated_loss, estimated_margin = self._select_optic_pair(
-                from_instance, selected_from, to_instance, selected_to, link_speed, length_m
+        created: List[dict] = []
+
+        for member_index, (selected_from, selected_to) in enumerate(selected_pairs, start=1):
+            selected_from_port = _text(selected_from.get("name"))
+            selected_to_port = _text(selected_to.get("name"))
+            connection_id = _next_identifier(self.connection_ids, "AUTO-NC-")
+            connection = {
+                "id": connection_id, "from_instance_id": _text(from_instance.get("id")), "from_port": selected_from_port,
+                "to_instance_id": _text(to_instance.get("id")), "to_port": selected_to_port, "connection_role": "uplink",
+                "medium": medium, "link_speed_mbps": link_speed, "cable_specification": cable_specification,
+                "fibre_count": 2 if medium == "fibre" else 0, "vlan_ids": [], "route_profile": "",
+                "route_path": route_path, "length_m": round(length_m, 3),
+                "notes": "Automatically generated network topology connection.", "auto_generated": True, **extra,
+            }
+            if lag_id:
+                connection.update(
+                    {
+                        "link_aggregation_group_id": lag_id,
+                        "link_aggregation_mode": "lacp",
+                        "link_aggregation_member_index": member_index,
+                        "link_aggregation_member_count": member_count,
+                        "aggregate_link_speed_mbps": aggregate_capacity,
+                        "aggregate_expected_bandwidth_mbps": round(required_bandwidth, 6),
+                        "aggregate_expected_packet_rate_pps": round(required_packets, 3),
+                        "expected_bandwidth_mbps": round(
+                            required_bandwidth / member_count, 6
+                        ),
+                        "expected_packet_rate_pps": round(
+                            required_packets / member_count, 3
+                        ),
+                    }
+                )
+                connection["notes"] = (
+                    _text(connection.get("notes"))
+                    + f" Member {member_index} of {member_count} in {lag_id}; "
+                    f"aggregate capacity {port_speed_label(aggregate_capacity)}."
+                ).strip()
+
+            if medium == "fibre" and not physical_connection:
+                from_optic, to_optic, estimated_loss, estimated_margin = self._select_optic_pair(
+                    from_instance, selected_from, to_instance, selected_to, link_speed, length_m
+                )
+                connection["from_optic_module_id"] = self._add_optic_module(
+                    connection_id, "from", from_instance, selected_from, link_speed, from_optic
+                )
+                connection["to_optic_module_id"] = self._add_optic_module(
+                    connection_id, "to", to_instance, selected_to, link_speed, to_optic
+                )
+                connection["estimated_optical_path_loss_db"] = round(estimated_loss, 6)
+                connection["required_optical_margin_db"] = max(
+                    0.0,
+                    _float(
+                        self.settings.get("physical_fibre_planning", {}).get(
+                            "minimum_optical_margin_db", 3.0
+                        )
+                    ),
+                )
+                connection["estimated_optical_margin_db"] = (
+                    "" if estimated_margin is None else round(estimated_margin, 6)
+                )
+
+            self.connections.append(connection)
+            created.append(connection)
+            if generate_patch_leads and medium in {"copper", "fibre"}:
+                self.add_patch_lead(connection_id=connection_id, instance=from_instance, port=selected_from_port, medium=medium, peer_instance_id=_text(to_instance.get("id")), peer_port=selected_to_port, preferred_use="uplink")
+                self.add_patch_lead(connection_id=connection_id, instance=to_instance, port=selected_to_port, medium=medium, peer_instance_id=_text(from_instance.get("id")), peer_port=selected_from_port, preferred_use="input")
+            if medium == "fibre":
+                self.total_fibre_m += length_m
+            else:
+                self.total_copper_m += length_m
+
+        if lag_id:
+            from_name = from_instance.get("name") or from_instance.get("id")
+            to_name = to_instance.get("name") or to_instance.get("id")
+            self.warnings.append(
+                f"Created {lag_id} between {from_name} and {to_name} using "
+                f"{member_count} × {port_speed_label(link_speed)} ports "
+                f"({port_speed_label(aggregate_capacity)} aggregate) for "
+                f"{required_bandwidth:.3f} Mbps required traffic."
             )
-            connection["from_optic_module_id"] = self._add_optic_module(
-                connection_id, "from", from_instance, selected_from, link_speed, from_optic
-            )
-            connection["to_optic_module_id"] = self._add_optic_module(
-                connection_id, "to", to_instance, selected_to, link_speed, to_optic
-            )
-            connection["estimated_optical_path_loss_db"] = round(estimated_loss, 6)
-            connection["required_optical_margin_db"] = max(
-                0.0,
-                _float(
-                    self.settings.get("physical_fibre_planning", {}).get(
-                        "minimum_optical_margin_db", 3.0
-                    )
-                ),
-            )
-            connection["estimated_optical_margin_db"] = (
-                "" if estimated_margin is None else round(estimated_margin, 6)
-            )
-        self.connections.append(connection)
-        if generate_patch_leads and medium in {"copper", "fibre"}:
-            self.add_patch_lead(connection_id=connection_id, instance=from_instance, port=from_port, medium=medium, peer_instance_id=_text(to_instance.get("id")), peer_port=to_port, preferred_use="uplink")
-            self.add_patch_lead(connection_id=connection_id, instance=to_instance, port=to_port, medium=medium, peer_instance_id=_text(from_instance.get("id")), peer_port=from_port, preferred_use="input")
-        if medium == "fibre": self.total_fibre_m += length_m
-        else: self.total_copper_m += length_m
-        return connection
+        return created[0]
 
     def add_power_connection(
         self,
@@ -2804,6 +3052,55 @@ def _build_core_layer(
                 for item in leaves
             )
 
+        def required_ports_for_candidate(asset: dict) -> int:
+            fake_core = {
+                "id": f"__AUTO-CORE-CANDIDATE-{_text(asset.get('id'))}",
+                "asset_id": _text(asset.get("id")),
+            }
+
+            def members_for(leaf: dict) -> int:
+                count_needed, _speed = builder.preview_connection_bundle(
+                    leaf,
+                    "Uplink-1",
+                    fake_core,
+                    "1",
+                    "fibre",
+                    0,
+                    max(0.0, _float(leaf.get("expected_bandwidth_mbps"))),
+                )
+                return max(1, count_needed)
+
+            try:
+                local_ports = sum(members_for(leaf) for leaf in leaves)
+                if root_count > 1 and desired_links > 1:
+                    remote_copies = min(desired_links - 1, root_count - 1)
+                    remote_ports = sum(
+                        members_for(leaf)
+                        for other_root in active_root_names
+                        if other_root != root_name
+                        for leaf in leaves_by_root.get(other_root, [])
+                    )
+                    return local_ports + int(
+                        math.ceil(
+                            remote_ports
+                            * remote_copies
+                            / max(1, root_count - 1)
+                        )
+                    )
+                return local_ports * desired_links
+            except NetworkPlanningError:
+                return 10**9
+
+        candidate_port_requirements = {
+            _text(asset.get("id")): required_ports_for_candidate(asset)
+            for asset in candidates
+        }
+        finite_requirements = [
+            value for value in candidate_port_requirements.values() if value < 10**9
+        ]
+        if finite_requirements:
+            required_ports = max(required_ports, min(finite_requirements))
+
         capacity_candidates = [
             {**asset, "number_of_ports": asset_port_capacity(asset)}
             for asset in candidates
@@ -2833,6 +3130,17 @@ def _build_core_layer(
         single_capable = []
         for asset in candidates:
             ports = asset_port_capacity(asset)
+            candidate_required_port_capacity = int(
+                math.ceil(
+                    max(
+                        0,
+                        candidate_port_requirements.get(
+                            _text(asset.get("id")), required_ports
+                        ),
+                    )
+                    * (1.0 + spare_fraction)
+                )
+            )
             bandwidth = max(
                 0.0, _float(asset.get("bandwidth_capacity_gbps")) * 1000.0
             )
@@ -2840,7 +3148,7 @@ def _build_core_layer(
                 0.0,
                 _float(asset.get("packet_throughput_mpps")) * 1_000_000.0,
             )
-            if ports < required_port_capacity:
+            if ports < candidate_required_port_capacity:
                 continue
             if bandwidth_declared and bandwidth + 1e-9 < required_bandwidth_capacity:
                 continue
@@ -2850,7 +3158,7 @@ def _build_core_layer(
                 (
                     max(1, _rack_units_for_asset(asset, 1)),
                     _float(asset.get("power_input_w")),
-                    ports - required_port_capacity,
+                    ports - candidate_required_port_capacity,
                     (
                         bandwidth - required_bandwidth_capacity
                         if bandwidth_declared
@@ -2977,13 +3285,32 @@ def _build_core_layer(
                 ordered_available(core_groups.get(remote_root, []), leaf_index - 1)
                 for remote_root in remote_root_names
             )
-            flat_candidates = [
-                core
-                for bucket in candidate_buckets
-                for core in bucket
-                if used_ports[_text(core.get("id"))]
-                < port_capacity.get(_text(core.get("id")), 0)
-            ]
+            flat_candidates: List[dict] = []
+            for bucket in candidate_buckets:
+                for core in bucket:
+                    core_id = _text(core.get("id"))
+                    remaining = (
+                        port_capacity.get(core_id, 0) - used_ports[core_id]
+                    )
+                    if remaining <= 0:
+                        continue
+                    try:
+                        member_count, _speed = builder.preview_connection_bundle(
+                            leaf,
+                            f"Uplink-{_int(leaf.get('_uplinks_used'), 0) + 1}",
+                            core,
+                            str(used_ports[core_id] + 1),
+                            "fibre",
+                            0,
+                            max(
+                                0.0,
+                                _float(leaf.get("expected_bandwidth_mbps")),
+                            ),
+                        )
+                    except NetworkPlanningError:
+                        continue
+                    if member_count <= remaining:
+                        flat_candidates.append(core)
 
             selected: List[dict] = []
             selected_ids: Set[str] = set()
@@ -3015,7 +3342,6 @@ def _build_core_layer(
             connection_ids: List[str] = []
             for link_index, core in enumerate(selected, start=1):
                 core_id = _text(core.get("id"))
-                used_ports[core_id] += 1
                 core_root = _text(core.get("route_anchor")) or _text(
                     core.get("location_name")
                 )
@@ -3026,7 +3352,7 @@ def _build_core_layer(
                     leaf,
                     f"Uplink-{_int(leaf.get('_uplinks_used'), 0) + 1}",
                     core,
-                    str(used_ports[core_id]),
+                    str(used_ports[core_id] + 1),
                     "fibre",
                     leaf_location,
                     core_root,
@@ -3045,9 +3371,23 @@ def _build_core_layer(
                     ),
                     fibre_count=2,
                 )
-                leaf["_uplinks_used"] = _int(leaf.get("_uplinks_used"), 0) + 1
+                member_count = max(
+                    1, _int(connection.get("link_aggregation_member_count"), 1)
+                )
+                used_ports[core_id] += member_count
+                leaf["_uplinks_used"] = (
+                    _int(leaf.get("_uplinks_used"), 0) + member_count
+                )
                 source_ids.append(core_id)
-                connection_ids.append(_text(connection.get("id")))
+                lag_id = _text(connection.get("link_aggregation_group_id"))
+                if lag_id:
+                    connection_ids.extend(
+                        _text(row.get("id"))
+                        for row in builder.connections
+                        if _text(row.get("link_aggregation_group_id")) == lag_id
+                    )
+                else:
+                    connection_ids.append(_text(connection.get("id")))
 
             if len(selected) > 1:
                 builder.redundancy_groups.append(
@@ -3957,10 +4297,10 @@ def _polan_design(
         )
 
     # OLT chassis expose both PON interfaces and Ethernet uplinks.  The generic
-    # asset port count must not be used as the PON count, and a protected OLT
-    # path can only carry the maximum common speed of one OLT/core uplink on
-    # each independent core path.  Build planning-only copies with those two
-    # capacities made explicit so large PoLAN designs create enough OLTs.
+    # asset port count must not be used as the PON count.  A protected core path
+    # may use a same-speed LACP bundle, so reserve enough OLT uplink ports for
+    # every independent core path and expose the resulting per-path aggregate
+    # capacity to the OLT packing calculation.
     core_candidates_for_olt = _choose_core_candidates(builder.data)
     core_fibre_speeds = {
         speed
@@ -3971,6 +4311,13 @@ def _polan_design(
         in PLUGGABLE_OPTIC_PORT_TYPES | {"pon", "lc", "sc", "mpo"}
         for speed in normalise_port_speeds(port_row.get("supported_speeds_mbps"))
     }
+
+    olt_core_links = max(
+        2 if bool(builder.settings.get("redundant_core", True)) else 1,
+        _int(builder.settings.get("independent_link_count"), 2)
+        if bool(builder.settings.get("redundant_core", True))
+        else 1,
+    )
 
     def olt_pon_port_count(asset: dict) -> int:
         structured = sum(
@@ -3985,18 +4332,34 @@ def _polan_design(
         return max(1, structured or _int(asset.get("connections_out"), 0))
 
     def protected_olt_uplink_capacity_mbps(asset: dict) -> float:
-        uplink_speeds = {
-            speed
-            for row in asset.get("port_definitions", [])
-            if isinstance(row, dict)
-            and _text(row.get("port_use")).lower() == "uplink"
-            and _text(row.get("port_type")).lower() in PLUGGABLE_OPTIC_PORT_TYPES
-            for speed in normalise_port_speeds(row.get("supported_speeds_mbps"))
-        }
-        common = uplink_speeds & core_fibre_speeds if core_fibre_speeds else uplink_speeds
-        single_path = float(max(common or uplink_speeds or {0}))
+        speed_port_counts: Dict[int, int] = defaultdict(int)
+        for row in asset.get("port_definitions", []):
+            if not isinstance(row, dict):
+                continue
+            if _text(row.get("port_use")).lower() != "uplink":
+                continue
+            if _text(row.get("port_type")).lower() not in PLUGGABLE_OPTIC_PORT_TYPES:
+                continue
+            port_count = max(0, _int(row.get("port_count")))
+            for speed in normalise_port_speeds(row.get("supported_speeds_mbps")):
+                if core_fibre_speeds and speed not in core_fibre_speeds:
+                    continue
+                speed_port_counts[speed] += port_count
+
+        aggregate_path_capacity = 0.0
+        for speed, available_ports in speed_port_counts.items():
+            members_per_path = available_ports // max(1, olt_core_links)
+            if members_per_path <= 0:
+                continue
+            aggregate_path_capacity = max(
+                aggregate_path_capacity,
+                float(speed * members_per_path),
+            )
+
         declared = max(0.0, _float(asset.get("bandwidth_capacity_gbps"))) * 1000.0
-        return min(single_path, declared) if declared > 0.0 and single_path > 0.0 else max(single_path, declared)
+        if declared > 0.0 and aggregate_path_capacity > 0.0:
+            return min(aggregate_path_capacity, declared)
+        return max(aggregate_path_capacity, declared)
 
     planning_olts: List[dict] = []
     for asset in eligible_olts:
@@ -4205,11 +4568,6 @@ def _polan_design(
         leaves_by_root.setdefault(_text(secondary_root.get("name")), []).extend(
             secondary_olts
         )
-    olt_core_links = max(
-        2 if bool(builder.settings.get("redundant_core", True)) else 1,
-        _int(builder.settings.get("independent_link_count"), 2)
-        if bool(builder.settings.get("redundant_core", True)) else 1,
-    )
     _build_core_layer(
         builder,
         leaves_by_root,

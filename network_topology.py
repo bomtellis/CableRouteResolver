@@ -26,6 +26,7 @@ from PySide6.QtGui import (
     QPen,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -2291,8 +2292,24 @@ class NetworkTopologyDialog(QDialog):
         self.setWindowFlag(Qt.Window, True)
         self.setWindowFlag(Qt.WindowMinMaxButtonsHint, True)
         self.setWindowModality(Qt.NonModal)
-        self.setMinimumSize(1180, 720)
-        self.resize(1540, 900)
+        screen = (
+            parent.screen()
+            if parent is not None and hasattr(parent, "screen")
+            else QApplication.primaryScreen()
+        )
+        available = screen.availableGeometry() if screen is not None else None
+        target_width = (
+            min(1540, max(640, int(available.width() * 0.96)), available.width())
+            if available is not None
+            else 1540
+        )
+        target_height = (
+            min(900, max(460, int(available.height() * 0.92)), available.height())
+            if available is not None
+            else 900
+        )
+        self.setMinimumSize(min(720, target_width), min(460, target_height))
+        self.resize(target_width, target_height)
         self.setModal(False)
         self.setStyleSheet(
             "QDialog { background: #111820; color: #e9eef2; }"
@@ -2322,7 +2339,8 @@ class NetworkTopologyDialog(QDialog):
         splitter.addWidget(self.view)
         splitter.addWidget(self._build_details_panel())
         splitter.setStretchFactor(0, 1)
-        splitter.setSizes([1180, 330])
+        details_width = min(330, max(260, int(self.width() * 0.22)))
+        splitter.setSizes([max(520, self.width() - details_width), details_width])
         root_layout.addWidget(splitter, 1)
 
         self.status_label = QLabel()
@@ -2389,7 +2407,7 @@ class NetworkTopologyDialog(QDialog):
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search device, model or location")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setMinimumWidth(260)
+        self.search_edit.setMinimumWidth(180)
         self.search_edit.textChanged.connect(self._apply_search_highlight)
         self.search_edit.returnPressed.connect(self._select_next_search_match)
         layout.addWidget(self.search_edit)
@@ -2478,11 +2496,26 @@ class NetworkTopologyDialog(QDialog):
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_from_data)
         layout.addWidget(refresh_button)
-        return header
+
+        # Keep every topology command reachable on narrow/high-DPI desktops.
+        # The header retains its natural width and scrolls horizontally instead
+        # of forcing the dialog beyond the available screen geometry.
+        header.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        header.setMinimumWidth(header.sizeHint().width())
+        scroll = QScrollArea()
+        scroll.setObjectName("TopologyHeaderScrollArea")
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(header)
+        scroll.setMinimumHeight(max(64, header.sizeHint().height() + 18))
+        scroll.setMaximumHeight(max(82, header.sizeHint().height() + 24))
+        return scroll
 
     def _build_details_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(310)
+        panel.setMinimumWidth(260)
         panel.setStyleSheet("background: #182028; border-left: 1px solid #2d3944;")
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(14, 14, 14, 14)
