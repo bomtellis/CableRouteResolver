@@ -4996,6 +4996,11 @@ class CableRouteEditor(QMainWindow):
                 f" · {statistics.changed_chunks} changed chunk(s), "
                 f"{statistics.unchanged_chunks} unchanged"
             )
+            if getattr(statistics, "compacted", False):
+                reclaimed_mb = getattr(statistics, "reclaimed_bytes", 0) / (1024 * 1024)
+                detail += f" · compacted ({reclaimed_mb:.1f} MiB reclaimed)"
+            elif getattr(statistics, "compaction_error", ""):
+                detail += " · compaction skipped"
         self.set_status(f"{status_prefix} {Path(self.current_json_path).name}{detail}")
         self.refresh_canvas()
 
@@ -6690,6 +6695,66 @@ class CableRouteEditor(QMainWindow):
         self._viewport_refresh_timer.start(120)
 
     def closeEvent(self, event):
+        if not getattr(self, "_close_database_prompt_handled", False):
+            storage_path = getattr(self.store, "storage_path", "") or self.current_json_path or ""
+            is_database = (
+                getattr(self.store, "storage_format", "") == "sqlite"
+                and bool(storage_path)
+                and Path(storage_path).suffix.lower() == ".crsdb"
+            )
+            if is_database:
+                usage = {}
+                try:
+                    usage = self.store.database_space_usage()
+                except Exception:
+                    usage = {}
+                file_mb = float(usage.get("file_size_bytes", 0) or 0) / (1024 * 1024)
+                reclaimable_mb = float(usage.get("reclaimable_bytes", 0) or 0) / (1024 * 1024)
+                free_percent = float(usage.get("free_ratio", 0.0) or 0.0) * 100.0
+
+                message = QMessageBox(self)
+                message.setWindowTitle("Close Cable Routing Solver")
+                message.setIcon(QMessageBox.Question)
+                message.setText("Save and compact the project database before closing?")
+                message.setInformativeText(
+                    f"Current database size: {file_mb:.1f} MiB. "
+                    f"Currently reusable space: {reclaimable_mb:.1f} MiB ({free_percent:.1f}%).\n\n"
+                    "Save and Compact writes the current project and runs SQLite VACUUM. "
+                    "This can take longer for large projects."
+                )
+                compact_button = message.addButton("Save and Compact", QMessageBox.ButtonRole.AcceptRole)
+                close_button = message.addButton("Close Without Compacting", QMessageBox.ButtonRole.DestructiveRole)
+                cancel_button = message.addButton(QMessageBox.Cancel)
+                message.setDefaultButton(compact_button)
+                message.exec()
+                clicked = message.clickedButton()
+                if clicked == cancel_button:
+                    event.ignore()
+                    return
+                if clicked == compact_button:
+                    QApplication.setOverrideCursor(Qt.WaitCursor)
+                    try:
+                        self.store.save_sqlite(storage_path, auto_compact=False)
+                        compaction = self.store.compact_database(force=True)
+                        reclaimed = getattr(compaction, "reclaimed_bytes", 0) / (1024 * 1024) if compaction else 0.0
+                        self.set_status(
+                            f"Saved and compacted {Path(storage_path).name} · {reclaimed:.1f} MiB reclaimed"
+                        )
+                    except Exception as exc:
+                        QMessageBox.critical(
+                            self,
+                            "Database compaction failed",
+                            f"The project could not be saved and compacted:\n{exc}",
+                        )
+                        event.ignore()
+                        return
+                    finally:
+                        QApplication.restoreOverrideCursor()
+                elif clicked != close_button:
+                    event.ignore()
+                    return
+            self._close_database_prompt_handled = True
+
         try:
             self._dxf_thread.quit()
             self._dxf_thread.wait(2000)

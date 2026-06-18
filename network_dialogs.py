@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QScrollArea,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -195,7 +196,14 @@ class PortSpeedButton(QPushButton):
         self._refresh_text()
 
     def _refresh_text(self) -> None:
-        self.setText(", ".join(port_speed_label(value) for value in self._speeds) if self._speeds else "Transparent / not declared")
+        labels = [port_speed_label(value) for value in self._speeds]
+        full_text = ", ".join(labels) if labels else "Transparent / not declared"
+        if len(labels) > 3:
+            display_text = ", ".join(labels[:3]) + f" +{len(labels) - 3}"
+        else:
+            display_text = full_text
+        self.setText(display_text)
+        self.setToolTip(full_text)
 
     def _choose(self) -> None:
         dialog = PortSpeedSelectionDialog(self, self._speeds)
@@ -241,11 +249,14 @@ class NetworkAssetEditorDialog(QDialog):
         self.setWindowTitle("Network Asset")
         self.asset = deepcopy(asset or {})
         self.result: Optional[dict] = None
-        self.resize(760, 860)
+        screen = parent.screen() if parent is not None and hasattr(parent, "screen") else QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        target_width = max(480, min(900, available.width() - 80)) if available is not None else 820
+        target_height = max(420, min(760, available.height() - 100)) if available is not None else 720
+        self.resize(target_width, target_height)
+        self.setMinimumSize(min(520, target_width), min(420, target_height))
 
         layout = QVBoxLayout(self)
-        form = QFormLayout()
-        layout.addLayout(form)
 
         self.id_edit = QLineEdit(_text(self.asset.get("id")) or suggested_id)
         self.name_edit = QLineEdit(_text(self.asset.get("name")))
@@ -477,43 +488,80 @@ class NetworkAssetEditorDialog(QDialog):
         self.notes_edit = QTextEdit(_text(self.asset.get("notes")))
         self.notes_edit.setMinimumHeight(90)
 
-        form.addRow("Asset ID", self.id_edit)
-        form.addRow("Name", self.name_edit)
-        form.addRow("Asset type", self.asset_type_combo)
-        form.addRow("Manufacturer", self.manufacturer_edit)
-        form.addRow("Model", self.model_edit)
-        form.addRow("Patch panel medium", self.patch_panel_type_combo)
-        form.addRow("Fibre split ratio", self.split_ratio_combo)
-        form.addRow("OLT maximum split ratio", self.olt_max_split_ratio_combo)
-        form.addRow("Wireless frequencies", self.frequencies_list)
-        form.addRow("Additional frequencies", self.additional_frequencies_edit)
-        form.addRow("Power input", self.power_input_spin)
-        form.addRow("PoE budget", self.poe_budget_spin)
-        form.addRow("Switching / routing bandwidth", self.bandwidth_capacity_spin)
-        form.addRow("Packet forwarding throughput", self.packet_throughput_spin)
-        form.addRow("Expected device bandwidth", self.expected_bandwidth_spin)
-        form.addRow("Expected device packet rate", self.expected_packet_rate_spin)
-        form.addRow("Physical ports", self.port_table)
-        form.addRow("Port rows", port_buttons)
-        form.addRow("Stacking", self.supports_stacking_check)
-        form.addRow("Maximum stack members", self.max_stack_members_spin)
-        form.addRow("Input connection type", self.input_type_combo)
-        form.addRow("Output connection type", self.output_type_combo)
-        form.addRow("Uplink connection type", self.uplink_type_combo)
-        form.addRow("Rack spaces", self.rack_units_spin)
-        form.addRow("Switch rack allowance", self.switch_rack_allowance_spin)
-        form.addRow("OLT units per rack unit", self.olt_units_per_u_spin)
-        form.addRow("Optic form factor", self.optic_form_factor_combo)
-        form.addRow("Optic supported speeds", self.optic_speeds_button)
-        form.addRow("Optic connector", self.optic_connector_combo)
-        form.addRow("Optic fibre standard", self.optic_standard_edit)
-        form.addRow("Optic maximum reach", self.optic_reach_spin)
-        form.addRow("Optic transmit power (dBm)", self.optic_tx_edit)
-        form.addRow("Optic receiver sensitivity (dBm)", self.optic_rx_edit)
-        form.addRow("Optic insertion loss (dB)", self.optic_insertion_edit)
-        form.addRow("Optic return loss (dB)", self.optic_return_edit)
-        form.addRow("Optic wavelength", self.optic_wavelength_spin)
-        form.addRow("Notes", self.notes_edit)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        layout.addWidget(self.tabs, 1)
+
+        def add_scroll_form_tab(title: str) -> tuple[QWidget, QFormLayout]:
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            content = QWidget()
+            form_layout = QFormLayout(content)
+            form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            scroll.setWidget(content)
+            page_layout.addWidget(scroll)
+            self.tabs.addTab(page, title)
+            return page, form_layout
+
+        _general_page, general_form = add_scroll_form_tab("General")
+        general_form.addRow("Asset ID", self.id_edit)
+        general_form.addRow("Name", self.name_edit)
+        general_form.addRow("Asset type", self.asset_type_combo)
+        general_form.addRow("Manufacturer", self.manufacturer_edit)
+        general_form.addRow("Model", self.model_edit)
+        general_form.addRow("Patch panel medium", self.patch_panel_type_combo)
+        general_form.addRow("Fibre split ratio", self.split_ratio_combo)
+        general_form.addRow("OLT maximum split ratio", self.olt_max_split_ratio_combo)
+        general_form.addRow("Wireless frequencies", self.frequencies_list)
+        general_form.addRow("Additional frequencies", self.additional_frequencies_edit)
+
+        _capacity_page, capacity_form = add_scroll_form_tab("Capacity and rack")
+        capacity_form.addRow("Power input", self.power_input_spin)
+        capacity_form.addRow("PoE budget", self.poe_budget_spin)
+        capacity_form.addRow("Switching / routing bandwidth", self.bandwidth_capacity_spin)
+        capacity_form.addRow("Packet forwarding throughput", self.packet_throughput_spin)
+        capacity_form.addRow("Expected device bandwidth", self.expected_bandwidth_spin)
+        capacity_form.addRow("Expected device packet rate", self.expected_packet_rate_spin)
+        capacity_form.addRow("Stacking", self.supports_stacking_check)
+        capacity_form.addRow("Maximum stack members", self.max_stack_members_spin)
+        capacity_form.addRow("Rack spaces", self.rack_units_spin)
+        capacity_form.addRow("Switch rack allowance", self.switch_rack_allowance_spin)
+        capacity_form.addRow("OLT units per rack unit", self.olt_units_per_u_spin)
+
+        ports_page = QWidget()
+        ports_layout = QVBoxLayout(ports_page)
+        ports_layout.addWidget(self.port_table, 1)
+        ports_layout.addWidget(port_buttons)
+        ports_form = QFormLayout()
+        ports_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        ports_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        ports_form.addRow("Input connection type", self.input_type_combo)
+        ports_form.addRow("Output connection type", self.output_type_combo)
+        ports_form.addRow("Uplink connection type", self.uplink_type_combo)
+        ports_layout.addLayout(ports_form)
+        self.tabs.addTab(ports_page, "Ports and connectivity")
+
+        _optics_page, optics_form = add_scroll_form_tab("Optics")
+        optics_form.addRow("Optic form factor", self.optic_form_factor_combo)
+        optics_form.addRow("Optic supported speeds", self.optic_speeds_button)
+        optics_form.addRow("Optic connector", self.optic_connector_combo)
+        optics_form.addRow("Optic fibre standard", self.optic_standard_edit)
+        optics_form.addRow("Optic maximum reach", self.optic_reach_spin)
+        optics_form.addRow("Optic transmit power (dBm)", self.optic_tx_edit)
+        optics_form.addRow("Optic receiver sensitivity (dBm)", self.optic_rx_edit)
+        optics_form.addRow("Optic insertion loss (dB)", self.optic_insertion_edit)
+        optics_form.addRow("Optic return loss (dB)", self.optic_return_edit)
+        optics_form.addRow("Optic wavelength", self.optic_wavelength_spin)
+
+        notes_page = QWidget()
+        notes_layout = QVBoxLayout(notes_page)
+        notes_layout.addWidget(self.notes_edit)
+        self.tabs.addTab(notes_page, "Notes")
 
         self.asset_type_combo.currentIndexChanged.connect(self._update_visibility)
         self.supports_stacking_check.toggled.connect(self._update_visibility)

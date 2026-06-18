@@ -4,6 +4,8 @@ from typing import Dict, List, Optional, Tuple
 import re
 
 from project_sqlite import (
+    AUTO_COMPACT_MIN_FREE_BYTES,
+    AUTO_COMPACT_MIN_FREE_RATIO,
     DEFAULT_EXTENSION,
     SQLiteProjectFile,
     export_json_atomic,
@@ -56,6 +58,7 @@ class JsonStore:
         self.storage_path: Optional[str] = None
         self.storage_format = "memory"
         self.last_save_statistics = None
+        self.last_compaction_statistics = None
         if data:
             self._load_from_payload(data)
 
@@ -224,7 +227,14 @@ class JsonStore:
             return
         self.save_sqlite(str(destination))
 
-    def save_sqlite(self, path: str) -> None:
+    def save_sqlite(
+        self,
+        path: str,
+        *,
+        auto_compact: bool = True,
+        compact_min_free_bytes: int = AUTO_COMPACT_MIN_FREE_BYTES,
+        compact_min_free_ratio: float = AUTO_COMPACT_MIN_FREE_RATIO,
+    ) -> None:
         destination = Path(path)
         if not destination.suffix:
             destination = destination.with_suffix(DEFAULT_EXTENSION)
@@ -232,6 +242,9 @@ class JsonStore:
         self.last_save_statistics = project.save(
             self.data,
             source_path=self.storage_path or "",
+            auto_compact=auto_compact,
+            compact_min_free_bytes=compact_min_free_bytes,
+            compact_min_free_ratio=compact_min_free_ratio,
         )
         errors = project.verify()
         if errors:
@@ -246,6 +259,28 @@ class JsonStore:
         if self.storage_format != "sqlite" or not self.storage_path:
             return {}
         return SQLiteProjectFile(self.storage_path).statistics()
+
+    def database_space_usage(self) -> dict:
+        if self.storage_format != "sqlite" or not self.storage_path:
+            return {}
+        usage = SQLiteProjectFile(self.storage_path).space_usage()
+        return {
+            "path": usage.path,
+            "file_size_bytes": usage.file_size_bytes,
+            "page_size_bytes": usage.page_size_bytes,
+            "page_count": usage.page_count,
+            "free_page_count": usage.free_page_count,
+            "reclaimable_bytes": usage.reclaimable_bytes,
+            "free_ratio": usage.free_ratio,
+        }
+
+    def compact_database(self, *, force: bool = True):
+        if self.storage_format != "sqlite" or not self.storage_path:
+            return None
+        self.last_compaction_statistics = SQLiteProjectFile(
+            self.storage_path
+        ).compact(force=force)
+        return self.last_compaction_statistics
 
     def query_records(
         self,

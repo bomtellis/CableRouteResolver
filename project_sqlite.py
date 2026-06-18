@@ -23,6 +23,8 @@ SCHEMA_VERSION = 1
 DEFAULT_EXTENSION = ".crsdb"
 SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_CHUNK_SIZE = 512
+AUTO_COMPACT_MIN_FREE_BYTES = 16 * 1024 * 1024
+AUTO_COMPACT_MIN_FREE_RATIO = 0.20
 
 
 def _utc_now() -> str:
@@ -218,6 +220,28 @@ def _create_schema(connection: sqlite3.Connection) -> None:
 
 
 @dataclass(frozen=True)
+class DatabaseSpaceStatistics:
+    path: str
+    file_size_bytes: int
+    page_size_bytes: int
+    page_count: int
+    free_page_count: int
+    reclaimable_bytes: int
+    free_ratio: float
+
+
+@dataclass(frozen=True)
+class CompactionStatistics:
+    path: str
+    compacted: bool
+    file_size_before_bytes: int
+    file_size_after_bytes: int
+    reclaimed_bytes: int
+    reclaimable_before_bytes: int
+    free_ratio_before: float
+
+
+@dataclass(frozen=True)
 class SaveStatistics:
     path: str
     changed_chunks: int
@@ -225,6 +249,11 @@ class SaveStatistics:
     deleted_chunks: int
     indexed_records: int
     file_size_bytes: int
+    compacted: bool = False
+    reclaimed_bytes: int = 0
+    reclaimable_before_bytes: int = 0
+    free_ratio_before: float = 0.0
+    compaction_error: str = ""
 
 
 class SQLiteProjectFile:
@@ -292,7 +321,103 @@ class SQLiteProjectFile:
         finally:
             connection.close()
 
-    def save(self, data: dict, *, source_path: str = "") -> SaveStatistics:
+    def space_usage(self) -> DatabaseSpaceStatistics:
+        """Return file and free-page information for maintenance decisions."""
+
+        if not self.path.exists() or not is_sqlite_project(self.path):
+            return DatabaseSpaceStatistics(
+                path=str(self.path),
+                file_size_bytes=self.path.stat().st_size if self.path.exists() else 0,
+                page_size_bytes=0,
+                page_count=0,
+                free_page_count=0,
+                reclaimable_bytes=0,
+                free_ratio=0.0,
+            )
+        connection = sqlite3.connect(str(self.path))
+        try:
+            _configure_connection(connection, writable=False)
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0] or 0)
+            page_count = int(connection.execute("PRAGMA page_count").fetchone()[0] or 0)
+            free_pages = int(connection.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+        finally:
+            connection.close()
+        reclaimable = max(0, page_size * free_pages)
+        return DatabaseSpaceStatistics(
+            path=str(self.path),
+            file_size_bytes=self.path.stat().st_size,
+            page_size_bytes=page_size,
+            page_count=page_count,
+            free_page_count=free_pages,
+            reclaimable_bytes=reclaimable,
+            free_ratio=(free_pages / page_count) if page_count else 0.0,
+        )
+
+    @staticmethod
+    def _meets_compaction_threshold(
+        usage: DatabaseSpaceStatistics,
+        *,
+        min_free_bytes: int,
+        min_free_ratio: float,
+    ) -> bool:
+        return (
+            usage.reclaimable_bytes >= max(0, int(min_free_bytes))
+            and usage.free_ratio >= max(0.0, float(min_free_ratio))
+        )
+
+    def compact(
+        self,
+        *,
+        force: bool = False,
+        min_free_bytes: int = AUTO_COMPACT_MIN_FREE_BYTES,
+        min_free_ratio: float = AUTO_COMPACT_MIN_FREE_RATIO,
+    ) -> CompactionStatistics:
+        """VACUUM the project when requested or when thresholds are exceeded."""
+
+        before = self.space_usage()
+        should_run = force or self._meets_compaction_threshold(
+            before,
+            min_free_bytes=min_free_bytes,
+            min_free_ratio=min_free_ratio,
+        )
+        if not should_run or not self.path.exists():
+            return CompactionStatistics(
+                path=str(self.path),
+                compacted=False,
+                file_size_before_bytes=before.file_size_bytes,
+                file_size_after_bytes=before.file_size_bytes,
+                reclaimed_bytes=0,
+                reclaimable_before_bytes=before.reclaimable_bytes,
+                free_ratio_before=before.free_ratio,
+            )
+
+        connection = sqlite3.connect(str(self.path))
+        try:
+            _configure_connection(connection, writable=True)
+            connection.execute("VACUUM")
+            connection.execute("PRAGMA optimize")
+        finally:
+            connection.close()
+        after = self.space_usage()
+        return CompactionStatistics(
+            path=str(self.path),
+            compacted=True,
+            file_size_before_bytes=before.file_size_bytes,
+            file_size_after_bytes=after.file_size_bytes,
+            reclaimed_bytes=max(0, before.file_size_bytes - after.file_size_bytes),
+            reclaimable_before_bytes=before.reclaimable_bytes,
+            free_ratio_before=before.free_ratio,
+        )
+
+    def save(
+        self,
+        data: dict,
+        *,
+        source_path: str = "",
+        auto_compact: bool = True,
+        compact_min_free_bytes: int = AUTO_COMPACT_MIN_FREE_BYTES,
+        compact_min_free_ratio: float = AUTO_COMPACT_MIN_FREE_RATIO,
+    ) -> SaveStatistics:
         if not isinstance(data, dict):
             raise TypeError("Project data must be a dictionary")
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -428,6 +553,27 @@ class SQLiteProjectFile:
         finally:
             connection.close()
 
+        compaction = CompactionStatistics(
+            path=str(self.path),
+            compacted=False,
+            file_size_before_bytes=self.path.stat().st_size if self.path.exists() else 0,
+            file_size_after_bytes=self.path.stat().st_size if self.path.exists() else 0,
+            reclaimed_bytes=0,
+            reclaimable_before_bytes=0,
+            free_ratio_before=0.0,
+        )
+        compaction_error = ""
+        if auto_compact:
+            try:
+                compaction = self.compact(
+                    min_free_bytes=compact_min_free_bytes,
+                    min_free_ratio=compact_min_free_ratio,
+                )
+            except Exception as exc:
+                # The project transaction has already committed. Maintenance
+                # failure must not turn a successful save into data loss.
+                compaction_error = str(exc)
+
         return SaveStatistics(
             path=str(self.path),
             changed_chunks=changed_chunks,
@@ -435,6 +581,11 @@ class SQLiteProjectFile:
             deleted_chunks=deleted_chunks,
             indexed_records=indexed_records,
             file_size_bytes=self.path.stat().st_size if self.path.exists() else 0,
+            compacted=compaction.compacted,
+            reclaimed_bytes=compaction.reclaimed_bytes,
+            reclaimable_before_bytes=compaction.reclaimable_before_bytes,
+            free_ratio_before=compaction.free_ratio_before,
+            compaction_error=compaction_error,
         )
 
     def verify(self) -> List[str]:
@@ -551,6 +702,10 @@ class SQLiteProjectFile:
                 FROM project_sections
                 """
             ).fetchone()
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0] or 0)
+            page_count = int(connection.execute("PRAGMA page_count").fetchone()[0] or 0)
+            free_pages = int(connection.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+            reclaimable = max(0, page_size * free_pages)
             return {
                 "path": str(self.path),
                 "schema_version": int(meta.get("schema_version", "0") or 0),
@@ -560,6 +715,11 @@ class SQLiteProjectFile:
                 "indexed_records": int(record_count or 0),
                 "compressed_payload_bytes": int(compressed_bytes or 0),
                 "file_size_bytes": self.path.stat().st_size,
+                "page_size_bytes": page_size,
+                "page_count": page_count,
+                "free_page_count": free_pages,
+                "reclaimable_bytes": reclaimable,
+                "free_ratio": (free_pages / page_count) if page_count else 0.0,
             }
         finally:
             connection.close()
