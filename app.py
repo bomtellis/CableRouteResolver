@@ -1725,9 +1725,11 @@ class CableRouteEditor(QMainWindow):
         file_menu = self.menuBar().addMenu("File")
 
         for text, handler in [
-            ("Open JSON", self.open_json),
-            ("Save JSON", self.save_json),
-            ("Save JSON As", self.save_json_as),
+            ("Open Project", self.open_json),
+            ("Import Legacy JSON", self.import_json),
+            ("Save Project", self.save_json),
+            ("Save Project As", self.save_json_as),
+            ("Export Project JSON", self.export_json),
             ("Map DXF to Floor", self.load_dxf),
             ("Clear Floor DXF", self.clear_floor_dxf),
             ("Export Floor DXFs", self.export_floor_dxfs),
@@ -4846,7 +4848,7 @@ class CableRouteEditor(QMainWindow):
             QMessageBox.warning(
                 self,
                 "No project",
-                "Open or save a project JSON first.",
+                "Open or save a project database first.",
             )
             return
 
@@ -4888,56 +4890,157 @@ class CableRouteEditor(QMainWindow):
                 str(exc),
             )
 
-    def open_json(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open JSON", "", "JSON files (*.json)"
-        )
-        if not path:
-            return
-        self.store = JsonStore.from_file(path)
+    @staticmethod
+    def _next_import_database_path(json_path):
+        source = Path(json_path)
+        candidate = source.with_suffix(".crsdb")
+        if not candidate.exists():
+            return candidate
+        number = 2
+        while True:
+            candidate = source.with_name(f"{source.stem}_imported_{number}.crsdb")
+            if not candidate.exists():
+                return candidate
+            number += 1
+
+    def _activate_loaded_project(self, store, path, status_message):
+        self.store = store
         self._render_data_revision += 1
         self.bulk_location_session = None
         self.bulk_data_point_session = None
-        self.current_json_path = path
+        self.current_json_path = str(path)
         self._clear_dxf_cache()
         current_floor = self.floor_spin.value()
         self._pending_fit_after_load = bool(self.get_floor_dxf_path(current_floor))
         self._queue_all_floor_dxf_loads(active_floor=current_floor, force_reload=False)
-        self.set_status(f"Opened {Path(path).name}")
+        self.set_status(status_message)
         self.refresh_canvas()
         self.fit_view()
 
-    def save_json(self):
-        path = self.current_json_path
-        if not path:
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save JSON", "", "JSON files (*.json)"
+    def _open_project_path(self, path):
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            store = JsonStore.from_file(path)
+            opened_path = Path(path)
+            if store.storage_format == "json":
+                database_path = self._next_import_database_path(opened_path)
+                store.save(str(database_path))
+                opened_path = database_path
+                status = f"Imported {Path(path).name} as {database_path.name}"
+            else:
+                database_path = None
+                status = f"Opened {opened_path.name}"
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if database_path is not None:
+            QMessageBox.information(
+                self,
+                "JSON project imported",
+                "The legacy JSON project was imported into SQLite.\n\n"
+                f"Database: {database_path}\n"
+                f"Original JSON retained: {path}",
             )
+        self._activate_loaded_project(store, opened_path, status)
+
+    def open_json(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Cable Routing Project",
+            "",
+            "Cable Routing projects (*.crsdb *.sqlite *.db);;"
+            "Legacy JSON projects (*.json);;All files (*)",
+        )
         if not path:
             return
-        self.store.save(path)
-        self.current_json_path = path
-        self.set_status(f"Saved {Path(path).name}")
-        self.refresh_canvas()
+        try:
+            self._open_project_path(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Open project failed", str(exc))
 
-    def save_json_as(self):
+    def import_json(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Legacy JSON", "", "JSON files (*.json)"
+        )
+        if not path:
+            return
+        try:
+            self._open_project_path(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "JSON import failed", str(exc))
+
+    def _project_save_path(self, title, initial_path=""):
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Save JSON As",
-            self.current_json_path or "",
-            "JSON files (*.json)",
+            title,
+            initial_path,
+            "Cable Routing project (*.crsdb)",
         )
+        if not path:
+            return ""
+        if not path.lower().endswith(".crsdb"):
+            path += ".crsdb"
+        return path
 
+    def _save_project_to_path(self, path, status_prefix="Saved"):
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.store.save(path)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.current_json_path = self.store.storage_path or str(path)
+        statistics = getattr(self.store, "last_save_statistics", None)
+        detail = ""
+        if statistics is not None:
+            detail = (
+                f" · {statistics.changed_chunks} changed chunk(s), "
+                f"{statistics.unchanged_chunks} unchanged"
+            )
+        self.set_status(f"{status_prefix} {Path(self.current_json_path).name}{detail}")
+        self.refresh_canvas()
+
+    def save_json(self):
+        path = self.current_json_path
+        if not path or Path(path).suffix.lower() == ".json":
+            initial = str(Path(path).with_suffix(".crsdb")) if path else ""
+            path = self._project_save_path("Save Cable Routing Project", initial)
         if not path:
             return
+        try:
+            self._save_project_to_path(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Save project failed", str(exc))
 
+    def save_json_as(self):
+        initial = self.current_json_path or ""
+        if initial:
+            initial = str(Path(initial).with_suffix(".crsdb"))
+        path = self._project_save_path("Save Cable Routing Project As", initial)
+        if not path:
+            return
+        try:
+            self._save_project_to_path(path, "Saved as")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save project failed", str(exc))
+
+    def export_json(self):
+        initial = (
+            str(Path(self.current_json_path).with_suffix(".json"))
+            if self.current_json_path
+            else "cable_routing_project.json"
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Project JSON", initial, "JSON files (*.json)"
+        )
+        if not path:
+            return
         if not path.lower().endswith(".json"):
             path += ".json"
-
-        self.store.save(path)
-        self.current_json_path = path
-        self.set_status(f"Saved as {Path(path).name}")
-        self.refresh_canvas()
+        try:
+            self.store.save(path)
+            self.set_status(f"Exported {Path(path).name}")
+        except Exception as exc:
+            QMessageBox.critical(self, "JSON export failed", str(exc))
 
     def load_dxf(self):
         floor = self.floor_spin.value()
@@ -8780,7 +8883,11 @@ class CableRouteEditor(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Room Type Asset Matrix",
-            self.current_json_path.replace(".json", "_room_type_asset_matrix.csv")
+            str(
+                Path(self.current_json_path).with_suffix("").with_name(
+                    Path(self.current_json_path).stem + "_room_type_asset_matrix.csv"
+                )
+            )
             if self.current_json_path
             else "room_type_asset_matrix.csv",
             "CSV files (*.csv)",

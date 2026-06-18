@@ -1,8 +1,15 @@
-import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import re
+
+from project_sqlite import (
+    DEFAULT_EXTENSION,
+    SQLiteProjectFile,
+    export_json_atomic,
+    is_sqlite_project,
+    load_json,
+)
 
 
 DEFAULT_JSON = {
@@ -37,8 +44,18 @@ DEFAULT_JSON = {
 
 
 class JsonStore:
+    """Compatibility store backed by JSON in memory and SQLite on disk.
+
+    The class name is retained because the editor and its extensions already
+    depend on it.  New project saves use ``.crsdb`` SQLite databases; JSON is
+    supported as an import/export interchange format.
+    """
+
     def __init__(self, data: Optional[dict] = None):
         self.data = deepcopy(DEFAULT_JSON)
+        self.storage_path: Optional[str] = None
+        self.storage_format = "memory"
+        self.last_save_statistics = None
         if data:
             self._load_from_payload(data)
 
@@ -186,12 +203,121 @@ class JsonStore:
 
     @classmethod
     def from_file(cls, path: str) -> "JsonStore":
-        with open(path, "r", encoding="utf-8") as f:
-            return cls(json.load(f))
+        source = Path(path)
+        if is_sqlite_project(source):
+            payload = SQLiteProjectFile(source).load()
+            store = cls(payload)
+            store.storage_path = str(source)
+            store.storage_format = "sqlite"
+            return store
+
+        payload = load_json(source)
+        store = cls(payload)
+        store.storage_path = str(source)
+        store.storage_format = "json"
+        return store
 
     def save(self, path: str) -> None:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, indent=2)
+        destination = Path(path)
+        if destination.suffix.lower() == ".json":
+            self.export_json(str(destination))
+            return
+        self.save_sqlite(str(destination))
+
+    def save_sqlite(self, path: str) -> None:
+        destination = Path(path)
+        if not destination.suffix:
+            destination = destination.with_suffix(DEFAULT_EXTENSION)
+        project = SQLiteProjectFile(destination)
+        self.last_save_statistics = project.save(
+            self.data,
+            source_path=self.storage_path or "",
+        )
+        errors = project.verify()
+        if errors:
+            raise ValueError("SQLite project verification failed: " + "; ".join(errors))
+        self.storage_path = str(destination)
+        self.storage_format = "sqlite"
+
+    def export_json(self, path: str) -> None:
+        export_json_atomic(self.data, path)
+
+    def database_statistics(self) -> dict:
+        if self.storage_format != "sqlite" or not self.storage_path:
+            return {}
+        return SQLiteProjectFile(self.storage_path).statistics()
+
+    def query_records(
+        self,
+        section_key: str,
+        *,
+        floor: Optional[int] = None,
+        kind: str = "",
+        bounds: Optional[Tuple[float, float, float, float]] = None,
+        record_id: str = "",
+        parent_id: str = "",
+    ) -> List[dict]:
+        """Query indexed SQLite records, with an in-memory fallback.
+
+        The current editor continues to expose the complete data dictionary,
+        but renderers and reports can use this method to adopt floor/viewport
+        lazy loading without another file-format migration.
+        """
+
+        if self.storage_format == "sqlite" and self.storage_path:
+            return SQLiteProjectFile(self.storage_path).query_records(
+                section_key,
+                floor=floor,
+                kind=kind,
+                bounds=bounds,
+                record_id=record_id,
+                parent_id=parent_id,
+            )
+
+        if section_key == "corridors.nodes":
+            rows = self.data.get("corridors", {}).get("nodes", [])
+        elif section_key == "corridors.edges":
+            rows = self.data.get("corridors", {}).get("edges", [])
+        else:
+            rows = self.data.get(section_key, [])
+        if not isinstance(rows, list):
+            return []
+        result = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if floor is not None:
+                try:
+                    if int(row.get("floor")) != int(floor):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            row_kind = str(
+                row.get(
+                    "kind",
+                    row.get("asset_type", row.get("node_type", row.get("design_role", ""))),
+                )
+                or ""
+            )
+            if kind and row_kind != kind:
+                continue
+            if record_id and str(row.get("id", row.get("name", ""))) != record_id:
+                continue
+            if parent_id and str(
+                row.get("parent_id", row.get("parent_node_id", row.get("from_instance_id", row.get("from", ""))))
+            ) != parent_id:
+                continue
+            if bounds is not None:
+                try:
+                    x = float(row.get("x"))
+                    y = float(row.get("y"))
+                except (TypeError, ValueError):
+                    continue
+                min_x, min_y, max_x, max_y = bounds
+                if not (min_x <= x <= max_x and min_y <= y <= max_y):
+                    continue
+            result.append(row)
+        return result
 
     def floor_dxf_path(self, floor: int) -> Optional[str]:
         for entry in self.data.get("floor_dxf_files", []):

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import math
 from dataclasses import dataclass
 from heapq import heappop, heappush
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+
+from models import JsonStore
 
 
 @dataclass(frozen=True)
@@ -21,8 +22,9 @@ class Point:
 
 
 def load_project(path: Path) -> dict:
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    """Load either a current SQLite project or a legacy JSON export."""
+
+    return JsonStore.from_file(str(path)).data
 
 
 def build_points(data: dict) -> Dict[str, Point]:
