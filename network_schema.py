@@ -2096,7 +2096,12 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             messages.append(
                 f"Redundancy group {group_id} references missing protected instance {protected!r}."
             )
-        if _text(group.get("protection_type")) == "independent_layer_uplinks":
+        protection_type = _text(group.get("protection_type")).lower()
+        if protection_type in {
+            "independent_layer_uplinks",
+            "independent_core_uplinks",
+            "redundant_external_network_links",
+        }:
             continue
         primary = _text(group.get("primary_olt_instance_id"))
         secondary = _text(group.get("secondary_olt_instance_id"))

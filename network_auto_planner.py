@@ -1476,7 +1476,9 @@ class DesignBuilder:
                 ),
             ),
             "standard": _text(
-                source.get("optic_fibre_standard") or host_asset.get("optical_standard")
+                source.get("optic_fibre_standard")
+                or host_asset.get("optic_fibre_standard")
+                or host_asset.get("optical_standard")
             ).upper(),
             "connector": _text(source.get("optic_connector_type")).lower(),
         }
@@ -1542,8 +1544,15 @@ class DesignBuilder:
                     and left_values["standard"] != right_values["standard"]
                 ):
                     continue
+                # Passive optical devices do not transmit at their stored reference
+                # wavelength.  In particular, a PON splitter sits between asymmetric
+                # downstream/upstream wavelengths, so comparing its wavelength with
+                # an integrated OLT/ONT optic incorrectly rejects valid 2.5G PON links.
+                # Wavelength equality is therefore only required for a direct path
+                # between two active optical endpoints.
                 if (
-                    left_values["wavelength"]
+                    both_active
+                    and left_values["wavelength"]
                     and right_values["wavelength"]
                     and left_values["wavelength"] != right_values["wavelength"]
                 ):
@@ -1677,7 +1686,16 @@ class DesignBuilder:
         requested_speed = max(0, _int(extra.pop("link_speed_mbps", 0)))
         physical_connection = bool(extra.get("physical_connection"))
         parent_logical_id = _text(extra.get("parent_logical_connection_id"))
-        required_bandwidth = max(0.0, _float(extra.get("expected_bandwidth_mbps")), _float(from_instance.get("expected_bandwidth_mbps")), _float(to_instance.get("expected_bandwidth_mbps")))
+        explicit_bandwidth = extra.get("expected_bandwidth_mbps", None)
+        required_bandwidth = (
+            max(0.0, _float(explicit_bandwidth))
+            if explicit_bandwidth is not None and _text(explicit_bandwidth) != ""
+            else max(
+                0.0,
+                _float(from_instance.get("expected_bandwidth_mbps")),
+                _float(to_instance.get("expected_bandwidth_mbps")),
+            )
+        )
         if physical_connection:
             selected_from = self._port_definition(from_instance, from_port, medium, self._requested_use(from_port, "uplink"))
             selected_to = self._port_definition(to_instance, to_port, medium, self._requested_use(to_port, "input"))
@@ -2814,6 +2832,12 @@ def _build_core_layer(
                     redundancy_role="primary" if link_index == 1 else "secondary",
                     protection_group=protection_group if len(selected) > 1 else "",
                     standby=link_index > 1,
+                    expected_bandwidth_mbps=max(
+                        0.0, _float(leaf.get("expected_bandwidth_mbps"))
+                    ),
+                    expected_packet_rate_pps=max(
+                        0.0, _float(leaf.get("expected_packet_rate_pps"))
+                    ),
                     fibre_count=2,
                 )
                 leaf["_uplinks_used"] = _int(leaf.get("_uplinks_used"), 0) + 1
@@ -3647,6 +3671,14 @@ def _polan_design(
                 polan_distribution_locations.append(location)
                 location_by_anchor[anchor] = location
 
+            splitter_bandwidth_mbps = sum(
+                max(0.0, _float(row["instance"].get("expected_bandwidth_mbps")))
+                for row in group
+            )
+            splitter_packet_rate_pps = sum(
+                max(0.0, _float(row["instance"].get("expected_packet_rate_pps")))
+                for row in group
+            )
             splitter = builder.add_instance(
                 asset,
                 f"AUTO Splitter F{floor} {len(splitter_records) + 1}",
@@ -3654,6 +3686,8 @@ def _polan_design(
                 "protected_splitter" if failover else "splitter",
                 route_anchor=anchor,
                 protected=failover,
+                expected_bandwidth_mbps=round(splitter_bandwidth_mbps, 6),
+                expected_packet_rate_pps=round(splitter_packet_rate_pps, 3),
             )
             for output_number, ont_record in enumerate(group, start=1):
                 route_length, _route_path = routed(anchor, ont_record["anchor"])
@@ -3666,6 +3700,14 @@ def _polan_design(
                     anchor,
                     ont_record["anchor"],
                     connection_role="output",
+                    expected_bandwidth_mbps=max(
+                        0.0,
+                        _float(ont_record["instance"].get("expected_bandwidth_mbps")),
+                    ),
+                    expected_packet_rate_pps=max(
+                        0.0,
+                        _float(ont_record["instance"].get("expected_packet_rate_pps")),
+                    ),
                     fibre_count=1,
                 )
             splitter_records.append(
@@ -3675,6 +3717,8 @@ def _polan_design(
                     "anchor": anchor,
                     "output_count": len(group),
                     "split_capacity": _split_ratio_outputs(base_asset),
+                    "expected_bandwidth_mbps": round(splitter_bandwidth_mbps, 6),
+                    "expected_packet_rate_pps": round(splitter_packet_rate_pps, 3),
                 }
             )
 
@@ -3707,12 +3751,73 @@ def _polan_design(
             "The selected splitter ratio exceeds every available OLT capability."
         )
 
+    # OLT chassis expose both PON interfaces and Ethernet uplinks.  The generic
+    # asset port count must not be used as the PON count, and a protected OLT
+    # path can only carry the maximum common speed of one OLT/core uplink on
+    # each independent core path.  Build planning-only copies with those two
+    # capacities made explicit so large PoLAN designs create enough OLTs.
+    core_candidates_for_olt = _choose_core_candidates(builder.data)
+    core_fibre_speeds = {
+        speed
+        for core_asset in core_candidates_for_olt
+        for port_row in core_asset.get("port_definitions", [])
+        if isinstance(port_row, dict)
+        and _text(port_row.get("port_type")).lower()
+        in PLUGGABLE_OPTIC_PORT_TYPES | {"pon", "lc", "sc", "mpo"}
+        for speed in normalise_port_speeds(port_row.get("supported_speeds_mbps"))
+    }
+
+    def olt_pon_port_count(asset: dict) -> int:
+        structured = sum(
+            max(0, _int(row.get("port_count")))
+            for row in asset.get("port_definitions", [])
+            if isinstance(row, dict)
+            and (
+                _text(row.get("port_type")).lower() == "pon"
+                or _text(row.get("port_use")).lower() == "pon"
+            )
+        )
+        return max(1, structured or _int(asset.get("connections_out"), 0))
+
+    def protected_olt_uplink_capacity_mbps(asset: dict) -> float:
+        uplink_speeds = {
+            speed
+            for row in asset.get("port_definitions", [])
+            if isinstance(row, dict)
+            and _text(row.get("port_use")).lower() == "uplink"
+            and _text(row.get("port_type")).lower() in PLUGGABLE_OPTIC_PORT_TYPES
+            for speed in normalise_port_speeds(row.get("supported_speeds_mbps"))
+        }
+        common = uplink_speeds & core_fibre_speeds if core_fibre_speeds else uplink_speeds
+        single_path = float(max(common or uplink_speeds or {0}))
+        declared = max(0.0, _float(asset.get("bandwidth_capacity_gbps"))) * 1000.0
+        return min(single_path, declared) if declared > 0.0 and single_path > 0.0 else max(single_path, declared)
+
+    planning_olts: List[dict] = []
+    for asset in eligible_olts:
+        protected_capacity = protected_olt_uplink_capacity_mbps(asset)
+        if protected_capacity <= 0.0:
+            continue
+        planning_olts.append(
+            {
+                **asset,
+                "number_of_ports": olt_pon_port_count(asset),
+                "connections_out": olt_pon_port_count(asset),
+                "bandwidth_capacity_gbps": protected_capacity / 1000.0,
+                "_protected_uplink_capacity_mbps": protected_capacity,
+            }
+        )
+    if not planning_olts:
+        raise NetworkPlanningError(
+            "No OLT has an uplink speed compatible with the available core switches."
+        )
+
     def build_olt_side(side: str, root: dict) -> List[dict]:
         mix = _minimum_asset_mix(
-            eligible_olts, required_pon_ports, 0.0, spare_fraction, f"{side} OLT"
+            planning_olts, required_pon_ports, 0.0, spare_fraction, f"{side} OLT"
         )
         mix = _ensure_aggregate_traffic_capacity(
-            eligible_olts,
+            planning_olts,
             mix,
             total_bandwidth_mbps,
             total_packet_rate_pps,
@@ -3730,28 +3835,104 @@ def _polan_design(
                 route_anchor=_text(root.get("name")),
                 olt_side=side.lower(),
                 core_redundancy_role=side.lower(),
-                expected_bandwidth_mbps=round(total_bandwidth_mbps, 6),
-                expected_packet_rate_pps=round(total_packet_rate_pps, 3),
+                expected_bandwidth_mbps=0.0,
+                expected_packet_rate_pps=0.0,
             )
             for index, asset in enumerate(mix)
         ]
-        capacities = [
-            max(_int(asset.get("connections_out")), _int(asset.get("number_of_ports")))
+        remaining_ports = [max(1, _int(asset.get("number_of_ports"), 1)) for asset in mix]
+        remaining_bandwidth = [
+            max(0.0, _float(asset.get("_protected_uplink_capacity_mbps")))
             for asset in mix
         ]
-        instance_index = 0
-        port_number = 1
-        for splitter_index, splitter_record in enumerate(splitter_records, start=1):
-            while (
-                instance_index < len(capacities)
-                and port_number > capacities[instance_index]
-            ):
-                instance_index += 1
-                port_number = 1
-            if instance_index >= len(instances):
-                raise NetworkPlanningError(
-                    "OLT PON-port allocation exceeded selected capacity."
+        used_pon_ports = [0 for _asset in mix]
+        allocation_rows = sorted(
+            enumerate(splitter_records, start=1),
+            key=lambda row: (
+                -max(0.0, _float(row[1].get("expected_bandwidth_mbps"))),
+                -max(0.0, _float(row[1].get("expected_packet_rate_pps"))),
+                row[0],
+            ),
+        )
+        for splitter_index, splitter_record in allocation_rows:
+            branch_bandwidth = max(
+                0.0, _float(splitter_record.get("expected_bandwidth_mbps"))
+            )
+            candidates = [
+                index
+                for index in range(len(instances))
+                if remaining_ports[index] > 0
+                and remaining_bandwidth[index] + 1e-9 >= branch_bandwidth
+            ]
+            if not candidates:
+                expandable = [
+                    asset
+                    for asset in planning_olts
+                    if max(0.0, _float(asset.get("_protected_uplink_capacity_mbps")))
+                    + 1e-9
+                    >= branch_bandwidth
+                ]
+                if not expandable:
+                    raise NetworkPlanningError(
+                        f"No available {side.lower()} OLT can carry splitter "
+                        f"{splitter_record['instance'].get('name') or splitter_index} "
+                        f"({branch_bandwidth:.3f} Mbps) over one protected core path."
+                    )
+                extra_asset = min(
+                    expandable,
+                    key=lambda asset: (
+                        max(0.0, _float(asset.get("_protected_uplink_capacity_mbps")))
+                        - branch_bandwidth,
+                        max(1, _rack_units_for_asset(asset, 1)),
+                        _text(asset.get("id")),
+                    ),
                 )
+                mix.append(extra_asset)
+                extra_index = len(instances)
+                instances.append(
+                    builder.add_instance(
+                        extra_asset,
+                        f"AUTO {side} OLT {extra_index + 1}",
+                        root,
+                        "olt_primary" if side == "Primary" else "olt_secondary",
+                        rack_name=f"AUTO-RACK-{_text(root.get('name'))}",
+                        rack_start_u=extra_index + 1,
+                        route_anchor=_text(root.get("name")),
+                        olt_side=side.lower(),
+                        core_redundancy_role=side.lower(),
+                        expected_bandwidth_mbps=0.0,
+                        expected_packet_rate_pps=0.0,
+                    )
+                )
+                remaining_ports.append(
+                    max(1, _int(extra_asset.get("number_of_ports"), 1))
+                )
+                remaining_bandwidth.append(
+                    max(
+                        0.0,
+                        _float(extra_asset.get("_protected_uplink_capacity_mbps")),
+                    )
+                )
+                used_pon_ports.append(0)
+                candidates = [extra_index]
+                builder.warnings.append(
+                    f"An additional {side.lower()} OLT was added to avoid "
+                    "fragmenting protected uplink capacity across PON branches."
+                )
+            instance_index = min(
+                candidates,
+                key=lambda index: (
+                    -remaining_bandwidth[index],
+                    -remaining_ports[index],
+                    index,
+                ),
+            )
+            used_pon_ports[instance_index] += 1
+            port_number = used_pon_ports[instance_index]
+            remaining_ports[instance_index] -= 1
+            remaining_bandwidth[instance_index] = max(
+                0.0, remaining_bandwidth[instance_index] - branch_bandwidth
+            )
             input_name = "Input-A" if side == "Primary" else "Input-B"
             protection_group = f"AUTO-PG-{splitter_index}" if failover else ""
             builder.add_connection(
@@ -3766,7 +3947,23 @@ def _polan_design(
                 redundancy_role=side.lower(),
                 protection_group=protection_group,
                 standby=side != "Primary",
+                expected_bandwidth_mbps=max(
+                    0.0, _float(splitter_record.get("expected_bandwidth_mbps"))
+                ),
+                expected_packet_rate_pps=max(
+                    0.0, _float(splitter_record.get("expected_packet_rate_pps"))
+                ),
                 fibre_count=1,
+            )
+            instances[instance_index]["expected_bandwidth_mbps"] = round(
+                max(0.0, _float(instances[instance_index].get("expected_bandwidth_mbps")))
+                + max(0.0, _float(splitter_record.get("expected_bandwidth_mbps"))),
+                6,
+            )
+            instances[instance_index]["expected_packet_rate_pps"] = round(
+                max(0.0, _float(instances[instance_index].get("expected_packet_rate_pps")))
+                + max(0.0, _float(splitter_record.get("expected_packet_rate_pps"))),
+                3,
             )
             if side == "Primary" and failover:
                 builder.redundancy_groups.append(
@@ -3791,7 +3988,6 @@ def _polan_design(
                             instances[instance_index].get("id")
                         )
                         break
-            port_number += 1
         return instances
 
     primary_olts = build_olt_side("Primary", primary_root)
