@@ -473,13 +473,21 @@ class TopologyModel:
         for connection in self.data.get("network_connections", []):
             if not isinstance(connection, dict):
                 continue
+            source_id = _text(connection.get("from_instance_id"))
+            target_id = _text(connection.get("to_instance_id"))
+            source_port = _text(connection.get("from_port"))
+            target_port = _text(connection.get("to_port"))
+            # Port status is a physical fact, so count occupied ports even for
+            # patch leads and other connections hidden from logical topology.
+            if source_id and source_port and source_port != "0":
+                occupied_ports_by_instance[source_id].add(source_port)
+            if target_id and target_port and target_port != "0":
+                occupied_ports_by_instance[target_id].add(target_port)
             # Physical patch cables and panel backbones are retained in the
             # data model and rack/port views, but must not alter the logical
             # topology between active devices.
             if bool(connection.get("topology_hidden")) or bool(connection.get("physical_connection")):
                 continue
-            source_id = _text(connection.get("from_instance_id"))
-            target_id = _text(connection.get("to_instance_id"))
             if not source_id or not target_id or source_id == target_id:
                 continue
             edge_id = _text(connection.get("id")) or f"link-{len(self.edges) + 1}"
@@ -509,12 +517,20 @@ class TopologyModel:
             self.adjacency[target_id].append((source_id, edge))
             connection_counts[source_id] += 1
             connection_counts[target_id] += 1
-            source_port = _text(connection.get("from_port"))
-            target_port = _text(connection.get("to_port"))
-            if source_port and source_port != "0":
-                occupied_ports_by_instance[source_id].add(source_port)
-            if target_port and target_port != "0":
-                occupied_ports_by_instance[target_id].add(target_port)
+
+        # Explicit patch-lead records are also valid occupancy sources.  Older
+        # projects may not mirror them into network_connections.
+        for lead in self.data.get("network_patch_leads", []):
+            if not isinstance(lead, dict):
+                continue
+            instance_id = _text(lead.get("instance_id"))
+            peer_instance_id = _text(lead.get("peer_instance_id"))
+            port = _text(lead.get("port"))
+            peer_port = _text(lead.get("peer_port"))
+            if instance_id and port and port != "0":
+                occupied_ports_by_instance[instance_id].add(port)
+            if peer_instance_id and peer_port and peer_port != "0":
+                occupied_ports_by_instance[peer_instance_id].add(peer_port)
 
         for instance in self.data.get("network_asset_instances", []):
             if not isinstance(instance, dict):
@@ -2510,6 +2526,16 @@ class NetworkTopologyDialog(QDialog):
         self.show_link_labels_check.setChecked(True)
         self.show_link_labels_check.toggled.connect(lambda _checked: self.rebuild_scene(fit=False))
         layout.addWidget(self.show_link_labels_check)
+
+        self.show_patch_leads_check = QCheckBox("Patch leads")
+        self.show_patch_leads_check.setToolTip(
+            "Show physical patch-cable lines between patch panels and connected devices in rack view"
+        )
+        # Port occupancy remains visible at all times.  The cable overlay is
+        # intentionally opt-in because dense racks become difficult to read.
+        self.show_patch_leads_check.setChecked(False)
+        self.show_patch_leads_check.toggled.connect(lambda _checked: self.rebuild_scene(fit=False))
+        layout.addWidget(self.show_patch_leads_check)
 
         add_device_button = QPushButton("Add device")
         add_device_button.setToolTip("Install a network asset and add it to the topology")
@@ -4590,7 +4616,11 @@ class NetworkTopologyDialog(QDialog):
                 self.scene.addItem(item)
                 self.node_items[node_id] = item
 
-        if self.rack_focus is not None and self.switch_port_focus is None:
+        if (
+            self.rack_focus is not None
+            and self.switch_port_focus is None
+            and self.show_patch_leads_check.isChecked()
+        ):
             self._add_rack_patch_connections()
 
         navigation_margin = getattr(self.view, "_navigation_margin", 5000.0)
