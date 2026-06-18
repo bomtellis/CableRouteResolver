@@ -900,7 +900,11 @@ class TopologyCardItem(QGraphicsObject):
         self._height = self._calculate_height()
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
-        self.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
+        # Device-coordinate caches can be invalidated incorrectly when the
+        # selected/hover state changes at very small topology zoom levels,
+        # making a clicked card appear to vanish.  Cards are inexpensive to
+        # repaint and selection must always update immediately.
+        self.setCacheMode(QGraphicsItem.NoCache)
         self.setToolTip(self._tooltip())
 
     def boundingRect(self) -> QRectF:
@@ -1241,6 +1245,24 @@ class RackEquipmentItem(QGraphicsObject):
         if self.search_match != match:
             self.search_match = match
             self.update()
+
+    def port_scene_position(self, port_name: str = "") -> QPointF:
+        """Return the scene position of a named front-panel port.
+
+        Rack patch-lead rendering uses the actual socket position when the
+        saved port name matches.  Older records that do not retain a usable
+        port name fall back to the centre of the equipment face.
+        """
+        wanted = _text(port_name).casefold()
+        if wanted:
+            for port_node in self.port_nodes:
+                candidate = _text(port_node.details.get("port_name")).casefold()
+                if candidate != wanted:
+                    continue
+                rect = self._port_rects.get(port_node.node_id)
+                if rect is not None:
+                    return self.mapToScene(rect.center())
+        return self.mapToScene(self.boundingRect().center())
 
     @staticmethod
     def _port_kind(port_name: str) -> str:
@@ -1698,6 +1720,18 @@ class SplitterFrontPanelItem(QGraphicsObject):
             self.search_match = match
             self.update()
 
+    def port_scene_position(self, port_name: str = "") -> QPointF:
+        wanted = _text(port_name).casefold()
+        if wanted:
+            for port_node in self.port_nodes:
+                candidate = _text(port_node.details.get("port_name")).casefold()
+                if candidate != wanted:
+                    continue
+                rect = self._port_rects.get(port_node.node_id)
+                if rect is not None:
+                    return self.mapToScene(rect.center())
+        return self.mapToScene(self.boundingRect().center())
+
     def _build_port_rects(self) -> None:
         self._port_rects.clear()
         inputs = [p for p in self.port_nodes if _text(p.details.get("port_use")).lower() == "input"]
@@ -1976,6 +2010,7 @@ class TopologyGraphicsView(QGraphicsView):
         self._rubber_band_selecting = False
         self._pan_button = Qt.NoButton
         self._pan_start = QPoint()
+        self._pan_render_reduced = False
         # Keep enough room to pan past the diagram without making the scene
         # extent look like an oversized bounding box around the topology.  The
         # scene expands further on demand while the user pans.
@@ -2047,7 +2082,15 @@ class TopologyGraphicsView(QGraphicsView):
         delta = current - self._pan_start
         self._pan_start = current
 
-        self._pan_viewport_by(delta.x(), delta.y())
+        if delta.x() or delta.y():
+            # Do not change the painter state merely because the user clicked
+            # empty space.  Some OpenGL/HiDPI combinations temporarily blank
+            # the graphics view when all render hints are removed on press.
+            # Reduce rendering quality only after a real drag begins.
+            if not self._pan_render_reduced:
+                self.setRenderHints(QPainter.RenderHints())
+                self._pan_render_reduced = True
+            self._pan_viewport_by(delta.x(), delta.y())
 
         event.accept()
 
@@ -2063,7 +2106,9 @@ class TopologyGraphicsView(QGraphicsView):
             self._panning = False
             self._pan_button = Qt.NoButton
             self.viewport().unsetCursor()
-            self.setRenderHints(self._normal_render_hints)
+            if self._pan_render_reduced:
+                self.setRenderHints(self._normal_render_hints)
+                self._pan_render_reduced = False
             self.viewport().update()
             event.accept()
             return
@@ -2075,7 +2120,9 @@ class TopologyGraphicsView(QGraphicsView):
             self._panning = False
             self._pan_button = Qt.NoButton
             self.viewport().unsetCursor()
-            self.setRenderHints(self._normal_render_hints)
+            if self._pan_render_reduced:
+                self.setRenderHints(self._normal_render_hints)
+                self._pan_render_reduced = False
             self.viewport().update()
 
         super().leaveEvent(event)
@@ -2149,9 +2196,9 @@ class TopologyGraphicsView(QGraphicsView):
         self._panning = True
         self._pan_button = button
         # Text antialiasing across hundreds or thousands of cards is expensive
-        # while the viewport is moving. Restore full quality immediately when
-        # the drag ends.
-        self.setRenderHints(QPainter.RenderHints())
+        # while the viewport is moving.  Defer reducing render quality until
+        # mouseMoveEvent confirms that this is a drag rather than a click.
+        self._pan_render_reduced = False
         self._pan_start = event.position().toPoint()
         self.viewport().setCursor(Qt.ClosedHandCursor)
         self.viewport().setFocus()
@@ -4421,7 +4468,13 @@ class NetworkTopologyDialog(QDialog):
         for child_id, parent_id in self.visible_parent.items():
             children_by_parent[parent_id].append(child_id)
 
-        if self.rack_focus is not None and self.switch_port_focus is None:
+        if self.switch_port_focus is not None or (
+            self.rack_focus is not None and self.switch_port_focus is None
+        ):
+            # Rack elevations and device port views render their own physical
+            # connection geometry. Pseudo port nodes deliberately have no
+            # standalone positions in device port view, so topology tree links
+            # must not be generated for them.
             children_by_parent.clear()
 
         for parent_id, child_ids in children_by_parent.items():
@@ -4537,6 +4590,9 @@ class NetworkTopologyDialog(QDialog):
                 self.scene.addItem(item)
                 self.node_items[node_id] = item
 
+        if self.rack_focus is not None and self.switch_port_focus is None:
+            self._add_rack_patch_connections()
+
         navigation_margin = getattr(self.view, "_navigation_margin", 5000.0)
         scene_rect = self.scene.itemsBoundingRect().adjusted(
             -navigation_margin,
@@ -4623,6 +4679,167 @@ class NetworkTopologyDialog(QDialog):
             units = max(1, self._node_rack_units(node_id))
             return QRectF(pos.x(), pos.y(), 965.2, max(88.9, units * 88.9))
         return QRectF(pos.x(), pos.y(), self.CARD_W, self._node_card_height(node_id))
+
+    def _rack_item_port_position(self, instance_id: str, port_name: str = "") -> Optional[QPointF]:
+        item = self.node_items.get(_text(instance_id))
+        if item is None:
+            return None
+        getter = getattr(item, "port_scene_position", None)
+        if callable(getter):
+            return getter(port_name)
+        return item.mapToScene(item.boundingRect().center())
+
+    def _is_patch_panel_node(self, instance_id: str) -> bool:
+        node = self.model.nodes.get(_text(instance_id))
+        if node is None:
+            return False
+        asset_type = _text(node.asset_type).lower()
+        role = _text(node.role).lower()
+        name = _text(node.name).lower()
+        return (
+            asset_type == "patch_panel"
+            or role == "patch_panel"
+            or "patch panel" in name
+            or "patch-panel" in name
+        )
+
+    def _draw_rack_patch_connection(
+        self,
+        source_id: str,
+        source_port: str,
+        target_id: str,
+        target_port: str,
+        medium: str,
+        label: str,
+        traced: bool = False,
+    ) -> bool:
+        start = self._rack_item_port_position(source_id, source_port)
+        end = self._rack_item_port_position(target_id, target_port)
+        if start is None or end is None:
+            return False
+
+        path = QPainterPath(start)
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+        if abs(dx) < 160.0:
+            # Devices in the same cabinet are normally stacked vertically.
+            # Bow patch leads to the right of the faces so the cable remains
+            # visible without obscuring port labels or rack-unit numbers.
+            bow = max(32.0, min(115.0, abs(dy) * 0.22 + 28.0))
+            control_x = max(start.x(), end.x()) + bow
+            path.cubicTo(
+                QPointF(control_x, start.y()),
+                QPointF(control_x, end.y()),
+                end,
+            )
+        else:
+            # Between cabinets, use a shallow horizontal S-curve.
+            mid_x = (start.x() + end.x()) / 2.0
+            path.cubicTo(
+                QPointF(mid_x, start.y()),
+                QPointF(mid_x, end.y()),
+                end,
+            )
+
+        fibre = _text(medium).lower() in {"fibre", "fiber", "optical"}
+        colour = QColor("#65c7ff" if fibre else "#f0b35a")
+        if traced:
+            colour = QColor("#ff8a24")
+        item = QGraphicsPathItem(path)
+        pen = QPen(colour, 2.8 if traced else 2.0)
+        pen.setStyle(Qt.DashLine if fibre else Qt.SolidLine)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        item.setPen(pen)
+        item.setBrush(Qt.NoBrush)
+        item.setZValue(0.72)
+        item.setToolTip(label)
+        self.scene.addItem(item)
+        return True
+
+    def _add_rack_patch_connections(self) -> None:
+        """Draw patch leads and direct patch-panel links in rack view.
+
+        Patch panels remain omitted from the logical topology hierarchy, but
+        their physical rack-view relationships are shown between the actual
+        front-panel sockets.
+        """
+        if self.rack_focus is None or self.switch_port_focus is not None:
+            return
+
+        drawn: Set[Tuple[str, str, str, str]] = set()
+
+        def add(
+            source_id: str, source_port: str, target_id: str, target_port: str,
+            medium: str, label: str, traced: bool = False,
+        ) -> None:
+            source_id = _text(source_id); target_id = _text(target_id)
+            source_port = _text(source_port); target_port = _text(target_port)
+            if not source_id or not target_id or source_id == target_id:
+                return
+            if source_id not in self.node_items or target_id not in self.node_items:
+                return
+            if not (self._is_patch_panel_node(source_id) or self._is_patch_panel_node(target_id)):
+                return
+            forward = (source_id, source_port.casefold(), target_id, target_port.casefold())
+            reverse = (target_id, target_port.casefold(), source_id, source_port.casefold())
+            key = min(forward, reverse)
+            if key in drawn:
+                return
+            if self._draw_rack_patch_connection(
+                source_id, source_port, target_id, target_port, medium, label, traced
+            ):
+                drawn.add(key)
+
+        for lead in self.data.get("network_patch_leads", []):
+            if not isinstance(lead, dict):
+                continue
+            source_id = _text(lead.get("instance_id"))
+            target_id = _text(lead.get("peer_instance_id"))
+            if not target_id:
+                continue
+            lead_id = _text(lead.get("id"))
+            source_node = self.model.nodes.get(source_id)
+            target_node = self.model.nodes.get(target_id)
+            source_name = source_node.name if source_node else source_id
+            target_name = target_node.name if target_node else target_id
+            label = (
+                f"Patch cable {lead_id or ''}: {source_name} "
+                f"[{_text(lead.get('port')) or 'port'}] to {target_name} "
+                f"[{_text(lead.get('peer_port')) or 'port'}]"
+            ).strip()
+            add(
+                source_id, _text(lead.get("port")),
+                target_id, _text(lead.get("peer_port")),
+                _text(lead.get("medium")) or "copper",
+                label,
+                lead_id in self.trace_patch_lead_ids,
+            )
+
+        # Some imported or manually authored projects represent the panel-to-
+        # device relationship as a normal network connection rather than an
+        # explicit patch-lead record.  Show those too, without duplicating a
+        # lead already drawn above.
+        for connection in self.data.get("network_connections", []):
+            if not isinstance(connection, dict):
+                continue
+            source_id = _text(connection.get("from_instance_id"))
+            target_id = _text(connection.get("to_instance_id"))
+            if not (self._is_patch_panel_node(source_id) or self._is_patch_panel_node(target_id)):
+                continue
+            connection_id = _text(connection.get("id"))
+            source_node = self.model.nodes.get(source_id)
+            target_node = self.model.nodes.get(target_id)
+            source_name = source_node.name if source_node else source_id
+            target_name = target_node.name if target_node else target_id
+            label = f"Connection {connection_id or ''}: {source_name} to {target_name}".strip()
+            add(
+                source_id, _text(connection.get("from_port")),
+                target_id, _text(connection.get("to_port")),
+                _text(connection.get("medium")) or "copper",
+                label,
+                connection_id in self.trace_connection_ids,
+            )
 
     def _add_layer_headers(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         labels = {
@@ -5562,6 +5779,12 @@ class NetworkTopologyDialog(QDialog):
         cross_link: bool = False,
         client_link: bool = False,
     ) -> None:
+        # Filtered and specialised views can retain relationship metadata for
+        # pseudo nodes that are intentionally rendered inside another item (for
+        # example switch ports inside a front-panel item). Do not attempt to
+        # route a standalone scene link unless both endpoints were laid out.
+        if source_id not in positions or target_id not in positions:
+            return
         source_pos = positions[source_id]
         target_pos = positions[target_id]
         standby = self._edge_is_failover(edge)
