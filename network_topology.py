@@ -404,7 +404,7 @@ class TopologyEdge:
         medium = self.medium.title() if self.medium else "Link"
         if self.length_m > 0.05:
             medium += f" · {self.length_m:.0f} m"
-        if self.standby or self.redundancy_role.lower() in {"secondary", "standby"}:
+        if self.standby or self.redundancy_role.lower() in {"secondary", "standby", "failover"}:
             medium += " · Failover"
         return medium
 
@@ -1175,6 +1175,7 @@ class RackEquipmentItem(QGraphicsObject):
         self.units = max(1, int(units))
         self.port_nodes = list(port_nodes)
         self._port_rects: Dict[str, QRectF] = {}
+        self._compact_vertical_lc = False
         self.search_match = False
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
@@ -1212,7 +1213,51 @@ class RackEquipmentItem(QGraphicsObject):
 
     def _build_port_rects(self) -> None:
         self._port_rects.clear()
+        self._compact_vertical_lc = False
         if not self.port_nodes or self._width < 42.0 or self._height < 14.0:
+            return
+        port_kinds = [
+            self._port_kind(
+                port_node.details.get('port_type')
+                or port_node.details.get('port_name', '')
+            )
+            for port_node in self.port_nodes
+        ]
+        self._compact_vertical_lc = bool(
+            self.node.asset_type == 'patch_panel'
+            and port_kinds
+            and all(kind == 'lc' for kind in port_kinds)
+        )
+        if self._compact_vertical_lc:
+            # A 1U LC panel can contain 48 duplex adapters. Draw the adapter
+            # bodies vertically and use their actual narrow face width instead
+            # of the widest generic port type, otherwise the panel spills into
+            # two oversized rows.
+            scale = self._width / 482.6
+            ear_w = min(15.0, self._width * 0.045)
+            left = ear_w + max(3.0, 4.0 * scale)
+            right = self._width - ear_w - max(3.0, 4.0 * scale)
+            usable_w = max(8.0, right - left)
+            port_w = max(2.8, min(4.8, 4.0 * scale))
+            port_h = max(6.5, min(10.0, 8.5 * scale))
+            gap_x = max(0.55, min(1.25, 0.85 * scale))
+            count = len(self.port_nodes)
+            required_w = count * port_w + max(0, count - 1) * gap_x
+            if required_w > usable_w and count:
+                factor = max(0.55, usable_w / required_w)
+                port_w *= factor
+                gap_x *= factor
+                required_w = count * port_w + max(0, count - 1) * gap_x
+            x0 = left + max(0.0, (usable_w - required_w) / 2.0)
+            top = max(7.0, self._height * 0.27)
+            bottom = self._height - max(2.0, self._height * 0.08)
+            available_h = max(4.0, bottom - top)
+            port_h = min(port_h, available_h)
+            y = top + max(0.0, (available_h - port_h) / 2.0)
+            for index, port_node in enumerate(self.port_nodes):
+                self._port_rects[port_node.node_id] = QRectF(
+                    x0 + index * (port_w + gap_x), y, port_w, port_h
+                )
             return
         # The rack face uses a 482.6 mm-wide 19-inch panel. Shared OLT modules
         # retain that same scale after the face is divided into equal sections.
@@ -1308,11 +1353,19 @@ class RackEquipmentItem(QGraphicsObject):
                 painter.setBrush(fill.darker(150))
                 painter.drawEllipse(port_rect.adjusted(port_rect.width()*0.27, port_rect.height()*0.22, -port_rect.width()*0.27, -port_rect.height()*0.22))
             elif kind == 'lc':
-                painter.drawRoundedRect(port_rect, 1.0, 1.0)
+                painter.drawRoundedRect(port_rect, 0.7, 0.7)
                 painter.setBrush(fill.darker(150))
-                half = port_rect.width()/2.0
-                painter.drawEllipse(QRectF(port_rect.left()+half*0.15, port_rect.top()+port_rect.height()*0.2, half*0.55, port_rect.height()*0.6))
-                painter.drawEllipse(QRectF(port_rect.left()+half*1.15, port_rect.top()+port_rect.height()*0.2, half*0.55, port_rect.height()*0.6))
+                if self._compact_vertical_lc or port_rect.height() > port_rect.width() * 1.25:
+                    diameter = min(port_rect.width() * 0.64, port_rect.height() * 0.28)
+                    x = port_rect.center().x() - diameter / 2.0
+                    upper_y = port_rect.top() + port_rect.height() * 0.16
+                    lower_y = port_rect.bottom() - port_rect.height() * 0.16 - diameter
+                    painter.drawEllipse(QRectF(x, upper_y, diameter, diameter))
+                    painter.drawEllipse(QRectF(x, lower_y, diameter, diameter))
+                else:
+                    half = port_rect.width()/2.0
+                    painter.drawEllipse(QRectF(port_rect.left()+half*0.15, port_rect.top()+port_rect.height()*0.2, half*0.55, port_rect.height()*0.6))
+                    painter.drawEllipse(QRectF(port_rect.left()+half*1.15, port_rect.top()+port_rect.height()*0.2, half*0.55, port_rect.height()*0.6))
             elif kind == 'sc':
                 painter.drawRect(port_rect)
                 painter.setBrush(fill.darker(150)); painter.drawEllipse(port_rect.adjusted(port_rect.width()*0.28, port_rect.height()*0.2, -port_rect.width()*0.28, -port_rect.height()*0.2))
@@ -1387,6 +1440,7 @@ class SwitchFrontPanelItem(QGraphicsObject):
         self._width = float(width)
         self._height = float(height)
         self._port_rects: Dict[str, QRectF] = {}
+        self._compact_vertical_lc = False
         self.search_match = False
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
@@ -1419,7 +1473,44 @@ class SwitchFrontPanelItem(QGraphicsObject):
 
     def _build_port_rects(self) -> None:
         self._port_rects.clear()
+        self._compact_vertical_lc = False
         if not self.port_nodes:
+            return
+        port_kinds = [
+            self._port_kind(
+                port_node.details.get('port_type')
+                or port_node.details.get('port_name', '')
+            )
+            for port_node in self.port_nodes
+        ]
+        self._compact_vertical_lc = bool(
+            self.node.asset_type == 'patch_panel'
+            and port_kinds
+            and all(kind == 'lc' for kind in port_kinds)
+        )
+        if self._compact_vertical_lc:
+            margin_x = 42.0
+            usable_w = max(20.0, self._width - margin_x * 2.0)
+            scale = self._width / 482.6
+            port_w = max(4.0, min(8.0, 4.0 * scale))
+            port_h = max(10.0, min(18.0, 8.5 * scale))
+            gap_x = max(0.8, min(2.0, 0.85 * scale))
+            count = len(self.port_nodes)
+            required_w = count * port_w + max(0, count - 1) * gap_x
+            if required_w > usable_w and count:
+                factor = max(0.50, usable_w / required_w)
+                port_w *= factor
+                gap_x *= factor
+                required_w = count * port_w + max(0, count - 1) * gap_x
+            x0 = margin_x + max(0.0, (usable_w - required_w) / 2.0)
+            top = 21.0
+            available_h = max(10.0, self._height - top - 7.0)
+            port_h = min(port_h, available_h)
+            y = top + max(0.0, (available_h - port_h) / 2.0)
+            for index, port_node in enumerate(self.port_nodes):
+                self._port_rects[port_node.node_id] = QRectF(
+                    x0 + index * (port_w + gap_x), y, port_w, port_h
+                )
             return
         # 19-inch equipment width = 482.6 mm. Port sizes are proportional to that width.
         mm_scale = self._width / 482.6
@@ -1477,15 +1568,24 @@ class SwitchFrontPanelItem(QGraphicsObject):
                 painter.setBrush(fill.darker(145)); painter.drawEllipse(port_rect.adjusted(port_rect.width()*0.28, port_rect.height()*0.2, -port_rect.width()*0.28, -port_rect.height()*0.2))
             elif kind == 'lc':
                 painter.drawRect(port_rect); painter.setBrush(fill.darker(145))
-                painter.drawEllipse(QRectF(port_rect.left()+port_rect.width()*0.12, port_rect.top()+port_rect.height()*0.2, port_rect.width()*0.28, port_rect.height()*0.6))
-                painter.drawEllipse(QRectF(port_rect.left()+port_rect.width()*0.60, port_rect.top()+port_rect.height()*0.2, port_rect.width()*0.28, port_rect.height()*0.6))
+                if self._compact_vertical_lc or port_rect.height() > port_rect.width() * 1.25:
+                    diameter = min(port_rect.width() * 0.64, port_rect.height() * 0.28)
+                    x = port_rect.center().x() - diameter / 2.0
+                    upper_y = port_rect.top() + port_rect.height() * 0.16
+                    lower_y = port_rect.bottom() - port_rect.height() * 0.16 - diameter
+                    painter.drawEllipse(QRectF(x, upper_y, diameter, diameter))
+                    painter.drawEllipse(QRectF(x, lower_y, diameter, diameter))
+                else:
+                    painter.drawEllipse(QRectF(port_rect.left()+port_rect.width()*0.12, port_rect.top()+port_rect.height()*0.2, port_rect.width()*0.28, port_rect.height()*0.6))
+                    painter.drawEllipse(QRectF(port_rect.left()+port_rect.width()*0.60, port_rect.top()+port_rect.height()*0.2, port_rect.width()*0.28, port_rect.height()*0.6))
             elif kind == 'sc':
                 painter.drawRect(port_rect); painter.setBrush(fill.darker(145)); painter.drawEllipse(port_rect.adjusted(port_rect.width()*0.3, port_rect.height()*0.2, -port_rect.width()*0.3, -port_rect.height()*0.2))
             else:
                 painter.drawRect(port_rect); painter.setBrush(fill.darker(145)); painter.drawRect(port_rect.adjusted(port_rect.width()*0.12, port_rect.height()*0.22, -port_rect.width()*0.12, -port_rect.height()*0.22))
-            painter.setFont(QFont('Arial', 5))
-            painter.setPen(QColor('#ffffff'))
-            painter.drawText(port_rect.adjusted(0, -10, 0, 0), Qt.AlignHCenter|Qt.AlignTop, _text(port_node.details.get('port_name')))
+            if not self._compact_vertical_lc or len(self.port_nodes) <= 24:
+                painter.setFont(QFont('Arial', 5))
+                painter.setPen(QColor('#ffffff'))
+                painter.drawText(port_rect.adjusted(0, -10, 0, 0), Qt.AlignHCenter|Qt.AlignTop, _text(port_node.details.get('port_name')))
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -2782,17 +2882,24 @@ class NetworkTopologyDialog(QDialog):
                 source_port=first.source_port,
                 target_port=last.target_port,
                 length_m=sum(edge.length_m for edge in ordered),
-                standby=any(edge.standby for edge in ordered),
-                redundancy_role=next(
-                    (edge.redundancy_role for edge in ordered if edge.redundancy_role),
-                    "",
+                # Only the real child-adjacent link determines whether the
+                # visible collapsed connection is secondary.  An upstream
+                # standby segment must not paint the complete downstream path
+                # as failover.
+                standby=self._edge_is_failover(last),
+                redundancy_role=(
+                    last.redundancy_role if self._edge_is_failover(last) else ""
                 ),
-                protection_group=next(
-                    (edge.protection_group for edge in ordered if edge.protection_group),
-                    "",
+                protection_group=(
+                    last.protection_group if self._edge_is_failover(last) else ""
                 ),
                 connection={
-                    "collapsed_patch_panel_path": [edge.edge_id for edge in ordered]
+                    "collapsed_patch_panel_path": [edge.edge_id for edge in ordered],
+                    "collapsed_terminal_edge_id": last.edge_id,
+                    "standby": self._edge_is_failover(last),
+                    "redundancy_role": (
+                        last.redundancy_role if self._edge_is_failover(last) else ""
+                    ),
                 },
             )
             self._collapsed_edge_cache[cache_key] = cached_edge
@@ -4061,7 +4168,11 @@ class NetworkTopologyDialog(QDialog):
         )
         if self.rack_focus is None:
             for edge in visible_cross_edges:
-                if edge.source_id in positions and edge.target_id in positions:
+                if (
+                    self._edge_is_failover(edge)
+                    and edge.source_id in positions
+                    and edge.target_id in positions
+                ):
                     _source_id, target_id = self._cross_link_origin_target(edge)
                     self._visible_failover_bus_nodes.add(target_id)
 
@@ -4090,18 +4201,24 @@ class NetworkTopologyDialog(QDialog):
 
         if self.show_redundant_check.isChecked() and self.rack_focus is None and self.switch_port_focus is None:
             failover_groups: Dict[str, List[Tuple[str, str, TopologyEdge]]] = defaultdict(list)
+            ordinary_cross_links: List[Tuple[str, str, TopologyEdge]] = []
             for edge in visible_cross_edges:
-                if edge.source_id in positions and edge.target_id in positions:
-                    source_id, target_id = self._cross_link_origin_target(edge)
-                    failover_groups[self._failover_group_key(edge, source_id)].append(
-                        (source_id, target_id, edge)
-                    )
+                if edge.source_id not in positions or edge.target_id not in positions:
+                    continue
+                source_id, target_id = self._cross_link_origin_target(edge)
+                row = (source_id, target_id, edge)
+                if self._edge_is_failover(edge):
+                    failover_groups[self._failover_group_key(edge, source_id)].append(row)
+                else:
+                    ordinary_cross_links.append(row)
             for rows in failover_groups.values():
                 unique_sources = {source_id for source_id, _target_id, _edge in rows}
                 if len(rows) >= 2 and len(unique_sources) >= 1:
                     self._add_shared_failover_trunk(rows, positions)
                     continue
                 source_id, target_id, edge = rows[0]
+                self._add_link(source_id, target_id, positions, edge, cross_link=True)
+            for source_id, target_id, edge in ordinary_cross_links:
                 self._add_link(source_id, target_id, positions, edge, cross_link=True)
 
         if self.switch_port_focus is not None:
@@ -4496,8 +4613,13 @@ class NetworkTopologyDialog(QDialog):
                 position = max(1, _int(pdu_node.instance.get("side_mount_position"), 1))
                 pdu_width = 22.0
                 offset = (position - 1) * (pdu_width + 5.0)
+                # Keep left-side PDUs outside the rack-unit number gutter.
+                # Unit labels begin at rack_left - 36 px and can be about
+                # 20 px wide, so the previous 9 px offset placed the PDU
+                # directly over labels such as 38U--42U.
+                rack_number_gutter = 48.0
                 x = (
-                    rack_left - 9.0 - pdu_width - offset
+                    rack_left - rack_number_gutter - pdu_width - offset
                     if side != "right"
                     else rack_left + rack_width + 9.0 + offset
                 )
@@ -4855,17 +4977,17 @@ class NetworkTopologyDialog(QDialog):
             if edge and self.show_link_labels_check.isChecked() and not client_link:
                 self._add_link_label(edge.label, colour, QPointF((rail_x + end.x()) / 2.0, branch_y), edge)
 
-    def _active_descendants_for_hidden(
+    def _active_descendant_terminals_for_hidden(
         self, node_id: str, positions: Dict[str, QPointF]
-    ) -> List[str]:
-        """Return the first visible active nodes below a hidden passive node.
+    ) -> List[Tuple[str, TopologyEdge]]:
+        """Return visible descendants and the real edge entering each device.
 
-        Passive splitters, patch panels and rack support items are omitted from
-        the overview. A standby fibre commonly terminates on one of those hidden
-        nodes, so the failover link must continue to the first visible active
-        descendant rather than disappearing with the passive card.
+        A standby state is never copied from an upstream hidden splitter,
+        patch panel or support component across the remainder of the branch.
+        The downstream device is failover only when its own terminal link is
+        explicitly secondary or standby.
         """
-        result: List[str] = []
+        result: List[Tuple[str, TopologyEdge]] = []
         pending = deque(self.model.children.get(node_id, []))
         seen: Set[str] = set()
         while pending:
@@ -4873,11 +4995,16 @@ class NetworkTopologyDialog(QDialog):
             if candidate_id in seen:
                 continue
             seen.add(candidate_id)
+            terminal_edge = self.model.edges_by_id.get(
+                self.model.parent_edge.get(candidate_id, "")
+            )
             if candidate_id in positions and self._is_active_topology_device(candidate_id):
-                result.append(candidate_id)
+                if terminal_edge is not None:
+                    result.append((candidate_id, terminal_edge))
                 continue
             pending.extend(self.model.children.get(candidate_id, []))
         return result
+
 
     def _tree_length_between(self, ancestor_id: str, descendant_id: str) -> float:
         """Return the saved cable length along a parent-chain segment."""
@@ -4895,12 +5022,13 @@ class NetworkTopologyDialog(QDialog):
     def _visible_cross_edges(
         self, positions: Dict[str, QPointF]
     ) -> List[TopologyEdge]:
-        """Return cross/failover links mapped onto visible active devices.
+        """Return cross-links without propagating failover down a whole route.
 
-        Direct cross-links are retained unchanged. Standby links ending on a
-        hidden splitter or patch panel are expanded to the first visible active
-        descendants, preserving the failover relationship in the active-only
-        topology.
+        A protection group contains both primary and secondary links, so the
+        group identifier alone never makes a link failover.  When a cross-link
+        ends on a hidden support/passive component, it is projected to a visible
+        descendant only when the real edge entering that descendant is itself
+        explicitly secondary or standby.
         """
         visible: List[TopologyEdge] = []
         seen: Set[Tuple[str, str, str, str]] = set()
@@ -4914,53 +5042,64 @@ class NetworkTopologyDialog(QDialog):
                     visible.append(edge)
                 continue
 
-            is_failover = bool(
-                edge.standby
-                or edge.redundancy_role.lower() in {"secondary", "standby", "failover"}
-                or edge.protection_group
-            )
-            if not is_failover:
+            if not self._edge_is_failover(edge):
                 continue
 
-            mappings: List[Tuple[str, str, float]] = []
+            mappings: List[Tuple[str, str, float, TopologyEdge]] = []
             if source_visible and not target_visible:
-                for target_id in self._active_descendants_for_hidden(edge.target_id, positions):
-                    mappings.append(
-                        (edge.source_id, target_id, self._tree_length_between(edge.target_id, target_id))
-                    )
+                for target_id, terminal_edge in self._active_descendant_terminals_for_hidden(
+                    edge.target_id, positions
+                ):
+                    if not self._edge_is_failover(terminal_edge):
+                        continue
+                    mappings.append((
+                        edge.source_id,
+                        target_id,
+                        self._tree_length_between(edge.target_id, target_id),
+                        terminal_edge,
+                    ))
             elif target_visible and not source_visible:
-                for source_id in self._active_descendants_for_hidden(edge.source_id, positions):
-                    mappings.append(
-                        (source_id, edge.target_id, self._tree_length_between(edge.source_id, source_id))
-                    )
+                for source_id, terminal_edge in self._active_descendant_terminals_for_hidden(
+                    edge.source_id, positions
+                ):
+                    if not self._edge_is_failover(terminal_edge):
+                        continue
+                    mappings.append((
+                        source_id,
+                        edge.target_id,
+                        self._tree_length_between(edge.source_id, source_id),
+                        terminal_edge,
+                    ))
 
-            for source_id, target_id, extra_length in mappings:
+            for source_id, target_id, extra_length, terminal_edge in mappings:
                 if source_id == target_id or source_id not in positions or target_id not in positions:
                     continue
                 pair = tuple(sorted((source_id, target_id)))
-                key = (pair[0], pair[1], edge.protection_group, edge.edge_id)
+                key = (pair[0], pair[1], terminal_edge.protection_group, terminal_edge.edge_id)
                 if key in seen:
                     continue
                 seen.add(key)
                 synthetic = TopologyEdge(
-                    edge_id=f"visible-failover::{edge.edge_id}::{source_id}::{target_id}",
+                    edge_id=f"visible-failover::{terminal_edge.edge_id}::{source_id}::{target_id}",
                     source_id=source_id,
                     target_id=target_id,
-                    medium=edge.medium or "fibre",
+                    medium=terminal_edge.medium or edge.medium or "fibre",
                     source_port=edge.source_port,
-                    target_port=edge.target_port,
+                    target_port=terminal_edge.target_port,
                     length_m=max(0.0, edge.length_m) + max(0.0, extra_length),
                     standby=True,
-                    redundancy_role=edge.redundancy_role or "standby",
-                    protection_group=edge.protection_group,
+                    redundancy_role=terminal_edge.redundancy_role or "standby",
+                    protection_group=terminal_edge.protection_group,
                     connection={
-                        **edge.connection,
+                        **terminal_edge.connection,
                         "collapsed_passive_failover": edge.edge_id,
+                        "collapsed_terminal_edge_id": terminal_edge.edge_id,
                     },
                 )
                 self._visible_synthetic_edges[synthetic.edge_id] = synthetic
                 visible.append(synthetic)
         return visible
+
 
     def _cross_link_origin_target(self, edge: TopologyEdge) -> Tuple[str, str]:
         source_rank = self.model._hierarchy_rank(edge.source_id)
@@ -5183,9 +5322,10 @@ class NetworkTopologyDialog(QDialog):
         source_pos = positions[source_id]
         target_pos = positions[target_id]
         standby = self._edge_is_failover(edge)
-        failover_style = cross_link or standby
+        failover_style = standby
+        alternate_cross_link = cross_link and not standby
         target_bus = self._bus_for_node(target_id, failover=failover_style)
-        if failover_style:
+        if failover_style or alternate_cross_link:
             source_center = QPointF(source_pos.x() + self.CARD_W / 2.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
             target_center = QPointF(
                 target_pos.x() + self.CARD_W / 2.0,
@@ -5237,7 +5377,7 @@ class NetworkTopologyDialog(QDialog):
                 self._add_link_label(edge.label, colour, QPointF((entry_x + bus_anchor.x()) / 2.0, bus_anchor.y() - (14.0 if failover_style else 12.0)), edge)
             return
         path = QPainterPath(start)
-        if failover_style:
+        if failover_style or alternate_cross_link:
             bend = max(60.0, abs(end.x() - start.x()) * 0.20)
             direction = -1.0 if end.x() >= start.x() else 1.0
             control_x = (start.x() + end.x()) / 2.0 + direction * bend

@@ -637,13 +637,13 @@ def ensure_network_schema(data: dict) -> dict:
     for field in ("name", "dxf_layer_prefix", "cable_layer", "node_layer", "splice_layer", "label_layer"):
         merged_layer_settings[field] = _text(merged_layer_settings.get(field)) or fibre_layer_defaults()[field]
     merged_layer_settings["symbol_scale"] = max(
-        0.05, min(2.0, _as_float(merged_layer_settings.get("symbol_scale"), 0.18))
+        0.05, min(2.0, _as_float(merged_layer_settings.get("symbol_scale"), 0.12))
     )
     merged_layer_settings["label_scale"] = max(
-        0.10, min(2.0, _as_float(merged_layer_settings.get("label_scale"), 0.30))
+        0.06, min(2.0, _as_float(merged_layer_settings.get("label_scale"), 0.14))
     )
     merged_layer_settings["cable_width_scale"] = max(
-        0.08, min(2.0, _as_float(merged_layer_settings.get("cable_width_scale"), 0.30))
+        0.05, min(2.0, _as_float(merged_layer_settings.get("cable_width_scale"), 0.18))
     )
     settings["physical_fibre_layer"] = merged_layer_settings
     raw_fibre_planning = settings.get("physical_fibre_planning")

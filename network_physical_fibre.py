@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from copy import deepcopy
+import time
 from typing import Callable, Dict, List, Optional, Sequence
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFrame, QGraphicsItem, QGraphicsObject, QGraphicsPathItem,
@@ -68,7 +69,9 @@ class FibreMapView(QGraphicsView):
 
     def fit_content(self):
         if not self.scene(): return
-        rect = self.scene().itemsBoundingRect().adjusted(-20, -20, 20, 20)
+        # ``rebuild`` already calculates a tight scene rectangle. Reusing it
+        # avoids a second full scene traversal when a large floor first opens.
+        rect = self.scene().sceneRect().adjusted(-8, -8, 8, 8)
         if not rect.isEmpty():
             self.resetTransform(); self.fitInView(rect, Qt.KeepAspectRatio)
 
@@ -78,12 +81,12 @@ class FibreNodeItem(QGraphicsObject):
     moved = Signal(str, float, float)
     activated = Signal(str)
 
-    def __init__(self, node: dict, traced: bool = False, symbol_scale: float = 0.18):
+    def __init__(self, node: dict, traced: bool = False, symbol_scale: float = 0.12):
         super().__init__()
         self.node = node
         self.traced = traced
-        self.symbol_scale = max(0.05, float(symbol_scale or 0.18))
-        self._size = max(8.0, min(18.0, 12.0 * self.symbol_scale / 0.18))
+        self.symbol_scale = max(0.05, float(symbol_scale or 0.12))
+        self._size = max(6.0, min(12.0, 8.0 * self.symbol_scale / 0.12))
         self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemSendsGeometryChanges | QGraphicsItem.ItemIgnoresTransformations)
         self.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
         self.setAcceptHoverEvents(True)
@@ -126,26 +129,34 @@ class FibreNodeItem(QGraphicsObject):
 
 class FibreCableBatchItem(QGraphicsObject):
     """One graphics item for all static fibre paths and labels on a floor."""
-    def __init__(self, records: Sequence[dict], labels: Sequence[dict], context_callback: Callable[[str, QPoint], None], width_scale: float = 0.30, label_scale: float = 0.30):
+    def __init__(self, records: Sequence[dict], labels: Sequence[dict], context_callback: Callable[[str, QPoint], None], width_scale: float = 0.18, label_scale: float = 0.14):
         super().__init__()
         self.records = list(records)
         self.labels = list(labels)
         self.context_callback = context_callback
-        self.width_scale = max(0.08, float(width_scale or 0.30))
-        self.label_scale = max(0.10, float(label_scale or 0.30))
+        self.width_scale = max(0.05, float(width_scale or 0.18))
+        self.label_scale = max(0.06, float(label_scale or 0.14))
         self.normal_path = QPainterPath(); self.traced_path = QPainterPath(); self._bounds = QRectF()
         first = True
         for record in self.records:
-            path = record["path"]
-            (self.traced_path if record.get("traced") else self.normal_path).addPath(path)
-            bounds = path.boundingRect()
+            points = record.get("points", [])
+            if len(points) < 2:
+                continue
+            target_path = self.traced_path if record.get("traced") else self.normal_path
+            target_path.moveTo(points[0])
+            for point in points[1:]:
+                target_path.lineTo(point)
+            bounds = record.get("bounds", QRectF())
             self._bounds = bounds if first else self._bounds.united(bounds); first = False
         for label in self.labels:
             point = label.get("point", QPointF())
             marker = QRectF(point.x()-1, point.y()-1, 2, 2)
             self._bounds = marker if first else self._bounds.united(marker); first = False
         self.setZValue(-0.2)
-        self.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
+        # A device-coordinate pixmap cache is expensive for floor-sized paths
+        # and is rebuilt whenever the view scale changes. Batched vector paths
+        # are faster and use substantially less memory without that cache.
+        self.setCacheMode(QGraphicsItem.NoCache)
         self.setAcceptHoverEvents(False)
 
     def boundingRect(self):
@@ -153,16 +164,20 @@ class FibreCableBatchItem(QGraphicsObject):
 
     def paint(self, painter, option, widget=None):
         lod = max(0.001, abs(painter.worldTransform().m11()))
-        normal_pen = QPen(QColor("#6f8dff"), max(0.55, 1.15 * self.width_scale / 0.30), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin); normal_pen.setCosmetic(True)
-        traced_pen = QPen(QColor("#ff8a24"), max(1.2, 2.4 * self.width_scale / 0.30), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin); traced_pen.setCosmetic(True)
+        normal_pen = QPen(QColor("#6f8dff"), max(0.40, 0.72 * self.width_scale / 0.18), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin); normal_pen.setCosmetic(True)
+        traced_pen = QPen(QColor("#ff8a24"), max(0.80, 1.45 * self.width_scale / 0.18), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin); traced_pen.setCosmetic(True)
         painter.setBrush(Qt.NoBrush); painter.setPen(normal_pen); painter.drawPath(self.normal_path); painter.setPen(traced_pen); painter.drawPath(self.traced_path)
-        # Hide labels at whole-floor zoom. They appear as compact, near-constant
-        # screen text only when the user zooms far enough to read them.
-        if lod < 0.30:
+        # Keep labels hidden at floor-plan zoom. When visible they remain a
+        # compact, near-constant screen size and cannot expand enough to obscure
+        # the underlying DXF. Legacy projects commonly store label_scale=0.30;
+        # the renderer maps that old default to the new compact presentation.
+        if lod < 0.72:
             return
-        font = QFont("Arial"); font.setBold(True); font.setPixelSize(max(1, int(round(7.0 * self.label_scale / 0.30 / lod))))
+        requested_screen_px = 3.8 * self.label_scale / 0.14
+        screen_px = max(3.0, min(4.8, requested_screen_px))
+        font = QFont("Arial"); font.setBold(True); font.setPixelSize(max(1, int(round(screen_px / lod))))
         painter.setFont(font)
-        offset_x = 3.0 / lod; offset_y = -8.0 / lod
+        offset_x = 2.0 / lod; offset_y = -5.0 / lod
         exposed = option.exposedRect.adjusted(-20.0 / lod, -20.0 / lod, 20.0 / lod, 20.0 / lod)
         for label in self.labels:
             minimum_lod = float(label.get("minimum_lod", 0.30))
@@ -189,7 +204,7 @@ class FibreCableBatchItem(QGraphicsObject):
         tolerance = 8.0 / max(0.001, scale)
         point = event.pos(); best = None
         for record in self.records:
-            if not record["path"].boundingRect().adjusted(-tolerance, -tolerance, tolerance, tolerance).contains(point):
+            if not record.get("bounds", QRectF()).adjusted(-tolerance, -tolerance, tolerance, tolerance).contains(point):
                 continue
             points = record.get("points", [])
             distance = min((self._distance_to_segment(point, points[index-1], points[index]) for index in range(1, len(points))), default=float("inf"))
@@ -203,9 +218,22 @@ class FibreCableBatchItem(QGraphicsObject):
 class PhysicalFibreTopologyDialog(QDialog):
     """Editable floor map for physical fibre, splices and terminations."""
     def __init__(self, parent, data: dict, on_change: Optional[Callable[[dict], None]] = None, initial_trace_connection_id: str = ""):
-        super().__init__(parent); self.data = data; ensure_network_schema(self.data); self.on_change = on_change
+        super().__init__(parent)
+        self.data = data
+        self.on_change = on_change
+        # Project loading already applies the network schema. Avoid another
+        # whole-project normalisation pass when opening this view; on large
+        # projects that scan was one of the dominant startup costs.
+        settings = self.data.get("network_settings")
+        if not isinstance(settings, dict) or not isinstance(settings.get("physical_fibre_layer"), dict):
+            ensure_network_schema(self.data)
         self.trace = circuit_trace(self.data, initial_trace_connection_id) if initial_trace_connection_id else {}
         self._route_points_cache: Optional[Dict[str, dict]] = None
+        self._cable_geometry_cache: Dict[int, List[dict]] = {}
+        self._base_graph_cache: Dict[int, QPainterPath] = {}
+        self._instances_cache: Optional[Dict[str, dict]] = None
+        self._building = False
+        self._initial_build_pending = True
         self.setWindowTitle("Physical Fibre Topology"); self.setWindowFlag(Qt.Window, True); self.resize(1500, 900)
         self.setStyleSheet("QDialog{background:#10161c;color:#e8edf1} QPushButton,QComboBox{background:#25303b;color:#e8edf1;border:1px solid #46535e;padding:5px;border-radius:4px} QLabel{color:#d8e0e6}")
         layout = QVBoxLayout(self); toolbar = QHBoxLayout(); layout.addLayout(toolbar)
@@ -226,10 +254,14 @@ class PhysicalFibreTopologyDialog(QDialog):
             button = QPushButton(label); button.clicked.connect(handler); toolbar.addWidget(button)
         toolbar.addStretch(1)
         self.layer_label = QLabel(); toolbar.addWidget(self.layer_label)
-        self.scene = QGraphicsScene(self); self.scene.setItemIndexMethod(QGraphicsScene.BspTreeIndex); self.view = FibreMapView(self); self.view.setScene(self.scene); layout.addWidget(self.view, 1)
-        self.status = QLabel(); self.status.setStyleSheet("padding:7px;background:#182028;color:#aeb9c2"); layout.addWidget(self.status)
+        self.scene = QGraphicsScene(self); self.scene.setItemIndexMethod(QGraphicsScene.NoIndex); self.view = FibreMapView(self); self.view.setScene(self.scene); layout.addWidget(self.view, 1)
+        self.status = QLabel("Loading physical fibre…"); self.status.setStyleSheet("padding:7px;background:#182028;color:#aeb9c2"); layout.addWidget(self.status)
         self.floor_combo.currentIndexChanged.connect(self.rebuild)
-        self._populate_floors(); self.rebuild()
+        self._populate_floors()
+        # Let the dialog become visible before the first potentially large
+        # geometry build. This removes the apparent application freeze while
+        # the window is opening.
+        QTimer.singleShot(0, self._initial_rebuild)
 
     def _populate_floors(self):
         current = self.floor_combo.currentData(); self.floor_combo.blockSignals(True); self.floor_combo.clear()
@@ -240,6 +272,43 @@ class PhysicalFibreTopologyDialog(QDialog):
         idx=self.floor_combo.findData(current); self.floor_combo.setCurrentIndex(idx if idx>=0 else 0); self.floor_combo.blockSignals(False)
 
     def _floor(self): return _int(self.floor_combo.currentData())
+
+    @staticmethod
+    def _compact_scale(value, legacy_defaults, new_default: float, minimum: float, maximum: float) -> float:
+        resolved = _float(value, new_default)
+        for legacy in legacy_defaults:
+            if abs(resolved - float(legacy)) <= 1e-9:
+                resolved = new_default
+                break
+        return max(minimum, min(maximum, resolved))
+
+    def _initial_rebuild(self):
+        if not self._initial_build_pending:
+            return
+        self._initial_build_pending = False
+        self.rebuild()
+        QTimer.singleShot(0, self._fit)
+
+    def _invalidate_geometry(self, changed: Optional[Sequence[str]] = None):
+        keys = set(changed or ())
+        if not keys or keys.intersection({
+            "corridors", "locations", "data_points", "transitions",
+            "network_asset_instances", "network_fibre_cables",
+        }):
+            self._route_points_cache = None
+            self._instances_cache = None
+            self._cable_geometry_cache.clear()
+            self._base_graph_cache.clear()
+
+    def _instances(self) -> Dict[str, dict]:
+        if self._instances_cache is None:
+            self._instances_cache = {
+                _text(row.get("id")): row
+                for row in self.data.get("network_asset_instances", [])
+                if isinstance(row, dict) and _text(row.get("id"))
+            }
+        return self._instances_cache
+
     def _layer_settings(self): return self.data.get("network_settings",{}).get("physical_fibre_layer",{})
     def _commit(
         self,
@@ -248,6 +317,7 @@ class PhysicalFibreTopologyDialog(QDialog):
         rebuild: bool = True,
         notify: bool = True,
     ):
+        self._invalidate_geometry(changed)
         if self.on_change and notify:
             keys = tuple(changed or (
                 "network_settings", "network_assets", "network_asset_instances",
@@ -263,121 +333,281 @@ class PhysicalFibreTopologyDialog(QDialog):
     def _all_route_points(self):
         if self._route_points_cache is not None:
             return self._route_points_cache
-        points = {}
-        for collection in (self.data.get("corridors", {}).get("nodes", []), self.data.get("locations", []), self.data.get("data_points", [])):
+        points: Dict[str, dict] = {}
+        # Corridor nodes and locations are needed for the base graph and make
+        # up nearly all physical-fibre route paths.
+        for collection in (self.data.get("corridors", {}).get("nodes", []), self.data.get("locations", [])):
             for row in collection:
-                if isinstance(row, dict) and _text(row.get("name")): points[_text(row.get("name"))] = row
+                if isinstance(row, dict) and _text(row.get("name")):
+                    points[_text(row.get("name"))] = row
         for transition in self.data.get("transitions", []):
             if not isinstance(transition, dict): continue
             transition_id = _text(transition.get("id"))
             for floor_text, coordinates in (transition.get("floor_locations") or {}).items():
                 if not isinstance(coordinates, dict): continue
                 row = dict(coordinates); row["floor"] = _int(floor_text); row["name"] = f"{transition_id}-F{floor_text}"; points[row["name"]] = row
+
+        missing_names = {
+            _text(name)
+            for cable in self.data.get("network_fibre_cables", [])
+            if isinstance(cable, dict)
+            for name in cable.get("route_path", [])
+            if _text(name) and _text(name) not in points
+        }
+        # Data points can dominate a large project. Do not scan or duplicate
+        # them unless a physical-fibre route actually references one that was
+        # not already resolved as a corridor, location or transition node.
+        if missing_names:
+            for row in self.data.get("data_points", []):
+                name = _text(row.get("name")) if isinstance(row, dict) else ""
+                if name in missing_names:
+                    points[name] = row
+                    missing_names.discard(name)
+                    if not missing_names:
+                        break
         self._route_points_cache = points
         return points
 
-    def rebuild(self, *_args):
-        self.scene.clear()
-        floor = self._floor(); layer = self._layer_settings()
-        self.layer_label.setText(f"DXF layers: {layer.get('cable_layer','NET-FIBRE-CABLE')} / {layer.get('splice_layer','NET-FIBRE-SPLICE')}")
-        symbol_scale = max(0.05, _float(layer.get("symbol_scale"), 0.18)); label_scale = max(0.10, _float(layer.get("label_scale"), 0.30)); width_scale = max(0.08, _float(layer.get("cable_width_scale"), 0.30))
-        route_points = self._all_route_points()
-        if layer.get("show_base_graph", True): self._draw_base_graph(floor, route_points)
-        traced_cables = set(self.trace.get("fibre_cable_ids", [])); traced_splices = set(self.trace.get("splice_ids", []))
-        traced_nodes = {_text(splice.get("node_id")) for splice in self.data.get("network_fibre_splices", []) if _text(splice.get("id")) in traced_splices}
-        splice_counts: Dict[str, int] = defaultdict(int)
-        for splice in self.data.get("network_fibre_splices", []):
-            if isinstance(splice, dict) and _text(splice.get("node_id")): splice_counts[_text(splice.get("node_id"))] += 1
-        instances = {_text(row.get("id")): row for row in self.data.get("network_asset_instances", []) if isinstance(row, dict)}
+    @staticmethod
+    def _polyline_midpoint(points: Sequence[QPointF]) -> QPointF:
+        if not points:
+            return QPointF()
+        if len(points) == 1:
+            return QPointF(points[0])
+        lengths = []
+        total = 0.0
+        for index in range(1, len(points)):
+            dx = points[index].x() - points[index - 1].x()
+            dy = points[index].y() - points[index - 1].y()
+            length = (dx * dx + dy * dy) ** 0.5
+            lengths.append(length)
+            total += length
+        if total <= 1e-12:
+            return QPointF(points[len(points) // 2])
+        target = total / 2.0
+        travelled = 0.0
+        for index, length in enumerate(lengths, start=1):
+            if travelled + length >= target and length > 1e-12:
+                ratio = (target - travelled) / length
+                a = points[index - 1]; b = points[index]
+                return QPointF(
+                    a.x() + (b.x() - a.x()) * ratio,
+                    a.y() + (b.y() - a.y()) * ratio,
+                )
+            travelled += length
+        return QPointF(points[-1])
 
-        cable_records = []; labels = []; cable_count = 0
+    @staticmethod
+    def _polyline_bounds(points: Sequence[QPointF]) -> QRectF:
+        if not points:
+            return QRectF()
+        min_x = min(point.x() for point in points)
+        max_x = max(point.x() for point in points)
+        min_y = min(point.y() for point in points)
+        max_y = max(point.y() for point in points)
+        return QRectF(min_x, min_y, max(0.01, max_x - min_x), max(0.01, max_y - min_y))
+
+    def _cable_geometry_for_floor(self, floor: int, route_points: Dict[str, dict]) -> List[dict]:
+        cached = self._cable_geometry_cache.get(floor)
+        if cached is not None:
+            return cached
+        instances = self._instances()
+        records: List[dict] = []
         for cable in self.data.get("network_fibre_cables", []):
-            if not isinstance(cable, dict): continue
-            resolved = []
+            if not isinstance(cable, dict):
+                continue
+            points: List[QPointF] = []
             for name in cable.get("route_path", []):
                 point = route_points.get(_text(name))
-                if point is not None: resolved.append(point)
-            if not resolved:
+                if point is not None and _int(point.get("floor")) == floor:
+                    points.append(QPointF(_float(point.get("x")), -_float(point.get("y"))))
+            if not points:
                 for key in ("from_instance_id", "to_instance_id"):
                     instance = instances.get(_text(cable.get(key)), {})
-                    if instance: resolved.append(instance)
-            points = [QPointF(_float(point.get("x")), -_float(point.get("y"))) for point in resolved if _int(point.get("floor")) == floor]
-            if len(points) < 2: continue
-            path = QPainterPath(points[0])
-            for point in points[1:]: path.lineTo(point)
-            traced = _text(cable.get("id")) in traced_cables
-            stats = cable_core_statistics(cable); role = _text(cable.get("routing_role")) or "direct"
-            compact_label = f"{_text(cable.get('id'))} · {_int(cable.get('core_count'))}F"
-            detailed = compact_label + f" · {role.replace('_', ' ')}"
-            if layer.get("show_dark_fibre", True): detailed += f" · {stats['dark']} dark"
-            if _float(cable.get("estimated_total_loss_db")) > 0: detailed += f" · {_float(cable.get('estimated_total_loss_db')):.2f} dB"
-            cable_records.append({"cable_id": _text(cable.get("id")), "path": path, "points": points, "traced": traced})
-            labels.append({"point": path.pointAtPercent(0.5), "text": detailed if traced else compact_label, "colour": QColor("#ffb25f") if traced else QColor("#b8c8ff"), "minimum_lod": 0.22 if traced else 0.55})
-            cable_count += 1
+                    if instance and _int(instance.get("floor")) == floor:
+                        points.append(QPointF(_float(instance.get("x")), -_float(instance.get("y"))))
+            if len(points) < 2:
+                continue
+            records.append({
+                "cable": cable,
+                "cable_id": _text(cable.get("id")),
+                "points": points,
+                "midpoint": self._polyline_midpoint(points),
+                "bounds": self._polyline_bounds(points),
+            })
+        self._cable_geometry_cache[floor] = records
+        return records
 
-        node_count = 0
-        for node in self.data.get("network_fibre_nodes", []):
-            if not isinstance(node, dict) or _int(node.get("floor")) != floor: continue
-            item = FibreNodeItem(node, _text(node.get("id")) in traced_nodes, symbol_scale); item.setPos(_float(node.get("x")), -_float(node.get("y")))
-            item.contextRequested.connect(self._node_context); item.moved.connect(self._node_moved); item.activated.connect(self.edit_node); self.scene.addItem(item); node_count += 1
-            labels.append({"point": item.pos(), "text": _text(node.get("label")) or _text(node.get("name")), "colour": QColor("#dce5ea"), "minimum_lod": 0.45})
-            count = splice_counts.get(_text(node.get("id")), 0)
-            if layer.get("show_splice_labels", True) and count:
-                labels.append({"point": item.pos(), "text": f"{count} splice{'s' if count != 1 else ''}", "colour": QColor("#d5a5f1"), "minimum_lod": 0.80})
+    def rebuild(self, *_args):
+        if self._building or self._initial_build_pending:
+            return
+        self._building = True
+        started = time.perf_counter()
+        self.view.setUpdatesEnabled(False)
+        try:
+            self.scene.clear()
+            floor = self._floor(); layer = self._layer_settings()
+            self.layer_label.setText(f"DXF layers: {layer.get('cable_layer','NET-FIBRE-CABLE')} / {layer.get('splice_layer','NET-FIBRE-SPLICE')}")
+            symbol_scale = self._compact_scale(layer.get("symbol_scale"), (0.32, 0.18), 0.12, 0.05, 0.32)
+            label_scale = self._compact_scale(layer.get("label_scale"), (0.55, 0.30, 0.18), 0.14, 0.06, 0.24)
+            width_scale = self._compact_scale(layer.get("cable_width_scale"), (0.55, 0.30, 0.22), 0.18, 0.05, 0.32)
+            route_points = self._all_route_points()
+            if layer.get("show_base_graph", True): self._draw_base_graph(floor, route_points)
+            traced_cables = set(self.trace.get("fibre_cable_ids", [])); traced_splices = set(self.trace.get("splice_ids", []))
 
-        if cable_records or labels:
-            # Spatially partition the static overlay.  Each tile remains a single
-            # batched item, but off-screen tiles are culled by QGraphicsScene.
-            all_points = [record["path"].pointAtPercent(0.5) for record in cable_records]
-            all_points.extend(label.get("point", QPointF()) for label in labels)
-            min_x = min((point.x() for point in all_points), default=0.0)
-            max_x = max((point.x() for point in all_points), default=1.0)
-            min_y = min((point.y() for point in all_points), default=0.0)
-            max_y = max((point.y() for point in all_points), default=1.0)
-            tile_w = max(1.0, (max_x - min_x) / 8.0)
-            tile_h = max(1.0, (max_y - min_y) / 8.0)
+            floor_nodes = [
+                node for node in self.data.get("network_fibre_nodes", [])
+                if isinstance(node, dict) and _int(node.get("floor")) == floor
+            ]
+            floor_node_ids = {_text(node.get("id")) for node in floor_nodes if _text(node.get("id"))}
+            traced_nodes = set(); splice_counts: Dict[str, int] = defaultdict(int); floor_splices = 0
+            for splice in self.data.get("network_fibre_splices", []):
+                if not isinstance(splice, dict):
+                    continue
+                node_id = _text(splice.get("node_id"))
+                if _text(splice.get("id")) in traced_splices:
+                    traced_nodes.add(node_id)
+                if node_id in floor_node_ids:
+                    splice_counts[node_id] += 1
+                    floor_splices += 1
 
-            def tile_key(point: QPointF) -> tuple[int, int]:
-                return (
-                    max(0, min(7, int((point.x() - min_x) / tile_w))),
-                    max(0, min(7, int((point.y() - min_y) / tile_h))),
+            cable_records = []; labels = []
+            geometry = self._cable_geometry_for_floor(floor, route_points)
+            for record in geometry:
+                cable = record["cable"]
+                cable_id = record["cable_id"]
+                traced = cable_id in traced_cables
+                compact_label = f"{cable_id} · {_int(cable.get('core_count'))}F"
+                label_text = compact_label
+                minimum_lod = 1.25
+                if traced:
+                    role = _text(cable.get("routing_role")) or "direct"
+                    label_text += f" · {role.replace('_', ' ')}"
+                    if layer.get("show_dark_fibre", True):
+                        stats = cable_core_statistics(cable)
+                        label_text += f" · {stats['dark']} dark"
+                    if _float(cable.get("estimated_total_loss_db")) > 0:
+                        label_text += f" · {_float(cable.get('estimated_total_loss_db')):.2f} dB"
+                    minimum_lod = 0.78
+                cable_records.append({
+                    "cable_id": cable_id,
+                    "points": record["points"],
+                    "bounds": record["bounds"],
+                    "traced": traced,
+                })
+                labels.append({
+                    "point": record["midpoint"],
+                    "text": label_text,
+                    "colour": QColor("#ffb25f") if traced else QColor("#b8c8ff"),
+                    "minimum_lod": minimum_lod,
+                })
+
+            for node in floor_nodes:
+                item = FibreNodeItem(node, _text(node.get("id")) in traced_nodes, symbol_scale)
+                item.setPos(_float(node.get("x")), -_float(node.get("y")))
+                item.contextRequested.connect(self._node_context); item.moved.connect(self._node_moved); item.activated.connect(self.edit_node)
+                self.scene.addItem(item)
+                labels.append({
+                    "point": item.pos(),
+                    "text": _text(node.get("label")) or _text(node.get("name")),
+                    "colour": QColor("#dce5ea"),
+                    "minimum_lod": 1.10,
+                })
+                count = splice_counts.get(_text(node.get("id")), 0)
+                if layer.get("show_splice_labels", True) and count:
+                    labels.append({
+                        "point": item.pos(),
+                        "text": f"{count} splice{'s' if count != 1 else ''}",
+                        "colour": QColor("#d5a5f1"),
+                        "minimum_lod": 1.65,
+                    })
+
+            if cable_records or labels:
+                all_points = [record["midpoint"] for record in geometry]
+                all_points.extend(label.get("point", QPointF()) for label in labels)
+                min_x = min((point.x() for point in all_points), default=0.0)
+                max_x = max((point.x() for point in all_points), default=1.0)
+                min_y = min((point.y() for point in all_points), default=0.0)
+                max_y = max((point.y() for point in all_points), default=1.0)
+                tile_count = 8
+                tile_w = max(1.0, (max_x - min_x) / tile_count)
+                tile_h = max(1.0, (max_y - min_y) / tile_count)
+
+                def tile_key(point: QPointF) -> tuple[int, int]:
+                    return (
+                        max(0, min(tile_count - 1, int((point.x() - min_x) / tile_w))),
+                        max(0, min(tile_count - 1, int((point.y() - min_y) / tile_h))),
+                    )
+
+                tiled_records: Dict[tuple[int, int], List[dict]] = defaultdict(list)
+                tiled_labels: Dict[tuple[int, int], List[dict]] = defaultdict(list)
+                geometry_midpoints = {record["cable_id"]: record["midpoint"] for record in geometry}
+                for record in cable_records:
+                    tiled_records[tile_key(geometry_midpoints.get(record["cable_id"], QPointF()))].append(record)
+                for label in labels:
+                    tiled_labels[tile_key(label.get("point", QPointF()))].append(label)
+                for key in sorted(set(tiled_records) | set(tiled_labels)):
+                    self.scene.addItem(FibreCableBatchItem(
+                        tiled_records.get(key, []),
+                        tiled_labels.get(key, []),
+                        self._cable_context,
+                        width_scale,
+                        label_scale,
+                    ))
+
+            content_rect = QRectF()
+            have_bounds = False
+            base_path = self._base_graph_cache.get(floor)
+            if base_path is not None and not base_path.isEmpty():
+                content_rect = base_path.boundingRect(); have_bounds = True
+            for record in geometry:
+                bounds = record.get("bounds", QRectF())
+                if bounds.isEmpty():
+                    continue
+                content_rect = bounds if not have_bounds else content_rect.united(bounds)
+                have_bounds = True
+            node_pad = 8.0
+            for node in floor_nodes:
+                point_rect = QRectF(
+                    _float(node.get("x")) - node_pad,
+                    -_float(node.get("y")) - node_pad,
+                    node_pad * 2.0,
+                    node_pad * 2.0,
                 )
-
-            tiled_records: Dict[tuple[int, int], List[dict]] = defaultdict(list)
-            tiled_labels: Dict[tuple[int, int], List[dict]] = defaultdict(list)
-            for record in cable_records:
-                tiled_records[tile_key(record["path"].pointAtPercent(0.5))].append(record)
-            for label in labels:
-                tiled_labels[tile_key(label.get("point", QPointF()))].append(label)
-            for key in sorted(set(tiled_records) | set(tiled_labels)):
-                batch = FibreCableBatchItem(
-                    tiled_records.get(key, []),
-                    tiled_labels.get(key, []),
-                    self._cable_context,
-                    width_scale,
-                    label_scale,
-                )
-                self.scene.addItem(batch)
-        margin = 20.0; rect = self.scene.itemsBoundingRect().adjusted(-margin, -margin, margin, margin); self.scene.setSceneRect(rect if not rect.isEmpty() else QRectF(-100,-100,200,200))
-        floor_node_ids = {_text(node.get("id")) for node in self.data.get("network_fibre_nodes", []) if isinstance(node, dict) and _int(node.get("floor")) == floor}
-        floor_splices = sum(1 for splice in self.data.get("network_fibre_splices", []) if _text(splice.get("node_id")) in floor_node_ids)
-        failed_paths = sum(1 for row in self.data.get("network_optical_paths", []) if _text(row.get("status")).lower() not in {"pass", "ok"})
-        self.status.setText(f"Floor {floor}: {cable_count} routed fibre cables, {node_count} fibre nodes, {floor_splices} core splices · {failed_paths} optical path{'s' if failed_paths != 1 else ''} outside budget · Static cables/text are batched; labels appear as you zoom in")
+                content_rect = point_rect if not have_bounds else content_rect.united(point_rect)
+                have_bounds = True
+            margin = 10.0
+            rect = content_rect.adjusted(-margin,-margin,margin,margin) if have_bounds else QRectF(-100,-100,200,200)
+            self.scene.setSceneRect(rect)
+            failed_paths = sum(1 for row in self.data.get("network_optical_paths", []) if _text(row.get("status")).lower() not in {"pass", "ok"})
+            elapsed = time.perf_counter() - started
+            self.status.setText(
+                f"Floor {floor}: {len(cable_records)} routed fibre cables, {len(floor_nodes)} fibre nodes, {floor_splices} core splices · "
+                f"{failed_paths} optical path{'s' if failed_paths != 1 else ''} outside budget · "
+                f"loaded in {elapsed:.2f} s · labels appear only at close zoom"
+            )
+        finally:
+            self._building = False
+            self.view.setUpdatesEnabled(True)
+            self.view.viewport().update()
 
     def _draw_base_graph(self, floor, points):
-        path = QPainterPath()
-        for edge in self.data.get("corridors", {}).get("edges", []):
-            if not isinstance(edge, dict): continue
-            a = points.get(_text(edge.get("from"))); b = points.get(_text(edge.get("to")))
-            if not a or not b or _int(a.get("floor")) != floor or _int(b.get("floor")) != floor: continue
-            path.moveTo(QPointF(_float(a.get("x")), -_float(a.get("y")))); path.lineTo(QPointF(_float(b.get("x")), -_float(b.get("y"))))
+        path = self._base_graph_cache.get(floor)
+        if path is None:
+            path = QPainterPath()
+            for edge in self.data.get("corridors", {}).get("edges", []):
+                if not isinstance(edge, dict): continue
+                a = points.get(_text(edge.get("from"))); b = points.get(_text(edge.get("to")))
+                if not a or not b or _int(a.get("floor")) != floor or _int(b.get("floor")) != floor: continue
+                path.moveTo(QPointF(_float(a.get("x")), -_float(a.get("y")))); path.lineTo(QPointF(_float(b.get("x")), -_float(b.get("y"))))
+            self._base_graph_cache[floor] = path
         if not path.isEmpty():
-            item = QGraphicsPathItem(path); pen = QPen(QColor("#2d3740"), 0.65); pen.setCosmetic(True); item.setPen(pen); item.setZValue(-2); self.scene.addItem(item)
+            item = QGraphicsPathItem(path); pen = QPen(QColor("#2d3740"), 0.55); pen.setCosmetic(True); item.setPen(pen); item.setZValue(-2); self.scene.addItem(item)
 
     def _fit(self): self.view.fit_content()
     def refresh(self):
         ensure_network_schema(self.data)
-        self._route_points_cache = None
+        self._invalidate_geometry()
         self._populate_floors(); self.rebuild()
     def clear_trace(self): self.trace={}; self.rebuild()
     def trace_cable(self,cable_id):

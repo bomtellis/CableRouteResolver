@@ -1176,9 +1176,9 @@ def fibre_layer_defaults() -> dict:
         # Physical coordinates are in the project/DXF world coordinate system.
         # Keep symbols and labels deliberately small so they overlay a floor
         # plan without obscuring rooms, routes or nearby fibre records.
-        "symbol_scale": 0.18,
-        "label_scale": 0.30,
-        "cable_width_scale": 0.30,
+        "symbol_scale": 0.12,
+        "label_scale": 0.14,
+        "cable_width_scale": 0.18,
     }
 
 
