@@ -23,7 +23,7 @@ from network_fibre_dialogs import (
     PhysicalFibrePlanningDialog,
     SpliceCassetteViewDialog,
 )
-from network_schema import ensure_network_schema, next_network_id
+from network_schema import NETWORK_SCHEMA_VERSION, ensure_network_schema, next_network_id
 from network_services import (
     cable_core_statistics,
     calculate_optical_budgets,
@@ -257,7 +257,11 @@ class PhysicalFibreTopologyDialog(QDialog):
         # whole-project normalisation pass when opening this view; on large
         # projects that scan was one of the dominant startup costs.
         settings = self.data.get("network_settings")
-        if not isinstance(settings, dict) or not isinstance(settings.get("physical_fibre_layer"), dict):
+        if (
+            _int(self.data.get("network_schema_version"), 0) < NETWORK_SCHEMA_VERSION
+            or not isinstance(settings, dict)
+            or not isinstance(settings.get("physical_fibre_layer"), dict)
+        ):
             ensure_network_schema(self.data)
         self.trace = circuit_trace(self.data, initial_trace_connection_id) if initial_trace_connection_id else {}
         self._route_points_cache: Optional[Dict[str, dict]] = None
@@ -351,12 +355,7 @@ class PhysicalFibreTopologyDialog(QDialog):
     ):
         self._invalidate_geometry(changed)
         if self.on_change and notify:
-            keys = tuple(changed or (
-                "network_settings", "network_assets", "network_asset_instances",
-                "network_connections", "network_optic_modules", "network_optical_paths",
-                "network_fibre_cable_types", "network_fibre_cables",
-                "network_fibre_nodes", "network_fibre_splices",
-            ))
+            keys = tuple(changed or ("network_fibre_nodes",))
             payload = {key: deepcopy(self.data.get(key)) for key in keys if key in self.data}
             self.on_change(payload)
         if rebuild:
@@ -647,7 +646,8 @@ class PhysicalFibreTopologyDialog(QDialog):
 
     def _fit(self): self.view.fit_content()
     def refresh(self):
-        ensure_network_schema(self.data)
+        if _int(self.data.get("network_schema_version"), 0) < NETWORK_SCHEMA_VERSION:
+            ensure_network_schema(self.data)
         self._invalidate_geometry()
         self._populate_floors(); self.rebuild()
     def clear_trace(self): self.trace={}; self.rebuild()
@@ -660,16 +660,16 @@ class PhysicalFibreTopologyDialog(QDialog):
 
     def add_node(self):
         dialog=FibreNodeEditorDialog(self,nodes=self.data.get("network_fibre_nodes",[]),instances=self.data.get("network_asset_instances",[]),locations=self.data.get("locations",[]),suggested_id=next_network_id(self.data.get("network_fibre_nodes",[]),"FN"),default_floor=self._floor())
-        if dialog.exec()==QDialog.Accepted and dialog.result: self.data.setdefault("network_fibre_nodes",[]).append(dialog.result); self._commit()
+        if dialog.exec()==QDialog.Accepted and dialog.result: self.data.setdefault("network_fibre_nodes",[]).append(dialog.result); self._commit(changed=("network_fibre_nodes",))
     def edit_node(self,node_id):
         nodes=self.data.get("network_fibre_nodes",[]); index=next((i for i,n in enumerate(nodes) if _text(n.get("id"))==_text(node_id)),-1)
         if index<0:return
         dialog=FibreNodeEditorDialog(self,nodes[index],nodes,self.data.get("network_asset_instances",[]),self.data.get("locations",[]),node_id)
-        if dialog.exec()==QDialog.Accepted and dialog.result: nodes[index]=dialog.result; self._commit()
+        if dialog.exec()==QDialog.Accepted and dialog.result: nodes[index]=dialog.result; self._commit(changed=("network_fibre_nodes",))
     def delete_node(self,node_id):
         if QMessageBox.question(self,"Delete fibre node",f"Delete fibre node {node_id} and its splice records?")!=QMessageBox.Yes:return
         self.data["network_fibre_nodes"]=[n for n in self.data.get("network_fibre_nodes",[]) if _text(n.get("id"))!=node_id and _text(n.get("parent_node_id"))!=node_id]
-        self.data["network_fibre_splices"]=[s for s in self.data.get("network_fibre_splices",[]) if _text(s.get("node_id"))!=node_id and _text(s.get("cassette_id"))!=node_id]; self._commit()
+        self.data["network_fibre_splices"]=[s for s in self.data.get("network_fibre_splices",[]) if _text(s.get("node_id"))!=node_id and _text(s.get("cassette_id"))!=node_id]; self._commit(changed=("network_fibre_nodes", "network_fibre_splices"))
     def _node_moved(self,node_id,x,y):
         node=next((n for n in self.data.get("network_fibre_nodes",[]) if _text(n.get("id"))==node_id),None)
         if node:
@@ -689,7 +689,7 @@ class PhysicalFibreTopologyDialog(QDialog):
         if dialog.exec()==QDialog.Accepted and dialog.result:
             self.data.setdefault("network_fibre_cables",[]).append(dialog.result)
             calculate_optical_budgets(self.data)
-            self._commit()
+            self._commit(changed=("network_fibre_cables", "network_optical_paths", "network_connections"))
 
     def edit_cable(self,cable_id):
         cables=self.data.get("network_fibre_cables",[])
@@ -705,7 +705,7 @@ class PhysicalFibreTopologyDialog(QDialog):
         if dialog.exec()==QDialog.Accepted and dialog.result:
             cables[index]=dialog.result
             calculate_optical_budgets(self.data)
-            self._commit()
+            self._commit(changed=("network_fibre_cables", "network_optical_paths", "network_connections"))
 
     def edit_cable_types(self):
         dialog=FibreCableTypeLibraryDialog(self,self.data.get("network_fibre_cable_types",[]))
@@ -713,7 +713,7 @@ class PhysicalFibreTopologyDialog(QDialog):
             self.data["network_fibre_cable_types"]=dialog.result
             ensure_network_schema(self.data)
             calculate_optical_budgets(self.data)
-            self._commit()
+            self._commit(changed=("network_fibre_cable_types", "network_fibre_cables", "network_optical_paths", "network_connections"))
 
     def edit_fibre_planning(self):
         settings=self.data.setdefault("network_settings",{}).get("physical_fibre_planning",{})
@@ -721,7 +721,7 @@ class PhysicalFibreTopologyDialog(QDialog):
         if dialog.exec()==QDialog.Accepted and dialog.result is not None:
             self.data.setdefault("network_settings",{})["physical_fibre_planning"]=dialog.result
             ensure_network_schema(self.data)
-            self._commit()
+            self._commit(changed=("network_settings",))
 
     def edit_optical_properties(self):
         dialog=OpticalPropertiesDialog(self,self.data.get("network_assets",[]))
@@ -729,7 +729,7 @@ class PhysicalFibreTopologyDialog(QDialog):
             self.data["network_assets"]=dialog.result
             ensure_network_schema(self.data)
             calculate_optical_budgets(self.data)
-            self._commit()
+            self._commit(changed=("network_assets", "network_optical_paths", "network_connections"))
 
     def view_cassettes(self,enclosure_id=""):
         if not enclosure_id:
@@ -754,7 +754,7 @@ class PhysicalFibreTopologyDialog(QDialog):
     def delete_cable(self,cable_id):
         if QMessageBox.question(self,"Delete fibre cable",f"Delete fibre cable {cable_id} and its splice records?")!=QMessageBox.Yes:return
         self.data["network_fibre_cables"]=[c for c in self.data.get("network_fibre_cables",[]) if _text(c.get("id"))!=cable_id]
-        self.data["network_fibre_splices"]=[s for s in self.data.get("network_fibre_splices",[]) if _text(s.get("incoming_cable_id"))!=cable_id and _text(s.get("outgoing_cable_id"))!=cable_id]; calculate_optical_budgets(self.data); self._commit()
+        self.data["network_fibre_splices"]=[s for s in self.data.get("network_fibre_splices",[]) if _text(s.get("incoming_cable_id"))!=cable_id and _text(s.get("outgoing_cable_id"))!=cable_id]; calculate_optical_budgets(self.data); self._commit(changed=("network_fibre_cables", "network_fibre_splices", "network_optical_paths", "network_connections"))
 
     def add_splice(self,node_id="",incoming_cable_id=""):
         seed={"node_id":node_id,"incoming_cable_id":incoming_cable_id}
@@ -766,17 +766,17 @@ class PhysicalFibreTopologyDialog(QDialog):
                     ids=[_text(v) for v in cable.get("splice_ids",[]) if _text(v)]
                     if _text(dialog.result.get("id")) not in ids: ids.append(_text(dialog.result.get("id")))
                     cable["splice_ids"]=ids
-            set_core_status_from_splices(self.data); calculate_optical_budgets(self.data); self._commit()
+            set_core_status_from_splices(self.data); calculate_optical_budgets(self.data); self._commit(changed=("network_fibre_splices", "network_fibre_cables", "network_optical_paths", "network_connections"))
     def edit_splice(self,splice_id):
         splices=self.data.get("network_fibre_splices",[]); index=next((i for i,s in enumerate(splices) if _text(s.get("id"))==splice_id),-1)
         if index<0:return
         dialog=FibreSpliceEditorDialog(self,splices[index],self.data.get("network_fibre_nodes",[]),self.data.get("network_fibre_cables",[]),splice_id)
-        if dialog.exec()==QDialog.Accepted and dialog.result: splices[index]=dialog.result; set_core_status_from_splices(self.data); calculate_optical_budgets(self.data); self._commit()
+        if dialog.exec()==QDialog.Accepted and dialog.result: splices[index]=dialog.result; set_core_status_from_splices(self.data); calculate_optical_budgets(self.data); self._commit(changed=("network_fibre_splices", "network_fibre_cables", "network_optical_paths", "network_connections"))
     def delete_splice(self,splice_id):
         if QMessageBox.question(self,"Delete splice",f"Delete splice {splice_id}?")!=QMessageBox.Yes:return
         self.data["network_fibre_splices"]=[s for s in self.data.get("network_fibre_splices",[]) if _text(s.get("id"))!=splice_id]
         for cable in self.data.get("network_fibre_cables",[]): cable["splice_ids"]=[v for v in cable.get("splice_ids",[]) if _text(v)!=splice_id]
-        calculate_optical_budgets(self.data); self._commit()
+        calculate_optical_budgets(self.data); self._commit(changed=("network_fibre_splices", "network_fibre_cables", "network_optical_paths", "network_connections"))
 
     def _node_context(self,node_id,screen_pos):
         node=next((n for n in self.data.get("network_fibre_nodes",[]) if _text(n.get("id"))==node_id),{})
@@ -790,7 +790,7 @@ class PhysicalFibreTopologyDialog(QDialog):
             parent=next((n for n in self.data.get("network_fibre_nodes",[]) if _text(n.get("id"))==node_id),{})
             seed={"node_type":"splice_cassette","parent_node_id":node_id,"location_name":parent.get("location_name", ""),"floor":parent.get("floor",0),"x":parent.get("x",0.0),"y":parent.get("y",0.0)}
             dialog=FibreNodeEditorDialog(self,seed,self.data.get("network_fibre_nodes",[]),self.data.get("network_asset_instances",[]),self.data.get("locations",[]),next_network_id(self.data.get("network_fibre_nodes",[]),"FSC"),self._floor())
-            if dialog.exec()==QDialog.Accepted and dialog.result:self.data["network_fibre_nodes"].append(dialog.result);self._commit()
+            if dialog.exec()==QDialog.Accepted and dialog.result:self.data["network_fibre_nodes"].append(dialog.result);self._commit(changed=("network_fibre_nodes",))
         elif action==splice:self.add_splice(node_id)
         elif action==delete:self.delete_node(node_id)
 

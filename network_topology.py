@@ -52,7 +52,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from network_schema import default_port_speeds, ensure_network_schema, next_network_id, normalise_port_speeds, port_speed_label
+from network_schema import (
+    NETWORK_SCHEMA_VERSION, default_port_speeds, ensure_network_schema,
+    next_network_id, normalise_port_speeds, port_speed_label,
+)
 from network_services import circuit_trace, network_traffic_loads
 from network_auto_planner import auto_connect_manual_devices
 from network_dialogs import (
@@ -412,8 +415,9 @@ class TopologyEdge:
 class TopologyModel:
     """Create an orientation and spanning hierarchy from network connections."""
 
-    def __init__(self, data: dict):
-        ensure_network_schema(data)
+    def __init__(self, data: dict, normalise: bool = True):
+        if normalise:
+            ensure_network_schema(data)
         self.data = data
         self.assets = {
             _text(item.get("id")): item
@@ -438,10 +442,12 @@ class TopologyModel:
         self.client_groups: Dict[str, List[TopologyNode]] = defaultdict(list)
         self._descendant_cache: Dict[str, int] = {}
         self._cross_edges_cache: Optional[List[TopologyEdge]] = None
+        self.traffic: dict = {}
         self._build()
 
     def _build(self) -> None:
         traffic = network_traffic_loads(self.data)
+        self.traffic = traffic
         carried_traffic = traffic.get("carried_by_instance", {})
         assignments_by_instance: Dict[str, List[dict]] = defaultdict(list)
         for assignment in self.data.get("network_endpoint_assignments", []):
@@ -1150,6 +1156,47 @@ class TopologyCardItem(QGraphicsObject):
         event.accept()
 
 
+class RackCabinetBackgroundItem(QGraphicsObject):
+    """Paint a complete rack frame, grid and U labels as one graphics item."""
+
+    def __init__(self, rack_name: str, width: float, height: float, capacity: int, unit_pitch: float, used: int, selected: bool):
+        super().__init__()
+        self.rack_name = rack_name
+        self._width = float(width)
+        self._height = float(height)
+        self.capacity = max(1, int(capacity))
+        self.unit_pitch = float(unit_pitch)
+        self.used = max(0, int(used))
+        self.selected = bool(selected)
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        self.setZValue(-2.0)
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(-42.0, -46.0, self._width + 46.0, self._height + 50.0)
+
+    def paint(self, painter, option, widget=None) -> None:
+        painter.save()
+        frame = QRectF(0.0, 0.0, self._width, self._height)
+        painter.setPen(QPen(QColor("#7f95a5") if self.selected else QColor("#5d6b76"), 2.4 if self.selected else 2.0))
+        painter.setBrush(QBrush(QColor("#141c23")))
+        painter.drawRoundedRect(frame, 8.0, 8.0)
+        painter.setPen(QPen(QColor("#2f3b45"), 0.8))
+        for u in range(1, self.capacity + 1):
+            y = (self.capacity - u) * self.unit_pitch
+            painter.drawLine(QPointF(0.0, y), QPointF(self._width, y))
+        painter.setPen(QColor("#8997a2"))
+        painter.setFont(QFont("Arial", 8))
+        for u in range(1, self.capacity + 1):
+            y = (self.capacity - u) * self.unit_pitch
+            painter.drawText(QRectF(-40.0, y + 3.0, 34.0, 18.0), Qt.AlignRight | Qt.AlignVCenter, f"{u}U")
+        font = QFont("Arial", 12)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#e5edf2"))
+        painter.drawText(QRectF(0.0, -42.0, self._width, 28.0), Qt.AlignLeft | Qt.AlignVCenter, f"{self.rack_name} — {self.used}/{self.capacity}U")
+        painter.restore()
+
+
 class RackEquipmentItem(QGraphicsObject):
     activated = Signal(str)
     branchToggleRequested = Signal(str)
@@ -1242,13 +1289,12 @@ class RackEquipmentItem(QGraphicsObject):
             port_h = max(6.5, min(10.0, 8.5 * scale))
             gap_x = max(0.55, min(1.25, 0.85 * scale))
             count = len(self.port_nodes)
-            required_w = count * port_w + max(0, count - 1) * gap_x
-            if required_w > usable_w and count:
-                factor = max(0.55, usable_w / required_w)
-                port_w *= factor
-                gap_x *= factor
-                required_w = count * port_w + max(0, count - 1) * gap_x
-            x0 = left + max(0.0, (usable_w - required_w) / 2.0)
+            # Fixed left-to-right pitch prevents dense LC adapters being
+            # compressed into a cluster in the centre of the panel.
+            pitch = max(port_w + gap_x, 8.6 * scale)
+            if count > 1:
+                pitch = min(pitch, max(port_w, (usable_w - port_w) / (count - 1)))
+            x0 = left
             top = max(7.0, self._height * 0.27)
             bottom = self._height - max(2.0, self._height * 0.08)
             available_h = max(4.0, bottom - top)
@@ -1256,7 +1302,7 @@ class RackEquipmentItem(QGraphicsObject):
             y = top + max(0.0, (available_h - port_h) / 2.0)
             for index, port_node in enumerate(self.port_nodes):
                 self._port_rects[port_node.node_id] = QRectF(
-                    x0 + index * (port_w + gap_x), y, port_w, port_h
+                    x0 + index * pitch, y, port_w, port_h
                 )
             return
         # The rack face uses a 482.6 mm-wide 19-inch panel. Shared OLT modules
@@ -1496,20 +1542,17 @@ class SwitchFrontPanelItem(QGraphicsObject):
             port_h = max(10.0, min(18.0, 8.5 * scale))
             gap_x = max(0.8, min(2.0, 0.85 * scale))
             count = len(self.port_nodes)
-            required_w = count * port_w + max(0, count - 1) * gap_x
-            if required_w > usable_w and count:
-                factor = max(0.50, usable_w / required_w)
-                port_w *= factor
-                gap_x *= factor
-                required_w = count * port_w + max(0, count - 1) * gap_x
-            x0 = margin_x + max(0.0, (usable_w - required_w) / 2.0)
+            pitch = max(port_w + gap_x, 8.6 * scale)
+            if count > 1:
+                pitch = min(pitch, max(port_w, (usable_w - port_w) / (count - 1)))
+            x0 = margin_x
             top = 21.0
             available_h = max(10.0, self._height - top - 7.0)
             port_h = min(port_h, available_h)
             y = top + max(0.0, (available_h - port_h) / 2.0)
             for index, port_node in enumerate(self.port_nodes):
                 self._port_rects[port_node.node_id] = QRectF(
-                    x0 + index * (port_w + gap_x), y, port_w, port_h
+                    x0 + index * pitch, y, port_w, port_h
                 )
             return
         # 19-inch equipment width = 482.6 mm. Port sizes are proportional to that width.
@@ -2219,8 +2262,9 @@ class NetworkTopologyDialog(QDialog):
         self.trace_patch_lead_ids: Set[str] = set(self.trace.get("patch_lead_ids", []))
         self.trace_fibre_cable_ids: Set[str] = set(self.trace.get("fibre_cable_ids", []))
         self.trace_splice_ids: Set[str] = set(self.trace.get("splice_ids", []))
-        ensure_network_schema(self.data)
-        self.model = TopologyModel(self.data)
+        if _int(self.data.get("network_schema_version"), 0) < NETWORK_SCHEMA_VERSION:
+            ensure_network_schema(self.data)
+        self.model = TopologyModel(self.data, normalise=False)
         self.explicit_expanded: Set[str] = set()
         self.explicit_collapsed: Set[str] = set()
         self.node_items: Dict[str, TopologyCardItem] = {}
@@ -2241,6 +2285,7 @@ class NetworkTopologyDialog(QDialog):
         self._floor_match_cache: Dict[Tuple[str, int], bool] = {}
         self._logical_children_cache: Dict[str, Tuple[str, ...]] = {}
         self._collapsed_edge_cache: Dict[Tuple[str, str], TopologyEdge] = {}
+        self._build_runtime_indexes()
 
         self.setWindowTitle("Network Topology Editor")
         self.setWindowFlag(Qt.Window, True)
@@ -2288,10 +2333,20 @@ class NetworkTopologyDialog(QDialog):
 
         self.scene.selectionChanged.connect(self._scene_selection_changed)
         self.view.emptySceneDoubleClicked.connect(self._rack_empty_space_double_clicked)
+        self._initial_scene_pending = True
+        self.status_label.setText("Preparing topology view…")
+        QTimer.singleShot(0, self._initial_rebuild_scene)
+
+    def _initial_rebuild_scene(self) -> None:
+        if not self._initial_scene_pending:
+            return
+        self._initial_scene_pending = False
         self.rebuild_scene(fit=True)
 
     def showEvent(self, event) -> None:  # noqa: ANN001
         super().showEvent(event)
+        if self._initial_scene_pending:
+            QTimer.singleShot(0, self._initial_rebuild_scene)
         if self._fit_after_show:
             self._fit_after_show = False
             self._schedule_fit_topology()
@@ -3012,6 +3067,129 @@ class NetworkTopologyDialog(QDialog):
             visit(root_id)
         return visible
 
+    def _build_runtime_indexes(self) -> None:
+        """Build reusable indexes for topology, rack and port views."""
+
+        self._assignments_by_instance: Dict[str, List[dict]] = defaultdict(list)
+        for assignment in self.data.get("network_endpoint_assignments", []):
+            if not isinstance(assignment, dict):
+                continue
+            instance_id = _text(assignment.get("network_instance_id"))
+            if instance_id:
+                self._assignments_by_instance[instance_id].append(assignment)
+
+        self._device_port_record_cache: Dict[
+            str, Tuple[Dict[str, List[str]], Dict[str, float], Dict[str, dict]]
+        ] = {}
+        self._expanded_ports_cache: Dict[str, Tuple[dict, ...]] = {}
+        self._rack_port_node_cache: Dict[str, Tuple[TopologyNode, ...]] = {}
+        self._traced_ports: Set[Tuple[str, str]] = set()
+        for connection in self.data.get("network_connections", []):
+            if not isinstance(connection, dict):
+                continue
+            connection_id = _text(connection.get("id"))
+            parent_id = _text(connection.get("parent_logical_connection_id"))
+            if (
+                connection_id not in self.trace_connection_ids
+                and parent_id not in self.trace_connection_ids
+            ):
+                continue
+            for instance_field, port_field in (
+                ("from_instance_id", "from_port"),
+                ("to_instance_id", "to_port"),
+            ):
+                instance_id = _text(connection.get(instance_field))
+                port = _text(connection.get(port_field))
+                if instance_id and port:
+                    self._traced_ports.add((instance_id, port))
+        for lead in self.data.get("network_patch_leads", []):
+            if (
+                not isinstance(lead, dict)
+                or _text(lead.get("id")) not in self.trace_patch_lead_ids
+            ):
+                continue
+            instance_id = _text(lead.get("instance_id"))
+            port = _text(lead.get("port"))
+            if instance_id and port:
+                self._traced_ports.add((instance_id, port))
+
+        self._rack_nodes_by_location: Dict[Tuple[int, str], List[str]] = defaultdict(list)
+        self._pdu_nodes_by_rack: Dict[Tuple[int, str, str], List[TopologyNode]] = defaultdict(list)
+        rack_name_sets: Dict[Tuple[int, str], Set[str]] = defaultdict(set)
+        self._rack_capacity_cache: Dict[Tuple[int, str, str], int] = {}
+        occupied_units: Dict[Tuple[int, str, str], Set[int]] = defaultdict(set)
+        default_capacity = max(
+            1,
+            _int(
+                self.data.get("network_settings", {}).get("default_rack_size_u"),
+                42,
+            ),
+        )
+
+        for node_id, node in self.model.nodes.items():
+            if node.pseudo or node.asset_type == "rack_cabinet":
+                continue
+            rack_name = _text(node.instance.get("rack_name"))
+            if not rack_name:
+                continue
+            location_key = (node.floor, node.location_name)
+            rack_key = (node.floor, node.location_name, rack_name)
+            rack_name_sets[location_key].add(rack_name)
+            self._rack_capacity_cache[rack_key] = max(
+                self._rack_capacity_cache.get(rack_key, 0),
+                _int(node.instance.get("rack_size_u"), 0),
+                default_capacity,
+            )
+            if node.asset_type == "pdu" and _text(
+                node.instance.get("rack_mount_style")
+                or node.asset.get("rack_mount_style")
+            ).lower() == "vertical_side":
+                self._pdu_nodes_by_rack[rack_key].append(node)
+                continue
+            self._rack_nodes_by_location[location_key].append(node_id)
+            units = self._node_rack_units(node_id)
+            if units <= 0:
+                continue
+            start_u = max(1, _int(node.instance.get("rack_start_u"), 1))
+            capacity = self._rack_capacity_cache[rack_key]
+            for rack_u in range(start_u, start_u + units):
+                if 1 <= rack_u <= capacity:
+                    occupied_units[rack_key].add(rack_u)
+
+        occupied_keys = set(occupied_units) | set(self._pdu_nodes_by_rack)
+        for rack in self.data.get("network_racks", []):
+            if not isinstance(rack, dict):
+                continue
+            rack_name = _text(rack.get("name"))
+            location = _text(rack.get("location_name"))
+            floor = _int(rack.get("floor"))
+            if not rack_name:
+                continue
+            rack_key = (floor, location, rack_name)
+            if bool(rack.get("auto_generated")) and rack_key not in occupied_keys:
+                continue
+            rack_name_sets[(floor, location)].add(rack_name)
+            self._rack_capacity_cache[rack_key] = max(
+                self._rack_capacity_cache.get(rack_key, 0),
+                _int(rack.get("capacity_u"), default_capacity),
+            )
+
+        self._rack_names_cache = {
+            key: sorted(values, key=lambda value: value.lower())
+            for key, values in rack_name_sets.items()
+        }
+        self._rack_used_cache = {
+            key: len(values) for key, values in occupied_units.items()
+        }
+
+    def _defined_ports(self, node: TopologyNode) -> List[dict]:
+        asset_id = _text(node.asset.get("id")) or node.node_id
+        cached = self._expanded_ports_cache.get(asset_id)
+        if cached is None:
+            cached = tuple(_expanded_asset_ports(node.asset))
+            self._expanded_ports_cache[asset_id] = cached
+        return list(cached)
+
     def _collect_rack_visible(self) -> List[str]:
         visible: List[str] = []
         self.visible_parent.clear()
@@ -3022,39 +3200,14 @@ class NetworkTopologyDialog(QDialog):
         if key is None:
             return visible
         floor, location, _selected_rack = key
-        # A rack view represents the equipment room/location, not just one rack.
-        # Include every physical rack at the same floor/location so additional
-        # racks are visible side by side rather than appearing to overflow the
-        # selected rack.
-        rack_names_at_location = {
-            _text(node.instance.get("rack_name"))
-            for node in self.model.nodes.values()
-            if not node.pseudo
-            and node.asset_type != "rack_cabinet"
-            and node.floor == floor
-            and node.location_name == location
-            and _text(node.instance.get("rack_name"))
-        }
-        rack_nodes = [
-            node_id
-            for node_id, node in self.model.nodes.items()
-            if not node.pseudo
-            and node.asset_type != "rack_cabinet"
-            and not (
-                node.asset_type == "pdu"
-                and _text(node.instance.get("rack_mount_style") or node.asset.get("rack_mount_style")).lower() == "vertical_side"
+        visible.extend(self._rack_nodes_by_location.get((floor, location), []))
+        visible.sort(
+            key=lambda node_id: (
+                _text(self.model.nodes[node_id].instance.get("rack_name")),
+                max(1, _int(self.model.nodes[node_id].instance.get("rack_start_u"), 1)),
+                self.model.nodes[node_id].name.lower(),
             )
-            and _text(node.instance.get("rack_name"))
-            and node.floor == floor
-            and node.location_name == location
-            and _text(node.instance.get("rack_name")) in rack_names_at_location
-        ]
-        rack_nodes.sort(key=lambda node_id: (
-            _text(self._node_for(node_id).instance.get("rack_name")) if self._node_for(node_id) else "",
-            max(1, _int(self._node_for(node_id).instance.get("rack_start_u"), 1)) if self._node_for(node_id) else 1,
-            self._node_for(node_id).name.lower() if self._node_for(node_id) else node_id,
-        ))
-        visible.extend(rack_nodes)
+        )
         return visible
 
     def _supports_port_view(self, node: TopologyNode) -> bool:
@@ -3167,46 +3320,34 @@ class NetworkTopologyDialog(QDialog):
         }
 
     def _port_is_traced(self, instance_id: str, port_name: str) -> bool:
-        target_port = _text(port_name)
-        for connection in self.data.get("network_connections", []):
-            connection_id = _text(connection.get("id"))
-            parent_id = _text(connection.get("parent_logical_connection_id"))
-            if connection_id not in self.trace_connection_ids and parent_id not in self.trace_connection_ids:
-                continue
-            if _text(connection.get("from_instance_id")) == instance_id and _text(connection.get("from_port")) == target_port:
-                return True
-            if _text(connection.get("to_instance_id")) == instance_id and _text(connection.get("to_port")) == target_port:
-                return True
-        for lead in self.data.get("network_patch_leads", []):
-            if _text(lead.get("id")) in self.trace_patch_lead_ids and _text(lead.get("instance_id")) == instance_id and _text(lead.get("port")) == target_port:
-                return True
-        return False
+        return (_text(instance_id), _text(port_name)) in self._traced_ports
 
     def _device_port_records(self, device_id: str) -> Tuple[Dict[str, List[str]], Dict[str, float], Dict[str, dict]]:
+        cached = self._device_port_record_cache.get(device_id)
+        if cached is not None:
+            return cached
         records: Dict[str, List[str]] = defaultdict(list)
         poe_by_port: Dict[str, float] = defaultdict(float)
         traces: Dict[str, dict] = {}
-        for assignment in self.data.get("network_endpoint_assignments", []):
-            if _text(assignment.get("network_instance_id")) != device_id:
-                continue
+        for assignment in self._assignments_by_instance.get(device_id, []):
             port = _text(assignment.get("network_port")) or "Unspecified"
             endpoint = _text(assignment.get("endpoint_name")) or "Endpoint"
             asset_name = _text(assignment.get("endpoint_asset_name"))
             records[port].append(endpoint + (f" — {asset_name}" if asset_name else ""))
             poe_by_port[port] += max(0.0, _float(assignment.get("poe_power_w")))
-        for edge in self.model.edges:
+        for peer_id, edge in self.model.adjacency.get(device_id, []):
             if edge.source_id == device_id:
                 port = edge.source_port or "Unspecified"
-                peer = self.model.nodes.get(edge.target_id)
-                speed = max(0, _int(edge.connection.get("link_speed_mbps")))
-                records[port].append((peer.name if peer else edge.target_id) + (f" @ {port_speed_label(speed)}" if speed else ""))
-            elif edge.target_id == device_id:
+            else:
                 port = edge.target_port or "Unspecified"
-                peer = self.model.nodes.get(edge.source_id)
-                speed = max(0, _int(edge.connection.get("link_speed_mbps")))
-                records[port].append((peer.name if peer else edge.source_id) + (f" @ {port_speed_label(speed)}" if speed else ""))
+            peer = self.model.nodes.get(peer_id)
+            speed = max(0, _int(edge.connection.get("link_speed_mbps")))
+            records[port].append(
+                (peer.name if peer else peer_id)
+                + (f" @ {port_speed_label(speed)}" if speed else "")
+            )
         device = self.model.nodes.get(device_id)
-        defined_ports = _expanded_asset_ports(device.asset) if device is not None else []
+        defined_ports = self._defined_ports(device) if device is not None else []
         if defined_ports:
             canonical_records: Dict[str, List[str]] = defaultdict(list)
             canonical_poe: Dict[str, float] = defaultdict(float)
@@ -3216,10 +3357,9 @@ class NetworkTopologyDialog(QDialog):
                 canonical_poe[canonical] += poe_by_port.get(port_name, 0.0)
             records = canonical_records
             poe_by_port = canonical_poe
-        # Trace details are intentionally calculated only when a user selects
-        # a port. Eagerly tracing every port on every rack device would undo the
-        # topology loading-performance improvements on large projects.
-        return records, poe_by_port, traces
+        result = (records, poe_by_port, traces)
+        self._device_port_record_cache[device_id] = result
+        return result
 
     def _collect_switch_port_visible(self) -> List[str]:
         visible: List[str] = []
@@ -3235,7 +3375,7 @@ class NetworkTopologyDialog(QDialog):
         port_records, poe_by_port, port_traces = self._device_port_records(switch_id)
 
         capacity = max(0, switch.port_capacity)
-        defined_ports = _expanded_asset_ports(switch.asset)
+        defined_ports = self._defined_ports(switch)
         names = {row["name"] for row in defined_ports} or {str(number) for number in range(1, capacity + 1)}
         names.update(port_records)
         port_definitions_by_name = {_text(row.get("name")): row for row in defined_ports}
@@ -3283,13 +3423,18 @@ class NetworkTopologyDialog(QDialog):
         return visible
 
     def _rack_port_nodes(self, device_id: str) -> List[TopologyNode]:
+        cached = self._rack_port_node_cache.get(device_id)
+        if cached is not None:
+            for node in cached:
+                self._rack_port_nodes_by_id[node.node_id] = node
+            return list(cached)
         device = self.model.nodes.get(device_id)
         if device is None:
             return []
         records, poe_by_port, port_traces = self._device_port_records(device_id)
 
         capacity = max(0, device.port_capacity)
-        defined_ports = _expanded_asset_ports(device.asset)
+        defined_ports = self._defined_ports(device)
         names = {row["name"] for row in defined_ports} or {str(number) for number in range(1, capacity + 1)}
         names.update(records)
         port_definitions_by_name = {_text(row.get("name")): row for row in defined_ports}
@@ -3333,6 +3478,7 @@ class NetworkTopologyDialog(QDialog):
             )
             self._rack_port_nodes_by_id[node_id] = node
             result.append(node)
+        self._rack_port_node_cache[device_id] = tuple(result)
         return result
 
     def _rack_client_nodes(self, parent_id: str) -> List[TopologyNode]:
@@ -4192,12 +4338,17 @@ class NetworkTopologyDialog(QDialog):
             children_by_parent.clear()
 
         for parent_id, child_ids in children_by_parent.items():
-            if len(child_ids) >= 2:
+            parent_node = self._node_for(parent_id)
+            draw_individually = bool(
+                parent_node is not None
+                and (parent_node.asset_type == "site_group" or "core" in _text(parent_node.role).lower())
+            )
+            if len(child_ids) >= 2 and not draw_individually:
                 self._add_link_rail(parent_id, child_ids, positions)
                 continue
-            child_id = child_ids[0]
-            edge = None if child_id.startswith("client::") else self._edge_by_id(self.visible_parent_edge.get(child_id, ""))
-            self._add_link(parent_id, child_id, positions, edge, client_link=child_id.startswith("client::"))
+            for child_id in child_ids:
+                edge = None if child_id.startswith("client::") else self._edge_by_id(self.visible_parent_edge.get(child_id, ""))
+                self._add_link(parent_id, child_id, positions, edge, client_link=child_id.startswith("client::"))
 
         if self.show_redundant_check.isChecked() and self.rack_focus is None and self.switch_port_focus is None:
             failover_groups: Dict[str, List[Tuple[str, str, TopologyEdge]]] = defaultdict(list)
@@ -4409,6 +4560,11 @@ class NetworkTopologyDialog(QDialog):
             7: "Client devices",
         }
         layer_rects: Dict[int, QRectF] = {}
+        layer_nodes: Dict[int, List[TopologyNode]] = defaultdict(list)
+        traffic_tiers_by_layer: Dict[int, Set[int]] = defaultdict(set)
+        tier_by_instance = self.model.traffic.get("tier_by_instance", {})
+        unique_by_tier = self.model.traffic.get("unique_by_tier", {})
+
         for node_id in visible_ids:
             if node_id not in positions:
                 continue
@@ -4417,17 +4573,109 @@ class NetworkTopologyDialog(QDialog):
                 continue
             layer = self._topology_layer(node_id)
             rect = self._card_rect(node_id, positions)
-            layer_rects[layer] = rect if layer not in layer_rects else layer_rects[layer].united(rect)
+            layer_rects[layer] = (
+                rect if layer not in layer_rects else layer_rects[layer].united(rect)
+            )
+            if not node.pseudo:
+                layer_nodes[layer].append(node)
+                if node.node_id in tier_by_instance:
+                    traffic_tiers_by_layer[layer].add(
+                        _int(tier_by_instance.get(node.node_id))
+                    )
+
+        def bandwidth_text(value_mbps: float) -> str:
+            value = max(0.0, float(value_mbps or 0.0))
+            if value >= 1_000_000.0:
+                return f"{value / 1_000_000.0:.3f} Tbps"
+            if value >= 1_000.0:
+                return f"{value / 1_000.0:.3f} Gbps"
+            return f"{value:.3f} Mbps"
+
+        def packets_text(value_pps: float) -> str:
+            value = max(0.0, float(value_pps or 0.0))
+            if value >= 1_000_000_000.0:
+                return f"{value / 1_000_000_000.0:.3f} Gpps"
+            if value >= 1_000_000.0:
+                return f"{value / 1_000_000.0:.3f} Mpps"
+            if value >= 1_000.0:
+                return f"{value / 1_000.0:.3f} kpps"
+            return f"{value:.0f} pps"
+
+        total_bandwidth = max(
+            0.0,
+            _float(
+                self.model.traffic.get("total_endpoint_bandwidth_mbps")
+            ),
+        )
+        total_packets = max(
+            0.0,
+            _float(
+                self.model.traffic.get("total_endpoint_packet_rate_pps")
+            ),
+        )
 
         for layer, rect in sorted(layer_rects.items()):
-            text = labels.get(layer, "Network")
-            label = QGraphicsSimpleTextItem(text)
-            font = QFont("Arial", 11)
+            title = labels.get(layer, "Network")
+            nodes = layer_nodes.get(layer, [])
+            bandwidth_capacity = sum(
+                max(0.0, node.bandwidth_capacity_mbps) for node in nodes
+            )
+            packet_capacity = sum(
+                max(0.0, node.packet_capacity_pps) for node in nodes
+            )
+
+            if layer in {0, 7}:
+                bandwidth_load = total_bandwidth
+                packet_load = total_packets
+            else:
+                tier_loads = [
+                    unique_by_tier.get(tier, {})
+                    for tier in traffic_tiers_by_layer.get(layer, set())
+                ]
+                # A displayed layer can combine sequential logical tiers, for
+                # example distribution and OLT. Use the largest unique service
+                # load rather than adding the same endpoint demand twice.
+                bandwidth_load = max(
+                    (
+                        max(0.0, _float(row.get("bandwidth_mbps")))
+                        for row in tier_loads
+                    ),
+                    default=0.0,
+                )
+                packet_load = max(
+                    (
+                        max(0.0, _float(row.get("packet_rate_pps")))
+                        for row in tier_loads
+                    ),
+                    default=0.0,
+                )
+
+            text_lines = [title]
+            if bandwidth_load > 0.0 or packet_load > 0.0:
+                text_lines.append(
+                    "Load "
+                    + bandwidth_text(bandwidth_load)
+                    + " · "
+                    + packets_text(packet_load)
+                )
+            if bandwidth_capacity > 0.0 or packet_capacity > 0.0:
+                capacity_parts = []
+                if bandwidth_capacity > 0.0:
+                    capacity_parts.append(bandwidth_text(bandwidth_capacity))
+                if packet_capacity > 0.0:
+                    capacity_parts.append(packets_text(packet_capacity))
+                text_lines.append("Installed " + " · ".join(capacity_parts))
+
+            label = QGraphicsSimpleTextItem("\n".join(text_lines))
+            font = QFont("Arial", 9)
             font.setBold(True)
             label.setFont(font)
             label.setBrush(QBrush(QColor("#d9e4ec")))
             label_rect = label.boundingRect()
-            label.setPos(rect.center().x() - label_rect.width() / 2.0, rect.top() - 46.0)
+            label.setPos(
+                rect.center().x() - label_rect.width() / 2.0,
+                rect.top() - label_rect.height() - 20.0,
+            )
             label.setZValue(-0.2)
             self.scene.addItem(label)
 
@@ -4469,77 +4717,14 @@ class NetworkTopologyDialog(QDialog):
         return max(0, _int(node.asset.get("rack_units"), 1))
 
     def _rack_names_for_location(self, floor: int, location: str) -> List[str]:
-        names = {
-            _text(node.instance.get("rack_name"))
-            for node in self.model.nodes.values()
-            if not node.pseudo
-            and node.floor == int(floor)
-            and node.location_name == location
-            and _text(node.instance.get("rack_name"))
-        }
-        occupied = {
-            (node.floor, node.location_name, _text(node.instance.get("rack_name")))
-            for node in self.model.nodes.values()
-            if not node.pseudo
-            and node.asset_type != "rack_cabinet"
-            and _text(node.instance.get("rack_name"))
-        }
-        names.update(
-            _text(rack.get("name"))
-            for rack in self.data.get("network_racks", [])
-            if isinstance(rack, dict)
-            and _int(rack.get("floor")) == int(floor)
-            and _text(rack.get("location_name")) == location
-            and _text(rack.get("name"))
-            and (
-                not bool(rack.get("auto_generated"))
-                or (int(floor), location, _text(rack.get("name"))) in occupied
-            )
-        )
-        return sorted(names, key=lambda value: value.lower())
+        return list(self._rack_names_cache.get((int(floor), location), []))
 
     def _rack_capacity_for_key(self, key: Tuple[int, str, str]) -> int:
         default_capacity = max(1, _int(self.data.get("network_settings", {}).get("default_rack_size_u"), 42))
-        explicit_capacity = 0
-        for rack in self.data.get("network_racks", []):
-            if not isinstance(rack, dict):
-                continue
-            rack_key = (_int(rack.get("floor")), _text(rack.get("location_name")), _text(rack.get("name")))
-            if rack_key == key:
-                explicit_capacity = max(explicit_capacity, _int(rack.get("capacity_u"), 0))
-        for node in self.model.nodes.values():
-            if node.pseudo or node.asset_type == "rack_cabinet" or not _text(node.instance.get("rack_name")):
-                continue
-            node_key = (node.floor, node.location_name, _text(node.instance.get("rack_name")))
-            if node_key == key:
-                explicit_capacity = max(explicit_capacity, _int(node.instance.get("rack_size_u"), 0))
-        return explicit_capacity or default_capacity
+        return max(1, self._rack_capacity_cache.get(key, default_capacity))
 
     def _rack_used_for_key(self, key: Tuple[int, str, str]) -> int:
-        """Return actual occupied rack-unit capacity, not the highest mounted U.
-
-        A rack with one 1U device at U42 consumes 1U, not 42U.  Counting the
-        union of occupied integer rack positions also handles intentional
-        shared-width equipment: several devices mounted in subdivisions of the
-        same rack unit still consume one physical U.
-        """
-        occupied_units: Set[int] = set()
-        capacity = self._rack_capacity_for_key(key)
-        for node_id, node in self.model.nodes.items():
-            if node.pseudo or node.asset_type == "rack_cabinet" or not _text(node.instance.get("rack_name")):
-                continue
-            node_key = (node.floor, node.location_name, _text(node.instance.get("rack_name")))
-            if node_key != key:
-                continue
-            units = self._node_rack_units(node_id)
-            if units <= 0:
-                continue
-            start_u = max(1, _int(node.instance.get("rack_start_u"), 1))
-            end_u = start_u + units - 1
-            for rack_u in range(start_u, end_u + 1):
-                if 1 <= rack_u <= capacity:
-                    occupied_units.add(rack_u)
-        return len(occupied_units)
+        return max(0, self._rack_used_cache.get(key, 0))
 
     def _add_rack_elevation(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         key = self.rack_focus
@@ -4560,47 +4745,15 @@ class NetworkTopologyDialog(QDialog):
             capacity = self._rack_capacity_for_key(rack_key)
             rack_left = rack_left_start + rack_index * (rack_width + rack_gap)
             rack_height = capacity * unit_pitch
-            frame_path = QPainterPath()
-            frame_path.addRoundedRect(QRectF(rack_left, rack_top, rack_width, rack_height), 8.0, 8.0)
-            frame = QGraphicsPathItem(frame_path)
-            frame.setPen(QPen(QColor("#7f95a5") if rack_name == selected_rack else QColor("#5d6b76"), 2.4 if rack_name == selected_rack else 2.0))
-            frame.setBrush(QBrush(QColor("#141c23")))
-            frame.setZValue(-2.0)
-            self.scene.addItem(frame)
-            for u in range(1, capacity + 1):
-                y = rack_top + (capacity - u) * unit_pitch
-                line = QPainterPath(QPointF(rack_left, y))
-                line.lineTo(QPointF(rack_left + rack_width, y))
-                item = QGraphicsPathItem(line)
-                item.setPen(QPen(QColor("#2f3b45"), 0.8))
-                item.setZValue(-1.8)
-                self.scene.addItem(item)
-                label = QGraphicsSimpleTextItem(f"{u}U")
-                label.setFont(QFont("Arial", 8))
-                label.setBrush(QBrush(QColor("#8997a2")))
-                label.setPos(rack_left - 36.0, y + 7.0)
-                label.setZValue(-1.0)
-                self.scene.addItem(label)
             used = self._rack_used_for_key(rack_key)
-            title = QGraphicsSimpleTextItem(f"{rack_name} — {used}/{capacity}U")
-            font = QFont("Arial", 12)
-            font.setBold(True)
-            title.setFont(font)
-            title.setBrush(QBrush(QColor("#e5edf2")))
-            title.setPos(rack_left, rack_top - 42.0)
-            title.setZValue(-1.0)
-            self.scene.addItem(title)
+            background = RackCabinetBackgroundItem(
+                rack_name, rack_width, rack_height, capacity, unit_pitch, used,
+                rack_name == selected_rack,
+            )
+            background.setPos(rack_left, rack_top)
+            self.scene.addItem(background)
 
-            pdu_nodes = [
-                node
-                for node in self.model.nodes.values()
-                if not node.pseudo
-                and node.asset_type == "pdu"
-                and node.floor == floor
-                and node.location_name == location
-                and _text(node.instance.get("rack_name")) == rack_name
-                and _text(node.instance.get("rack_mount_style") or node.asset.get("rack_mount_style")).lower() == "vertical_side"
-            ]
+            pdu_nodes = list(self._pdu_nodes_by_rack.get(rack_key, []))
             for pdu_node in sorted(
                 pdu_nodes,
                 key=lambda node: (
@@ -5562,9 +5715,10 @@ class NetworkTopologyDialog(QDialog):
         self.rebuild_scene(fit=True)
 
     def _commit_changes(self, refresh: bool = True) -> None:
-        ensure_network_schema(self.data)
+        if _int(self.data.get("network_schema_version"), 0) < NETWORK_SCHEMA_VERSION:
+            ensure_network_schema(self.data)
         if callable(self.on_change):
-            self.on_change(deepcopy(self.data))
+            self.on_change(self.data)
         if refresh:
             self.refresh_from_data()
 
@@ -6756,8 +6910,10 @@ class NetworkTopologyDialog(QDialog):
         self._show_node_details(node_id)
 
     def refresh_from_data(self) -> None:
-        ensure_network_schema(self.data)
-        self.model = TopologyModel(self.data)
+        if _int(self.data.get("network_schema_version"), 0) < NETWORK_SCHEMA_VERSION:
+            ensure_network_schema(self.data)
+        self.model = TopologyModel(self.data, normalise=False)
+        self._build_runtime_indexes()
         self._floor_match_cache.clear()
         self._logical_children_cache.clear()
         self._collapsed_edge_cache.clear()

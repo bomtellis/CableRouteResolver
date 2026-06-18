@@ -1460,7 +1460,8 @@ def next_network_id(items: Iterable[dict], prefix: str) -> str:
 
 
 def network_assets_by_id(data: dict) -> Dict[str, dict]:
-    ensure_network_schema(data)
+    if _as_int(data.get("network_schema_version"), 0) < NETWORK_SCHEMA_VERSION:
+        ensure_network_schema(data)
     return {
         _text(item.get("id")): item
         for item in data.get("network_assets", [])
@@ -1469,7 +1470,8 @@ def network_assets_by_id(data: dict) -> Dict[str, dict]:
 
 
 def network_instances_by_id(data: dict) -> Dict[str, dict]:
-    ensure_network_schema(data)
+    if _as_int(data.get("network_schema_version"), 0) < NETWORK_SCHEMA_VERSION:
+        ensure_network_schema(data)
     return {
         _text(item.get("id")): item
         for item in data.get("network_asset_instances", [])
@@ -1478,7 +1480,8 @@ def network_instances_by_id(data: dict) -> Dict[str, dict]:
 
 
 def network_instances_for_floor(data: dict, floor: int) -> Dict[str, dict]:
-    ensure_network_schema(data)
+    if _as_int(data.get("network_schema_version"), 0) < NETWORK_SCHEMA_VERSION:
+        ensure_network_schema(data)
     result: Dict[str, dict] = {}
     locations = {
         _text(item.get("name")): item

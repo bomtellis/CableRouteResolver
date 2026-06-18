@@ -5,6 +5,8 @@ from copy import deepcopy
 import re
 import subprocess
 import csv
+import pickle
+import zlib
 
 import heapq
 import math
@@ -984,6 +986,19 @@ class RoomTypeCountsDialog(QDialog):
 
 
 
+_NETWORK_UNDO_KEYS = (
+    "network_settings", "network_assets", "network_asset_instances",
+    "network_racks", "network_connections", "network_endpoint_assignments",
+    "network_patch_leads", "network_redundancy_groups",
+    "network_power_connections", "network_vlans", "network_routes",
+    "network_ip_allocations", "network_external_networks",
+    "network_optic_modules", "network_optical_paths",
+    "network_fibre_cable_types", "network_fibre_cables",
+    "network_fibre_nodes", "network_fibre_splices",
+    "network_design_summary", "locations", "assets",
+)
+
+
 class CableRouteEditor(QMainWindow):
     _request_dxf_batch_load = Signal(object)
 
@@ -1140,29 +1155,54 @@ class CableRouteEditor(QMainWindow):
         self.undo_stack.append(
             {
                 "label": label,
+                "scope": "project",
                 "data": deepcopy(self.store.data),
             }
         )
-
         if len(self.undo_stack) > self.max_undo_steps:
             self.undo_stack.pop(0)
-
         self.redo_stack.clear()
 
-    def undo(self):
-        if not self.undo_stack:
-            self.set_status("Nothing to undo")
-            return
-
-        self.redo_stack.append(
-            {
-                "label": "Redo",
-                "data": deepcopy(self.store.data),
-            }
+    def _network_undo_snapshot(self) -> bytes:
+        payload = {
+            key: self.store.data.get(key)
+            for key in _NETWORK_UNDO_KEYS
+            if key in self.store.data
+        }
+        return zlib.compress(
+            pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL),
+            level=1,
         )
 
-        state = self.undo_stack.pop()
-        self.store.data = deepcopy(state["data"])
+    def _restore_network_undo_snapshot(self, snapshot: bytes) -> None:
+        payload = pickle.loads(zlib.decompress(snapshot))
+        for key in _NETWORK_UNDO_KEYS:
+            if key in payload:
+                self.store.data[key] = payload[key]
+            elif key in self.store.data:
+                self.store.data.pop(key, None)
+
+    def push_network_undo_state(self, label="Network change"):
+        """Store a compact network-only history state.
+
+        Network dialogs previously deep-copied the complete project, including
+        corridor geometry and tens of thousands of room/data-point records,
+        before every edit. A compressed network snapshot keeps undo support
+        without copying the unrelated 90 MB project model.
+        """
+        self._render_data_revision += 1
+        self.undo_stack.append(
+            {
+                "label": label,
+                "scope": "network",
+                "data": self._network_undo_snapshot(),
+            }
+        )
+        if len(self.undo_stack) > self.max_undo_steps:
+            self.undo_stack.pop(0)
+        self.redo_stack.clear()
+
+    def _after_history_restore(self) -> None:
         self._render_data_revision += 1
         self.selected_point_name = None
         self.selected_template_names.clear()
@@ -1171,30 +1211,57 @@ class CableRouteEditor(QMainWindow):
         if hasattr(self.canvas, "invalidate_dxf_cache"):
             self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
+
+    def undo(self):
+        if not self.undo_stack:
+            self.set_status("Nothing to undo")
+            return
+        state = self.undo_stack.pop()
+        if state.get("scope") == "network":
+            self.redo_stack.append(
+                {
+                    "label": state.get("label", "Network change"),
+                    "scope": "network",
+                    "data": self._network_undo_snapshot(),
+                }
+            )
+            self._restore_network_undo_snapshot(state["data"])
+        else:
+            self.redo_stack.append(
+                {
+                    "label": state.get("label", "Change"),
+                    "scope": "project",
+                    "data": deepcopy(self.store.data),
+                }
+            )
+            self.store.data = deepcopy(state["data"])
+        self._after_history_restore()
         self.set_status(f"Undid: {state.get('label', 'Change')}")
 
     def redo(self):
         if not self.redo_stack:
             self.set_status("Nothing to redo")
             return
-
-        self.undo_stack.append(
-            {
-                "label": "Undo",
-                "data": deepcopy(self.store.data),
-            }
-        )
-
         state = self.redo_stack.pop()
-        self.store.data = deepcopy(state["data"])
-        self._render_data_revision += 1
-        self.selected_point_name = None
-        self.selected_template_names.clear()
-        self.selected_for_edge = None
-        self.edge_delete_start = None
-        if hasattr(self.canvas, "invalidate_dxf_cache"):
-            self.canvas.invalidate_dxf_cache()
-        self.refresh_canvas()
+        if state.get("scope") == "network":
+            self.undo_stack.append(
+                {
+                    "label": state.get("label", "Network change"),
+                    "scope": "network",
+                    "data": self._network_undo_snapshot(),
+                }
+            )
+            self._restore_network_undo_snapshot(state["data"])
+        else:
+            self.undo_stack.append(
+                {
+                    "label": state.get("label", "Change"),
+                    "scope": "project",
+                    "data": deepcopy(self.store.data),
+                }
+            )
+            self.store.data = deepcopy(state["data"])
+        self._after_history_restore()
         self.set_status("Redid change")
 
     def _mode_definitions(self):

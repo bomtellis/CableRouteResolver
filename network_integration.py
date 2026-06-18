@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -49,6 +49,7 @@ from network_physical_fibre import PhysicalFibreTopologyDialog
 from network_fibre_dialogs import FibreNodeEditorDialog
 from network_services import circuit_trace, ensure_physical_fibre_for_design, generate_ip_address_plan
 from network_schema import (
+    NETWORK_SCHEMA_VERSION,
     ensure_network_schema,
     find_nearest_network_instance,
     install_json_store_extensions,
@@ -101,9 +102,33 @@ def _install_location_types() -> None:
 
 
 def _safe_push_undo(editor, label: str) -> None:
-    method = getattr(editor, "push_undo_state", None)
+    method = getattr(editor, "push_network_undo_state", None)
+    if not callable(method):
+        method = getattr(editor, "push_undo_state", None)
     if callable(method):
         method(label)
+
+
+def _ensure_network_schema_current(data: dict) -> dict:
+    if int(data.get("network_schema_version", 0) or 0) < NETWORK_SCHEMA_VERSION:
+        return ensure_network_schema(data)
+    return data
+
+
+def _schedule_network_canvas_refresh(editor, delay_ms: int = 60) -> None:
+    """Coalesce repeated main-canvas redraws from network dialogs."""
+
+    if getattr(editor, "_network_canvas_refresh_pending", False):
+        return
+    editor._network_canvas_refresh_pending = True
+
+    def refresh() -> None:
+        editor._network_canvas_refresh_pending = False
+        method = getattr(editor, "refresh_canvas", None)
+        if callable(method):
+            method()
+
+    QTimer.singleShot(max(0, int(delay_ms)), refresh)
 
 
 def _network_pick_radius(editor) -> float:
@@ -157,7 +182,7 @@ def _is_active_main_graph_asset(asset: dict, instance: Optional[dict] = None) ->
 
 def _find_network_instance(editor, x: float, y: float) -> Optional[str]:
     """Find a selectable main-canvas network instance, excluding patch panels."""
-    ensure_network_schema(editor.store.data)
+    _ensure_network_schema_current(editor.store.data)
     data = editor.store.data
     assets = {
         _text(item.get("id")): item
@@ -400,43 +425,30 @@ def _replace_by_id(items: list, value: dict, old_id: str = "") -> bool:
 
 
 def _open_network_planner(editor) -> None:
-    ensure_network_schema(editor.store.data)
+    _ensure_network_schema_current(editor.store.data)
 
     def save(payload: dict) -> None:
         _safe_push_undo(editor, "Update network planning data")
-        dict_keys = {"network_settings", "network_design_summary"}
         for key in (
-            "network_settings",
-            "assets",
-            "network_assets",
-            "network_asset_instances",
-            "network_racks",
-            "network_connections",
-            "network_power_connections",
-            "network_endpoint_assignments",
-            "network_redundancy_groups",
-            "network_vlans",
-            "network_routes",
-            "network_ip_allocations",
-            "network_external_networks",
-            "network_optic_modules",
-            "network_optical_paths",
-            "network_fibre_cable_types",
-            "network_fibre_cables",
-            "network_fibre_nodes",
-            "network_fibre_splices",
-            "network_patch_leads",
-            "network_design_summary",
+            "network_settings", "assets", "locations", "network_assets",
+            "network_asset_instances", "network_racks", "network_connections",
+            "network_power_connections", "network_endpoint_assignments",
+            "network_redundancy_groups", "network_vlans", "network_routes",
+            "network_ip_allocations", "network_external_networks",
+            "network_optic_modules", "network_optical_paths",
+            "network_fibre_cable_types", "network_fibre_cables",
+            "network_fibre_nodes", "network_fibre_splices",
+            "network_patch_leads", "network_design_summary",
         ):
-            editor.store.data[key] = deepcopy(
-                payload.get(key, {} if key in dict_keys else [])
-            )
+            if key in payload:
+                editor.store.data[key] = payload[key]
         ensure_network_schema(editor.store.data)
         _sync_network_technology_controls(editor)
-        editor.refresh_canvas()
+        _schedule_network_canvas_refresh(editor)
         refresh = getattr(editor, "refresh_rhs_search_sidebar", None)
         if callable(refresh):
             refresh()
+
 
     dialog = NetworkPlannerDialog(editor, editor.store.data, save)
     editor._network_planner_dialog = dialog
@@ -446,7 +458,7 @@ def _open_network_planner(editor) -> None:
 
 def _open_network_topology(editor) -> None:
     """Open the editable logical network hierarchy and rack/device views."""
-    ensure_network_schema(editor.store.data)
+    _ensure_network_schema_current(editor.store.data)
     windows = getattr(editor, "_network_topology_windows", None)
     if windows is None:
         windows = []
@@ -467,26 +479,36 @@ def _open_network_topology(editor) -> None:
 
 
 def _apply_network_payload(editor, payload: dict) -> None:
-    """Apply edits made in topology/rack/fibre dialogs and refresh the plan."""
+    """Apply network-only edits without copying or redrawing the whole project."""
+
     _safe_push_undo(editor, "Edit network topology")
+    changed = False
     for key in (
-        "network_settings", "network_assets", "network_asset_instances", "network_racks",
-        "network_connections", "network_power_connections", "network_endpoint_assignments", "network_patch_leads",
+        "network_settings", "network_assets", "network_asset_instances",
+        "network_racks", "network_connections", "network_power_connections",
+        "network_endpoint_assignments", "network_patch_leads",
         "network_redundancy_groups", "network_vlans", "network_routes",
         "network_ip_allocations", "network_external_networks",
-        "network_optic_modules", "network_optical_paths", "network_fibre_cable_types",
-        "network_fibre_cables", "network_fibre_nodes", "network_fibre_splices",
-        "network_design_summary",
+        "network_optic_modules", "network_optical_paths",
+        "network_fibre_cable_types", "network_fibre_cables",
+        "network_fibre_nodes", "network_fibre_splices",
+        "network_design_summary", "locations", "assets",
     ):
-        if key in payload:
-            editor.store.data[key] = deepcopy(payload[key])
-    ensure_network_schema(editor.store.data)
-    editor.refresh_canvas()
+        if key not in payload:
+            continue
+        value = payload[key]
+        if value is editor.store.data.get(key):
+            continue
+        editor.store.data[key] = deepcopy(value)
+        changed = True
+    if changed:
+        ensure_network_schema(editor.store.data)
+    _schedule_network_canvas_refresh(editor)
 
 
 def _open_physical_fibre_topology(editor, connection_id: str = "") -> None:
     """Open the floor-aware physical fibre overlay and splice editor."""
-    ensure_network_schema(editor.store.data)
+    _ensure_network_schema_current(editor.store.data)
     windows = getattr(editor, "_physical_fibre_windows", None)
     if windows is None:
         windows = []

@@ -15,7 +15,7 @@ from heapq import heappop, heappush
 from itertools import count
 import math
 import os
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from network_schema import (
     PLUGGABLE_OPTIC_PORT_TYPES,
@@ -2715,122 +2715,327 @@ def _build_core_layer(
     minimum_distinct_cores: int = 1,
     protection_prefix: str = "AUTO-CORE-UPLINK",
 ) -> List[dict]:
-    """Build core switches and connect each leaf with independent uplinks.
+    """Build the smallest capable core layer across the available MERs.
 
-    PoLAN OLTs use this with two distinct core switches.  The older allocator
-    reserved only one core port per OLT, so a redundant OLT pair still had a
-    single upstream failure point.
+    A single core switch is preferred at each MER when that device has enough
+    physical ports, switching bandwidth and packet-forwarding capacity. When
+    protected uplinks are required, the second path is taken to a core in a
+    different MER before another core is added to the local MER. Additional
+    local cores are generated only when a single asset cannot satisfy the
+    calculated protected demand.
     """
-    cores: List[dict] = []
+
     candidates = _choose_core_candidates(builder.data)
     if not candidates:
         builder.warnings.append(
             "No core/distribution switch asset was available; uplinks were not terminated at a core."
         )
-        return cores
+        return []
 
     desired_links = max(1, int(links_per_leaf or 1))
-    minimum_distinct = max(1, min(desired_links, int(minimum_distinct_cores or 1)))
-    for root_name, leaves in leaves_by_root.items():
-        if not leaves:
-            continue
-        root = roots[root_name]
-        expected_bandwidth_mbps = sum(
-            max(0.0, _float(item.get("expected_bandwidth_mbps"))) for item in leaves
+    requested_distinct = max(1, min(desired_links, int(minimum_distinct_cores or 1)))
+    active_root_names = [
+        root_name
+        for root_name, leaves in leaves_by_root.items()
+        if leaves and root_name in roots
+    ]
+    if not active_root_names:
+        return []
+
+    root_count = len(active_root_names)
+    total_leaves = sum(len(leaves_by_root.get(name, [])) for name in active_root_names)
+    total_bandwidth_mbps = sum(
+        max(0.0, _float(leaf.get("expected_bandwidth_mbps")))
+        for name in active_root_names
+        for leaf in leaves_by_root.get(name, [])
+    )
+    total_packet_rate_pps = sum(
+        max(0.0, _float(leaf.get("expected_packet_rate_pps")))
+        for name in active_root_names
+        for leaf in leaves_by_root.get(name, [])
+    )
+
+    def asset_port_capacity(asset: dict) -> int:
+        structured = sum(
+            max(0, _int(row.get("port_count")))
+            for row in asset.get("port_definitions", [])
+            if isinstance(row, dict)
+            and _text(row.get("port_use")).lower()
+            not in {"power", "console", "management", "stacking"}
         )
-        expected_packet_rate_pps = sum(
-            max(0.0, _float(item.get("expected_packet_rate_pps"))) for item in leaves
+        return max(structured, max(0, _int(asset.get("number_of_ports"))))
+
+    candidate_by_id = {_text(asset.get("id")): asset for asset in candidates}
+    core_groups: Dict[str, List[dict]] = {}
+    core_assets: Dict[str, dict] = {}
+    all_cores: List[dict] = []
+    rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
+
+    for root_name in active_root_names:
+        leaves = leaves_by_root.get(root_name, [])
+        local_count = len(leaves)
+
+        if root_count > 1 and desired_links > 1:
+            # One primary link from local leaves plus a fair share of secondary
+            # links from the other MERs. This is the actual protected port load
+            # on one core at this MER, rather than multiplying every leaf by the
+            # number of redundant paths at every MER.
+            remote_copies = min(desired_links - 1, root_count - 1)
+            remote_share = int(
+                math.ceil(
+                    max(0, total_leaves - local_count)
+                    * remote_copies
+                    / max(1, root_count - 1)
+                )
+            )
+            required_ports = local_count + remote_share
+            # Either MER must be capable of carrying the complete service load
+            # after failure of the other protected path.
+            protected_bandwidth = total_bandwidth_mbps
+            protected_packets = total_packet_rate_pps
+        else:
+            required_ports = local_count * desired_links
+            protected_bandwidth = sum(
+                max(0.0, _float(item.get("expected_bandwidth_mbps")))
+                for item in leaves
+            )
+            protected_packets = sum(
+                max(0.0, _float(item.get("expected_packet_rate_pps")))
+                for item in leaves
+            )
+
+        capacity_candidates = [
+            {**asset, "number_of_ports": asset_port_capacity(asset)}
+            for asset in candidates
+        ]
+
+        # Prefer one switch that satisfies every declared requirement. Selecting
+        # by ports first and then appending devices for traffic capacity can
+        # otherwise retain a small switch beside a larger switch even though the
+        # larger model alone satisfies ports, bandwidth and packet throughput.
+        required_port_capacity = int(
+            math.ceil(max(0, required_ports) * (1.0 + spare_fraction))
         )
-        required_ports = len(leaves) * desired_links
-        mix = _minimum_asset_mix(
-            candidates, required_ports, 0.0, spare_fraction, "core switch"
+        required_bandwidth_capacity = max(0.0, protected_bandwidth) * (
+            1.0 + spare_fraction
         )
-        mix = _ensure_aggregate_traffic_capacity(
-            candidates,
-            mix,
-            expected_bandwidth_mbps,
-            expected_packet_rate_pps,
-            spare_fraction,
-            "core switch",
+        required_packet_capacity = max(0.0, protected_packets) * (
+            1.0 + spare_fraction
         )
-        while len(mix) < minimum_distinct:
-            mix.append(
-                min(
-                    candidates,
-                    key=lambda asset: (
-                        max(1, _rack_units_for_asset(asset, 1)),
-                        -_int(asset.get("number_of_ports")),
-                        _text(asset.get("id")),
+        bandwidth_declared = any(
+            _float(asset.get("bandwidth_capacity_gbps")) > 0
+            for asset in candidates
+        )
+        packets_declared = any(
+            _float(asset.get("packet_throughput_mpps")) > 0
+            for asset in candidates
+        )
+        single_capable = []
+        for asset in candidates:
+            ports = asset_port_capacity(asset)
+            bandwidth = max(
+                0.0, _float(asset.get("bandwidth_capacity_gbps")) * 1000.0
+            )
+            packets = max(
+                0.0,
+                _float(asset.get("packet_throughput_mpps")) * 1_000_000.0,
+            )
+            if ports < required_port_capacity:
+                continue
+            if bandwidth_declared and bandwidth + 1e-9 < required_bandwidth_capacity:
+                continue
+            if packets_declared and packets + 1e-9 < required_packet_capacity:
+                continue
+            single_capable.append(
+                (
+                    max(1, _rack_units_for_asset(asset, 1)),
+                    _float(asset.get("power_input_w")),
+                    ports - required_port_capacity,
+                    (
+                        bandwidth - required_bandwidth_capacity
+                        if bandwidth_declared
+                        else 0.0
                     ),
+                    (
+                        packets - required_packet_capacity
+                        if packets_declared
+                        else 0.0
+                    ),
+                    _text(asset.get("id")),
+                    asset,
                 )
             )
 
-        rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
-        rack_index = 1
+        if single_capable:
+            mix = [min(single_capable, key=lambda row: row[:-1])[-1]]
+        else:
+            mix = _minimum_asset_mix(
+                capacity_candidates,
+                required_ports,
+                0.0,
+                spare_fraction,
+                f"core switch at {root_name}",
+            )
+            mix = [
+                candidate_by_id.get(_text(asset.get("id")), asset)
+                for asset in mix
+            ]
+            mix = _ensure_aggregate_traffic_capacity(
+                candidates,
+                mix,
+                protected_bandwidth,
+                protected_packets,
+                spare_fraction,
+                f"core switch at {root_name}",
+            )
+
+        # With only one MER, device diversity must be local. With multiple MERs,
+        # the second distinct core is supplied by the other MER and does not
+        # justify a duplicate core at each location.
+        if root_count == 1:
+            while len(mix) < requested_distinct:
+                mix.append(
+                    min(
+                        candidates,
+                        key=lambda asset: (
+                            max(1, _rack_units_for_asset(asset, 1)),
+                            -asset_port_capacity(asset),
+                            -_float(asset.get("bandwidth_capacity_gbps")),
+                            -_float(asset.get("packet_throughput_mpps")),
+                            _text(asset.get("id")),
+                        ),
+                    )
+                )
+
         next_rack_u = 1
-        core_instances: List[dict] = []
-        for index, asset in enumerate(mix):
+        rack_index = 1
+        group: List[dict] = []
+        for index, asset in enumerate(mix, start=1):
             rack_u = _rack_units_for_asset(asset, 1)
             if next_rack_u + rack_u - 1 > rack_size_u and next_rack_u > 1:
                 rack_index += 1
                 next_rack_u = 1
-            core_instances.append(
-                builder.add_instance(
-                    asset,
-                    f"AUTO Core {root_name} {index + 1}",
-                    root,
-                    "core_switch",
-                    rack_name=(
-                        f"AUTO-RACK-{root_name}"
-                        if rack_index == 1
-                        else f"AUTO-RACK-{root_name}-{rack_index}"
-                    ),
-                    rack_start_u=next_rack_u,
-                    rack_size_u=rack_size_u,
-                    route_anchor=root_name,
-                    network_layer="core",
-                    expected_bandwidth_mbps=round(expected_bandwidth_mbps, 6),
-                    expected_packet_rate_pps=round(expected_packet_rate_pps, 3),
-                )
+            instance = builder.add_instance(
+                asset,
+                f"AUTO Core {root_name} {index}",
+                roots[root_name],
+                "core_switch",
+                rack_name=(
+                    f"AUTO-RACK-{root_name}"
+                    if rack_index == 1
+                    else f"AUTO-RACK-{root_name}-{rack_index}"
+                ),
+                rack_start_u=next_rack_u,
+                rack_size_u=rack_size_u,
+                route_anchor=root_name,
+                network_layer="core",
+                expected_bandwidth_mbps=round(protected_bandwidth, 6),
+                expected_packet_rate_pps=round(protected_packets, 3),
             )
+            group.append(instance)
+            core_assets[_text(instance.get("id"))] = asset
+            all_cores.append(instance)
             next_rack_u += rack_u
+        core_groups[root_name] = group
 
-        capacities = [max(0, _int(asset.get("number_of_ports"))) for asset in mix]
-        used_ports = [0 for _ in core_instances]
-        for leaf_index, leaf in enumerate(leaves, start=1):
-            available = [
-                index for index, capacity in enumerate(capacities)
-                if used_ports[index] < capacity
+    port_capacity = {
+        _text(core.get("id")): asset_port_capacity(
+            core_assets.get(_text(core.get("id")), {})
+        )
+        for core in all_cores
+    }
+    used_ports: Dict[str, int] = defaultdict(int)
+
+    def ordered_available(instances: Sequence[dict], offset: int = 0) -> List[dict]:
+        rows = list(instances)
+        if rows:
+            offset %= len(rows)
+            rows = rows[offset:] + rows[:offset]
+        return sorted(
+            rows,
+            key=lambda core: (
+                used_ports[_text(core.get("id"))]
+                / max(1, port_capacity.get(_text(core.get("id")), 0)),
+                used_ports[_text(core.get("id"))],
+                _text(core.get("id")),
+            ),
+        )
+
+    for root_index, root_name in enumerate(active_root_names):
+        local_group = core_groups.get(root_name, [])
+        remote_root_names = [
+            active_root_names[(root_index + step) % root_count]
+            for step in range(1, root_count)
+        ]
+        for leaf_index, leaf in enumerate(
+            leaves_by_root.get(root_name, []), start=1
+        ):
+            candidate_buckets: List[List[dict]] = [
+                ordered_available(local_group, leaf_index - 1)
             ]
-            if len(available) < minimum_distinct:
-                raise NetworkPlanningError(
-                    f"Core switch capacity at {root_name} cannot provide {minimum_distinct} "
-                    f"distinct uplinks for {leaf.get('name') or leaf.get('id')}."
-                )
-            available.sort(
-                key=lambda index: (
-                    used_ports[index] / max(1, capacities[index]),
-                    (index - leaf_index) % max(1, len(core_instances)),
-                    index,
-                )
+            candidate_buckets.extend(
+                ordered_available(core_groups.get(remote_root, []), leaf_index - 1)
+                for remote_root in remote_root_names
             )
-            selected = available[: min(desired_links, len(available))]
-            protection_group = f"{protection_prefix}-{_text(leaf.get('id')) or leaf_index}"
+            flat_candidates = [
+                core
+                for bucket in candidate_buckets
+                for core in bucket
+                if used_ports[_text(core.get("id"))]
+                < port_capacity.get(_text(core.get("id")), 0)
+            ]
+
+            selected: List[dict] = []
+            selected_ids: Set[str] = set()
+            for core in flat_candidates:
+                core_id = _text(core.get("id"))
+                if core_id in selected_ids:
+                    continue
+                selected.append(core)
+                selected_ids.add(core_id)
+                if len(selected) >= desired_links:
+                    break
+
+            if len(selected) < desired_links:
+                raise NetworkPlanningError(
+                    f"Core capacity cannot provide {desired_links} uplink(s) for "
+                    f"{leaf.get('name') or leaf.get('id')}."
+                )
+            if len(selected_ids) < requested_distinct:
+                raise NetworkPlanningError(
+                    f"The design requires {requested_distinct} distinct core paths for "
+                    f"{leaf.get('name') or leaf.get('id')}, but only "
+                    f"{len(selected_ids)} are available."
+                )
+
+            protection_group = (
+                f"{protection_prefix}-{_text(leaf.get('id')) or leaf_index}"
+            )
             source_ids: List[str] = []
             connection_ids: List[str] = []
-            for link_index, core_index in enumerate(selected, start=1):
-                used_ports[core_index] += 1
-                leaf_location = _text(leaf.get("route_anchor")) or _text(leaf.get("location_name"))
+            for link_index, core in enumerate(selected, start=1):
+                core_id = _text(core.get("id"))
+                used_ports[core_id] += 1
+                core_root = _text(core.get("route_anchor")) or _text(
+                    core.get("location_name")
+                )
+                leaf_location = _text(leaf.get("route_anchor")) or _text(
+                    leaf.get("location_name")
+                )
                 connection = builder.add_connection(
                     leaf,
                     f"Uplink-{_int(leaf.get('_uplinks_used'), 0) + 1}",
-                    core_instances[core_index],
-                    str(used_ports[core_index]),
+                    core,
+                    str(used_ports[core_id]),
                     "fibre",
                     leaf_location,
-                    root_name,
-                    redundancy_role="primary" if link_index == 1 else "secondary",
-                    protection_group=protection_group if len(selected) > 1 else "",
+                    core_root,
+                    redundancy_role=(
+                        "primary" if link_index == 1 else "secondary"
+                    ),
+                    protection_group=(
+                        protection_group if len(selected) > 1 else ""
+                    ),
                     standby=link_index > 1,
                     expected_bandwidth_mbps=max(
                         0.0, _float(leaf.get("expected_bandwidth_mbps"))
@@ -2841,8 +3046,9 @@ def _build_core_layer(
                     fibre_count=2,
                 )
                 leaf["_uplinks_used"] = _int(leaf.get("_uplinks_used"), 0) + 1
-                source_ids.append(_text(core_instances[core_index].get("id")))
+                source_ids.append(core_id)
                 connection_ids.append(_text(connection.get("id")))
+
             if len(selected) > 1:
                 builder.redundancy_groups.append(
                     {
@@ -2852,14 +3058,13 @@ def _build_core_layer(
                         "source_instance_ids": source_ids,
                         "source_core_instance_ids": source_ids,
                         "connection_ids": connection_ids,
-                        "required_distinct_sources": minimum_distinct,
+                        "required_distinct_sources": requested_distinct,
                         "protection_type": "independent_core_uplinks",
                         "auto_generated": True,
                     }
                 )
-        cores.extend(core_instances)
-    return cores
 
+    return all_cores
 
 def _traditional_design(
     builder: DesignBuilder, endpoints: Sequence[EndpointDemand], spare_fraction: float

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import pickle
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import Qt
@@ -1588,12 +1589,54 @@ class _CrudTab(QWidget):
                 )
 
 
+_PLANNER_MUTABLE_KEYS = (
+    "network_settings",
+    "network_assets",
+    "network_asset_instances",
+    "network_racks",
+    "network_connections",
+    "network_endpoint_assignments",
+    "network_patch_leads",
+    "network_redundancy_groups",
+    "network_power_connections",
+    "network_vlans",
+    "network_routes",
+    "network_ip_allocations",
+    "network_external_networks",
+    "network_optic_modules",
+    "network_optical_paths",
+    "network_fibre_cable_types",
+    "network_fibre_cables",
+    "network_fibre_nodes",
+    "network_fibre_splices",
+    "network_design_summary",
+    "locations",
+    "assets",
+)
+
+
+def _planner_working_copy(data: dict) -> dict:
+    """Copy only sections the planner can edit.
+
+    The corridor graph, data points, room definitions and drawing metadata are
+    read-only while this dialog is open and can safely be shared. Copying the
+    complete 90 MB project was a major part of the previous startup delay.
+    """
+
+    result = dict(data)
+    mutable = {key: data.get(key) for key in _PLANNER_MUTABLE_KEYS if key in data}
+    # Pickle performs one graph traversal and is materially faster than a long
+    # series of recursive ``deepcopy`` calls for the large network collections.
+    result.update(pickle.loads(pickle.dumps(mutable, protocol=pickle.HIGHEST_PROTOCOL)))
+    return result
+
+
 class NetworkPlannerDialog(QDialog):
     def __init__(self, parent, data: dict, on_save: Callable[[dict], None]):
         super().__init__(parent)
         self.setWindowTitle("Network Planning")
         self.resize(1250, 780)
-        self.data = deepcopy(data)
+        self.data = _planner_working_copy(data)
         self.on_save = on_save
 
         layout = QVBoxLayout(self)
@@ -2024,6 +2067,24 @@ class NetworkPlannerDialog(QDialog):
         self.summary_text.setReadOnly(True)
         self.tabs.addTab(self.summary_text, "Generated Design")
 
+        self._data_tabs = {
+            self.assets_tab: "assets",
+            self.endpoint_traffic_tab: "endpoint_traffic",
+            self.instances_tab: "instances",
+            self.connections_tab: "connections",
+            self.patch_leads_tab: "patch_leads",
+            self.fibre_nodes_tab: "fibre_nodes",
+            self.fibre_cables_tab: "fibre_cables",
+            self.fibre_splices_tab: "fibre_splices",
+            self.external_networks_tab: "external_networks",
+            self.vlans_tab: "vlans",
+            self.routes_tab: "routes",
+            self.ip_allocations_tab: "ip_allocations",
+            self.summary_text: "summary",
+        }
+        self._dirty_tabs = set(self._data_tabs)
+        self.tabs.currentChanged.connect(self._refresh_current_tab)
+
         self.assets_tab.add_button.clicked.connect(self.add_asset)
         self.assets_tab.edit_button.clicked.connect(self.edit_asset)
         self.assets_tab.delete_button.clicked.connect(self.delete_asset)
@@ -2179,129 +2240,125 @@ class NetworkPlannerDialog(QDialog):
                 if _text(allocation.get("vlan_id")) == old_id:
                     allocation["vlan_id"] = new_id
 
-    def refresh_tables(self) -> None:
-        self.assets_tab.set_rows(
-            [
-                [
-                    item.get("id", ""),
-                    item.get("name", ""),
-                    item.get("asset_type", ""),
-                    item.get("number_of_ports", 0),
-                    item.get("connections_in", 0),
-                    item.get("connections_out", 0),
-                    item.get("uplink_ports", 0),
-                    "Yes" if item.get("supports_stacking", False) else "No",
-                    item.get("max_stack_members", 1),
-                    item.get("power_input_w", 0),
-                    item.get("poe_budget_w", 0),
-                    item.get("bandwidth_capacity_gbps", 0),
-                    item.get("packet_throughput_mpps", 0),
-                    item.get("expected_bandwidth_mbps", 0),
-                    item.get("expected_packet_rate_pps", 0),
-                    item.get("rack_units", 0),
-                    item.get("switch_rack_unit_allowance", 0),
-                    item.get("olt_units_per_rack_unit", 1),
-                ]
+    def refresh_tables(self, force_all: bool = False) -> None:
+        """Mark planner tables dirty and materialise only the visible tab."""
+
+        self._dirty_tabs.update(self._data_tabs)
+        if force_all:
+            for widget in tuple(self._data_tabs):
+                self._refresh_tab(widget)
+        else:
+            self._refresh_current_tab()
+
+    def _refresh_current_tab(self, *_args) -> None:
+        widget = self.tabs.currentWidget()
+        if widget in self._dirty_tabs:
+            self._refresh_tab(widget)
+
+    def _refresh_tab(self, widget) -> None:
+        key = self._data_tabs.get(widget)
+        if not key:
+            return
+        if key == "assets":
+            self.assets_tab.set_rows([
+                [item.get("id", ""), item.get("name", ""), item.get("asset_type", ""),
+                 item.get("number_of_ports", 0), item.get("connections_in", 0),
+                 item.get("connections_out", 0), item.get("uplink_ports", 0),
+                 "Yes" if item.get("supports_stacking", False) else "No",
+                 item.get("max_stack_members", 1), item.get("power_input_w", 0),
+                 item.get("poe_budget_w", 0), item.get("bandwidth_capacity_gbps", 0),
+                 item.get("packet_throughput_mpps", 0), item.get("expected_bandwidth_mbps", 0),
+                 item.get("expected_packet_rate_pps", 0), item.get("rack_units", 0),
+                 item.get("switch_rack_unit_allowance", 0), item.get("olt_units_per_rack_unit", 1)]
                 for item in self._items("network_assets")
-            ]
-        )
-        self.instances_tab.set_rows(
-            [
-                [
-                    item.get("id", ""),
-                    item.get("name", ""),
-                    item.get("asset_id", ""),
-                    item.get("location_name", ""),
-                    item.get("floor", 0),
-                    item.get("rack_name", ""),
-                    item.get("rack_start_u", 0),
-                    item.get("rack_size_u", 0) or "",
-                    item.get("management_ip", ""),
-                ]
-                for item in self._items("network_asset_instances")
-            ]
-        )
-        self.connections_tab.set_rows(
-            [
-                [
-                    item.get("id", ""),
-                    item.get("from_instance_id", ""),
-                    item.get("from_port", ""),
-                    item.get("to_instance_id", ""),
-                    item.get("to_port", ""),
-                    item.get("connection_role", ""),
-                    item.get("medium", ""),
-                    item.get("cable_specification", ""),
-                    ", ".join(item.get("vlan_ids", [])),
-                ]
-                for item in self._items("network_connections")
-            ]
-        )
-        self.vlans_tab.set_rows(
-            [
-                [
-                    item.get("id", ""),
-                    item.get("vlan_id", ""),
-                    item.get("name", ""),
-                    item.get("purpose", ""),
-                    item.get("subnet", ""),
-                    item.get("gateway", ""),
-                    item.get("security_zone", ""),
-                ]
-                for item in self._items("network_vlans")
-            ]
-        )
-        self.routes_tab.set_rows(
-            [
-                [
-                    item.get("id", ""), item.get("source", ""), item.get("destination", ""),
-                    item.get("vlan_id", ""), item.get("protocol", ""), item.get("next_hop", ""),
-                    item.get("metric", 0), item.get("firewall_policy", ""),
-                ]
-                for item in self._items("network_routes")
-            ]
-        )
-        self.patch_leads_tab.set_rows([
-            [item.get("id",""), item.get("instance_id",""), item.get("port",""),
-             item.get("peer_instance_id",""), item.get("peer_port",""), item.get("endpoint_name",""),
-             item.get("medium",""), item.get("length_m",0), item.get("connection_id","")]
-            for item in self._items("network_patch_leads")
-        ])
-        self.fibre_nodes_tab.set_rows([
-            [item.get("id",""), item.get("name",""), item.get("node_type",""), item.get("location_name",""),
-             item.get("floor",0), item.get("rack_name",""), item.get("parent_node_id",""),
-             item.get("splice_capacity", item.get("cassette_capacity",0)), item.get("drawing_layer","")]
-            for item in self._items("network_fibre_nodes")
-        ])
-        fibre_cable_rows = []
-        for item in self._items("network_fibre_cables"):
-            stats = cable_core_statistics(item)
-            fibre_cable_rows.append([
-                item.get("id",""), item.get("name",""), item.get("from_instance_id","") or item.get("from_location",""),
-                item.get("to_instance_id","") or item.get("to_location",""), item.get("cable_type",""),
-                item.get("core_count",0), stats.get("used",0), stats.get("dark",0), item.get("length_m",0),
-                " -> ".join(str(v) for v in item.get("route_path",[]) if _text(v)), item.get("drawing_layer","")
             ])
-        self.fibre_cables_tab.set_rows(fibre_cable_rows)
-        self.fibre_splices_tab.set_rows([
-            [item.get("id",""), item.get("node_id",""), item.get("cassette_id",""),
-             item.get("incoming_cable_id",""), item.get("incoming_core",1), item.get("outgoing_cable_id",""),
-             item.get("outgoing_core",1), item.get("splice_type",""), item.get("circuit_id",""), item.get("loss_db",0.0)]
-            for item in self._items("network_fibre_splices")
-        ])
-        self.external_networks_tab.set_rows([
-            [item.get("id",""), item.get("name",""), item.get("network_type",""), item.get("provider",""),
-             item.get("asn",""), item.get("location_name",""), item.get("demarcation_instance_id",""),
-             ", ".join(item.get("prefixes",[])), ", ".join(item.get("peer_instance_ids",[]))]
-            for item in self._items("network_external_networks")
-        ])
-        self.ip_allocations_tab.set_rows([
-            [item.get("id",""), item.get("instance_id",""), item.get("vlan_id",""), item.get("address",""),
-             item.get("prefix_length",0), item.get("gateway",""), item.get("purpose","")]
-            for item in self._items("network_ip_allocations")
-        ])
-        self._refresh_endpoint_traffic_table()
-        self._refresh_design_summary()
+        elif key == "endpoint_traffic":
+            self._refresh_endpoint_traffic_table()
+        elif key == "instances":
+            self.instances_tab.set_rows([
+                [item.get("id", ""), item.get("name", ""), item.get("asset_id", ""),
+                 item.get("location_name", ""), item.get("floor", 0), item.get("rack_name", ""),
+                 item.get("rack_start_u", 0), item.get("rack_size_u", 0) or "",
+                 item.get("management_ip", "")]
+                for item in self._items("network_asset_instances")
+            ])
+        elif key == "connections":
+            self.connections_tab.set_rows([
+                [item.get("id", ""), item.get("from_instance_id", ""), item.get("from_port", ""),
+                 item.get("to_instance_id", ""), item.get("to_port", ""),
+                 item.get("connection_role", ""), item.get("medium", ""),
+                 item.get("cable_specification", ""), ", ".join(item.get("vlan_ids", []))]
+                for item in self._items("network_connections")
+            ])
+        elif key == "vlans":
+            self.vlans_tab.set_rows([
+                [item.get("id", ""), item.get("vlan_id", ""), item.get("name", ""),
+                 item.get("purpose", ""), item.get("subnet", ""), item.get("gateway", ""),
+                 item.get("security_zone", "")]
+                for item in self._items("network_vlans")
+            ])
+        elif key == "routes":
+            self.routes_tab.set_rows([
+                [item.get("id", ""), item.get("source", ""), item.get("destination", ""),
+                 item.get("vlan_id", ""), item.get("protocol", ""), item.get("next_hop", ""),
+                 item.get("metric", 0), item.get("firewall_policy", "")]
+                for item in self._items("network_routes")
+            ])
+        elif key == "patch_leads":
+            self.patch_leads_tab.set_rows([
+                [item.get("id", ""), item.get("instance_id", ""), item.get("port", ""),
+                 item.get("peer_instance_id", ""), item.get("peer_port", ""),
+                 item.get("endpoint_name", ""), item.get("medium", ""),
+                 item.get("length_m", 0), item.get("connection_id", "")]
+                for item in self._items("network_patch_leads")
+            ])
+        elif key == "fibre_nodes":
+            self.fibre_nodes_tab.set_rows([
+                [item.get("id", ""), item.get("name", ""), item.get("node_type", ""),
+                 item.get("location_name", ""), item.get("floor", 0), item.get("rack_name", ""),
+                 item.get("parent_node_id", ""),
+                 item.get("splice_capacity", item.get("cassette_capacity", 0)),
+                 item.get("drawing_layer", "")]
+                for item in self._items("network_fibre_nodes")
+            ])
+        elif key == "fibre_cables":
+            rows = []
+            for item in self._items("network_fibre_cables"):
+                stats = cable_core_statistics(item)
+                rows.append([item.get("id", ""), item.get("name", ""),
+                    item.get("from_instance_id", "") or item.get("from_location", ""),
+                    item.get("to_instance_id", "") or item.get("to_location", ""),
+                    item.get("cable_type", ""), item.get("core_count", 0), stats.get("used", 0),
+                    stats.get("dark", 0), item.get("length_m", 0),
+                    " -> ".join(str(v) for v in item.get("route_path", []) if _text(v)),
+                    item.get("drawing_layer", "")])
+            self.fibre_cables_tab.set_rows(rows)
+        elif key == "fibre_splices":
+            self.fibre_splices_tab.set_rows([
+                [item.get("id", ""), item.get("node_id", ""), item.get("cassette_id", ""),
+                 item.get("incoming_cable_id", ""), item.get("incoming_core", 1),
+                 item.get("outgoing_cable_id", ""), item.get("outgoing_core", 1),
+                 item.get("splice_type", ""), item.get("circuit_id", ""), item.get("loss_db", 0.0)]
+                for item in self._items("network_fibre_splices")
+            ])
+        elif key == "external_networks":
+            self.external_networks_tab.set_rows([
+                [item.get("id", ""), item.get("name", ""), item.get("network_type", ""),
+                 item.get("provider", ""), item.get("asn", ""), item.get("location_name", ""),
+                 item.get("demarcation_instance_id", ""), ", ".join(item.get("prefixes", [])),
+                 ", ".join(item.get("peer_instance_ids", []))]
+                for item in self._items("network_external_networks")
+            ])
+        elif key == "ip_allocations":
+            self.ip_allocations_tab.set_rows([
+                [item.get("id", ""), item.get("instance_id", ""), item.get("vlan_id", ""),
+                 item.get("address", ""), item.get("prefix_length", 0), item.get("gateway", ""),
+                 item.get("purpose", "")]
+                for item in self._items("network_ip_allocations")
+            ])
+        elif key == "summary":
+            self._refresh_design_summary()
+        self._dirty_tabs.discard(widget)
 
     def _refresh_endpoint_traffic_table(self) -> None:
         table = self.endpoint_traffic_table
@@ -2558,6 +2615,14 @@ class NetworkPlannerDialog(QDialog):
             lines.extend(f"  • {warning}" for warning in warnings)
         self.summary_text.setPlainText("\n".join(lines))
 
+    def _save_payload(self) -> dict:
+        payload = {
+            key: self.data.get(key)
+            for key in _PLANNER_MUTABLE_KEYS
+            if key in self.data
+        }
+        return pickle.loads(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
+
     def generate_automatic_design(self) -> None:
         self._sync_planner_settings()
         technology = self.technology_combo.currentText().strip()
@@ -2608,7 +2673,7 @@ class NetworkPlannerDialog(QDialog):
             progress.setValue(100)
             progress.close()
         self.refresh_tables()
-        self.on_save(deepcopy(self.data))
+        self.on_save(self._save_payload())
         self.tabs.setCurrentWidget(self.summary_text)
         QMessageBox.information(
             self,
@@ -2676,7 +2741,7 @@ class NetworkPlannerDialog(QDialog):
         self.data["network_design_summary"] = {}
 
         self.refresh_tables()
-        self.on_save(deepcopy(self.data))
+        self.on_save(self._save_payload())
 
         QMessageBox.information(
             self,
@@ -2686,7 +2751,7 @@ class NetworkPlannerDialog(QDialog):
 
     def edit_visually_on_plan(self) -> None:
         self._sync_planner_settings()
-        self.on_save(deepcopy(self.data))
+        self.on_save(self._save_payload())
         parent = self.parent()
         setter = getattr(parent, "_set_editor_mode", None)
         if callable(setter):
@@ -3097,7 +3162,7 @@ class NetworkPlannerDialog(QDialog):
 
     def save(self) -> None:
         self._sync_planner_settings()
-        self.on_save(deepcopy(self.data))
+        self.on_save(self._save_payload())
         QMessageBox.information(
             self, "Network planning", "Network planning data saved."
         )
