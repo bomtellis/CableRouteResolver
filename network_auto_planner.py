@@ -5647,12 +5647,29 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
         rack_by_name: Dict[str, dict] = {}
 
         def create_rack(preferred_name: str = "") -> dict:
+            if preferred_name:
+                name = preferred_name
+                if name in rack_by_name:
+                    return rack_by_name[name]
+            else:
+                # Previously this used ``len(racks) + 1`` directly in the
+                # generated name.  A retained/preferred rack could already
+                # have that name (for example AUTO-RACK-MER-2-2 while it was
+                # the first rack reconstructed).  The fallback then returned
+                # the full existing rack instead of creating another rack,
+                # leaving room for the device but not its top-mounted fibre
+                # panel.  Always choose an unused automatic rack name.
+                suffix = 1
+                while True:
+                    name = (
+                        f"AUTO-RACK-{location_name}"
+                        if suffix == 1
+                        else f"AUTO-RACK-{location_name}-{suffix}"
+                    )
+                    if name not in rack_by_name:
+                        break
+                    suffix += 1
             index = len(racks) + 1
-            name = preferred_name or (
-                f"AUTO-RACK-{location_name}" if index == 1 else f"AUTO-RACK-{location_name}-{index}"
-            )
-            if name in rack_by_name:
-                return rack_by_name[name]
             rack = {
                 "index": index,
                 "name": name,
@@ -5698,7 +5715,14 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
                 prospective = rack["bottom_next"] + (ups_reserved_u if powered and not rack["ups_added"] else 0)
                 if prospective + units - 1 <= rack["top_next"]:
                     return rack
-            return create_rack()
+            rack = create_rack()
+            prospective = rack["bottom_next"] + (ups_reserved_u if powered else 0)
+            if prospective + units - 1 > rack["top_next"]:
+                raise NetworkPlanningError(
+                    f"A {rack_size_u}U rack at {location_name} cannot accommodate "
+                    f"the requested {units}U equipment and termination allowance."
+                )
+            return rack
 
         def place_bottom(instance: dict, rack: dict, units: int, powered: bool = False) -> None:
             if powered:
