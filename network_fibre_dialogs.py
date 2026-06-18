@@ -121,6 +121,13 @@ class FibreNodeEditorDialog(QDialog):
         self.rack_u_spin = QSpinBox(); self.rack_u_spin.setRange(0, 1000); self.rack_u_spin.setValue(_int(self.node.get("rack_start_u")))
         self.rack_units_spin = QSpinBox(); self.rack_units_spin.setRange(0, 100); self.rack_units_spin.setValue(_int(self.node.get("rack_units"), 1))
         self.capacity_spin = QSpinBox(); self.capacity_spin.setRange(0, 100000); self.capacity_spin.setValue(_int(self.node.get("splice_capacity", self.node.get("cassette_capacity", 12)), 12))
+        self.cassette_position_spin = QSpinBox(); self.cassette_position_spin.setRange(1, 4); self.cassette_position_spin.setValue(max(1, min(4, _int(self.node.get("cassette_position", self.node.get("tray_number")), 1))))
+        self.cassette_front_combo = QComboBox(); self.cassette_front_combo.addItem("LC duplex", "lc_duplex"); self.cassette_front_combo.addItem("SC simplex", "sc_simplex"); self.cassette_front_combo.addItem("SC duplex", "sc_duplex"); _set_combo(self.cassette_front_combo, _text(self.node.get("front_connector")) or "lc_duplex")
+        self.cassette_mode_combo = QComboBox(); self.cassette_mode_combo.addItem("Spliced / pigtail", "spliced"); self.cassette_mode_combo.addItem("Connectorised MPO/MTP", "connectorised"); _set_combo(self.cassette_mode_combo, _text(self.node.get("termination_mode")) or "spliced")
+        self.cassette_rear_combo = QComboBox(); self.cassette_rear_combo.addItem("Splice", "splice"); self.cassette_rear_combo.addItem("MPO-12", "mpo-12"); self.cassette_rear_combo.addItem("MTP-12", "mtp-12"); self.cassette_rear_combo.addItem("MPO-24", "mpo-24"); self.cassette_rear_combo.addItem("MTP-24", "mtp-24"); _set_combo(self.cassette_rear_combo, _text(self.node.get("rear_connector")) or "splice")
+        self.cassette_rear_count_spin = QSpinBox(); self.cassette_rear_count_spin.setRange(0, 4); self.cassette_rear_count_spin.setValue(max(0, min(4, _int(self.node.get("rear_connector_count"), 0))))
+        self.cassette_used_front_spin = QSpinBox(); self.cassette_used_front_spin.setRange(0, 12); self.cassette_used_front_spin.setValue(max(0, min(12, _int(self.node.get("used_front_connectors"), 0))))
+        self.cassette_used_fibres_spin = QSpinBox(); self.cassette_used_fibres_spin.setRange(0, 96); self.cassette_used_fibres_spin.setValue(max(0, _int(self.node.get("used_fibres"), 0)))
         self.layer_edit = QLineEdit(_text(self.node.get("drawing_layer")) or "NET-FIBRE-NODE")
         self.symbol_edit = QLineEdit(_text(self.node.get("symbol")))
         self.label_edit = QLineEdit(_text(self.node.get("label")))
@@ -132,7 +139,15 @@ class FibreNodeEditorDialog(QDialog):
             ("Parent enclosure/node", self.parent_combo), ("Floor", self.floor_spin),
             ("X", self.x_spin), ("Y", self.y_spin), ("Rack", self.rack_edit),
             ("Rack start", self.rack_u_spin), ("Rack units", self.rack_units_spin),
-            ("Splice/cassette capacity", self.capacity_spin), ("Drawing layer", self.layer_edit),
+            ("Splice/cassette capacity", self.capacity_spin),
+            ("Cassette position", self.cassette_position_spin),
+            ("Cassette front connector", self.cassette_front_combo),
+            ("Cassette termination", self.cassette_mode_combo),
+            ("Cassette rear interface", self.cassette_rear_combo),
+            ("Rear MPO/MTP connectors", self.cassette_rear_count_spin),
+            ("Used front connectors", self.cassette_used_front_spin),
+            ("Used fibres", self.cassette_used_fibres_spin),
+            ("Drawing layer", self.layer_edit),
             ("Symbol", self.symbol_edit), ("Drawing label", self.label_edit), ("Notes", self.notes_edit),
         ]:
             form.addRow(label, widget)
@@ -143,6 +158,7 @@ class FibreNodeEditorDialog(QDialog):
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
         self._update_type_fields()
         self.type_combo.currentIndexChanged.connect(self._update_type_fields)
+        self.cassette_mode_combo.currentIndexChanged.connect(self._update_type_fields)
 
         self._locations = list(locations or [])
         self._instances = list(instances or [])
@@ -167,8 +183,14 @@ class FibreNodeEditorDialog(QDialog):
 
     def _update_type_fields(self) -> None:
         node_type = _text(self.type_combo.currentData())
-        self.parent_combo.setEnabled(node_type == "splice_cassette")
+        is_cassette = node_type == "splice_cassette"
+        self.parent_combo.setEnabled(is_cassette)
         self.capacity_spin.setEnabled(node_type in {"splice_enclosure", "splice_cassette", "fibre_joint"})
+        for widget in (self.cassette_position_spin, self.cassette_front_combo, self.cassette_mode_combo, self.cassette_used_front_spin, self.cassette_used_fibres_spin):
+            widget.setEnabled(is_cassette)
+        connectorised = is_cassette and _text(self.cassette_mode_combo.currentData()) == "connectorised"
+        self.cassette_rear_combo.setEnabled(connectorised)
+        self.cassette_rear_count_spin.setEnabled(connectorised)
 
     def accept(self) -> None:
         node_id = self.id_edit.text().strip()
@@ -187,7 +209,17 @@ class FibreNodeEditorDialog(QDialog):
             "floor": int(self.floor_spin.value()), "x": float(self.x_spin.value()), "y": float(self.y_spin.value()),
             "rack_name": self.rack_edit.text().strip(), "rack_start_u": int(self.rack_u_spin.value()),
             "rack_units": int(self.rack_units_spin.value()), "cassette_capacity": int(self.capacity_spin.value()),
-            "splice_capacity": int(self.capacity_spin.value()), "drawing_layer": self.layer_edit.text().strip() or "NET-FIBRE-NODE",
+            "splice_capacity": int(self.capacity_spin.value()),
+            "cassette_position": int(self.cassette_position_spin.value()) if _text(self.type_combo.currentData()) == "splice_cassette" else 0,
+            "tray_number": int(self.cassette_position_spin.value()) if _text(self.type_combo.currentData()) == "splice_cassette" else int(self.node.get("tray_number", 0) or 0),
+            "front_connector": _text(self.cassette_front_combo.currentData()) if _text(self.type_combo.currentData()) == "splice_cassette" else "",
+            "front_connector_capacity": 12 if _text(self.type_combo.currentData()) == "splice_cassette" else 0,
+            "termination_mode": _text(self.cassette_mode_combo.currentData()) if _text(self.type_combo.currentData()) == "splice_cassette" else "",
+            "rear_connector": (_text(self.cassette_rear_combo.currentData()) if _text(self.cassette_mode_combo.currentData()) == "connectorised" else "splice") if _text(self.type_combo.currentData()) == "splice_cassette" else "",
+            "rear_connector_count": int(self.cassette_rear_count_spin.value()) if _text(self.type_combo.currentData()) == "splice_cassette" and _text(self.cassette_mode_combo.currentData()) == "connectorised" else 0,
+            "used_front_connectors": int(self.cassette_used_front_spin.value()) if _text(self.type_combo.currentData()) == "splice_cassette" else 0,
+            "used_fibres": int(self.cassette_used_fibres_spin.value()) if _text(self.type_combo.currentData()) == "splice_cassette" else 0,
+            "drawing_layer": self.layer_edit.text().strip() or "NET-FIBRE-NODE",
             "symbol": self.symbol_edit.text().strip() or _text(self.type_combo.currentData()),
             "label": self.label_edit.text().strip() or name, "notes": self.notes_edit.toPlainText().strip(),
             "auto_generated": bool(self.node.get("auto_generated", False)),
@@ -474,13 +506,16 @@ class PhysicalFibrePlanningDialog(QDialog):
         self.branch=QComboBox(); self.branch.addItems(["spliced","connectorised"]); _set_combo(self.branch,_text(self.settings.get("branch_termination_method")) or "spliced")
         self.splitter=QComboBox(); self.splitter.addItems(["connectorised","spliced"]); _set_combo(self.splitter,_text(self.settings.get("splitter_termination_method")) or "connectorised")
         self.pigtail=QCheckBox("Use a spliced pigtail when splitter termination is spliced"); self.pigtail.setChecked(bool(self.settings.get("splitter_pigtail",True)))
+        self.reduced_spine=QCheckBox("Continue the dominant route with reduced-count spine cables"); self.reduced_spine.setChecked(bool(self.settings.get("extend_reduced_count_spine",True))); self.reduced_spine.setToolTip("After each branch, keep one dominant route as a smaller-count spine extension instead of classifying every remaining single-circuit leg as a spur.")
         self.tray=QSpinBox(); self.tray.setRange(1,24); self.tray.setValue(max(1,min(24,_int(self.settings.get("max_splices_per_cassette"),24))))
         self.spare=QDoubleSpinBox(); self.spare.setRange(0,200); self.spare.setDecimals(1); self.spare.setSuffix(" %"); self.spare.setValue(float(self.settings.get("spare_core_percent",15.0) or 0.0))
         self.optical_margin=QDoubleSpinBox(); self.optical_margin.setRange(0,30); self.optical_margin.setDecimals(2); self.optical_margin.setSuffix(" dB"); self.optical_margin.setValue(float(self.settings.get("minimum_optical_margin_db",3.0) or 0.0))
-        for label,w in [("Routing arrangement",self.mode),("Direct cable type",self.default_type),("Spine cable type",self.spine_type),("Spur cable type",self.spur_type),("Branch termination",self.branch),("Splitter termination",self.splitter),("Splitter pigtail",self.pigtail),("Maximum splices per tray",self.tray),("Spare core allowance",self.spare),("Minimum optical design margin",self.optical_margin)]: form.addRow(label,w)
+        self.mpo_threshold=QSpinBox(); self.mpo_threshold.setRange(12,6912); self.mpo_threshold.setSuffix(" fibre cores"); self.mpo_threshold.setValue(max(12,_int(self.settings.get("mpo_breakout_minimum_cores"),48))); self.mpo_threshold.setToolTip("Cables at or above this core count use MPO/MTP rear connections into modular LC/SC breakout cassettes.")
+        self.mpo_connector=QComboBox(); self.mpo_connector.addItem("MPO-12","mpo-12"); self.mpo_connector.addItem("MTP-12","mtp-12"); self.mpo_connector.addItem("MPO-24","mpo-24"); self.mpo_connector.addItem("MTP-24","mtp-24"); _set_combo(self.mpo_connector,_text(self.settings.get("mpo_breakout_connector")) or "mpo-24")
+        for label,w in [("Routing arrangement",self.mode),("Direct cable type",self.default_type),("Spine cable type",self.spine_type),("Spur cable type",self.spur_type),("Reduced-count spine continuation",self.reduced_spine),("Branch termination",self.branch),("Splitter termination",self.splitter),("Splitter pigtail",self.pigtail),("Maximum splices per tray",self.tray),("Spare core allowance",self.spare),("MPO/MTP breakout threshold",self.mpo_threshold),("MPO/MTP breakout connector",self.mpo_connector),("Minimum optical design margin",self.optical_margin)]: form.addRow(label,w)
         buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel); buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
     def accept(self):
-        self.result={**self.settings,"routing_mode":_text(self.mode.currentData()),"default_cable_type_id":_text(self.default_type.currentData()),"spine_cable_type_id":_text(self.spine_type.currentData()),"spur_cable_type_id":_text(self.spur_type.currentData()),"branch_termination_method":self.branch.currentText(),"splitter_termination_method":self.splitter.currentText(),"splitter_pigtail":self.pigtail.isChecked(),"max_splices_per_cassette":int(self.tray.value()),"spare_core_percent":float(self.spare.value()),"minimum_optical_margin_db":float(self.optical_margin.value())}; super().accept()
+        self.result={**self.settings,"routing_mode":_text(self.mode.currentData()),"default_cable_type_id":_text(self.default_type.currentData()),"spine_cable_type_id":_text(self.spine_type.currentData()),"spur_cable_type_id":_text(self.spur_type.currentData()),"extend_reduced_count_spine":self.reduced_spine.isChecked(),"branch_termination_method":self.branch.currentText(),"splitter_termination_method":self.splitter.currentText(),"splitter_pigtail":self.pigtail.isChecked(),"max_splices_per_cassette":int(self.tray.value()),"spare_core_percent":float(self.spare.value()),"mpo_breakout_minimum_cores":int(self.mpo_threshold.value()),"mpo_breakout_connector":_text(self.mpo_connector.currentData()),"minimum_optical_margin_db":float(self.optical_margin.value())}; super().accept()
 
 
 class OpticalPropertiesDialog(QDialog):

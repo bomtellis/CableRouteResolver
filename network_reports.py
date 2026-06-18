@@ -733,6 +733,8 @@ def _splice_cassette_schedule(data: dict) -> List[dict]:
         enclosure = nodes.get(_text(cassette.get("parent_node_id")), {})
         splices = [row for row in data.get("network_fibre_splices", []) if isinstance(row, dict) and _text(row.get("cassette_id")) == cassette_id]
         capacity = max(1, min(24, _int(cassette.get("max_splices_per_tray"), cassette.get("splice_capacity", 24))))
+        front_capacity = max(1, _int(cassette.get("front_connector_capacity"), cassette.get("cassette_capacity", 12)))
+        used_front = max(0, _int(cassette.get("used_front_connectors"), len(cassette.get("used_front_connector_names", []))))
         incoming_id = _text(cassette.get("incoming_cable_id")) or next((_text(row.get("incoming_cable_id")) for row in splices if _text(row.get("incoming_cable_id"))), "")
         incoming = cables.get(incoming_id, {})
         rows.append({
@@ -748,7 +750,19 @@ def _splice_cassette_schedule(data: dict) -> List[dict]:
             "capacity": capacity,
             "used_positions": len(splices),
             "available_positions": max(0, capacity - len(splices)),
-            "circuit_ids": ", ".join(sorted({_text(row.get("circuit_id")) for row in splices if _text(row.get("circuit_id"))})),
+            "front_connector": _text(cassette.get("front_connector")),
+            "front_connector_capacity": front_capacity,
+            "used_front_connectors": used_front,
+            "available_front_connectors": max(0, front_capacity - used_front),
+            "used_fibres": max(0, _int(cassette.get("used_fibres"))),
+            "termination_mode": _text(cassette.get("termination_mode")),
+            "rear_connector": _text(cassette.get("rear_connector")),
+            "rear_connector_count": max(0, _int(cassette.get("rear_connector_count"))),
+            "associated_cable_ids": ", ".join(_text(value) for value in cassette.get("cable_ids", []) if _text(value)),
+            "circuit_ids": ", ".join(sorted(
+                {_text(value) for value in cassette.get("circuit_ids", []) if _text(value)}
+                | {_text(row.get("circuit_id")) for row in splices if _text(row.get("circuit_id"))}
+            )),
             "notes": _text(cassette.get("notes")),
         })
     return sorted(rows, key=lambda row: (row["floor"], row["enclosure_id"], row["tray_number"], row["cassette_id"]))
@@ -1084,7 +1098,7 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
         ),
         (
             "splice_cassette_schedule",
-            ["enclosure_id", "enclosure_name", "cassette_id", "cassette_name", "tray_number", "floor", "location_name", "incoming_cable_id", "incoming_cable_core_count", "capacity", "used_positions", "available_positions", "circuit_ids", "notes"],
+            ["enclosure_id", "enclosure_name", "cassette_id", "cassette_name", "tray_number", "floor", "location_name", "incoming_cable_id", "incoming_cable_core_count", "capacity", "used_positions", "available_positions", "front_connector", "front_connector_capacity", "used_front_connectors", "available_front_connectors", "used_fibres", "termination_mode", "rear_connector", "rear_connector_count", "associated_cable_ids", "circuit_ids", "notes"],
             _splice_cassette_schedule(data),
         ),
         (

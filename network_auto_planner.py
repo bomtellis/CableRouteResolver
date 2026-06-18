@@ -4774,14 +4774,23 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
 
 
 def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
-    """Return a usable fibre patch panel, creating a conservative 24-port 1U model when absent."""
+    """Return a modular fibre panel, creating a four-cassette model when absent.
+
+    Fixed fibre panels remain valid user assets, but the automatic design uses a
+    modular chassis so separate incoming cables can share unused connector and
+    cassette capacity and high-core-count trunks can use MPO/MTP breakout
+    cassettes.
+    """
     candidates = _candidate_assets(
         builder.data,
         "patch_panel",
         lambda asset: _text(asset.get("patch_panel_type")).lower() == "fibre"
+        and bool(asset.get("modular_patch_panel") or _text(asset.get("patch_panel_format")).lower() == "modular_cassette")
         and max(_int(asset.get("number_of_ports")), _int(asset.get("connections_in")), _int(asset.get("connections_out"))) > 0,
     )
-    candidates = _apply_manufacturer_preference(builder.data, candidates, "fibre_patch_panel", "fibre patch panel")
+    candidates = _apply_manufacturer_preference(
+        builder.data, candidates, "fibre_patch_panel", "modular fibre patch panel"
+    )
     if candidates:
         return min(
             candidates,
@@ -4792,21 +4801,51 @@ def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
             ),
         )
 
-    asset_id = "AUTO-FIBRE-PATCH-PANEL-24"
+    asset_id = "AUTO-FIBRE-PATCH-PANEL-MODULAR-4X12"
     for asset in builder.data.get("network_assets", []):
         if _text(asset.get("id")) == asset_id:
             return asset
+
+    cassette_count = 4
+    cassette_capacity = 12
+    explicit_names = [
+        f"C{cassette}-LC-{position:02d}"
+        for cassette in range(1, cassette_count + 1)
+        for position in range(1, cassette_capacity + 1)
+    ]
+    planning = builder.settings.get("physical_fibre_planning", {})
+    mpo_connector = _text(planning.get("mpo_breakout_connector")).lower() or "mpo-24"
+    if mpo_connector not in {"mpo-12", "mtp-12", "mpo-24", "mtp-24"}:
+        mpo_connector = "mpo-24"
     asset = {
         "id": asset_id,
-        "name": "24-port OS2 fibre patch panel",
+        "name": "4-cassette OS2 modular fibre patch panel",
         "asset_type": "patch_panel",
         "patch_panel_type": "fibre",
-        "number_of_ports": 24,
-        "connections_in": 24,
-        "connections_out": 24,
+        "patch_panel_format": "modular_cassette",
+        "modular_patch_panel": True,
+        "patch_panel_cassette_count": cassette_count,
+        "patch_panel_cassette_capacity": cassette_capacity,
+        "patch_panel_cassette_front_connector": "lc_duplex",
+        "patch_panel_cassette_termination_mode": "spliced",
+        "patch_panel_cassette_rear_connector": mpo_connector,
+        "patch_panel_cassette_rear_connector_count": 1,
+        "patch_panel_mpo_breakout_minimum_cores": max(
+            12, _int(planning.get("mpo_breakout_minimum_cores"), 48)
+        ),
+        "number_of_ports": cassette_count * cassette_capacity,
+        "connections_in": cassette_count * cassette_capacity,
+        "connections_out": cassette_count * cassette_capacity,
         "uplink_ports": 0,
         "port_definitions": [
-            {"port_type": "lc", "port_count": 24, "port_use": "patch", "name_prefix": "LC"}
+            {
+                "port_type": "lc",
+                "port_count": cassette_count * cassette_capacity,
+                "port_use": "patch",
+                "name_prefix": "LC",
+                "explicit_names": explicit_names,
+                "supported_speeds_mbps": [],
+            }
         ],
         "input_connection_type": "fibre",
         "output_connection_type": "fibre",
@@ -4814,25 +4853,30 @@ def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
         "power_input_w": 0.0,
         "optical_insertion_loss_db": 0.5,
         "optical_return_loss_db": 55.0,
-        "notes": "Automatically generated fibre patch-panel allowance.",
+        "notes": (
+            "Automatically generated modular fibre panel with four 12-position "
+            "LC duplex cassettes. Cassettes may be spliced or connectorised "
+            "with multiple MPO/MTP rear interfaces."
+        ),
         "auto_network_asset": True,
     }
     builder.data.setdefault("network_assets", []).append(asset)
     builder.asset_ids.add(asset_id)
     builder.warnings.append(
-        "No fibre patch-panel asset was available; a 24-port 1U OS2 patch panel was generated automatically."
+        "No modular fibre patch-panel asset was available; a 48-position 1U "
+        "panel with four configurable 12-position cassettes was generated automatically."
     )
     return asset
 
 
 def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -> None:
-    """Terminate cabinet-to-field fibre on rack-mounted patch panels.
+    """Terminate cabinet-to-field fibre on shared modular patch panels.
 
-    Logical links remain direct active-device edges in the network topology.
-    Hidden physical records model the internal equipment patch lead and the
-    permanent field cable. A patch panel is installed only on an endpoint that
-    is actually assigned to a rack cabinet; rackless field devices, splitters,
-    joints and ONTs remain direct field terminations.
+    The allocator fills unused compatible cassette positions before adding a new
+    cassette or panel.  Cables at or above the configured core threshold use
+    connectorised MPO/MTP rear interfaces; smaller cables use the panel's
+    configured cassette termination method.  Logical topology links remain
+    direct active-device links and all panel records stay topology-hidden.
     """
 
     instance_by_id = {_text(row.get("id")): row for row in builder.instances}
@@ -4862,8 +4906,6 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         if a_rack is not None and a_rack == b_rack:
             row["physical_segment"] = "intra_rack"
             continue
-        # Only cabinet boundaries need panels. A field-to-field link remains a
-        # routed physical cable without inventing a rack at either end.
         if a_rack is None and b_rack is None:
             continue
         row["logical_topology"] = True
@@ -4872,105 +4914,298 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
     if not eligible:
         return
 
-    default_cable_cores = max(
-        2, _int(builder.settings.get("default_fibre_core_count"), 12)
+    panel_asset = _fibre_patch_panel_asset(builder)
+    cassette_count = max(1, min(4, _int(panel_asset.get("patch_panel_cassette_count"), 4)))
+    cassette_capacity = 12
+    capacity = cassette_count * cassette_capacity
+    front_key = _text(panel_asset.get("patch_panel_cassette_front_connector")).lower() or "lc_duplex"
+    front_port_type = "sc" if front_key.startswith("sc_") else "lc"
+    fibres_per_position = 1 if front_key == "sc_simplex" else 2
+    default_mode = _text(panel_asset.get("patch_panel_cassette_termination_mode")).lower() or "spliced"
+    if default_mode not in {"spliced", "connectorised"}:
+        default_mode = "spliced"
+    default_rear = _text(panel_asset.get("patch_panel_cassette_rear_connector")).lower() or "mpo-24"
+    if default_rear not in {"mpo-12", "mtp-12", "mpo-24", "mtp-24"}:
+        default_rear = "mpo-24"
+    planning = builder.settings.get("physical_fibre_planning", {})
+    mpo_threshold = max(
+        12,
+        _int(
+            panel_asset.get("patch_panel_mpo_breakout_minimum_cores"),
+            _int(planning.get("mpo_breakout_minimum_cores"), 48),
+        ),
     )
-    terminations: Dict[Tuple[int, str, str], int] = defaultdict(int)
-    ports_per_connection: Dict[str, int] = {}
+    planned_mpo_connector = _text(planning.get("mpo_breakout_connector")).lower() or default_rear
+    if planned_mpo_connector not in {"mpo-12", "mtp-12", "mpo-24", "mtp-24"}:
+        planned_mpo_connector = default_rear
+    rear_fibres = 24 if planned_mpo_connector.endswith("24") else 12
+
+    default_cable_cores = max(2, _int(builder.settings.get("default_fibre_core_count"), 12))
+    connection_plan: Dict[str, dict] = {}
+    required_positions_by_rack: Dict[Tuple[int, str, str], int] = defaultdict(int)
     for logical, a, b in eligible:
-        cable_cores = max(
-            default_cable_cores,
-            max(1, _int(logical.get("fibre_count"), 2)),
+        logical_id = _text(logical.get("id"))
+        used_cores = max(1, _int(logical.get("fibre_count"), 2))
+        declared_core_count = _int(logical.get("cable_core_count"), 0)
+        cable_core_count = max(
+            used_cores,
+            declared_core_count if declared_core_count > 0 else default_cable_cores,
         )
-        # LC panel capacity is treated as duplex adapter positions.
-        adapter_ports = max(1, int(math.ceil(cable_cores / 2.0)))
-        ports_per_connection[_text(logical.get("id"))] = adapter_ports
+        connector_positions = max(1, int(math.ceil(cable_core_count / float(fibres_per_position))))
+        active_positions = max(1, int(math.ceil(used_cores / float(fibres_per_position))))
+        connectorised_breakout = cable_core_count >= mpo_threshold
+        termination_mode = "connectorised" if connectorised_breakout else default_mode
+        rear_connector = planned_mpo_connector if termination_mode == "connectorised" else "splice"
+        connection_plan[logical_id] = {
+            "used_cores": used_cores,
+            "cable_core_count": cable_core_count,
+            "connector_positions": connector_positions,
+            "active_positions": active_positions,
+            "termination_mode": termination_mode,
+            "rear_connector": rear_connector,
+            "connectorised_breakout": connectorised_breakout,
+        }
         for instance in (a, b):
             key = rack_key(instance)
             if key is not None:
-                terminations[key] += adapter_ports
+                required_positions_by_rack[key] += connector_positions
 
-    panel_asset = _fibre_patch_panel_asset(builder)
-    capacity = max(
-        1,
-        _int(panel_asset.get("number_of_ports")),
-        _int(panel_asset.get("connections_in")),
-        _int(panel_asset.get("connections_out")),
-    )
     locations = {
         _text(row.get("name")): row
         for row in builder.data.get("locations", [])
         if isinstance(row, dict) and _text(row.get("name"))
     }
     panels_by_rack: Dict[Tuple[int, str, str], List[dict]] = defaultdict(list)
-    for key, used in sorted(terminations.items()):
+
+    def empty_cassettes() -> List[dict]:
+        return [
+            {
+                "position": index,
+                "front_connector": front_key,
+                "front_connector_capacity": cassette_capacity,
+                "termination_mode": default_mode,
+                "rear_connector": default_rear if default_mode == "connectorised" else "splice",
+                "rear_connector_count": 0,
+                "used_front_connectors": 0,
+                "used_front_connector_names": [],
+                "used_fibres": 0,
+                "cable_ids": [],
+                "associated_instance_ids": [],
+            }
+            for index in range(1, cassette_count + 1)
+        ]
+
+    def add_panel(key: Tuple[int, str, str]) -> dict:
         floor, location_name, rack_name = key
-        required = max(1, int(math.ceil(used * (1.0 + spare_fraction))))
-        count_needed = max(1, int(math.ceil(required / capacity)))
         location = locations.get(location_name) or {
             "name": location_name,
             "floor": floor,
             "x": 0.0,
             "y": 0.0,
         }
-        for index in range(count_needed):
-            panel = builder.add_instance(
-                panel_asset,
-                f"AUTO {location_name} {rack_name} Fibre Patch Panel {index + 1}",
-                location,
-                "fibre_patch_panel",
-                rack_name=rack_name,
-                target_rack_name=rack_name,
-                rack_start_u=0,
-                rack_size_u=max(
-                    1, _int(builder.settings.get("default_rack_size_u"), 42)
-                ),
-                route_anchor=location_name,
-                termination_count=max(0, min(capacity, used - index * capacity)),
-                cabinet_patch_panel=True,
-                external_field_termination=True,
-            )
-            panels_by_rack[key].append(panel)
-            instance_by_id[_text(panel.get("id"))] = panel
+        panel_index = len(panels_by_rack[key]) + 1
+        panel = builder.add_instance(
+            panel_asset,
+            f"AUTO {location_name} {rack_name} Modular Fibre Patch Panel {panel_index}",
+            location,
+            "fibre_patch_panel",
+            rack_name=rack_name,
+            target_rack_name=rack_name,
+            rack_start_u=0,
+            rack_size_u=max(1, _int(builder.settings.get("default_rack_size_u"), 42)),
+            route_anchor=location_name,
+            termination_count=0,
+            available_connector_count=capacity,
+            cabinet_patch_panel=True,
+            external_field_termination=True,
+            fibre_cassettes=empty_cassettes(),
+        )
+        panels_by_rack[key].append(panel)
+        instance_by_id[_text(panel.get("id"))] = panel
+        return panel
 
-    next_port: Dict[Tuple[int, str, str], int] = defaultdict(int)
+    for key, used in sorted(required_positions_by_rack.items()):
+        required = max(1, int(math.ceil(used * (1.0 + spare_fraction))))
+        for _ in range(max(1, int(math.ceil(required / float(capacity))))):
+            add_panel(key)
 
-    def allocate(instance: dict, count: int) -> Tuple[dict, str, List[str]]:
+    def panel_port_names(panel: dict) -> List[str]:
+        names = [
+            _text(row.get("name"))
+            for row in builder._expanded_ports(panel)
+            if _text(row.get("name"))
+        ]
+        if len(names) < capacity:
+            connector_label = "SC" if front_port_type == "sc" else "LC"
+            names = [
+                f"C{cassette}-{connector_label}-{position:02d}"
+                for cassette in range(1, cassette_count + 1)
+                for position in range(1, cassette_capacity + 1)
+            ]
+        return names[:capacity]
+
+    def allocate(
+        instance: dict,
+        count: int,
+        *,
+        logical_id: str,
+        cable_core_count: int,
+        termination_mode: str,
+        rear_connector: str,
+    ) -> List[dict]:
         key = rack_key(instance)
         if key is None:
             raise NetworkPlanningError("Cannot allocate a fibre panel outside a rack.")
-        index = next_port[key]
-        panel_index, port_index = divmod(index, capacity)
-        if port_index + count > capacity:
-            panel_index += 1
-            port_index = 0
-            index = panel_index * capacity
-        panels = panels_by_rack.get(key, [])
-        if panel_index >= len(panels):
-            raise NetworkPlanningError(
-                f"Fibre patch-panel capacity was exceeded for {key[1]} / {key[2]}."
+        remaining = max(1, int(count))
+        remaining_fibres = max(1, int(cable_core_count))
+        allocations: List[dict] = []
+        panels = panels_by_rack[key]
+        panel_cursor = 0
+        while remaining > 0:
+            if panel_cursor >= len(panels):
+                add_panel(key)
+            panel = panels[panel_cursor]
+            names = panel_port_names(panel)
+            cassette_rows = panel.setdefault("fibre_cassettes", empty_cassettes())
+            progress = False
+            for cassette_index in range(cassette_count):
+                cassette = cassette_rows[cassette_index]
+                used_names = {
+                    _text(value)
+                    for value in cassette.get("used_front_connector_names", [])
+                    if _text(value)
+                }
+                existing_mode = _text(cassette.get("termination_mode")).lower()
+                existing_rear = _text(cassette.get("rear_connector")).lower()
+                cassette_used = bool(used_names)
+                compatible = (
+                    not cassette_used
+                    or (
+                        existing_mode == termination_mode
+                        and (
+                            termination_mode != "connectorised"
+                            or existing_rear == rear_connector
+                        )
+                    )
+                )
+                if not compatible:
+                    continue
+                cassette_names = names[
+                    cassette_index * cassette_capacity:
+                    (cassette_index + 1) * cassette_capacity
+                ]
+                available = [name for name in cassette_names if name not in used_names]
+                if not available:
+                    continue
+                take = min(remaining, len(available))
+                selected = available[:take]
+                used_names.update(selected)
+                chunk_fibres = min(remaining_fibres, take * fibres_per_position)
+                cassette["position"] = cassette_index + 1
+                cassette["front_connector"] = front_key
+                cassette["front_connector_capacity"] = cassette_capacity
+                cassette["termination_mode"] = termination_mode
+                cassette["rear_connector"] = rear_connector if termination_mode == "connectorised" else "splice"
+                cassette["used_front_connector_names"] = sorted(used_names, key=lambda value: names.index(value) if value in names else capacity)
+                cassette["used_front_connectors"] = len(used_names)
+                cassette["used_fibres"] = max(0, _int(cassette.get("used_fibres"))) + chunk_fibres
+                cassette["rear_connector_count"] = (
+                    max(1, min(4, int(math.ceil(cassette["used_fibres"] / float(rear_fibres)))))
+                    if termination_mode == "connectorised"
+                    else 0
+                )
+                cable_ids = [_text(value) for value in cassette.get("cable_ids", []) if _text(value)]
+                if logical_id not in cable_ids:
+                    cable_ids.append(logical_id)
+                cassette["cable_ids"] = cable_ids
+                associated_ids = [_text(value) for value in cassette.get("associated_instance_ids", []) if _text(value)]
+                instance_id = _text(instance.get("id"))
+                if instance_id and instance_id not in associated_ids:
+                    associated_ids.append(instance_id)
+                cassette["associated_instance_ids"] = associated_ids
+
+                allocations.append(
+                    {
+                        "panel": panel,
+                        "panel_id": _text(panel.get("id")),
+                        "cassette_position": cassette_index + 1,
+                        "ports": selected,
+                        "termination_mode": termination_mode,
+                        "rear_connector": cassette["rear_connector"],
+                        "rear_connector_count": cassette["rear_connector_count"],
+                        "fibre_count": chunk_fibres,
+                    }
+                )
+                remaining -= take
+                remaining_fibres = max(0, remaining_fibres - chunk_fibres)
+                progress = True
+                if remaining <= 0:
+                    break
+            panel["termination_count"] = sum(
+                max(0, _int(row.get("used_front_connectors")))
+                for row in panel.get("fibre_cassettes", [])
+                if isinstance(row, dict)
             )
-        ports = [f"LC-{port_index + offset + 1}" for offset in range(count)]
-        next_port[key] = index + count
-        panel = panels[panel_index]
-        associated = [_text(value) for value in panel.get("associated_instance_ids", []) if _text(value)]
-        instance_id = _text(instance.get("id"))
-        if instance_id and instance_id not in associated:
-            associated.append(instance_id)
-        panel["associated_instance_ids"] = associated
-        return panel, ports[0], ports
+            panel["available_connector_count"] = max(0, capacity - _int(panel.get("termination_count")))
+            associated = [_text(value) for value in panel.get("associated_instance_ids", []) if _text(value)]
+            instance_id = _text(instance.get("id"))
+            if instance_id and instance_id not in associated:
+                associated.append(instance_id)
+            panel["associated_instance_ids"] = associated
+            if remaining <= 0:
+                break
+            panel_cursor += 1
+            if not progress and panel_cursor >= len(panels):
+                add_panel(key)
+        return allocations
+
+    def flatten_ports(allocations: Sequence[dict]) -> List[str]:
+        return [
+            _text(port)
+            for allocation in allocations
+            for port in allocation.get("ports", [])
+            if _text(port)
+        ]
+
+    def allocation_summary(allocations: Sequence[dict]) -> List[dict]:
+        return [
+            {
+                "panel_instance_id": _text(row.get("panel_id")),
+                "cassette_position": _int(row.get("cassette_position")),
+                "ports": list(row.get("ports", [])),
+                "termination_mode": _text(row.get("termination_mode")),
+                "rear_connector": _text(row.get("rear_connector")),
+                "rear_connector_count": _int(row.get("rear_connector_count")),
+                "fibre_count": _int(row.get("fibre_count")),
+            }
+            for row in allocations
+        ]
 
     for logical, a, b in eligible:
         parent_id = _text(logical.get("id"))
-        adapter_count = ports_per_connection.get(parent_id, 1)
-        used_cores = max(1, _int(logical.get("fibre_count"), 2))
-        cable_core_count = max(default_cable_cores, used_cores)
+        plan = connection_plan[parent_id]
+        used_cores = plan["used_cores"]
+        cable_core_count = plan["cable_core_count"]
+        adapter_count = plan["connector_positions"]
+        active_positions = plan["active_positions"]
+        termination_mode = plan["termination_mode"]
+        rear_connector = plan["rear_connector"]
 
         a_termination = a
         a_port = _text(logical.get("from_port"))
-        a_panel_ports: List[str] = []
+        a_allocations: List[dict] = []
         if rack_key(a) is not None:
-            a_termination, a_port, a_panel_ports = allocate(a, adapter_count)
+            a_allocations = allocate(
+                a,
+                adapter_count,
+                logical_id=parent_id,
+                cable_core_count=cable_core_count,
+                termination_mode=termination_mode,
+                rear_connector=rear_connector,
+            )
+            a_panel_ports = flatten_ports(a_allocations)
+            a_termination = a_allocations[0]["panel"]
+            a_port = a_panel_ports[0]
             builder.add_connection(
                 a,
                 _text(logical.get("from_port")),
@@ -4982,16 +5217,32 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                 physical_connection=True,
                 parent_logical_connection_id=parent_id,
                 physical_segment="fibre_patch_cable",
-                cable_specification="OS2 fibre patch lead",
+                cable_specification=(
+                    "OS2 MPO/MTP equipment breakout lead"
+                    if plan["connectorised_breakout"]
+                    else "OS2 fibre patch lead"
+                ),
                 fibre_count=used_cores,
-                terminated_panel_ports=list(a_panel_ports),
+                terminated_panel_ports=list(a_panel_ports[:active_positions]),
+                field_terminated_panel_ports=list(a_panel_ports),
+                panel_termination_allocations=allocation_summary(a_allocations),
             )
 
         b_termination = b
         b_port = _text(logical.get("to_port"))
-        b_panel_ports: List[str] = []
+        b_allocations: List[dict] = []
         if rack_key(b) is not None:
-            b_termination, b_port, b_panel_ports = allocate(b, adapter_count)
+            b_allocations = allocate(
+                b,
+                adapter_count,
+                logical_id=parent_id,
+                cable_core_count=cable_core_count,
+                termination_mode=termination_mode,
+                rear_connector=rear_connector,
+            )
+            b_panel_ports = flatten_ports(b_allocations)
+            b_termination = b_allocations[0]["panel"]
+            b_port = b_panel_ports[0]
             builder.add_connection(
                 b_termination,
                 b_port,
@@ -5003,9 +5254,15 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                 physical_connection=True,
                 parent_logical_connection_id=parent_id,
                 physical_segment="fibre_patch_cable",
-                cable_specification="OS2 fibre patch lead",
+                cable_specification=(
+                    "OS2 MPO/MTP equipment breakout lead"
+                    if plan["connectorised_breakout"]
+                    else "OS2 fibre patch lead"
+                ),
                 fibre_count=used_cores,
-                terminated_panel_ports=list(b_panel_ports),
+                terminated_panel_ports=list(b_panel_ports[:active_positions]),
+                field_terminated_panel_ports=list(b_panel_ports),
+                panel_termination_allocations=allocation_summary(b_allocations),
             )
 
         backbone = builder.add_connection(
@@ -5021,14 +5278,24 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             physical_connection=True,
             parent_logical_connection_id=parent_id,
             physical_segment="fibre_backbone",
+            cable_specification=(
+                f"OS2 {rear_connector.upper()} trunk with modular cassette breakout"
+                if plan["connectorised_breakout"]
+                else "OS2 fixed installation fibre"
+            ),
             fibre_count=used_cores,
             cable_core_count=cable_core_count,
-            from_terminated_panel_ports=list(a_panel_ports),
-            to_terminated_panel_ports=list(b_panel_ports),
+            from_termination_method=termination_mode,
+            to_termination_method=termination_mode,
+            from_connector_type=rear_connector if termination_mode == "connectorised" else front_port_type,
+            to_connector_type=rear_connector if termination_mode == "connectorised" else front_port_type,
+            connectorised_breakout=bool(plan["connectorised_breakout"]),
+            from_panel_termination_allocations=allocation_summary(a_allocations),
+            to_panel_termination_allocations=allocation_summary(b_allocations),
+            from_terminated_panel_ports=flatten_ports(a_allocations),
+            to_terminated_panel_ports=flatten_ports(b_allocations),
             cabinet_to_field=(rack_key(a) is None or rack_key(b) is None),
         )
-        # Preserve the logical route exactly; this is the permanent cable shown
-        # on the independent physical-fibre drawing layer.
         backbone["route_path"] = list(logical.get("route_path", []))
         backbone["length_m"] = _float(logical.get("length_m"))
         backbone["redundancy_role"] = _text(logical.get("redundancy_role"))

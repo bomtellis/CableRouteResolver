@@ -81,14 +81,14 @@ class FibreNodeItem(QGraphicsObject):
     moved = Signal(str, float, float)
     activated = Signal(str)
 
-    def __init__(self, node: dict, traced: bool = False, symbol_scale: float = 0.12):
+    def __init__(self, node: dict, traced: bool = False, symbol_scale: float = 0.075):
         super().__init__()
         self.node = node
         self.traced = traced
-        self.symbol_scale = max(0.05, float(symbol_scale or 0.12))
+        self.symbol_scale = max(0.035, float(symbol_scale or 0.075))
         # Store the symbol dimensions in scene units. The view transform then
         # enlarges or reduces the icon with the rest of the floor drawing.
-        self._size = max(5.0, min(14.0, 8.0 * self.symbol_scale / 0.12))
+        self._size = max(3.2, min(10.0, 5.0 * self.symbol_scale / 0.075))
         self.setFlags(
             QGraphicsItem.ItemIsSelectable
             | QGraphicsItem.ItemIsMovable
@@ -116,7 +116,8 @@ class FibreNodeItem(QGraphicsObject):
         pen_width = max(0.35, self._size * (0.10 if self.traced or self.isSelected() else 0.065))
         painter.setPen(QPen(border, pen_width))
         painter.setBrush(colour)
-        rect = self.boundingRect().adjusted(1.0, 1.0, -1.0, -1.0)
+        inset = max(0.35, self._size * 0.09)
+        rect = self.boundingRect().adjusted(inset, inset, -inset, -inset)
         if node_type in {"splice_enclosure", "fibre_joint"}: painter.drawEllipse(rect)
         elif node_type == "splice_cassette":
             painter.drawRoundedRect(rect.adjusted(0, 2, 0, -2), 2, 2)
@@ -125,7 +126,7 @@ class FibreNodeItem(QGraphicsObject):
         else: painter.drawRoundedRect(rect, 3, 3)
         painter.setPen(QColor("#ffffff"))
         font = QFont("Arial")
-        font.setPixelSize(max(2, int(round(self._size * 0.28))))
+        font.setPixelSize(max(1, int(round(self._size * 0.24))))
         font.setBold(True)
         painter.setFont(font)
         initials = {"splice_enclosure":"SE","splice_cassette":"SC","fibre_joint":"J","termination":"T","handhole":"HH","chamber":"CH"}.get(node_type,"F")
@@ -140,13 +141,13 @@ class FibreNodeItem(QGraphicsObject):
 
 class FibreCableBatchItem(QGraphicsObject):
     """One graphics item for all static fibre paths and labels on a floor."""
-    def __init__(self, records: Sequence[dict], labels: Sequence[dict], context_callback: Callable[[str, QPoint], None], width_scale: float = 0.18, label_scale: float = 0.14):
+    def __init__(self, records: Sequence[dict], labels: Sequence[dict], context_callback: Callable[[str, QPoint], None], width_scale: float = 0.18, label_scale: float = 0.09):
         super().__init__()
         self.records = list(records)
         self.labels = list(labels)
         self.context_callback = context_callback
         self.width_scale = max(0.05, float(width_scale or 0.18))
-        self.label_scale = max(0.06, float(label_scale or 0.14))
+        self.label_scale = max(0.035, float(label_scale or 0.09))
         self.normal_path = QPainterPath(); self.traced_path = QPainterPath(); self._bounds = QRectF()
         first = True
         for record in self.records:
@@ -202,8 +203,8 @@ class FibreCableBatchItem(QGraphicsObject):
         # enlarges them at the same rate as symbols and cable geometry.
         if lod < 0.72:
             return
-        requested_scene_px = 2.0 * self.label_scale / 0.14
-        scene_px = max(1.4, min(2.8, requested_scene_px))
+        requested_scene_px = 1.25 * self.label_scale / 0.09
+        scene_px = max(0.85, min(2.0, requested_scene_px))
         exposed = option.exposedRect.adjusted(-10.0, -10.0, 10.0, 10.0)
         for label in self.labels:
             minimum_lod = float(label.get("minimum_lod", 0.30))
@@ -515,8 +516,8 @@ class PhysicalFibreTopologyDialog(QDialog):
             self.scene.clear()
             floor = self._floor(); layer = self._layer_settings()
             self.layer_label.setText(f"DXF layers: {layer.get('cable_layer','NET-FIBRE-CABLE')} / {layer.get('splice_layer','NET-FIBRE-SPLICE')}")
-            symbol_scale = self._compact_scale(layer.get("symbol_scale"), (0.32, 0.18), 0.12, 0.05, 0.32)
-            label_scale = self._compact_scale(layer.get("label_scale"), (0.55, 0.30, 0.18), 0.14, 0.06, 0.24)
+            symbol_scale = self._compact_scale(layer.get("symbol_scale"), (0.32, 0.18, 0.12), 0.075, 0.035, 0.24)
+            label_scale = self._compact_scale(layer.get("label_scale"), (0.55, 0.30, 0.18, 0.14), 0.09, 0.035, 0.18)
             width_scale = self._compact_scale(layer.get("cable_width_scale"), (0.55, 0.30, 0.22), 0.18, 0.05, 0.32)
             route_points = self._all_route_points()
             if layer.get("show_base_graph", True): self._draw_base_graph(floor, route_points)
@@ -567,7 +568,7 @@ class PhysicalFibreTopologyDialog(QDialog):
                     "text": label_text,
                     "colour": QColor("#ffb25f") if traced else QColor("#b8c8ff"),
                     "minimum_lod": minimum_lod,
-                    "offset": QPointF(1.5, -2.5),
+                    "offset": QPointF(1.0, -1.7),
                     "font_scale": 1.0,
                 })
 
@@ -581,7 +582,7 @@ class PhysicalFibreTopologyDialog(QDialog):
                     "text": _text(node.get("label")) or _text(node.get("name")),
                     "colour": QColor("#dce5ea"),
                     "minimum_lod": 0.90,
-                    "offset": QPointF(item._size * 0.62, -item._size * 0.42),
+                    "offset": QPointF(item._size * 0.58, -item._size * 0.36),
                     "font_scale": 0.90,
                 })
                 count = splice_counts.get(_text(node.get("id")), 0)
@@ -591,7 +592,7 @@ class PhysicalFibreTopologyDialog(QDialog):
                         "text": f"{count} splice{'s' if count != 1 else ''}",
                         "colour": QColor("#d5a5f1"),
                         "minimum_lod": 1.35,
-                        "offset": QPointF(item._size * 0.62, item._size * 0.20),
+                        "offset": QPointF(item._size * 0.58, item._size * 0.16),
                         "font_scale": 0.75,
                     })
 

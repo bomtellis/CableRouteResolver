@@ -274,6 +274,69 @@ class NetworkAssetEditorDialog(QDialog):
             self.patch_panel_type_combo, _text(self.asset.get("patch_panel_type"))
         )
 
+        self.patch_panel_format_combo = QComboBox()
+        self.patch_panel_format_combo.addItem("Fixed connector panel", "fixed")
+        self.patch_panel_format_combo.addItem("Modular cassette panel", "modular_cassette")
+        panel_format = _text(self.asset.get("patch_panel_format")).lower()
+        if bool(self.asset.get("modular_patch_panel")) or panel_format in {"modular", "cassette", "modular_cassette"}:
+            panel_format = "modular_cassette"
+        else:
+            panel_format = "fixed"
+        format_index = self.patch_panel_format_combo.findData(panel_format)
+        if format_index >= 0:
+            self.patch_panel_format_combo.setCurrentIndex(format_index)
+
+        self.patch_panel_cassette_count_spin = QSpinBox()
+        self.patch_panel_cassette_count_spin.setRange(1, 4)
+        self.patch_panel_cassette_count_spin.setValue(
+            max(1, min(4, int(self.asset.get("patch_panel_cassette_count", 4) or 4)))
+        )
+        self.patch_panel_cassette_count_spin.setSuffix(" cassettes")
+        self.patch_panel_cassette_count_spin.setToolTip(
+            "Number of cassette positions fitted in the modular panel. Maximum four."
+        )
+        self.patch_panel_cassette_capacity_label = QLabel("12 front connector positions per cassette")
+        self.patch_panel_cassette_capacity_label.setWordWrap(True)
+
+        self.patch_panel_cassette_front_combo = QComboBox()
+        self.patch_panel_cassette_front_combo.addItem("12 duplex LC connectors", "lc_duplex")
+        self.patch_panel_cassette_front_combo.addItem("12 simplex SC connectors", "sc_simplex")
+        self.patch_panel_cassette_front_combo.addItem("12 duplex SC connectors", "sc_duplex")
+        front_value = _text(self.asset.get("patch_panel_cassette_front_connector")).lower() or "lc_duplex"
+        front_index = self.patch_panel_cassette_front_combo.findData(front_value)
+        self.patch_panel_cassette_front_combo.setCurrentIndex(max(0, front_index))
+
+        self.patch_panel_cassette_mode_combo = QComboBox()
+        self.patch_panel_cassette_mode_combo.addItem("Spliced / pigtail cassette", "spliced")
+        self.patch_panel_cassette_mode_combo.addItem("Connectorised MPO/MTP breakout cassette", "connectorised")
+        mode_value = _text(self.asset.get("patch_panel_cassette_termination_mode")).lower() or "spliced"
+        mode_index = self.patch_panel_cassette_mode_combo.findData(mode_value)
+        self.patch_panel_cassette_mode_combo.setCurrentIndex(max(0, mode_index))
+
+        self.patch_panel_cassette_rear_combo = QComboBox()
+        for label, value in (("MPO-12", "mpo-12"), ("MTP-12", "mtp-12"), ("MPO-24", "mpo-24"), ("MTP-24", "mtp-24")):
+            self.patch_panel_cassette_rear_combo.addItem(label, value)
+        rear_value = _text(self.asset.get("patch_panel_cassette_rear_connector")).lower() or "mpo-24"
+        rear_index = self.patch_panel_cassette_rear_combo.findData(rear_value)
+        self.patch_panel_cassette_rear_combo.setCurrentIndex(max(0, rear_index))
+
+        self.patch_panel_cassette_rear_count_spin = QSpinBox()
+        self.patch_panel_cassette_rear_count_spin.setRange(1, 4)
+        self.patch_panel_cassette_rear_count_spin.setValue(
+            max(1, min(4, int(self.asset.get("patch_panel_cassette_rear_connector_count", 1) or 1)))
+        )
+        self.patch_panel_cassette_rear_count_spin.setSuffix(" rear connectors")
+
+        self.patch_panel_mpo_threshold_spin = QSpinBox()
+        self.patch_panel_mpo_threshold_spin.setRange(12, 6912)
+        self.patch_panel_mpo_threshold_spin.setValue(
+            max(12, int(self.asset.get("patch_panel_mpo_breakout_minimum_cores", 48) or 48))
+        )
+        self.patch_panel_mpo_threshold_spin.setSuffix(" fibre cores")
+        self.patch_panel_mpo_threshold_spin.setToolTip(
+            "Incoming cables at or above this size are allocated connectorised MPO/MTP breakout cassettes automatically."
+        )
+
         self.split_ratio_combo = QComboBox()
         self.split_ratio_combo.setEditable(True)
         self.split_ratio_combo.addItems(SPLIT_RATIOS)
@@ -545,6 +608,14 @@ class NetworkAssetEditorDialog(QDialog):
         general_form.addRow("Manufacturer", self.manufacturer_edit)
         general_form.addRow("Model", self.model_edit)
         general_form.addRow("Patch panel medium", self.patch_panel_type_combo)
+        general_form.addRow("Patch panel construction", self.patch_panel_format_combo)
+        general_form.addRow("Modular cassette quantity", self.patch_panel_cassette_count_spin)
+        general_form.addRow("Cassette capacity", self.patch_panel_cassette_capacity_label)
+        general_form.addRow("Cassette front connector", self.patch_panel_cassette_front_combo)
+        general_form.addRow("Cassette termination", self.patch_panel_cassette_mode_combo)
+        general_form.addRow("Rear MPO/MTP connector", self.patch_panel_cassette_rear_combo)
+        general_form.addRow("Rear connectors per cassette", self.patch_panel_cassette_rear_count_spin)
+        general_form.addRow("Automatic MPO breakout threshold", self.patch_panel_mpo_threshold_spin)
         general_form.addRow("Fibre split ratio", self.split_ratio_combo)
         general_form.addRow("OLT maximum split ratio", self.olt_max_split_ratio_combo)
         general_form.addRow("Wireless frequencies", self.frequencies_list)
@@ -600,6 +671,10 @@ class NetworkAssetEditorDialog(QDialog):
         self.tabs.addTab(notes_page, "Notes")
 
         self.asset_type_combo.currentIndexChanged.connect(self._update_visibility)
+        self.patch_panel_type_combo.currentTextChanged.connect(self._update_visibility)
+        self.patch_panel_format_combo.currentIndexChanged.connect(self._update_visibility)
+        self.patch_panel_cassette_count_spin.valueChanged.connect(self._update_visibility)
+        self.patch_panel_cassette_mode_combo.currentIndexChanged.connect(self._update_visibility)
         self.supports_stacking_check.toggled.connect(self._update_visibility)
         self._update_visibility()
 
@@ -690,7 +765,19 @@ class NetworkAssetEditorDialog(QDialog):
 
     def _update_visibility(self) -> None:
         asset_type = _text(self.asset_type_combo.currentData())
-        self.patch_panel_type_combo.setEnabled(asset_type == "patch_panel")
+        is_patch_panel = asset_type == "patch_panel"
+        is_fibre_patch_panel = is_patch_panel and _text(self.patch_panel_type_combo.currentText()).lower() == "fibre"
+        is_modular_patch_panel = is_fibre_patch_panel and _text(self.patch_panel_format_combo.currentData()).lower() == "modular_cassette"
+        self.patch_panel_type_combo.setEnabled(is_patch_panel)
+        self.patch_panel_format_combo.setEnabled(is_fibre_patch_panel)
+        self.patch_panel_cassette_count_spin.setEnabled(is_modular_patch_panel)
+        self.patch_panel_cassette_capacity_label.setEnabled(is_modular_patch_panel)
+        self.patch_panel_cassette_front_combo.setEnabled(is_modular_patch_panel)
+        self.patch_panel_cassette_mode_combo.setEnabled(is_modular_patch_panel)
+        connectorised_cassette = is_modular_patch_panel and _text(self.patch_panel_cassette_mode_combo.currentData()).lower() == "connectorised"
+        self.patch_panel_cassette_rear_combo.setEnabled(connectorised_cassette)
+        self.patch_panel_cassette_rear_count_spin.setEnabled(connectorised_cassette)
+        self.patch_panel_mpo_threshold_spin.setEnabled(is_modular_patch_panel)
         self.split_ratio_combo.setEnabled(asset_type == "fibre_splitter")
         self.olt_max_split_ratio_combo.setEnabled(
             asset_type == "optical_line_terminal"
@@ -708,7 +795,7 @@ class NetworkAssetEditorDialog(QDialog):
         optic_enabled = asset_type == "optical_transceiver"
         for widget in (self.optic_form_factor_combo, self.optic_speeds_button, self.optic_connector_combo, self.optic_standard_edit, self.optic_reach_spin, self.optic_tx_edit, self.optic_rx_edit, self.optic_insertion_edit, self.optic_return_edit, self.optic_wavelength_spin):
             widget.setEnabled(optic_enabled)
-        self.port_table.setEnabled(not optic_enabled)
+        self.port_table.setEnabled(not optic_enabled and not is_modular_patch_panel)
         capacity_enabled = asset_type in {
             "network_switch", "network_router", "firewall",
             "optical_line_terminal", "optical_network_terminal",
@@ -761,6 +848,11 @@ class NetworkAssetEditorDialog(QDialog):
                 return
             self.split_ratio_combo.setEditText(split_ratio)
 
+        is_modular_patch_panel = bool(
+            asset_type == "patch_panel"
+            and self.patch_panel_type_combo.currentText().strip().lower() == "fibre"
+            and _text(self.patch_panel_format_combo.currentData()).lower() == "modular_cassette"
+        )
         port_definitions = self._port_definitions()
         if asset_type == "fibre_splitter":
             input_names = ["Input-1"] if split_inputs == 1 else ["Input-A", "Input-B"]
@@ -780,7 +872,11 @@ class NetworkAssetEditorDialog(QDialog):
                 },
             ]
         portless_asset_types = {"ups", "pdu", "power_device", "cable_management", "optical_transceiver"}
-        if not port_definitions and asset_type not in portless_asset_types:
+        if (
+            not port_definitions
+            and asset_type not in portless_asset_types
+            and not is_modular_patch_panel
+        ):
             QMessageBox.critical(
                 self, "Invalid asset", "At least one physical port row is required."
             )
@@ -812,6 +908,31 @@ class NetworkAssetEditorDialog(QDialog):
         except ValueError:
             return
 
+        cassette_count = int(self.patch_panel_cassette_count_spin.value()) if is_modular_patch_panel else 0
+        cassette_front = _text(self.patch_panel_cassette_front_combo.currentData()).lower() if is_modular_patch_panel else ""
+        cassette_mode = _text(self.patch_panel_cassette_mode_combo.currentData()).lower() if is_modular_patch_panel else ""
+        cassette_rear = _text(self.patch_panel_cassette_rear_combo.currentData()).lower() if is_modular_patch_panel else ""
+        cassette_rear_count = int(self.patch_panel_cassette_rear_count_spin.value()) if is_modular_patch_panel else 0
+        if is_modular_patch_panel:
+            port_type = "sc" if cassette_front.startswith("sc_") else "lc"
+            connector_label = "SC" if port_type == "sc" else "LC"
+            explicit_names = [
+                f"C{cassette}-{connector_label}-{position:02d}"
+                for cassette in range(1, cassette_count + 1)
+                for position in range(1, 13)
+            ]
+            port_definitions = [
+                {
+                    "port_type": port_type,
+                    "port_count": cassette_count * 12,
+                    "port_use": "patch",
+                    "name_prefix": connector_label,
+                    "explicit_names": explicit_names,
+                    "supported_speeds_mbps": [],
+                    "default_speed_mbps": 0,
+                }
+            ]
+
         self.result = {
             **self.asset,
             "id": asset_id,
@@ -824,6 +945,15 @@ class NetworkAssetEditorDialog(QDialog):
                 if asset_type == "patch_panel"
                 else ""
             ),
+            "patch_panel_format": "modular_cassette" if is_modular_patch_panel else "fixed",
+            "modular_patch_panel": is_modular_patch_panel,
+            "patch_panel_cassette_count": cassette_count,
+            "patch_panel_cassette_capacity": 12 if is_modular_patch_panel else 0,
+            "patch_panel_cassette_front_connector": cassette_front,
+            "patch_panel_cassette_termination_mode": cassette_mode,
+            "patch_panel_cassette_rear_connector": cassette_rear if cassette_mode == "connectorised" else "",
+            "patch_panel_cassette_rear_connector_count": cassette_rear_count if cassette_mode == "connectorised" else 0,
+            "patch_panel_mpo_breakout_minimum_cores": int(self.patch_panel_mpo_threshold_spin.value()) if is_modular_patch_panel else 0,
             "split_ratio": split_ratio if asset_type == "fibre_splitter" else "",
             "max_split_ratio": (
                 self.olt_max_split_ratio_combo.currentText().strip()
@@ -847,10 +977,12 @@ class NetworkAssetEditorDialog(QDialog):
             "number_of_ports": 0 if asset_type == "optical_transceiver" else sum(row["port_count"] for row in port_definitions),
             "connections_in": (
                 split_inputs if asset_type == "fibre_splitter"
+                else cassette_count * 12 if is_modular_patch_panel
                 else int(self.connections_in_spin.value())
             ),
             "connections_out": (
                 split_outputs if asset_type == "fibre_splitter"
+                else cassette_count * 12 if is_modular_patch_panel
                 else int(self.connections_out_spin.value())
             ),
             "uplink_ports": int(self.uplink_ports_spin.value()),

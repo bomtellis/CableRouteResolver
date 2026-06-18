@@ -198,6 +198,17 @@ def _fibre_connection_demands(data: dict) -> List[dict]:
                 "route_path": route_path,
                 "length_m": max(0.0, _float(connection.get("length_m"))),
                 "used_cores": max(1, _int(connection.get("fibre_count"), 2)),
+                "cable_core_count": max(
+                    max(1, _int(connection.get("fibre_count"), 2)),
+                    _int(connection.get("cable_core_count"), 0),
+                ),
+                "from_termination_method": _text(connection.get("from_termination_method")),
+                "to_termination_method": _text(connection.get("to_termination_method")),
+                "from_connector_type": _text(connection.get("from_connector_type")),
+                "to_connector_type": _text(connection.get("to_connector_type")),
+                "connectorised_breakout": bool(connection.get("connectorised_breakout", False)),
+                "from_panel_termination_allocations": list(connection.get("from_panel_termination_allocations", [])) if isinstance(connection.get("from_panel_termination_allocations", []), list) else [],
+                "to_panel_termination_allocations": list(connection.get("to_panel_termination_allocations", [])) if isinstance(connection.get("to_panel_termination_allocations", []), list) else [],
                 "auto_generated": bool(connection.get("auto_generated", False)),
                 "redundancy_role": _text(connection.get("redundancy_role")),
                 "protection_group": _text(connection.get("protection_group")),
@@ -470,24 +481,214 @@ def _add_splice_record(
     return splice
 
 
+def _merge_panel_termination_allocations(
+    demands: Sequence[dict], side: str
+) -> List[dict]:
+    """Combine per-circuit panel allocations into cassette-level records."""
+    key = f"{side}_panel_termination_allocations"
+    merged: Dict[Tuple[str, int], dict] = {}
+    for demand in demands:
+        rows = demand.get(key, [])
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            panel_id = _text(row.get("panel_instance_id") or row.get("panel_id"))
+            position = max(1, _int(row.get("cassette_position"), 1))
+            if not panel_id:
+                continue
+            item = merged.setdefault(
+                (panel_id, position),
+                {
+                    "panel_instance_id": panel_id,
+                    "cassette_position": position,
+                    "ports": [],
+                    "termination_mode": _text(row.get("termination_mode")),
+                    "rear_connector": _text(row.get("rear_connector")),
+                    "rear_connector_count": 0,
+                    "fibre_count": 0,
+                    "logical_connection_ids": [],
+                },
+            )
+            for port in row.get("ports", []):
+                port = _text(port)
+                if port and port not in item["ports"]:
+                    item["ports"].append(port)
+            item["fibre_count"] += max(0, _int(row.get("fibre_count")))
+            logical_id = _text(demand.get("id"))
+            if logical_id and logical_id not in item["logical_connection_ids"]:
+                item["logical_connection_ids"].append(logical_id)
+            item["rear_connector_count"] = max(
+                item["rear_connector_count"],
+                max(0, _int(row.get("rear_connector_count"))),
+            )
+    return [merged[key] for key in sorted(merged)]
+
+
+def _configure_panel_allocations_for_mpo(
+    data: dict,
+    allocations: Sequence[dict],
+    rear_connector: str,
+) -> None:
+    """Convert allocated modular cassettes to connectorised MPO/MTP breakout."""
+    rear_connector = _text(rear_connector).lower() or "mpo-24"
+    rear_fibres = 24 if rear_connector.endswith("24") else 12
+    instances = {
+        _text(row.get("id")): row
+        for row in data.get("network_asset_instances", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    for allocation in allocations:
+        panel = instances.get(_text(allocation.get("panel_instance_id")))
+        if panel is None:
+            continue
+        position = max(1, _int(allocation.get("cassette_position"), 1))
+        cassettes = panel.get("fibre_cassettes", [])
+        if not isinstance(cassettes, list):
+            continue
+        cassette = next(
+            (
+                row for index, row in enumerate(cassettes, start=1)
+                if isinstance(row, dict)
+                and max(1, _int(row.get("position"), index)) == position
+            ),
+            None,
+        )
+        if cassette is None:
+            continue
+        ports = [_text(value) for value in allocation.get("ports", []) if _text(value)]
+        used_names = [
+            _text(value)
+            for value in cassette.get("used_front_connector_names", [])
+            if _text(value)
+        ]
+        for port in ports:
+            if port not in used_names:
+                used_names.append(port)
+        fibre_count = max(
+            max(0, _int(cassette.get("used_fibres"))),
+            max(0, _int(allocation.get("fibre_count"))),
+            len(used_names) * 2,
+        )
+        cassette["termination_mode"] = "connectorised"
+        cassette["rear_connector"] = rear_connector
+        cassette["used_front_connector_names"] = used_names
+        cassette["used_front_connectors"] = max(
+            max(0, _int(cassette.get("used_front_connectors"))), len(used_names)
+        )
+        cassette["used_fibres"] = fibre_count
+        cassette["rear_connector_count"] = max(
+            1,
+            min(4, int(math.ceil(fibre_count / float(rear_fibres)))),
+        )
+        allocation["termination_mode"] = "connectorised"
+        allocation["rear_connector"] = rear_connector
+        allocation["rear_connector_count"] = cassette["rear_connector_count"]
+        panel["connectorised_breakout"] = True
+        panel["termination_count"] = sum(
+            max(0, _int(row.get("used_front_connectors")))
+            for row in cassettes
+            if isinstance(row, dict)
+        )
+        panel["available_connector_count"] = max(
+            0,
+            sum(
+                max(0, _int(row.get("front_connector_capacity"), 12))
+                for row in cassettes
+                if isinstance(row, dict)
+            )
+            - _int(panel.get("termination_count")),
+        )
+
+
+def _apply_cable_panel_metadata(
+    data: dict,
+    cable: dict,
+    demands: Sequence[dict],
+    *,
+    include_from: bool,
+    include_to: bool,
+    mpo_threshold: int,
+    mpo_connector: str,
+) -> None:
+    """Attach panel/cassette allocations and apply large-trunk MPO breakout."""
+    from_allocations = (
+        _merge_panel_termination_allocations(demands, "from")
+        if include_from else []
+    )
+    to_allocations = (
+        _merge_panel_termination_allocations(demands, "to")
+        if include_to else []
+    )
+    cable["from_panel_termination_allocations"] = from_allocations
+    cable["to_panel_termination_allocations"] = to_allocations
+
+    large_trunk = max(1, _int(cable.get("core_count"))) >= max(12, mpo_threshold)
+    if not large_trunk or not (from_allocations or to_allocations):
+        return
+
+    cable["connectorised_breakout"] = True
+    if from_allocations:
+        cable["from_termination_method"] = "connectorised"
+        cable["from_connector_type"] = mpo_connector
+        _configure_panel_allocations_for_mpo(data, from_allocations, mpo_connector)
+    if to_allocations:
+        cable["to_termination_method"] = "connectorised"
+        cable["to_connector_type"] = mpo_connector
+        _configure_panel_allocations_for_mpo(data, to_allocations, mpo_connector)
+    cable["connector_count"] = int(
+        _text(cable.get("from_termination_method")) == "connectorised"
+    ) + int(_text(cable.get("to_termination_method")) == "connectorised")
+    cable["notes"] = (
+        "Generated high-core-count spine with MPO/MTP rear interfaces into "
+        "shared modular LC/SC breakout cassettes."
+    )
+    update_fibre_cable_loss(cable)
+
+
 def _sync_direct_fibre_cables(data: dict, cables: List[dict], demands: Sequence[dict]) -> List[dict]:
     planning = data.get("network_settings", {}).get("physical_fibre_planning", {})
     preferred = _text(planning.get("default_cable_type_id"))
     spare = max(0.0, _float(planning.get("spare_core_percent"), 15.0)) / 100.0
+    mpo_threshold = max(12, _int(planning.get("mpo_breakout_minimum_cores"), 48))
+    mpo_connector = _text(planning.get("mpo_breakout_connector")).lower() or "mpo-24"
+    if mpo_connector not in {"mpo-12", "mtp-12", "mpo-24", "mtp-24"}:
+        mpo_connector = "mpo-24"
     created: List[dict] = []
     assets = {_text(row.get("id")): row for row in data.get("network_assets", []) if isinstance(row, dict)}
     instances = {_text(row.get("id")): row for row in data.get("network_asset_instances", []) if isinstance(row, dict)}
     for demand in sorted(demands, key=lambda row: row["id"]):
-        required = max(demand["used_cores"], int(math.ceil(demand["used_cores"] * (1.0 + spare))))
+        declared_cores = max(demand["used_cores"], _int(demand.get("cable_core_count"), demand["used_cores"]))
+        required = max(declared_cores, int(math.ceil(demand["used_cores"] * (1.0 + spare))))
         target_asset = assets.get(_text(instances.get(demand["to_instance_id"], {}).get("asset_id")), {})
         target_is_splitter = _text(target_asset.get("asset_type")) == "fibre_splitter"
-        to_method = _text(planning.get("splitter_termination_method")) if target_is_splitter else "connectorised"
+        from_method = _text(demand.get("from_termination_method")) or "connectorised"
+        to_method = _text(demand.get("to_termination_method"))
+        if not to_method:
+            to_method = _text(planning.get("splitter_termination_method")) if target_is_splitter else "connectorised"
         cable, _allocation = _new_fibre_cable(
             data, cables, [demand], demand["route_path"], "direct", preferred, required,
             from_instance_id=demand["from_instance_id"], from_port=demand["from_port"],
             to_instance_id=demand["to_instance_id"], to_port=demand["to_port"],
-            from_method="connectorised", to_method=to_method or "connectorised",
+            from_method=from_method, to_method=to_method or "connectorised",
         )
+        cable["connectorised_breakout"] = bool(demand.get("connectorised_breakout", False))
+        cable["from_connector_type"] = _text(demand.get("from_connector_type"))
+        cable["to_connector_type"] = _text(demand.get("to_connector_type"))
+        cable["from_panel_termination_allocations"] = list(demand.get("from_panel_termination_allocations", []))
+        cable["to_panel_termination_allocations"] = list(demand.get("to_panel_termination_allocations", []))
+        _apply_cable_panel_metadata(
+            data,
+            cable,
+            [demand],
+            include_from=bool(demand.get("from_panel_termination_allocations")),
+            include_to=bool(demand.get("to_panel_termination_allocations")),
+            mpo_threshold=mpo_threshold,
+            mpo_connector=mpo_connector,
+        )
+        if cable.get("connectorised_breakout") and "MPO/MTP" not in _text(cable.get("notes")):
+            cable["notes"] = "Generated high-core-count MPO/MTP trunk with modular cassette breakout."
         created.append(cable)
     return created
 
@@ -498,6 +699,11 @@ def _sync_spine_and_spur_cables(data: dict, cables: List[dict], demands: Sequenc
     max_per_tray = max(1, min(24, _int(planning.get("max_splices_per_cassette"), 24)))
     branch_method = _text(planning.get("branch_termination_method")) or "spliced"
     splitter_method = _text(planning.get("splitter_termination_method")) or "connectorised"
+    extend_reduced_spine = bool(planning.get("extend_reduced_count_spine", True))
+    mpo_threshold = max(12, _int(planning.get("mpo_breakout_minimum_cores"), 48))
+    mpo_connector = _text(planning.get("mpo_breakout_connector")).lower() or "mpo-24"
+    if mpo_connector not in {"mpo-12", "mtp-12", "mpo-24", "mtp-24"}:
+        mpo_connector = "mpo-24"
     created: List[dict] = []
     demand_by_id = {row["id"]: row for row in demands}
     assets = {_text(row.get("id")): row for row in data.get("network_assets", []) if isinstance(row, dict)}
@@ -519,10 +725,8 @@ def _sync_spine_and_spur_cables(data: dict, cables: List[dict], demands: Sequenc
         edge_demands: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
         outgoing: Dict[str, Set[str]] = defaultdict(set)
         incoming: Dict[str, Set[str]] = defaultdict(set)
-        destinations: Dict[str, Set[str]] = defaultdict(set)
         for demand in group:
             path = demand["route_path"]
-            destinations[path[-1]].add(demand["id"])
             for a, b in zip(path, path[1:]):
                 edge_demands[(a, b)].add(demand["id"])
                 outgoing[a].add(b)
@@ -554,35 +758,100 @@ def _sync_spine_and_spur_cables(data: dict, cables: List[dict], demands: Sequenc
 
         for child in sorted(outgoing.get(root, set())):
             walk(root, child)
-        for edge in sorted(edge_demands):
-            if edge not in visited:
-                walk(*edge)
+        for edge_key in sorted(edge_demands):
+            if edge_key not in visited:
+                walk(*edge_key)
 
-        segment_by_start: Dict[str, List[dict]] = defaultdict(list)
-        segment_by_end: Dict[str, List[dict]] = defaultdict(list)
-        for segment in segments:
-            segment_by_start[segment["path"][0]].append(segment)
-            segment_by_end[segment["path"][-1]].append(segment)
+        segment_by_start: Dict[str, List[int]] = defaultdict(list)
+        segment_by_end: Dict[str, List[int]] = defaultdict(list)
+        for index, segment in enumerate(segments):
+            segment_by_start[segment["path"][0]].append(index)
+            segment_by_end[segment["path"][-1]].append(index)
+
+        role_by_index: Dict[int, str] = {
+            index: ("spine" if len(segment["demand_ids"]) > 1 else "spur")
+            for index, segment in enumerate(segments)
+        }
+
+        def continuation_score(index: int) -> Tuple[int, int, float, str]:
+            segment = segments[index]
+            segment_demands = [demand_by_id[value] for value in segment["demand_ids"]]
+            used = sum(max(1, _int(row.get("used_cores"), 1)) for row in segment_demands)
+            remaining_distance = max(
+                (_route_path_length(data, row.get("route_path", []), row.get("length_m", 0.0)) for row in segment_demands),
+                default=0.0,
+            )
+            return (len(segment["demand_ids"]), used, remaining_distance, "|".join(segment["path"]))
+
+        # Walk outward from every root segment. At each branch, keep the dominant
+        # route as the spine. Once only one circuit remains it becomes a
+        # reduced-count spine extension; side branches remain true spurs.
+        root_indices = sorted(segment_by_start.get(root, []), key=continuation_score, reverse=True)
+        queue = deque(root_indices)
+        queued = set(root_indices)
+        while queue:
+            parent_index = queue.popleft()
+            parent_segment = segments[parent_index]
+            child_indices = sorted(
+                segment_by_start.get(parent_segment["path"][-1], []),
+                key=continuation_score,
+                reverse=True,
+            )
+            if child_indices and extend_reduced_spine and role_by_index.get(parent_index) in {"spine", "spine_extension"}:
+                dominant = child_indices[0]
+                if len(segments[dominant]["demand_ids"]) == 1:
+                    role_by_index[dominant] = "spine_extension"
+            for child_index in child_indices:
+                if child_index not in queued:
+                    queued.add(child_index)
+                    queue.append(child_index)
+
+        # Parent-before-child order guarantees parent cable identifiers are
+        # available when each reduced-count continuation is created.
+        creation_order: List[int] = []
+        queue = deque(root_indices)
+        seen_indices: Set[int] = set()
+        while queue:
+            index = queue.popleft()
+            if index in seen_indices:
+                continue
+            seen_indices.add(index)
+            creation_order.append(index)
+            for child_index in segment_by_start.get(segments[index]["path"][-1], []):
+                queue.append(child_index)
+        creation_order.extend(index for index in range(len(segments)) if index not in seen_indices)
 
         cable_for_segment: Dict[int, dict] = {}
         allocation_for_segment: Dict[int, Dict[str, List[int]]] = {}
-        for index, segment in enumerate(segments):
+        for index in creation_order:
+            segment = segments[index]
             segment_demands = [demand_by_id[value] for value in sorted(segment["demand_ids"])]
             used = sum(row["used_cores"] for row in segment_demands)
             required = max(used, int(math.ceil(used * (1.0 + spare))))
-            role = "spine" if len(segment["demand_ids"]) > 1 else "spur"
-            preferred = _text(planning.get("spine_cable_type_id" if role == "spine" else "spur_cable_type_id"))
-            first = segment["path"][0] == root
+            role = role_by_index[index]
+            first = segment["path"][0] == root and not segment_by_end.get(segment["path"][0])
+            if role == "spur":
+                preferred = _text(planning.get("spur_cable_type_id"))
+            elif first:
+                preferred = _text(planning.get("spine_cable_type_id"))
+            else:
+                # A downstream continuation is deliberately allowed to select
+                # the smallest library cable that satisfies its remaining load.
+                preferred = "" if extend_reduced_spine else _text(planning.get("spine_cable_type_id"))
             final_demands = [row for row in segment_demands if row["route_path"][-1] == segment["path"][-1]]
             sole_final = final_demands[0] if len(final_demands) == 1 and len(segment["demand_ids"]) == 1 else None
             target_asset = assets.get(_text(instances.get(_text((sole_final or {}).get("to_instance_id")), {}).get("asset_id")), {})
             target_is_splitter = _text(target_asset.get("asset_type")) == "fibre_splitter"
             to_method = splitter_method if target_is_splitter else ("connectorised" if sole_final else branch_method)
-            parent_cable_id = ""
-            parent_segments = segment_by_end.get(segment["path"][0], [])
-            if parent_segments:
-                parent_index = segments.index(parent_segments[0])
-                parent_cable_id = _text(cable_for_segment.get(parent_index, {}).get("id"))
+            parent_indices = segment_by_end.get(segment["path"][0], [])
+            parent_cable_id = next(
+                (
+                    _text(cable_for_segment[parent_index].get("id"))
+                    for parent_index in parent_indices
+                    if parent_index in cable_for_segment
+                ),
+                "",
+            )
             cable, allocation = _new_fibre_cable(
                 data, cables, segment_demands, segment["path"], role, preferred, required,
                 from_instance_id=segment_demands[0]["from_instance_id"] if first else "",
@@ -594,23 +863,38 @@ def _sync_spine_and_spur_cables(data: dict, cables: List[dict], demands: Sequenc
                 from_method="connectorised" if first else branch_method,
                 to_method=to_method,
             )
+            if role == "spine_extension":
+                cable["notes"] = (
+                    "Reduced-count continuation of the dominant spine route; "
+                    "side branches are modelled as separate spur cables."
+                )
+                cable["spine_continuation"] = True
+            _apply_cable_panel_metadata(
+                data,
+                cable,
+                segment_demands,
+                include_from=first,
+                include_to=bool(sole_final),
+                mpo_threshold=mpo_threshold,
+                mpo_connector=mpo_connector,
+            )
             cable_for_segment[index] = cable
             allocation_for_segment[index] = allocation
             created.append(cable)
 
         # Map core designations through each branch. Every circuit is explicitly
         # spliced from its incoming spine core to the designated outgoing core.
-        for node_name, parent_segments in sorted(segment_by_end.items()):
-            child_segments = segment_by_start.get(node_name, [])
-            if not child_segments:
+        for node_name, parent_indices in sorted(segment_by_end.items()):
+            child_indices = segment_by_start.get(node_name, [])
+            if not child_indices:
                 continue
-            for parent_segment in parent_segments:
-                parent_index = segments.index(parent_segment)
+            for parent_index in parent_indices:
+                parent_segment = segments[parent_index]
                 parent_cable = cable_for_segment[parent_index]
                 enclosure, cassettes = _ensure_branch_enclosure(data, node_name, parent_cable, max_per_tray)
                 splice_position = 0
-                for child_segment in child_segments:
-                    child_index = segments.index(child_segment)
+                for child_index in child_indices:
+                    child_segment = segments[child_index]
                     child_cable = cable_for_segment[child_index]
                     common_ids = sorted(parent_segment["demand_ids"] & child_segment["demand_ids"])
                     for circuit_id in common_ids:
@@ -650,7 +934,6 @@ def _sync_spine_and_spur_cables(data: dict, cables: List[dict], demands: Sequenc
                             termination_port=demand["to_port"],
                         )
     return created
-
 
 def sync_fibre_cables_from_connections(data: dict, replace_auto: bool = False) -> List[dict]:
     """Build designated fixed-installation fibre from logical connections.
@@ -1176,8 +1459,8 @@ def fibre_layer_defaults() -> dict:
         # Physical coordinates are in the project/DXF world coordinate system.
         # Keep symbols and labels deliberately small so they overlay a floor
         # plan without obscuring rooms, routes or nearby fibre records.
-        "symbol_scale": 0.12,
-        "label_scale": 0.14,
+        "symbol_scale": 0.075,
+        "label_scale": 0.09,
         "cable_width_scale": 0.18,
     }
 
@@ -1224,12 +1507,12 @@ def _record_location(data: dict, instance_id: str) -> tuple[str, int, float, flo
 
 
 def sync_fibre_nodes_from_design(data: dict, replace_auto: bool = False) -> List[dict]:
-    """Create physical terminations and splice cassettes for generated fibre ends.
+    """Create physical terminations and cassette records for generated fibre ends.
 
-    Passive nodes are deliberately stored outside ``network_asset_instances`` so
-    they never appear in the logical topology.  They are linked to the active or
-    patch-panel instance that terminates the cable and can be drawn on the
-    independent physical-fibre map.
+    Modular patch-panel instances create one physical cassette node per fitted
+    cassette position.  Cassette records retain front connector usage and
+    splice/MPO/MTP rear-interface configuration so physical schedules do not
+    collapse a four-cassette chassis into one oversized generic tray.
     """
     nodes = data.setdefault("network_fibre_nodes", [])
     if replace_auto:
@@ -1249,13 +1532,47 @@ def sync_fibre_nodes_from_design(data: dict, replace_auto: bool = False) -> List
         for item in nodes
         if isinstance(item, dict) and _text(item.get("linked_instance_id"))
     }
+    existing_cassettes = {
+        (
+            _text(item.get("linked_instance_id")),
+            max(1, _int(item.get("cassette_position", item.get("tray_number")), 1)),
+        ): item
+        for item in nodes
+        if isinstance(item, dict)
+        and _text(item.get("linked_instance_id"))
+        and _text(item.get("node_type")) == "splice_cassette"
+    }
     created: List[dict] = []
     endpoint_ids: Set[str] = set()
+    physical_cable_ids_by_logical: Dict[str, List[str]] = defaultdict(list)
     for cable in data.get("network_fibre_cables", []):
         if not isinstance(cable, dict):
             continue
         endpoint_ids.add(_text(cable.get("from_instance_id")))
         endpoint_ids.add(_text(cable.get("to_instance_id")))
+        cable_id = _text(cable.get("id"))
+        if cable_id:
+            for logical_id in cable.get("logical_connection_ids", []):
+                logical_id = _text(logical_id)
+                if logical_id and cable_id not in physical_cable_ids_by_logical[logical_id]:
+                    physical_cable_ids_by_logical[logical_id].append(cable_id)
+
+    # A single high-core-count trunk can fan out across several modular
+    # panel chassis.  Only the first panel is the cable endpoint record,
+    # while the detailed allocation metadata names every additional panel.
+    # Include all fitted modular panels so each chassis and cassette remains
+    # visible in the physical-fibre schedule and editor.
+    for instance_id, instance in instances.items():
+        asset = assets.get(_text(instance.get("asset_id")), {})
+        if (
+            _text(asset.get("asset_type")).lower() == "patch_panel"
+            and _text(asset.get("patch_panel_type")).lower() == "fibre"
+            and (
+                bool(asset.get("modular_patch_panel"))
+                or isinstance(instance.get("fibre_cassettes"), list)
+            )
+        ):
+            endpoint_ids.add(instance_id)
     for instance_id in sorted(value for value in endpoint_ids if value):
         instance = instances.get(instance_id)
         if not instance:
@@ -1263,6 +1580,7 @@ def sync_fibre_nodes_from_design(data: dict, replace_auto: bool = False) -> List
         asset = assets.get(_text(instance.get("asset_id")), {})
         asset_type = _text(asset.get("asset_type")).lower()
         is_panel = asset_type == "patch_panel" and _text(asset.get("patch_panel_type")).lower() == "fibre"
+        is_modular_panel = is_panel and bool(asset.get("modular_patch_panel"))
         location_name, floor, x, y = _record_location(data, instance_id)
         termination = existing_by_instance_type.get((instance_id, "termination"))
         if termination is None:
@@ -1287,28 +1605,96 @@ def sync_fibre_nodes_from_design(data: dict, replace_auto: bool = False) -> List
             nodes.append(termination)
             existing_by_instance_type[(instance_id, "termination")] = termination
             created.append(termination)
-        if is_panel and (instance_id, "splice_cassette") not in existing_by_instance_type:
-            cassette = {
-                "id": next_record_id(nodes, "FSC"),
-                "name": f"{_text(instance.get('name')) or instance_id} cassette",
-                "node_type": "splice_cassette",
-                "linked_instance_id": instance_id,
-                "location_name": location_name,
-                "floor": floor,
-                "x": x,
-                "y": y,
-                "rack_name": _text(instance.get("rack_name")),
-                "rack_start_u": _int(instance.get("rack_start_u")),
-                "rack_units": 1,
-                "parent_node_id": _text(termination.get("id")),
-                "cassette_capacity": max(12, _int(asset.get("number_of_ports"), 12)),
-                "drawing_layer": "NET-FIBRE-SPLICE",
-                "notes": "Generated splice cassette associated with the fibre patch panel.",
-                "auto_generated": True,
-            }
-            nodes.append(cassette)
-            existing_by_instance_type[(instance_id, "splice_cassette")] = cassette
-            created.append(cassette)
+
+        if not is_panel:
+            continue
+
+        cassette_rows = instance.get("fibre_cassettes", [])
+        if not isinstance(cassette_rows, list) or not cassette_rows:
+            cassette_total = (
+                max(1, min(4, _int(asset.get("patch_panel_cassette_count"), 4)))
+                if is_modular_panel
+                else 1
+            )
+            cassette_rows = [
+                {
+                    "position": position,
+                    "front_connector": _text(asset.get("patch_panel_cassette_front_connector")) or "lc_duplex",
+                    "front_connector_capacity": 12 if is_modular_panel else max(12, _int(asset.get("number_of_ports"), 12)),
+                    "termination_mode": _text(asset.get("patch_panel_cassette_termination_mode")) or "spliced",
+                    "rear_connector": _text(asset.get("patch_panel_cassette_rear_connector")) or "splice",
+                    "rear_connector_count": _int(asset.get("patch_panel_cassette_rear_connector_count"), 0),
+                    "used_front_connectors": 0,
+                    "used_fibres": 0,
+                    "cable_ids": [],
+                }
+                for position in range(1, cassette_total + 1)
+            ]
+
+        for row_index, cassette_config in enumerate(cassette_rows, start=1):
+            if not isinstance(cassette_config, dict):
+                continue
+            position = max(1, _int(cassette_config.get("position"), row_index))
+            cassette = existing_cassettes.get((instance_id, position))
+            if cassette is None:
+                cassette = {
+                    "id": next_record_id(nodes, "FSC"),
+                    "node_type": "splice_cassette",
+                    "linked_instance_id": instance_id,
+                    "location_name": location_name,
+                    "floor": floor,
+                    "x": x,
+                    "y": y,
+                    "rack_name": _text(instance.get("rack_name")),
+                    "rack_start_u": _int(instance.get("rack_start_u")),
+                    "rack_units": 1,
+                    "parent_node_id": _text(termination.get("id")),
+                    "drawing_layer": "NET-FIBRE-SPLICE",
+                    "auto_generated": True,
+                }
+                nodes.append(cassette)
+                existing_cassettes[(instance_id, position)] = cassette
+                created.append(cassette)
+            front_capacity = max(1, _int(cassette_config.get("front_connector_capacity"), 12))
+            front_connector = _text(cassette_config.get("front_connector")) or "lc_duplex"
+            fibres_per_position = 1 if front_connector == "sc_simplex" else 2
+            mode = _text(cassette_config.get("termination_mode")) or "spliced"
+            rear = _text(cassette_config.get("rear_connector")) or ("splice" if mode == "spliced" else "mpo-24")
+            logical_circuit_ids = [
+                _text(value)
+                for value in cassette_config.get("cable_ids", [])
+                if _text(value)
+            ] if isinstance(cassette_config.get("cable_ids", []), list) else []
+            associated_physical_cable_ids: List[str] = []
+            for logical_id in logical_circuit_ids:
+                for cable_id in physical_cable_ids_by_logical.get(logical_id, []):
+                    if cable_id not in associated_physical_cable_ids:
+                        associated_physical_cable_ids.append(cable_id)
+            cassette.update({
+                "name": f"{_text(instance.get('name')) or instance_id} cassette {position}",
+                "cassette_position": position,
+                "tray_number": position,
+                "front_connector": front_connector,
+                "front_connector_capacity": front_capacity,
+                "cassette_capacity": front_capacity,
+                "splice_capacity": front_capacity * fibres_per_position,
+                "termination_mode": mode,
+                "rear_connector": rear,
+                "rear_connector_count": max(0, _int(cassette_config.get("rear_connector_count"))),
+                "used_front_connectors": max(0, _int(cassette_config.get("used_front_connectors"))),
+                "used_front_connector_names": list(cassette_config.get("used_front_connector_names", [])) if isinstance(cassette_config.get("used_front_connector_names", []), list) else [],
+                "used_fibres": max(0, _int(cassette_config.get("used_fibres"))),
+                "incoming_cable_id": (
+                    associated_physical_cable_ids[0]
+                    if associated_physical_cable_ids else ""
+                ),
+                "cable_ids": associated_physical_cable_ids,
+                "circuit_ids": logical_circuit_ids,
+                "notes": (
+                    f"Modular cassette {position}: {front_connector}, {mode}; "
+                    f"rear interface {rear} x{max(0, _int(cassette_config.get('rear_connector_count')))}."
+                ),
+            })
     return created
 
 

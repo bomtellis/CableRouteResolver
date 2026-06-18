@@ -1976,24 +1976,33 @@ class TopologyGraphicsView(QGraphicsView):
         self._rubber_band_selecting = False
         self._pan_button = Qt.NoButton
         self._pan_start = QPoint()
-        self._navigation_margin = 5000.0
+        # Keep enough room to pan past the diagram without making the scene
+        # extent look like an oversized bounding box around the topology.  The
+        # scene expands further on demand while the user pans.
+        self._navigation_margin = 360.0
         self._min_zoom = 0.005
         self._max_zoom = 8.0
         self._normal_render_hints = self.renderHints()
 
+    def _interactive_item_at(self, position: QPoint) -> Optional[QGraphicsItem]:
+        """Return a selectable topology object beneath *position*.
+
+        Decorative location enclosures, layer headings and background paths can
+        cover most of a populated scene.  They must not prevent left-button
+        panning, while selectable cards, rack equipment, ports and link labels
+        continue to receive their normal mouse events.
+        """
+        for hit in self.items(position):
+            item = hit
+            while item is not None:
+                if item.flags() & QGraphicsItem.ItemIsSelectable:
+                    return item
+                item = item.parentItem()
+        return None
+
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.LeftButton:
-            selectable = False
-            for hit in self.items(event.position().toPoint()):
-                item = hit
-                while item is not None:
-                    if item.flags() & QGraphicsItem.ItemIsSelectable:
-                        selectable = True
-                        break
-                    item = item.parentItem()
-                if selectable:
-                    break
-            if not selectable:
+            if self._interactive_item_at(event.position().toPoint()) is None:
                 self.emptySceneDoubleClicked.emit(
                     self.mapToScene(event.position().toPoint())
                 )
@@ -2003,7 +2012,7 @@ class TopologyGraphicsView(QGraphicsView):
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         position = event.position().toPoint()
-        clicked_item = self.itemAt(position)
+        clicked_item = self._interactive_item_at(position)
 
         # Middle mouse pans from anywhere.
         if event.button() == Qt.MiddleButton:
@@ -2173,7 +2182,14 @@ class TopologyGraphicsView(QGraphicsView):
         if center is not None:
             required = required.united(QRectF(center.x() - 1.0, center.y() - 1.0, 2.0, 2.0))
 
-        margin = max(self._navigation_margin, visible_rect.width(), visible_rect.height())
+        # Keep the initial scene rectangle close to the actual drawing.  The
+        # scene is enlarged incrementally while panning, so it does not need a
+        # full viewport-width border on every rebuild.
+        margin = max(
+            self._navigation_margin,
+            visible_rect.width() * 0.35,
+            visible_rect.height() * 0.35,
+        )
         required = required.adjusted(-margin, -margin, margin, margin)
         if not current_rect.contains(required):
             scene.setSceneRect(current_rect.united(required))
@@ -2234,6 +2250,14 @@ class NetworkTopologyDialog(QDialog):
     CARD_W = TopologyCardItem.WIDTH
     CARD_H = TopologyCardItem.HEIGHT
 
+    RACK_LEFT_START = 92.0
+    RACK_TOP = 90.0
+    RACK_WIDTH = 518.6
+    # Includes the right-side 0U PDU bank, the next rack's unit-number gutter
+    # and a clear mouse target between adjacent cabinets.
+    RACK_GAP = 230.0
+    RACK_UNIT_PITCH = 44.45
+
     # Horizontal distance between sibling branches.
     X_GAP = 90
 
@@ -2283,6 +2307,10 @@ class NetworkTopologyDialog(QDialog):
         self._rack_port_nodes_by_id: Dict[str, TopologyNode] = {}
         self._switch_port_nodes_by_id: Dict[str, TopologyNode] = {}
         self._visible_synthetic_edges: Dict[str, TopologyEdge] = {}
+        # Drawing-oriented fibre endpoints for the current scene.  The source/
+        # target direction here follows the visible topology hierarchy rather
+        # than the storage order of the underlying connection record.
+        self._visible_drawn_fibre_edges: List[Tuple[str, str, TopologyEdge]] = []
         self._floor_match_cache: Dict[Tuple[str, int], bool] = {}
         self._logical_children_cache: Dict[str, Tuple[str, ...]] = {}
         self._collapsed_edge_cache: Dict[Tuple[str, str], TopologyEdge] = {}
@@ -4029,11 +4057,11 @@ class NetworkTopologyDialog(QDialog):
             return positions
         floor, location, _selected_rack = key
         rack_names = self._rack_names_for_location(floor, location)
-        rack_left_start = 92.0
-        rack_width = 518.6
-        rack_gap = 90.0
-        rack_top = 90.0
-        unit_pitch = 44.45
+        rack_left_start = self.RACK_LEFT_START
+        rack_width = self.RACK_WIDTH
+        rack_gap = self.RACK_GAP
+        rack_top = self.RACK_TOP
+        unit_pitch = self.RACK_UNIT_PITCH
         rack_x_by_name = {
             rack_name: rack_left_start + index * (rack_width + rack_gap)
             for index, rack_name in enumerate(rack_names)
@@ -4345,6 +4373,32 @@ class NetworkTopologyDialog(QDialog):
             if self.rack_focus is None and self.switch_port_focus is None
             else []
         )
+
+        # Register every visible fibre using its actual drawing direction.
+        # Connection records are not guaranteed to store from/to in upstream-
+        # to-downstream order, which previously made some secondary fibres use
+        # the card centre while access/distribution fibres used separate ports.
+        self._visible_drawn_fibre_edges = []
+        seen_drawn_fibres: Set[Tuple[str, str, str]] = set()
+        for child_id, parent_id in self.visible_parent.items():
+            if child_id.startswith("client::"):
+                continue
+            edge = self._edge_by_id(self.visible_parent_edge.get(child_id, ""))
+            if edge is None or _text(edge.medium).lower() != "fibre":
+                continue
+            key = (parent_id, child_id, edge.edge_id)
+            if key not in seen_drawn_fibres:
+                seen_drawn_fibres.add(key)
+                self._visible_drawn_fibre_edges.append((parent_id, child_id, edge))
+        for edge in visible_cross_edges:
+            if _text(edge.medium).lower() != "fibre":
+                continue
+            source_id, target_id = self._cross_link_origin_target(edge)
+            key = (source_id, target_id, edge.edge_id)
+            if key not in seen_drawn_fibres:
+                seen_drawn_fibres.add(key)
+                self._visible_drawn_fibre_edges.append((source_id, target_id, edge))
+
         if self.rack_focus is None:
             for edge in visible_cross_edges:
                 if (
@@ -4384,25 +4438,14 @@ class NetworkTopologyDialog(QDialog):
                 self._add_link(parent_id, child_id, positions, edge, client_link=child_id.startswith("client::"))
 
         if self.show_redundant_check.isChecked() and self.rack_focus is None and self.switch_port_focus is None:
-            failover_groups: Dict[str, List[Tuple[str, str, TopologyEdge]]] = defaultdict(list)
-            ordinary_cross_links: List[Tuple[str, str, TopologyEdge]] = []
+            # Draw every redundant fibre as an independent routed connection,
+            # matching the access/distribution presentation.  Primary and
+            # secondary fibres therefore terminate at separate positions on the
+            # downstream card instead of merging into a shared failover trunk.
             for edge in visible_cross_edges:
                 if edge.source_id not in positions or edge.target_id not in positions:
                     continue
                 source_id, target_id = self._cross_link_origin_target(edge)
-                row = (source_id, target_id, edge)
-                if self._edge_is_failover(edge):
-                    failover_groups[self._failover_group_key(edge, source_id)].append(row)
-                else:
-                    ordinary_cross_links.append(row)
-            for rows in failover_groups.values():
-                unique_sources = {source_id for source_id, _target_id, _edge in rows}
-                if len(rows) >= 2 and len(unique_sources) >= 1:
-                    self._add_shared_failover_trunk(rows, positions)
-                    continue
-                source_id, target_id, edge = rows[0]
-                self._add_link(source_id, target_id, positions, edge, cross_link=True)
-            for source_id, target_id, edge in ordinary_cross_links:
                 self._add_link(source_id, target_id, positions, edge, cross_link=True)
 
         if self.switch_port_focus is not None:
@@ -4594,9 +4637,6 @@ class NetworkTopologyDialog(QDialog):
         }
         layer_rects: Dict[int, QRectF] = {}
         layer_nodes: Dict[int, List[TopologyNode]] = defaultdict(list)
-        traffic_tiers_by_layer: Dict[int, Set[int]] = defaultdict(set)
-        tier_by_instance = self.model.traffic.get("tier_by_instance", {})
-        unique_by_tier = self.model.traffic.get("unique_by_tier", {})
 
         for node_id in visible_ids:
             if node_id not in positions:
@@ -4611,10 +4651,6 @@ class NetworkTopologyDialog(QDialog):
             )
             if not node.pseudo:
                 layer_nodes[layer].append(node)
-                if node.node_id in tier_by_instance:
-                    traffic_tiers_by_layer[layer].add(
-                        _int(tier_by_instance.get(node.node_id))
-                    )
 
         def bandwidth_text(value_mbps: float) -> str:
             value = max(0.0, float(value_mbps or 0.0))
@@ -4657,31 +4693,12 @@ class NetworkTopologyDialog(QDialog):
                 max(0.0, node.packet_capacity_pps) for node in nodes
             )
 
-            if layer in {0, 7}:
-                bandwidth_load = total_bandwidth
-                packet_load = total_packets
-            else:
-                tier_loads = [
-                    unique_by_tier.get(tier, {})
-                    for tier in traffic_tiers_by_layer.get(layer, set())
-                ]
-                # A displayed layer can combine sequential logical tiers, for
-                # example distribution and OLT. Use the largest unique service
-                # load rather than adding the same endpoint demand twice.
-                bandwidth_load = max(
-                    (
-                        max(0.0, _float(row.get("bandwidth_mbps")))
-                        for row in tier_loads
-                    ),
-                    default=0.0,
-                )
-                packet_load = max(
-                    (
-                        max(0.0, _float(row.get("packet_rate_pps")))
-                        for row in tier_loads
-                    ),
-                    default=0.0,
-                )
+            # The protected hierarchy can legitimately carry the same demand
+            # through several devices and redundant paths.  Showing a summed or
+            # de-duplicated value on every downstream layer was misleading, so
+            # the project-wide total is shown only at the permanent Site layer.
+            bandwidth_load = total_bandwidth if layer == 0 else 0.0
+            packet_load = total_packets if layer == 0 else 0.0
 
             text_lines = [title]
             if bandwidth_load > 0.0 or packet_load > 0.0:
@@ -4767,11 +4784,11 @@ class NetworkTopologyDialog(QDialog):
         rack_names = self._rack_names_for_location(floor, location)
         if not rack_names:
             return
-        rack_left_start = 92.0
-        rack_top = 90.0
-        rack_width = 518.6
-        rack_gap = 90.0
-        unit_pitch = 44.45
+        rack_left_start = self.RACK_LEFT_START
+        rack_top = self.RACK_TOP
+        rack_width = self.RACK_WIDTH
+        rack_gap = self.RACK_GAP
+        unit_pitch = self.RACK_UNIT_PITCH
 
         for rack_index, rack_name in enumerate(rack_names):
             rack_key = (floor, location, rack_name)
@@ -4846,7 +4863,9 @@ class NetworkTopologyDialog(QDialog):
             if rect is None:
                 continue
             bus_nodes = [node_id for node_id in node_ids if node_id in getattr(self, "_location_bus_by_node", {})]
-            rect = rect.adjusted(-20.0, -98.0 if bus_nodes else -34.0, 20.0, 22.0)
+            # Keep the location/rack enclosure close to the cards while still
+            # leaving room for the primary and failover bus pair above them.
+            rect = rect.adjusted(-8.0, -70.0 if bus_nodes else -22.0, 8.0, 10.0)
             path = QPainterPath()
             path.addRoundedRect(rect, 10.0, 10.0)
             item = QGraphicsPathItem(path)
@@ -4983,13 +5002,17 @@ class NetworkTopologyDialog(QDialog):
         colour: QColor,
         failover: bool = False,
         z_value: float = -0.95,
+        edge: Optional[TopologyEdge] = None,
     ) -> None:
         bus = self._bus_for_node(node_id, failover=failover)
         target_pos = positions.get(node_id)
         if bus is None or target_pos is None:
             return
         bus_anchor, _bus_left, _bus_right = bus
-        top = QPointF(target_pos.x() + self.CARD_W / 2.0, target_pos.y())
+        top = QPointF(
+            self._incoming_fibre_connection_x(node_id, positions, edge),
+            target_pos.y(),
+        )
         path = QPainterPath(bus_anchor)
         path.lineTo(top)
         item = QGraphicsPathItem(path)
@@ -5079,6 +5102,7 @@ class NetworkTopologyDialog(QDialog):
                     self._add_bus_drop(
                         child_id, positions, colour, failover=failover,
                         z_value=-0.80 if failover else -0.95,
+                        edge=edge,
                     )
                     if edge and self.show_link_labels_check.isChecked():
                         self._add_link_label(edge.label, colour, QPointF((entry_x + end.x()) / 2.0, end.y() - 14.0), edge)
@@ -5373,7 +5397,7 @@ class NetworkTopologyDialog(QDialog):
             item.setZValue(-0.82)
             self.scene.addItem(item)
             if bus is not None:
-                self._add_bus_drop(target_id, positions, colour, failover=True, z_value=-0.8)
+                self._add_bus_drop(target_id, positions, colour, failover=True, z_value=-0.8, edge=edge)
             if self.show_link_labels_check.isChecked():
                 self._add_link_label(edge.label, colour, label_point, edge)
 
@@ -5427,7 +5451,7 @@ class NetworkTopologyDialog(QDialog):
             trunk_item.setZValue(-0.82)
             self.scene.addItem(trunk_item)
             for target_id, end, edge in endpoints:
-                self._add_bus_drop(target_id, positions, QColor("#d68f52"), failover=True, z_value=-0.8)
+                self._add_bus_drop(target_id, positions, QColor("#d68f52"), failover=True, z_value=-0.8, edge=edge)
                 if self.show_link_labels_check.isChecked():
                     self._add_link_label(edge.label, QColor("#d68f52"), QPointF((entry_x + end.x()) / 2.0, end.y() - 14.0), edge)
             return
@@ -5444,6 +5468,51 @@ class NetworkTopologyDialog(QDialog):
         self._add_vertical_link_rail(start, endpoints, QColor("#a76a42"), z_value=-0.82, cross_link=True, rail_x=rail_x)
 
 
+    def _incoming_fibre_edges_for_node(
+        self,
+        node_id: str,
+        edge: Optional[TopologyEdge] = None,
+    ) -> List[TopologyEdge]:
+        """Return visible incoming fibres in stable primary/failover order."""
+        incoming: List[Tuple[int, str, TopologyEdge]] = []
+        seen_edge_ids: Set[str] = set()
+        for _source_id, drawn_target_id, candidate in getattr(
+            self, "_visible_drawn_fibre_edges", []
+        ):
+            if drawn_target_id != node_id:
+                continue
+            edge_id = _text(candidate.edge_id)
+            if not edge_id or edge_id in seen_edge_ids:
+                continue
+            seen_edge_ids.add(edge_id)
+            incoming.append((1 if self._edge_is_failover(candidate) else 0, edge_id, candidate))
+
+        # Synthetic collapsed links and legacy records can be created during a
+        # rebuild. Always include the edge currently being drawn.
+        if edge is not None and _text(edge.medium).lower() == "fibre":
+            edge_id = _text(edge.edge_id)
+            if edge_id and edge_id not in seen_edge_ids:
+                incoming.append((1 if self._edge_is_failover(edge) else 0, edge_id, edge))
+
+        incoming.sort(key=lambda row: (row[0], row[1]))
+        return [row[2] for row in incoming]
+
+    def _incoming_fibre_slot_index(
+        self,
+        node_id: str,
+        edge: Optional[TopologyEdge],
+    ) -> Tuple[int, int]:
+        incoming = self._incoming_fibre_edges_for_node(node_id, edge)
+        if not incoming:
+            return 0, 1
+        selected_index = 0
+        edge_id = _text(edge.edge_id) if edge is not None else ""
+        for index, candidate in enumerate(incoming):
+            if _text(candidate.edge_id) == edge_id:
+                selected_index = index
+                break
+        return selected_index, len(incoming)
+
     def _incoming_fibre_connection_y(
         self,
         node_id: str,
@@ -5451,50 +5520,38 @@ class NetworkTopologyDialog(QDialog):
         edge: Optional[TopologyEdge],
         cross_link: bool = False,
     ) -> float:
-        """Return an evenly spaced vertical connection point for fibre inputs.
-
-        Primary and failover fibres often terminate on the same splitter or
-        distribution card.  Using the card centre for both makes the final
-        horizontal sections overlap.  Reserve one vertical slot per visible
-        incoming fibre and centre the slots around the card midpoint.
-        """
+        """Return a separate side connection point for each incoming fibre."""
         pos = positions[node_id]
         card_height = self._node_card_height(node_id)
         centre_y = pos.y() + card_height / 2.0
         if edge is None or _text(edge.medium).lower() != "fibre":
             return centre_y
-
-        incoming = []
-        visible_ids = set(positions)
-        for candidate in self.model.edges:
-            if candidate.target_id != node_id:
-                continue
-            if candidate.source_id not in visible_ids:
-                continue
-            if _text(candidate.medium).lower() != "fibre":
-                continue
-            standby = bool(
-                candidate.standby
-                or candidate.redundancy_role.lower() in {"secondary", "standby"}
-            )
-            incoming.append((1 if standby else 0, candidate.edge_id, candidate))
-
-        if len(incoming) <= 1:
+        selected_index, count = self._incoming_fibre_slot_index(node_id, edge)
+        if count <= 1:
             return centre_y
-
-        incoming.sort(key=lambda row: (row[0], row[1]))
-        selected_index = 0
-        for index, (_standby, _edge_id, candidate) in enumerate(incoming):
-            if candidate.edge_id == edge.edge_id:
-                selected_index = index
-                break
-
-        # Fit all connection points inside the card with a sensible maximum
-        # pitch.  Two fibres therefore sit evenly above and below centre.
         usable_height = max(8.0, card_height - 20.0)
-        pitch = min(18.0, usable_height / max(1, len(incoming) - 1))
-        first_y = centre_y - pitch * (len(incoming) - 1) / 2.0
+        pitch = min(18.0, usable_height / max(1, count - 1))
+        first_y = centre_y - pitch * (count - 1) / 2.0
         return first_y + selected_index * pitch
+
+    def _incoming_fibre_connection_x(
+        self,
+        node_id: str,
+        positions: Dict[str, QPointF],
+        edge: Optional[TopologyEdge],
+    ) -> float:
+        """Return a separate top-edge position for bus-fed primary/failover fibres."""
+        pos = positions[node_id]
+        centre_x = pos.x() + self.CARD_W / 2.0
+        if edge is None or _text(edge.medium).lower() != "fibre":
+            return centre_x
+        selected_index, count = self._incoming_fibre_slot_index(node_id, edge)
+        if count <= 1:
+            return centre_x
+        usable_width = max(20.0, self.CARD_W - 72.0)
+        pitch = min(34.0, usable_width / max(1, count - 1))
+        first_x = centre_x - pitch * (count - 1) / 2.0
+        return first_x + selected_index * pitch
 
     def _add_link(
         self,
@@ -5558,7 +5615,10 @@ class NetworkTopologyDialog(QDialog):
             path_item.setPen(pen)
             path_item.setZValue(-1.0 if not failover_style else -0.8)
             self.scene.addItem(path_item)
-            self._add_bus_drop(target_id, positions, colour, failover=failover_style, z_value=-0.95 if not failover_style else -0.8)
+            self._add_bus_drop(
+                target_id, positions, colour, failover=failover_style,
+                z_value=-0.95 if not failover_style else -0.8, edge=edge,
+            )
             if edge and self.show_link_labels_check.isChecked():
                 self._add_link_label(edge.label, colour, QPointF((entry_x + bus_anchor.x()) / 2.0, bus_anchor.y() - (14.0 if failover_style else 12.0)), edge)
             return
@@ -5801,11 +5861,11 @@ class NetworkTopologyDialog(QDialog):
         rack_names = self._rack_names_for_location(floor, location)
         if not rack_names:
             return
-        rack_left_start = 92.0
-        rack_width = 518.6
-        rack_gap = 90.0
-        rack_top = 90.0
-        unit_pitch = 44.45
+        rack_left_start = self.RACK_LEFT_START
+        rack_width = self.RACK_WIDTH
+        rack_gap = self.RACK_GAP
+        rack_top = self.RACK_TOP
+        unit_pitch = self.RACK_UNIT_PITCH
         relative_x = scene_position.x() - rack_left_start
         if relative_x < 0.0:
             return
@@ -6557,11 +6617,11 @@ class NetworkTopologyDialog(QDialog):
             self.rebuild_scene(fit=False)
             return
 
-        rack_left_start = 92.0
-        rack_width = 518.6
-        rack_gap = 90.0
-        rack_top = 90.0
-        unit_pitch = 44.45
+        rack_left_start = self.RACK_LEFT_START
+        rack_width = self.RACK_WIDTH
+        rack_gap = self.RACK_GAP
+        rack_top = self.RACK_TOP
+        unit_pitch = self.RACK_UNIT_PITCH
         centre_x = anchor_item.sceneBoundingRect().center().x()
         target_index = min(
             range(len(rack_names)),
