@@ -1083,6 +1083,11 @@ def _clear_previous_auto_design(data: dict) -> None:
         for item in data.get("network_connections", [])
         if not bool(item.get("auto_generated"))
     ]
+    data["network_power_connections"] = [
+        item
+        for item in data.get("network_power_connections", [])
+        if not bool(item.get("auto_generated"))
+    ]
     data["network_patch_leads"] = [item for item in data.get("network_patch_leads", []) if not bool(item.get("auto_generated"))]
     data["network_endpoint_assignments"] = [
         item
@@ -1147,6 +1152,11 @@ class DesignBuilder:
             for item in data.get("network_connections", [])
             if _text(item.get("id"))
         }
+        self.power_connection_ids = {
+            _text(item.get("id"))
+            for item in data.get("network_power_connections", [])
+            if _text(item.get("id"))
+        }
         self.patch_lead_ids = {_text(item.get("id")) for item in data.get("network_patch_leads", []) if _text(item.get("id"))}
         self.optic_module_ids = {_text(item.get("id")) for item in data.get("network_optic_modules", []) if _text(item.get("id"))}
         self.assignment_ids = {
@@ -1162,6 +1172,7 @@ class DesignBuilder:
         self.warnings: List[str] = []
         self.instances: List[dict] = []
         self.connections: List[dict] = []
+        self.power_connections: List[dict] = []
         self.assignments: List[dict] = []
         self.patch_leads: List[dict] = []
         self.optic_modules: List[dict] = []
@@ -1718,6 +1729,35 @@ class DesignBuilder:
         else: self.total_copper_m += length_m
         return connection
 
+    def add_power_connection(
+        self,
+        from_instance: dict,
+        from_port: str,
+        to_instance: dict,
+        to_port: str,
+        *,
+        feed_label: str = "",
+        load_w: float = 0.0,
+        capacity_w: float = 0.0,
+        notes: str = "Automatically generated rack power connection.",
+    ) -> dict:
+        record = {
+            "id": _next_identifier(self.power_connection_ids, "AUTO-PC-"),
+            "from_instance_id": _text(from_instance.get("id")),
+            "from_port": _text(from_port),
+            "to_instance_id": _text(to_instance.get("id")),
+            "to_port": _text(to_port),
+            "feed_label": _text(feed_label),
+            "phase": "",
+            "voltage_v": 230.0,
+            "capacity_w": max(0.0, float(capacity_w or 0.0)),
+            "load_w": max(0.0, float(load_w or 0.0)),
+            "notes": notes,
+            "auto_generated": True,
+        }
+        self.power_connections.append(record)
+        return record
+
     def add_assignment(
         self,
         item: PortDemand,
@@ -1820,6 +1860,7 @@ class DesignBuilder:
 
         self.data.setdefault("network_asset_instances", []).extend(self.instances)
         self.data.setdefault("network_connections", []).extend(self.connections)
+        self.data.setdefault("network_power_connections", []).extend(self.power_connections)
         self.data.setdefault("network_endpoint_assignments", []).extend(
             self.assignments
         )
@@ -4012,6 +4053,8 @@ def _fibre_patch_panel_asset(builder: DesignBuilder) -> dict:
         "output_connection_type": "fibre",
         "rack_units": 1,
         "power_input_w": 0.0,
+        "optical_insertion_loss_db": 0.5,
+        "optical_return_loss_db": 55.0,
         "notes": "Automatically generated fibre patch-panel allowance.",
         "auto_network_asset": True,
     }
@@ -4396,7 +4439,7 @@ def _support_rack_asset(
         "number_of_ports": 0,
         "connections_in": 0,
         "connections_out": 0,
-        "rack_units": max(1, int(rack_units)),
+        "rack_units": max(0, int(rack_units)),
         "power_input_w": 0.0,
         "notes": notes,
         "auto_network_asset": True,
@@ -4434,6 +4477,55 @@ def _ups_asset(builder: DesignBuilder) -> dict:
         rack_units=2,
         notes="Automatically generated dual-UPS rack allowance.",
     )
+
+
+def _pdu_asset(builder: DesignBuilder) -> dict:
+    candidates = [
+        asset
+        for asset in builder.data.get("network_assets", [])
+        if isinstance(asset, dict)
+        and _asset_type(asset) == "pdu"
+        and (
+            _text(asset.get("rack_mount_style")).lower() == "vertical_side"
+            or _int(asset.get("rack_units"), 0) == 0
+        )
+    ]
+    candidates = _apply_manufacturer_preference(
+        builder.data, candidates, "rack_pdu", "rack PDU"
+    )
+    if candidates:
+        return max(
+            candidates,
+            key=lambda asset: (
+                max(0, _int(asset.get("power_outlet_count"), 0)),
+                max(0.0, _float(asset.get("power_capacity_w"), 0.0)),
+                _text(asset.get("id")),
+            ),
+        )
+    builder.warnings.append(
+        "No vertical rack PDU asset was available; a 42-outlet side-mounted PDU was generated automatically."
+    )
+    asset = _support_rack_asset(
+        builder,
+        asset_id="AUTO-RACK-PDU-42",
+        name="42-outlet vertical rack PDU",
+        asset_type="pdu",
+        rack_units=0,
+        notes="Automatically generated vertical side-mounted rack power distribution unit.",
+    )
+    asset.update(
+        {
+            "rack_mount_style": "vertical_side",
+            "power_outlet_count": max(
+                1, _int(builder.settings.get("default_pdu_outlet_count"), 42)
+            ),
+            "power_capacity_w": max(
+                0.0, _float(builder.settings.get("default_pdu_capacity_w"), 7360.0)
+            ),
+            "power_feed_count": 1,
+        }
+    )
+    return asset
 
 
 def _cable_manager_asset(builder: DesignBuilder) -> dict:
@@ -4482,8 +4574,10 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
     }
     rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
     ups_asset = _ups_asset(builder)
+    pdu_asset = _pdu_asset(builder)
     manager_asset = _cable_manager_asset(builder)
     assets[_text(ups_asset.get("id"))] = ups_asset
+    assets[_text(pdu_asset.get("id"))] = pdu_asset
     assets[_text(manager_asset.get("id"))] = manager_asset
     ups_u = max(1, _int(ups_asset.get("rack_units"), 2))
     manager_u = max(1, _int(manager_asset.get("rack_units"), 1))
@@ -4492,7 +4586,7 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
     groups: Dict[Tuple[int, str], List[dict]] = defaultdict(list)
     for instance in list(builder.instances):
         role = _text(instance.get("design_role"))
-        if role in {"rack_ups", "cable_management"}:
+        if role in {"rack_ups", "rack_pdu", "cable_management"}:
             continue
         asset = assets.get(_text(instance.get("asset_id")), {})
         units = _rack_units_for_asset(
@@ -4533,7 +4627,16 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
             )
             if name in rack_by_name:
                 return rack_by_name[name]
-            rack = {"index": index, "name": name, "bottom_next": 1, "top_next": rack_size_u, "ups_added": False}
+            rack = {
+                "index": index,
+                "name": name,
+                "bottom_next": 1,
+                "top_next": rack_size_u,
+                "ups_added": False,
+                "ups_instances": [],
+                "pdu_instances": {"left": [], "right": []},
+                "powered_items": [],
+            }
             racks.append(rack)
             rack_by_name[name] = rack
             return rack
@@ -4546,7 +4649,7 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
             first = rack["bottom_next"]
             second = first + ups_u + 1
             for number, start_u in ((1, first), (2, second)):
-                builder.add_instance(
+                ups_instance = builder.add_instance(
                     ups_asset,
                     f"AUTO {location_name} {rack['name']} UPS {number}",
                     location,
@@ -4554,7 +4657,9 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
                     rack_name=rack["name"], rack_start_u=start_u,
                     rack_size_u=rack_size_u, route_anchor=location_name,
                     ups_pair_number=number,
+                    ups_backed_source=True,
                 )
+                rack["ups_instances"].append(ups_instance)
             rack["bottom_next"] = second + ups_u
             rack["ups_added"] = True
 
@@ -4578,6 +4683,8 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
             instance["rack_start_u"] = rack["bottom_next"]
             instance["rack_size_u"] = rack_size_u
             rack["bottom_next"] += units
+            if powered:
+                rack["powered_items"].append(instance)
 
         equipment_by_id = {_text(row.get("id")): row for row in equipment}
         fibre_by_owner: Dict[str, List[dict]] = defaultdict(list)
@@ -4711,6 +4818,104 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
             if rack is None:
                 rack = create_rack()
             place_fibre_panel(panel, rack)
+
+        def pdu_load(pdu: dict) -> float:
+            return sum(
+                max(0.0, _float(row.get("load_w")))
+                for row in builder.power_connections
+                if _text(row.get("from_instance_id")) == _text(pdu.get("id"))
+            )
+
+        def pdu_outlets_used(pdu: dict) -> int:
+            return sum(
+                1
+                for row in builder.power_connections
+                if _text(row.get("from_instance_id")) == _text(pdu.get("id"))
+            )
+
+        def ensure_pdu(rack: dict, side: str, required_load_w: float) -> dict:
+            side = "right" if side == "right" else "left"
+            outlet_capacity = max(1, _int(pdu_asset.get("power_outlet_count"), 42))
+            watt_capacity = max(0.0, _float(pdu_asset.get("power_capacity_w"), 7360.0))
+            for pdu in rack["pdu_instances"][side]:
+                outlets_ok = pdu_outlets_used(pdu) < outlet_capacity
+                watts_ok = watt_capacity <= 0.0 or pdu_load(pdu) + required_load_w <= watt_capacity + 1e-9
+                if outlets_ok and watts_ok:
+                    return pdu
+            ensure_ups(rack)
+            position = len(rack["pdu_instances"][side]) + 1
+            pdu = builder.add_instance(
+                pdu_asset,
+                f"AUTO {location_name} {rack['name']} {side.title()} PDU {position}",
+                location,
+                "rack_pdu",
+                rack_name=rack["name"],
+                rack_start_u=0,
+                rack_size_u=rack_size_u,
+                route_anchor=location_name,
+                rack_mount_style="vertical_side",
+                rack_side=side,
+                side_mount_position=position,
+                power_feed_count=1,
+            )
+            rack["pdu_instances"][side].append(pdu)
+            ups = rack["ups_instances"][(position - 1) % len(rack["ups_instances"])]
+            pdu["upstream_power_source_id"] = _text(ups.get("id"))
+            builder.add_power_connection(
+                ups,
+                f"Output-{position}",
+                pdu,
+                "Input-1",
+                feed_label=f"{side.title()} PDU supply",
+                capacity_w=watt_capacity,
+                notes="Automatically generated UPS-backed rack PDU supply.",
+            )
+            return pdu
+
+        critical_types = {"network_switch", "network_router", "firewall", "optical_line_terminal"}
+        critical_roles = {"core_switch", "aggregation_switch", "access_switch", "olt_primary", "olt_secondary", "edge_router"}
+        dual_critical = bool(builder.settings.get("auto_dual_power_critical_devices", True))
+        for rack in racks:
+            for item_index, instance in enumerate(rack["powered_items"]):
+                asset = assets.get(_text(instance.get("asset_id")), {})
+                load_w = max(0.0, _float(asset.get("power_input_w")))
+                feeds = max(1, _int(asset.get("power_feed_count"), 1))
+                if bool(asset.get("redundant_power_supplies")):
+                    feeds = max(feeds, 2)
+                if dual_critical and (
+                    _asset_type(asset) in critical_types
+                    or _text(instance.get("design_role")) in critical_roles
+                ):
+                    feeds = max(feeds, 2)
+                feeds = min(2, feeds)
+                sides = ["left", "right"] if feeds > 1 else (["left"] if item_index % 2 == 0 else ["right"])
+                assigned_pdus: List[str] = []
+                for feed_index, side in enumerate(sides, start=1):
+                    pdu = ensure_pdu(rack, side, load_w)
+                    outlet_number = pdu_outlets_used(pdu) + 1
+                    feed_name = chr(ord("A") + feed_index - 1)
+                    builder.add_power_connection(
+                        pdu,
+                        f"Outlet-{outlet_number}",
+                        instance,
+                        f"PSU-{feed_name}",
+                        feed_label=f"Feed {feed_name}",
+                        load_w=load_w,
+                        capacity_w=max(0.0, _float(pdu_asset.get("power_capacity_w"))),
+                    )
+                    assigned_pdus.append(_text(pdu.get("id")))
+                instance["power_feed_count"] = len(assigned_pdus)
+                instance["power_pdu_instance_ids"] = assigned_pdus
+                instance["power_feed"] = "/".join(
+                    _text(next((p.get("rack_side") for side in rack["pdu_instances"].values() for p in side if _text(p.get("id")) == pdu_id), "")).upper()
+                    for pdu_id in assigned_pdus
+                )
+                instance["ups_source"] = "/".join(
+                    _text(pdu.get("upstream_power_source_id"))
+                    for side in rack["pdu_instances"].values()
+                    for pdu in side
+                    if _text(pdu.get("id")) in assigned_pdus
+                )
 
         for instance in items:
             instance.pop("_calculated_rack_units", None)
@@ -5231,7 +5436,11 @@ def auto_connect_manual_devices(
     ensure_network_schema(data)
     return result
 
-def generate_network_design(data: dict, technology: Optional[str] = None) -> dict:
+def generate_network_design(
+    data: dict,
+    technology: Optional[str] = None,
+    progress_callback=None,
+) -> dict:
     """Generate and install an optimised network design into ``data``.
 
     Objective order:
@@ -5242,6 +5451,11 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
       5. Minimise excess capacity and local copper length.
     """
 
+    def progress(value: int, message: str) -> None:
+        if callable(progress_callback):
+            progress_callback(max(0, min(100, int(value))), message)
+
+    progress(2, "Validating network project data...")
     ensure_network_schema(data)
     _clear_previous_auto_design(data)
     settings = data.setdefault("network_settings", {})
@@ -5265,6 +5479,7 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         max(0.0, _float(settings.get("spare_capacity_percent"), 15.0)) / 100.0
     )
 
+    progress(10, "Calculating endpoint, bandwidth and PoE demand...")
     endpoints, warnings = build_endpoint_demands(data)
     if not endpoints:
         raise NetworkPlanningError(
@@ -5297,6 +5512,7 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
             if isinstance(item, dict) and _text(item.get("kind")).lower() == "mer"
         )
 
+    progress(22, "Precomputing cable-routing paths...")
     precomputed_sources, route_workers_used = builder.graph.precompute_sources(
         route_sources,
         max_workers=max(0, _int(settings.get("auto_planner_max_workers"), 0)),
@@ -5305,22 +5521,27 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         ),
     )
 
+    progress(42, f"Creating {technology_value} active network layers...")
     if technology_value == "Traditional":
         _traditional_design(builder, endpoints, spare_fraction)
     else:
         _polan_design(builder, endpoints, spare_fraction)
 
+    progress(58, "Creating upstream, external and redundant links...")
     _install_external_network_connections(builder, spare_fraction)
 
     # Fibre terminations require physical patch-panel capacity and rack space.
     # Repack the complete generated equipment set afterwards so OLTs, cores and
     # panels share the location racks without ever exceeding the configured U.
+    progress(68, "Installing patch panels, UPS equipment and rack PDUs...")
     _install_copper_patch_panels(builder, spare_fraction)
     _install_fibre_patch_panels(builder, spare_fraction)
     _repack_generated_racks(builder)
 
+    progress(82, "Checking switch, rack, power and traffic capacity...")
     _assert_generated_capacity(builder, spare_fraction)
     builder.commit()
+    progress(90, "Planning physical fibre and optical budgets...")
     physical_fibre_summary = ensure_physical_fibre_for_design(data, replace_auto=False)
 
     assets_by_id = {
@@ -5452,6 +5673,8 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         ),
         "warnings": builder.warnings,
     }
+    summary["auto_generated_power_connections"] = len(builder.power_connections)
     data["network_design_summary"] = summary
     ensure_network_schema(data)
+    progress(100, "Automatic network plan complete.")
     return summary

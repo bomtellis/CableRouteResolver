@@ -40,6 +40,7 @@ from network_dialogs import (
     NetworkConnectionEditorDialog,
     NetworkInstanceEditorDialog,
     NetworkPlannerDialog,
+    rack_selection_records,
 )
 from network_auto_planner import auto_connect_manual_devices
 from network_reports import write_network_schedules
@@ -411,6 +412,7 @@ def _open_network_planner(editor) -> None:
             "network_asset_instances",
             "network_racks",
             "network_connections",
+            "network_power_connections",
             "network_endpoint_assignments",
             "network_redundancy_groups",
             "network_vlans",
@@ -469,7 +471,7 @@ def _apply_network_payload(editor, payload: dict) -> None:
     _safe_push_undo(editor, "Edit network topology")
     for key in (
         "network_settings", "network_assets", "network_asset_instances", "network_racks",
-        "network_connections", "network_endpoint_assignments", "network_patch_leads",
+        "network_connections", "network_power_connections", "network_endpoint_assignments", "network_patch_leads",
         "network_redundancy_groups", "network_vlans", "network_routes",
         "network_ip_allocations", "network_external_networks",
         "network_optic_modules", "network_optical_paths", "network_fibre_cable_types",
@@ -860,6 +862,7 @@ def _place_fibre_node(editor, x: float, y: float) -> None:
         nodes=editor.store.data.get("network_fibre_nodes", []),
         instances=editor.store.data.get("network_asset_instances", []),
         locations=editor.store.data.get("locations", []),
+        racks=rack_selection_records(editor.store.data),
         suggested_id=next_network_id(editor.store.data.get("network_fibre_nodes", []), "FN"),
         default_floor=int(editor.floor_spin.value()),
         default_x=float(x),
@@ -906,6 +909,7 @@ def _place_or_select_network_asset(editor, x: float, y: float) -> None:
         editor,
         assets=assets,
         locations=editor.store.data.get("locations", []),
+        racks=rack_selection_records(editor.store.data),
         suggested_id=next_network_id(
             editor.store.data.get("network_asset_instances", []), "NI"
         ),
@@ -987,6 +991,7 @@ def _edit_network_instance(editor, instance_id: str) -> None:
         instance=current,
         assets=editor.store.data.get("network_assets", []),
         locations=editor.store.data.get("locations", []),
+        racks=rack_selection_records(editor.store.data),
         suggested_id=instance_id,
     )
     if dialog.exec() != QDialog.Accepted or not dialog.result:
@@ -1007,6 +1012,11 @@ def _edit_network_instance(editor, instance_id: str) -> None:
                 connection["from_instance_id"] = new_id
             if _text(connection.get("to_instance_id")) == instance_id:
                 connection["to_instance_id"] = new_id
+        for power_link in editor.store.data.get("network_power_connections", []):
+            if _text(power_link.get("from_instance_id")) == instance_id:
+                power_link["from_instance_id"] = new_id
+            if _text(power_link.get("to_instance_id")) == instance_id:
+                power_link["to_instance_id"] = new_id
     if dialog.auto_connect_requested:
         auto_connect_manual_devices(editor.store.data, [new_id])
     editor.selected_point_name = new_id
@@ -1032,6 +1042,12 @@ def _delete_network_instance(editor, instance_id: str) -> None:
     editor.store.data["network_connections"] = [
         item
         for item in editor.store.data.get("network_connections", [])
+        if _text(item.get("from_instance_id")) != instance_id
+        and _text(item.get("to_instance_id")) != instance_id
+    ]
+    editor.store.data["network_power_connections"] = [
+        item
+        for item in editor.store.data.get("network_power_connections", [])
         if _text(item.get("from_instance_id")) != instance_id
         and _text(item.get("to_instance_id")) != instance_id
     ]

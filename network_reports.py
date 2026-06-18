@@ -837,6 +837,55 @@ def _dark_fibre_summary(data: dict) -> List[dict]:
     return rows
 
 
+def _power_connection_schedule(data: dict) -> List[dict]:
+    assets, instances, locations = _maps(data)
+    rows: List[dict] = []
+    for link in data.get("network_power_connections", []):
+        if not isinstance(link, dict):
+            continue
+        source = instances.get(_text(link.get("from_instance_id")), {})
+        target = instances.get(_text(link.get("to_instance_id")), {})
+        source_asset = assets.get(_text(source.get("asset_id")), {})
+        target_asset = assets.get(_text(target.get("asset_id")), {})
+        source_location = _text(source.get("location_name"))
+        target_location = _text(target.get("location_name"))
+        rows.append(
+            {
+                "power_connection_id": _text(link.get("id")),
+                "source_instance_id": _text(source.get("id")),
+                "source_instance_name": _text(source.get("name")),
+                "source_asset_type": _text(source_asset.get("asset_type")),
+                "source_location": source_location,
+                "source_floor": source.get("floor", locations.get(source_location, {}).get("floor", "")),
+                "source_rack": _text(source.get("rack_name")),
+                "source_port": _text(link.get("from_port")),
+                "destination_instance_id": _text(target.get("id")),
+                "destination_instance_name": _text(target.get("name")),
+                "destination_asset_type": _text(target_asset.get("asset_type")),
+                "destination_location": target_location,
+                "destination_floor": target.get("floor", locations.get(target_location, {}).get("floor", "")),
+                "destination_rack": _text(target.get("rack_name")),
+                "destination_port": _text(link.get("to_port")),
+                "feed_label": _text(link.get("feed_label")),
+                "phase": _text(link.get("phase")),
+                "voltage_v": _float(link.get("voltage_v")),
+                "capacity_w": _float(link.get("capacity_w")),
+                "load_w": _float(link.get("load_w")),
+                "auto_generated": "Yes" if bool(link.get("auto_generated")) else "No",
+                "notes": _text(link.get("notes")),
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["source_location"],
+            row["source_rack"],
+            row["source_instance_name"],
+            row["source_port"],
+        ),
+    )
+
+
 def _external_network_schedule(data: dict) -> List[dict]:
     return sorted([
         {
@@ -977,6 +1026,17 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
                 "poe_utilisation_percent", "endpoint_ports_served", "power_feed", "ups_source", "notes",
             ],
             _power_schedule(data),
+        ),
+        (
+            "power_connection_schedule",
+            [
+                "power_connection_id", "source_instance_id", "source_instance_name", "source_asset_type",
+                "source_location", "source_floor", "source_rack", "source_port",
+                "destination_instance_id", "destination_instance_name", "destination_asset_type",
+                "destination_location", "destination_floor", "destination_rack", "destination_port",
+                "feed_label", "phase", "voltage_v", "capacity_w", "load_w", "auto_generated", "notes",
+            ],
+            _power_connection_schedule(data),
         ),
         (
             "physical_fibre_cable_type_schedule",

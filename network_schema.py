@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional
 from network_services import FIBRE_COLOURS, build_fibre_cores, fibre_layer_defaults, set_core_status_from_splices
 
 
-NETWORK_SCHEMA_VERSION = 3
+NETWORK_SCHEMA_VERSION = 4
 
 
 DEFAULT_FIBRE_CABLE_TYPES = [
@@ -138,6 +138,9 @@ NETWORK_DEFAULTS = {
         "poe_power_defaults": {},
         "default_rack_size_u": 42,
         "default_fibre_core_count": 12,
+        "default_pdu_outlet_count": 42,
+        "default_pdu_capacity_w": 7360.0,
+        "auto_dual_power_critical_devices": True,
         "ip_plan_base_cidr": "10.0.0.0/8",
         "physical_fibre_layer": fibre_layer_defaults(),
         "physical_fibre_planning": default_physical_fibre_planning(),
@@ -146,6 +149,7 @@ NETWORK_DEFAULTS = {
     "network_asset_instances": [],
     "network_racks": [],
     "network_connections": [],
+    "network_power_connections": [],
     "network_endpoint_assignments": [],
     "network_patch_leads": [],
     "network_redundancy_groups": [],
@@ -315,6 +319,7 @@ MANUFACTURER_PREFERENCE_COMPONENTS = {
     "copper_patch_panel": "Copper patch panels",
     "fibre_patch_panel": "Fibre patch panels",
     "rack_ups": "Rack UPS equipment",
+    "rack_pdu": "Rack power distribution units",
     "cable_management": "Cable-management panels",
 }
 
@@ -556,6 +561,9 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("poe_power_defaults", {})
     settings.setdefault("default_rack_size_u", 42)
     settings.setdefault("default_fibre_core_count", 12)
+    settings.setdefault("default_pdu_outlet_count", 42)
+    settings.setdefault("default_pdu_capacity_w", 7360.0)
+    settings.setdefault("auto_dual_power_critical_devices", True)
     settings.setdefault("ip_plan_base_cidr", "10.0.0.0/8")
     settings.setdefault("physical_fibre_layer", fibre_layer_defaults())
     settings.setdefault("physical_fibre_planning", default_physical_fibre_planning())
@@ -615,6 +623,9 @@ def ensure_network_schema(data: dict) -> dict:
         1, _as_int(settings.get("default_rack_size_u"), 42)
     )
     settings["default_fibre_core_count"] = max(2, _as_int(settings.get("default_fibre_core_count"), 12))
+    settings["default_pdu_outlet_count"] = max(1, _as_int(settings.get("default_pdu_outlet_count"), 42))
+    settings["default_pdu_capacity_w"] = max(0.0, _as_float(settings.get("default_pdu_capacity_w"), 7360.0))
+    settings["auto_dual_power_critical_devices"] = bool(settings.get("auto_dual_power_critical_devices", True))
     settings["ip_plan_base_cidr"] = _text(settings.get("ip_plan_base_cidr")) or "10.0.0.0/8"
     layer_settings = settings.get("physical_fibre_layer")
     if not isinstance(layer_settings, dict):
@@ -667,6 +678,7 @@ def ensure_network_schema(data: dict) -> dict:
         "network_asset_instances",
         "network_racks",
         "network_connections",
+        "network_power_connections",
         "network_endpoint_assignments",
         "network_patch_leads",
         "network_redundancy_groups",
@@ -734,6 +746,44 @@ def ensure_network_schema(data: dict) -> dict:
             asset["split_output_count"] = 0
         asset["frequencies"] = _normalise_string_list(asset.get("frequencies", []))
         asset["power_input_w"] = max(0.0, _as_float(asset.get("power_input_w")))
+        asset["power_capacity_w"] = max(
+            0.0,
+            _as_float(
+                asset.get(
+                    "power_capacity_w",
+                    asset.get("rated_power_w", asset.get("output_capacity_w", 0.0)),
+                )
+            ),
+        )
+        asset["power_outlet_count"] = max(
+            0,
+            _as_int(
+                asset.get(
+                    "power_outlet_count",
+                    asset.get("outlet_count", asset.get("connections_out", 0)),
+                )
+            ),
+        )
+        asset["power_feed_count"] = max(1, min(8, _as_int(asset.get("power_feed_count"), 1)))
+        asset["redundant_power_supplies"] = bool(
+            asset.get("redundant_power_supplies", asset["power_feed_count"] > 1)
+        )
+        asset["rack_mount_style"] = _text(asset.get("rack_mount_style")).lower()
+        asset["rack_side"] = _text(asset.get("rack_side")).lower()
+        asset["ups_backed_source"] = bool(asset.get("ups_backed_source", False))
+        if asset["asset_type"] == "pdu":
+            asset["rack_mount_style"] = asset["rack_mount_style"] or "vertical_side"
+            if asset["rack_mount_style"] == "vertical_side":
+                asset["rack_units"] = 0
+            asset["power_outlet_count"] = max(
+                1,
+                asset["power_outlet_count"]
+                or _as_int(settings.get("default_pdu_outlet_count"), 42),
+            )
+            asset["power_capacity_w"] = max(
+                asset["power_capacity_w"],
+                _as_float(settings.get("default_pdu_capacity_w"), 7360.0),
+            )
         asset["poe_budget_w"] = max(0.0, _as_float(asset.get("poe_budget_w")))
         asset["bandwidth_capacity_gbps"] = max(
             0.0,
@@ -1004,6 +1054,12 @@ def ensure_network_schema(data: dict) -> dict:
         instance.setdefault("management_vlan", "")
         instance.setdefault("power_feed", "")
         instance.setdefault("ups_source", "")
+        instance["power_feed_count"] = max(1, min(8, _as_int(instance.get("power_feed_count"), 1)))
+        instance["power_pdu_instance_ids"] = _normalise_string_list(instance.get("power_pdu_instance_ids", []))
+        instance["upstream_power_source_id"] = _text(instance.get("upstream_power_source_id"))
+        instance["rack_mount_style"] = _text(instance.get("rack_mount_style")).lower()
+        instance["rack_side"] = _text(instance.get("rack_side")).lower()
+        instance["side_mount_position"] = max(1, _as_int(instance.get("side_mount_position"), 1))
         instance["logical_stack"] = bool(instance.get("logical_stack", False))
         instance["stack_member_count"] = max(
             1, _as_int(instance.get("stack_member_count"), 1)
@@ -1139,6 +1195,19 @@ def ensure_network_schema(data: dict) -> dict:
         assignment["vlan_ids"] = _normalise_string_list(assignment.get("vlan_ids", []))
         assignment.setdefault("technology", settings["technology"])
         assignment["auto_generated"] = bool(assignment.get("auto_generated", False))
+
+    for power_link in data["network_power_connections"]:
+        if not isinstance(power_link, dict):
+            continue
+        for field in (
+            "id", "from_instance_id", "from_port", "to_instance_id", "to_port",
+            "feed_label", "phase", "notes",
+        ):
+            power_link.setdefault(field, "")
+        power_link["voltage_v"] = max(0.0, _as_float(power_link.get("voltage_v"), 230.0))
+        power_link["capacity_w"] = max(0.0, _as_float(power_link.get("capacity_w")))
+        power_link["load_w"] = max(0.0, _as_float(power_link.get("load_w")))
+        power_link["auto_generated"] = bool(power_link.get("auto_generated", False))
 
     for lead in data["network_patch_leads"]:
         if not isinstance(lead, dict):
@@ -1473,6 +1542,7 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     asset_ids = validate_unique_id("network_assets", "Network asset")
     instance_ids = validate_unique_id("network_asset_instances", "Network instance")
     connection_ids = validate_unique_id("network_connections", "Network connection")
+    validate_unique_id("network_power_connections", "Power connection")
     validate_unique_id("network_endpoint_assignments", "Network endpoint assignment")
     validate_unique_id("network_patch_leads", "Network patch lead")
     validate_unique_id("network_redundancy_groups", "Network redundancy group")
@@ -1646,6 +1716,52 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             messages.append(
                 f"Endpoint assignment {assignment_id} expects {expected:g} Mbps but its "
                 f"selected port rate is only {port_speed_label(speed)}."
+            )
+
+    pdu_loads: Dict[str, float] = {}
+    pdu_outlets: Dict[str, int] = {}
+    for power_link in data.get("network_power_connections", []):
+        if not isinstance(power_link, dict):
+            continue
+        link_id = _text(power_link.get("id")) or "(unnamed)"
+        source_id = _text(power_link.get("from_instance_id"))
+        target_id = _text(power_link.get("to_instance_id"))
+        if source_id not in instance_ids:
+            messages.append(f"Power connection {link_id} references missing source instance {source_id!r}.")
+            continue
+        if target_id not in instance_ids:
+            messages.append(f"Power connection {link_id} references missing destination instance {target_id!r}.")
+            continue
+        source_asset = assets_by_id.get(_text(instances_by_id.get(source_id, {}).get("asset_id")), {})
+        target_asset = assets_by_id.get(_text(instances_by_id.get(target_id, {}).get("asset_id")), {})
+        source_type = _text(source_asset.get("asset_type")).lower()
+        target_type = _text(target_asset.get("asset_type")).lower()
+        if source_type not in {"ups", "pdu", "power_device"}:
+            messages.append(f"Power connection {link_id} starts from non-power asset {source_id}.")
+        if target_type == "pdu" and source_type not in {"ups", "power_device"}:
+            messages.append(f"PDU {target_id} must be supplied by a UPS or UPS-backed power source.")
+        if (
+            target_type == "pdu"
+            and source_type == "power_device"
+            and not bool(source_asset.get("ups_backed_source", False))
+        ):
+            messages.append(
+                f"PDU {target_id} is supplied by power source {source_id}, but that source is not marked as UPS-backed."
+            )
+        if source_type == "pdu":
+            pdu_loads[source_id] = pdu_loads.get(source_id, 0.0) + max(0.0, _as_float(power_link.get("load_w")))
+            pdu_outlets[source_id] = pdu_outlets.get(source_id, 0) + 1
+
+    for pdu_id, outlet_count in pdu_outlets.items():
+        pdu_instance = instances_by_id.get(pdu_id, {})
+        pdu_asset = assets_by_id.get(_text(pdu_instance.get("asset_id")), {})
+        declared_outlets = max(0, _as_int(pdu_asset.get("power_outlet_count")))
+        declared_capacity = max(0.0, _as_float(pdu_asset.get("power_capacity_w")))
+        if declared_outlets and outlet_count > declared_outlets:
+            messages.append(f"PDU {pdu_id} uses {outlet_count} outlets but only {declared_outlets} are declared.")
+        if declared_capacity and pdu_loads.get(pdu_id, 0.0) > declared_capacity + 1e-9:
+            messages.append(
+                f"PDU {pdu_id} carries {pdu_loads[pdu_id]:.1f} W but is rated for {declared_capacity:.1f} W."
             )
 
     seen_rack_ids: set[str] = set()

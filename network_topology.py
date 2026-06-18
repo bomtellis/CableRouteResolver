@@ -55,7 +55,12 @@ from PySide6.QtWidgets import (
 from network_schema import default_port_speeds, ensure_network_schema, next_network_id, normalise_port_speeds, port_speed_label
 from network_services import circuit_trace, network_traffic_loads
 from network_auto_planner import auto_connect_manual_devices
-from network_dialogs import NetworkConnectionEditorDialog, NetworkInstanceEditorDialog, NetworkRackEditorDialog
+from network_dialogs import (
+    NetworkConnectionEditorDialog,
+    NetworkInstanceEditorDialog,
+    NetworkRackEditorDialog,
+    rack_selection_records,
+)
 from network_fibre_dialogs import PatchLeadEditorDialog
 
 
@@ -251,6 +256,9 @@ def _type_label(asset_type: str, role: str) -> str:
         "client_device": "Client device",
         "site_group": "Installation",
         "rack_cabinet": "Rack cabinet",
+        "pdu": "Power distribution unit",
+        "ups": "Uninterruptible power supply",
+        "power_device": "Power source",
         "other": "Network asset",
     }
     if role:
@@ -574,6 +582,10 @@ class TopologyModel:
             floor = _int(rack.get("floor"), _int(self.locations.get(location_name, {}).get("floor")))
             if not rack_name or (floor, location_name, rack_name) in occupied_rack_keys:
                 continue
+            if bool(rack.get("auto_generated")):
+                # Planner-created rack records without installed assets are stale
+                # capacity artefacts, not real cabinets or installation targets.
+                continue
             rack_id = _text(rack.get("id")) or f"{floor}:{location_name}:{rack_name}:{rack_index}"
             node_id = f"rack::{rack_id}"
             suffix = 2
@@ -783,8 +795,6 @@ class TopologyModel:
         site_id = "topology::installation"
         project_name = _text(self.data.get("project", {}).get("name")) or "Network installation"
         original_roots = list(self.roots)
-        if not original_roots:
-            return
         self.nodes[site_id] = TopologyNode(
             node_id=site_id,
             name=project_name,
@@ -1725,9 +1735,64 @@ class LinkLabelItem(QGraphicsObject):
         super().contextMenuEvent(event)
 
 
+class RackPduItem(QGraphicsObject):
+    """Compact selectable representation of a vertical side-mounted rack PDU."""
+
+    activated = Signal(str)
+    contextRequested = Signal(str, object)
+
+    def __init__(self, node: TopologyNode, width: float, height: float):
+        super().__init__()
+        self.node = node
+        self._width = max(18.0, float(width))
+        self._height = max(80.0, float(height))
+        self.setFlags(QGraphicsItem.ItemIsSelectable)
+        outlets = max(0, _int(node.asset.get("power_outlet_count")))
+        source = _text(node.instance.get("upstream_power_source_id")) or "Unassigned source"
+        self.setToolTip(
+            f"{node.name}\n{outlets} outlets · {source}\n"
+            f"{_text(node.instance.get('rack_side')).title()} side of {_text(node.instance.get('rack_name'))}"
+        )
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(0.0, 0.0, self._width, self._height)
+
+    def paint(self, painter, option, widget=None) -> None:  # noqa: ANN001
+        selected = self.isSelected()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(QPen(QColor("#8fd2ff") if selected else QColor("#687986"), 2.0 if selected else 1.2))
+        painter.setBrush(QBrush(QColor("#242f38")))
+        painter.drawRoundedRect(self.boundingRect(), 4.0, 4.0)
+        outlets = max(1, min(42, _int(self.node.asset.get("power_outlet_count"), 42)))
+        spacing = self._height / float(outlets + 1)
+        painter.setPen(QPen(QColor("#afc3d1"), 1.0))
+        painter.setBrush(QBrush(QColor("#10161c")))
+        for index in range(outlets):
+            y = (index + 1) * spacing
+            painter.drawEllipse(QPointF(self._width / 2.0, y), 2.2, 2.2)
+        painter.save()
+        painter.translate(self._width / 2.0, self._height / 2.0)
+        painter.rotate(-90.0)
+        painter.setPen(QColor("#e6edf2"))
+        font = QFont("Arial", 8)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(QRectF(-self._height / 2.0, -8.0, self._height, 16.0), Qt.AlignCenter, "PDU")
+        painter.restore()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
+        self.activated.emit(self.node.node_id)
+        event.accept()
+
+    def contextMenuEvent(self, event) -> None:  # noqa: ANN001
+        self.contextRequested.emit(self.node.node_id, event.screenPos())
+        event.accept()
+
+
 class TopologyGraphicsView(QGraphicsView):
     nodeSelected = Signal(str)
     branchToggleRequested = Signal(str)
+    emptySceneDoubleClicked = Signal(object)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -1771,6 +1836,26 @@ class TopologyGraphicsView(QGraphicsView):
         self._min_zoom = 0.005
         self._max_zoom = 8.0
         self._normal_render_hints = self.renderHints()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.LeftButton:
+            selectable = False
+            for hit in self.items(event.position().toPoint()):
+                item = hit
+                while item is not None:
+                    if item.flags() & QGraphicsItem.ItemIsSelectable:
+                        selectable = True
+                        break
+                    item = item.parentItem()
+                if selectable:
+                    break
+            if not selectable:
+                self.emptySceneDoubleClicked.emit(
+                    self.mapToScene(event.position().toPoint())
+                )
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         position = event.position().toPoint()
@@ -2102,6 +2187,7 @@ class NetworkTopologyDialog(QDialog):
         root_layout.addWidget(self.status_label)
 
         self.scene.selectionChanged.connect(self._scene_selection_changed)
+        self.view.emptySceneDoubleClicked.connect(self._rack_empty_space_double_clicked)
         self.rebuild_scene(fit=True)
 
     def showEvent(self, event) -> None:  # noqa: ANN001
@@ -2179,7 +2265,12 @@ class NetworkTopologyDialog(QDialog):
 
         add_device_button = QPushButton("Add device")
         add_device_button.setToolTip("Install a network asset and add it to the topology")
-        add_device_button.clicked.connect(self._add_device)
+        add_device_button.clicked.connect(
+            lambda: self._add_device(
+                self.rack_focus[1] if self.rack_focus is not None else "",
+                self.rack_focus[2] if self.rack_focus is not None else "",
+            )
+        )
         layout.addWidget(add_device_button)
 
         self.add_link_button = QPushButton("Add link")
@@ -2374,6 +2465,48 @@ class NetworkTopologyDialog(QDialog):
                     self._detail_row("Device rack use", f"{self._node_rack_units(node.node_id)}U")
                 self._detail_row("Power feed", _text(node.instance.get("power_feed")))
                 self._detail_row("UPS source", _text(node.instance.get("ups_source")))
+                pdu_ids = [
+                    _text(value)
+                    for value in node.instance.get("power_pdu_instance_ids", [])
+                    if _text(value)
+                ]
+                if pdu_ids:
+                    pdu_names = []
+                    for pdu_id in pdu_ids:
+                        pdu_node = self.model.nodes.get(pdu_id)
+                        pdu_names.append(pdu_node.name if pdu_node is not None else pdu_id)
+                    self._detail_row("Rack PDU feed", "\n".join(pdu_names))
+                if node.asset_type == "pdu":
+                    asset = node.asset or {}
+                    outgoing = [
+                        row
+                        for row in self.data.get("network_power_connections", [])
+                        if isinstance(row, dict)
+                        and _text(row.get("from_instance_id")) == node.node_id
+                    ]
+                    incoming = [
+                        row
+                        for row in self.data.get("network_power_connections", [])
+                        if isinstance(row, dict)
+                        and _text(row.get("to_instance_id")) == node.node_id
+                    ]
+                    self._detail_row("Rack side", _text(node.instance.get("rack_side")).title())
+                    self._detail_row("Outlets", str(max(0, _int(asset.get("power_outlet_count")))))
+                    capacity_w = max(0.0, _float(asset.get("power_capacity_w")))
+                    if capacity_w:
+                        self._detail_row("Rated capacity", f"{capacity_w:.0f} W")
+                    self._detail_row("Used outlets", str(len(outgoing)))
+                    self._detail_row(
+                        "Connected load",
+                        f"{sum(max(0.0, _float(row.get('load_w'))) for row in outgoing):.1f} W",
+                    )
+                    if incoming:
+                        source_names = []
+                        for row in incoming:
+                            source_id = _text(row.get("from_instance_id"))
+                            source_node = self.model.nodes.get(source_id)
+                            source_names.append(source_node.name if source_node is not None else source_id)
+                        self._detail_row("Upstream source", "\n".join(source_names))
         else:
             if node.role == "switch_port":
                 self._detail_row("Port", _text(node.details.get("port_name")), True)
@@ -2800,12 +2933,14 @@ class NetworkTopologyDialog(QDialog):
             for node_id, node in self.model.nodes.items()
             if not node.pseudo
             and node.asset_type != "rack_cabinet"
-            and _text(node.instance.get("rack_name"))
-            and (
-                (node.floor == floor and node.location_name == location)
-                or _text(node.instance.get("rack_name")) in rack_names_at_location
-                or _text(node.instance.get("rack_name")) == _text(_selected_rack)
+            and not (
+                node.asset_type == "pdu"
+                and _text(node.instance.get("rack_mount_style") or node.asset.get("rack_mount_style")).lower() == "vertical_side"
             )
+            and _text(node.instance.get("rack_name"))
+            and node.floor == floor
+            and node.location_name == location
+            and _text(node.instance.get("rack_name")) in rack_names_at_location
         ]
         rack_nodes.sort(key=lambda node_id: (
             _text(self._node_for(node_id).instance.get("rack_name")) if self._node_for(node_id) else "",
@@ -3909,6 +4044,12 @@ class NetworkTopologyDialog(QDialog):
         self.scene.clear()
         self.node_items.clear()
         self.visible_nodes.clear()
+        if self.rack_focus is not None:
+            floor, location, rack_name = self.rack_focus
+            valid_racks = self._rack_names_for_location(floor, location)
+            if rack_name not in valid_racks:
+                self.rack_focus = None
+                self.switch_port_focus = None
         visible_ids = self._collect_visible()
         positions = self._layout_visible(visible_ids)
         self._update_breadcrumb()
@@ -4219,6 +4360,13 @@ class NetworkTopologyDialog(QDialog):
             and node.location_name == location
             and _text(node.instance.get("rack_name"))
         }
+        occupied = {
+            (node.floor, node.location_name, _text(node.instance.get("rack_name")))
+            for node in self.model.nodes.values()
+            if not node.pseudo
+            and node.asset_type != "rack_cabinet"
+            and _text(node.instance.get("rack_name"))
+        }
         names.update(
             _text(rack.get("name"))
             for rack in self.data.get("network_racks", [])
@@ -4226,11 +4374,11 @@ class NetworkTopologyDialog(QDialog):
             and _int(rack.get("floor")) == int(floor)
             and _text(rack.get("location_name")) == location
             and _text(rack.get("name"))
+            and (
+                not bool(rack.get("auto_generated"))
+                or (int(floor), location, _text(rack.get("name"))) in occupied
+            )
         )
-        # Support equipment generated into the same named rack can have legacy
-        # or blank location metadata. Keep it visible with the active equipment.
-        if self.rack_focus is not None and self.rack_focus[2]:
-            names.add(_text(self.rack_focus[2]))
         return sorted(names, key=lambda value: value.lower())
 
     def _rack_capacity_for_key(self, key: Tuple[int, str, str]) -> int:
@@ -4266,8 +4414,10 @@ class NetworkTopologyDialog(QDialog):
             node_key = (node.floor, node.location_name, _text(node.instance.get("rack_name")))
             if node_key != key:
                 continue
+            units = self._node_rack_units(node_id)
+            if units <= 0:
+                continue
             start_u = max(1, _int(node.instance.get("rack_start_u"), 1))
-            units = max(1, self._node_rack_units(node_id))
             end_u = start_u + units - 1
             for rack_u in range(start_u, end_u + 1):
                 if 1 <= rack_u <= capacity:
@@ -4281,7 +4431,7 @@ class NetworkTopologyDialog(QDialog):
         floor, location, selected_rack = key
         rack_names = self._rack_names_for_location(floor, location)
         if not rack_names:
-            rack_names = [selected_rack]
+            return
         rack_left_start = 92.0
         rack_top = 90.0
         rack_width = 518.6
@@ -4323,6 +4473,42 @@ class NetworkTopologyDialog(QDialog):
             title.setPos(rack_left, rack_top - 42.0)
             title.setZValue(-1.0)
             self.scene.addItem(title)
+
+            pdu_nodes = [
+                node
+                for node in self.model.nodes.values()
+                if not node.pseudo
+                and node.asset_type == "pdu"
+                and node.floor == floor
+                and node.location_name == location
+                and _text(node.instance.get("rack_name")) == rack_name
+                and _text(node.instance.get("rack_mount_style") or node.asset.get("rack_mount_style")).lower() == "vertical_side"
+            ]
+            for pdu_node in sorted(
+                pdu_nodes,
+                key=lambda node: (
+                    _text(node.instance.get("rack_side")).lower(),
+                    _int(node.instance.get("side_mount_position"), 1),
+                    node.name.lower(),
+                ),
+            ):
+                side = _text(pdu_node.instance.get("rack_side")).lower()
+                position = max(1, _int(pdu_node.instance.get("side_mount_position"), 1))
+                pdu_width = 22.0
+                offset = (position - 1) * (pdu_width + 5.0)
+                x = (
+                    rack_left - 9.0 - pdu_width - offset
+                    if side != "right"
+                    else rack_left + rack_width + 9.0 + offset
+                )
+                pdu_item = RackPduItem(pdu_node, pdu_width, rack_height)
+                pdu_item.setPos(x, rack_top)
+                pdu_item.setZValue(0.8)
+                pdu_item.activated.connect(self._card_activated)
+                pdu_item.contextRequested.connect(self._node_context_menu)
+                self.scene.addItem(pdu_item)
+                self.node_items[pdu_node.node_id] = pdu_item
+                self.visible_nodes[pdu_node.node_id] = pdu_node
 
         room_title = QGraphicsSimpleTextItem(
             f"Rack elevation — {location or 'Unassigned location'} ({len(rack_names)} rack{'s' if len(rack_names) != 1 else ''})"
@@ -5110,7 +5296,7 @@ class NetworkTopologyDialog(QDialog):
             return
         rack_items = [
             item for item in selected
-            if isinstance(item, (RackEquipmentItem, SplitterFrontPanelItem))
+            if isinstance(item, (RackEquipmentItem, SplitterFrontPanelItem, RackPduItem))
         ]
         if self.rack_focus is not None and rack_items:
             item = rack_items[0]
@@ -5292,7 +5478,58 @@ class NetworkTopologyDialog(QDialog):
         )
         QMessageBox.information(self, "Auto connect", message)
 
-    def _add_device(self, default_location: str = "", default_rack: str = "") -> None:
+    def _rack_empty_space_double_clicked(self, scene_position: QPointF) -> None:
+        if self.rack_focus is None or self.switch_port_focus is not None:
+            return
+        floor, location, _selected_rack = self.rack_focus
+        rack_names = self._rack_names_for_location(floor, location)
+        if not rack_names:
+            return
+        rack_left_start = 92.0
+        rack_width = 518.6
+        rack_gap = 90.0
+        rack_top = 90.0
+        unit_pitch = 44.45
+        relative_x = scene_position.x() - rack_left_start
+        if relative_x < 0.0:
+            return
+        rack_index = int(relative_x // (rack_width + rack_gap))
+        if rack_index < 0 or rack_index >= len(rack_names):
+            return
+        rack_left = rack_left_start + rack_index * (rack_width + rack_gap)
+        if not (rack_left <= scene_position.x() <= rack_left + rack_width):
+            return
+        rack_name = rack_names[rack_index]
+        capacity = self._rack_capacity_for_key((floor, location, rack_name))
+        rack_height = capacity * unit_pitch
+        if not (rack_top <= scene_position.y() < rack_top + rack_height):
+            return
+        row_from_top = int((scene_position.y() - rack_top) // unit_pitch)
+        rack_u = capacity - row_from_top
+        for node_id, node in self.model.nodes.items():
+            if node.pseudo or node.asset_type in {"rack_cabinet", "pdu"}:
+                continue
+            if (
+                node.floor != floor
+                or node.location_name != location
+                or _text(node.instance.get("rack_name")) != rack_name
+            ):
+                continue
+            start_u = max(1, _int(node.instance.get("rack_start_u"), 1))
+            units = max(0, self._node_rack_units(node_id))
+            if units > 0 and start_u <= rack_u <= start_u + units - 1:
+                self.status_label.setText(
+                    f"{rack_name} U{rack_u} is occupied by {node.name}; double-click an empty rack unit to add equipment."
+                )
+                return
+        self._add_device(location, rack_name, rack_u)
+
+    def _add_device(
+        self,
+        default_location: str = "",
+        default_rack: str = "",
+        default_rack_start_u: int = 0,
+    ) -> None:
         dialog = NetworkInstanceEditorDialog(
             self,
             assets=self.data.get("network_assets", []),
@@ -5303,13 +5540,11 @@ class NetworkTopologyDialog(QDialog):
                     "auto_connect_new_manual_devices", True
                 )
             ),
+            racks=rack_selection_records(self.data),
+            default_location=default_location,
+            default_rack=default_rack,
+            default_rack_start_u=default_rack_start_u,
         )
-        if default_location:
-            index = dialog.location_combo.findData(default_location)
-            if index >= 0:
-                dialog.location_combo.setCurrentIndex(index)
-        if default_rack:
-            dialog.rack_name_edit.setText(default_rack)
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self.data.setdefault("network_asset_instances", []).append(dialog.result)
             if dialog.auto_connect_requested:
@@ -5325,7 +5560,12 @@ class NetworkTopologyDialog(QDialog):
             return
         current = rows[index]
         dialog = NetworkInstanceEditorDialog(
-            self, current, self.data.get("network_assets", []), self.data.get("locations", []), instance_id
+            self,
+            instance=current,
+            assets=self.data.get("network_assets", []),
+            locations=self.data.get("locations", []),
+            suggested_id=instance_id,
+            racks=rack_selection_records(self.data),
         )
         if dialog.exec() != QDialog.Accepted or not dialog.result:
             return
@@ -5340,6 +5580,11 @@ class NetworkTopologyDialog(QDialog):
                     connection["from_instance_id"] = new_id
                 if _text(connection.get("to_instance_id")) == instance_id:
                     connection["to_instance_id"] = new_id
+            for power_link in self.data.get("network_power_connections", []):
+                if _text(power_link.get("from_instance_id")) == instance_id:
+                    power_link["from_instance_id"] = new_id
+                if _text(power_link.get("to_instance_id")) == instance_id:
+                    power_link["to_instance_id"] = new_id
             for lead in self.data.get("network_patch_leads", []):
                 if _text(lead.get("instance_id")) == instance_id:
                     lead["instance_id"] = new_id
@@ -5373,6 +5618,12 @@ class NetworkTopologyDialog(QDialog):
             row
             for row in self.data.get("network_connections", [])
             if _text(row.get("id")) not in connection_ids
+        ]
+        self.data["network_power_connections"] = [
+            row
+            for row in self.data.get("network_power_connections", [])
+            if _text(row.get("from_instance_id")) not in remove_ids
+            and _text(row.get("to_instance_id")) not in remove_ids
         ]
         self.data["network_patch_leads"] = [
             row
@@ -5864,7 +6115,7 @@ class NetworkTopologyDialog(QDialog):
     def _apply_external_payload(self, payload: dict) -> None:
         for key in (
             "network_settings", "network_assets", "network_asset_instances", "network_connections",
-            "network_endpoint_assignments", "network_patch_leads", "network_redundancy_groups",
+            "network_power_connections", "network_endpoint_assignments", "network_patch_leads", "network_redundancy_groups",
             "network_vlans", "network_routes", "network_ip_allocations", "network_external_networks",
             "network_optic_modules", "network_optical_paths", "network_fibre_cable_types",
             "network_fibre_cables", "network_fibre_nodes", "network_fibre_splices", "network_design_summary",

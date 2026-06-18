@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
     QScrollArea,
@@ -321,6 +322,34 @@ class NetworkAssetEditorDialog(QDialog):
             float(self.asset.get("power_input_w", 0.0) or 0.0)
         )
 
+        self.power_capacity_spin = QDoubleSpinBox()
+        self.power_capacity_spin.setRange(0.0, 100_000_000.0)
+        self.power_capacity_spin.setDecimals(1)
+        self.power_capacity_spin.setSuffix(" W")
+        self.power_capacity_spin.setSpecialValueText("Not declared")
+        self.power_capacity_spin.setValue(float(self.asset.get("power_capacity_w", 0.0) or 0.0))
+
+        self.power_outlet_count_spin = QSpinBox()
+        self.power_outlet_count_spin.setRange(0, 10000)
+        self.power_outlet_count_spin.setValue(int(self.asset.get("power_outlet_count", 0) or 0))
+
+        self.power_feed_count_spin = QSpinBox()
+        self.power_feed_count_spin.setRange(1, 8)
+        self.power_feed_count_spin.setValue(max(1, int(self.asset.get("power_feed_count", 1) or 1)))
+
+        self.redundant_power_check = QCheckBox("Device has independent/redundant power supplies")
+        self.redundant_power_check.setChecked(bool(self.asset.get("redundant_power_supplies", False)))
+
+        self.rack_mount_style_combo = QComboBox()
+        self.rack_mount_style_combo.addItem("Rack-unit mounted", "rack_units")
+        self.rack_mount_style_combo.addItem("Vertical side-mounted PDU", "vertical_side")
+        mount_index = self.rack_mount_style_combo.findData(_text(self.asset.get("rack_mount_style")) or "rack_units")
+        if mount_index >= 0:
+            self.rack_mount_style_combo.setCurrentIndex(mount_index)
+
+        self.ups_backed_source_check = QCheckBox("This power source is UPS backed")
+        self.ups_backed_source_check.setChecked(bool(self.asset.get("ups_backed_source", False)))
+
         self.poe_budget_spin = QDoubleSpinBox()
         self.poe_budget_spin.setRange(0.0, 1_000_000.0)
         self.poe_budget_spin.setDecimals(2)
@@ -522,6 +551,12 @@ class NetworkAssetEditorDialog(QDialog):
 
         _capacity_page, capacity_form = add_scroll_form_tab("Capacity and rack")
         capacity_form.addRow("Power input", self.power_input_spin)
+        capacity_form.addRow("Power output capacity", self.power_capacity_spin)
+        capacity_form.addRow("PDU outlet count", self.power_outlet_count_spin)
+        capacity_form.addRow("Required power feeds", self.power_feed_count_spin)
+        capacity_form.addRow("Redundant supplies", self.redundant_power_check)
+        capacity_form.addRow("Rack mounting", self.rack_mount_style_combo)
+        capacity_form.addRow("UPS-backed source", self.ups_backed_source_check)
         capacity_form.addRow("PoE budget", self.poe_budget_spin)
         capacity_form.addRow("Switching / routing bandwidth", self.bandwidth_capacity_spin)
         capacity_form.addRow("Packet forwarding throughput", self.packet_throughput_spin)
@@ -679,6 +714,14 @@ class NetworkAssetEditorDialog(QDialog):
         }
         self.bandwidth_capacity_spin.setEnabled(capacity_enabled)
         self.packet_throughput_spin.setEnabled(capacity_enabled)
+        is_pdu = asset_type == "pdu"
+        is_power_source = asset_type in {"ups", "power_device"}
+        self.power_capacity_spin.setEnabled(is_pdu or is_power_source)
+        self.power_outlet_count_spin.setEnabled(is_pdu)
+        self.rack_mount_style_combo.setEnabled(is_pdu)
+        self.ups_backed_source_check.setEnabled(is_power_source)
+        self.power_feed_count_spin.setEnabled(asset_type not in {"pdu", "ups", "power_device", "cable_management", "optical_transceiver"})
+        self.redundant_power_check.setEnabled(self.power_feed_count_spin.isEnabled())
 
     def _frequencies(self) -> List[str]:
         result = []
@@ -788,6 +831,12 @@ class NetworkAssetEditorDialog(QDialog):
             ),
             "frequencies": frequencies if asset_type == "wireless_access_point" else [],
             "power_input_w": float(self.power_input_spin.value()),
+            "power_capacity_w": float(self.power_capacity_spin.value()),
+            "power_outlet_count": int(self.power_outlet_count_spin.value()) if asset_type == "pdu" else int(self.asset.get("power_outlet_count", 0) or 0),
+            "power_feed_count": int(self.power_feed_count_spin.value()),
+            "redundant_power_supplies": bool(self.redundant_power_check.isChecked()),
+            "rack_mount_style": _text(self.rack_mount_style_combo.currentData()) if asset_type == "pdu" else _text(self.asset.get("rack_mount_style")),
+            "ups_backed_source": bool(self.ups_backed_source_check.isChecked()) if asset_type in {"ups", "power_device"} else bool(self.asset.get("ups_backed_source", False)),
             "poe_budget_w": float(self.poe_budget_spin.value()),
             "bandwidth_capacity_gbps": float(self.bandwidth_capacity_spin.value()),
             "packet_throughput_mpps": float(self.packet_throughput_spin.value()),
@@ -843,6 +892,69 @@ class NetworkAssetEditorDialog(QDialog):
         super().accept()
 
 
+def rack_selection_records(data: dict) -> List[dict]:
+    """Return real rack choices, including racks inferred from installed assets.
+
+    Auto-generated rack records with no installed equipment are intentionally
+    omitted so stale planner records cannot reappear as ghost install targets.
+    Manually created empty cabinets remain available.
+    """
+    installed_keys = {
+        (
+            int(row.get("floor", 0) or 0),
+            _text(row.get("location_name")),
+            _text(row.get("rack_name")),
+        )
+        for row in data.get("network_asset_instances", [])
+        if isinstance(row, dict) and _text(row.get("rack_name"))
+    }
+    result: List[dict] = []
+    seen = set()
+    for rack in data.get("network_racks", []):
+        if not isinstance(rack, dict):
+            continue
+        key = (
+            int(rack.get("floor", 0) or 0),
+            _text(rack.get("location_name")),
+            _text(rack.get("name")),
+        )
+        if not key[2] or key in seen:
+            continue
+        occupied = key in installed_keys
+        if bool(rack.get("auto_generated")) and not occupied:
+            continue
+        result.append({**rack, "has_installed_assets": occupied})
+        seen.add(key)
+    for floor, location, rack_name in sorted(installed_keys):
+        key = (floor, location, rack_name)
+        if key in seen:
+            continue
+        capacity = max(
+            [
+                int(row.get("rack_size_u", 0) or 0)
+                for row in data.get("network_asset_instances", [])
+                if isinstance(row, dict)
+                and int(row.get("floor", 0) or 0) == floor
+                and _text(row.get("location_name")) == location
+                and _text(row.get("rack_name")) == rack_name
+            ]
+            or [0]
+        )
+        result.append(
+            {
+                "id": "",
+                "name": rack_name,
+                "location_name": location,
+                "floor": floor,
+                "capacity_u": capacity,
+                "has_installed_assets": True,
+                "inferred_from_assets": True,
+            }
+        )
+        seen.add(key)
+    return result
+
+
 class NetworkInstanceEditorDialog(QDialog):
     def __init__(
         self,
@@ -855,12 +967,18 @@ class NetworkInstanceEditorDialog(QDialog):
         default_x: float = 0.0,
         default_y: float = 0.0,
         default_auto_connect: bool = True,
+        racks: Optional[Sequence[dict]] = None,
+        default_location: str = "",
+        default_rack: str = "",
+        default_rack_start_u: int = 0,
     ):
         super().__init__(parent)
         self.setWindowTitle("Installed Network Asset")
         self.instance = deepcopy(instance or {})
         self.assets = list(assets or [])
         self.locations = list(locations or [])
+        self.racks = [row for row in (racks or []) if isinstance(row, dict)]
+        self.default_rack = _text(default_rack)
         self.result: Optional[dict] = None
         self.auto_connect_requested = False
         self.resize(560, 620)
@@ -927,7 +1045,7 @@ class NetworkInstanceEditorDialog(QDialog):
                 name,
             )
         location_index = self.location_combo.findData(
-            _text(self.instance.get("location_name"))
+            _text(self.instance.get("location_name")) or _text(default_location)
         )
         if location_index >= 0:
             self.location_combo.setCurrentIndex(location_index)
@@ -944,11 +1062,13 @@ class NetworkInstanceEditorDialog(QDialog):
         self.y_spin.setDecimals(3)
         self.y_spin.setValue(float(self.instance.get("y", default_y) or 0.0))
 
-        self.rack_name_edit = QLineEdit(_text(self.instance.get("rack_name")))
+        self.rack_combo = QComboBox()
+        self.rack_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.rack_combo.setMinimumContentsLength(18)
         self.rack_start_spin = QSpinBox()
         self.rack_start_spin.setRange(0, 1000)
         self.rack_start_spin.setSuffix("U")
-        self.rack_start_spin.setValue(int(self.instance.get("rack_start_u", 0) or 0))
+        self.rack_start_spin.setValue(int(self.instance.get("rack_start_u", default_rack_start_u) or default_rack_start_u or 0))
         self.rack_size_spin = QSpinBox()
         self.rack_size_spin.setRange(0, 200)
         self.rack_size_spin.setSuffix("U")
@@ -972,7 +1092,7 @@ class NetworkInstanceEditorDialog(QDialog):
         form.addRow("Floor", self.floor_spin)
         form.addRow("X", self.x_spin)
         form.addRow("Y", self.y_spin)
-        form.addRow("Rack", self.rack_name_edit)
+        form.addRow("Rack", self.rack_combo)
         form.addRow("Rack start", self.rack_start_spin)
         form.addRow("Rack cabinet size", self.rack_size_spin)
         form.addRow("Management IP", self.management_ip_edit)
@@ -982,15 +1102,49 @@ class NetworkInstanceEditorDialog(QDialog):
         form.addRow("Notes", self.notes_edit)
 
         self.location_combo.currentIndexChanged.connect(self._location_changed)
+        self.floor_spin.valueChanged.connect(lambda _value: self._populate_rack_combo())
+        self._populate_rack_combo(_text(self.instance.get("rack_name")) or self.default_rack)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _populate_rack_combo(self, wanted: str = "") -> None:
+        wanted = _text(wanted) or _text(self.rack_combo.currentData())
+        location_name = _text(self.location_combo.currentData())
+        floor = int(self.floor_spin.value())
+        self.rack_combo.blockSignals(True)
+        self.rack_combo.clear()
+        self.rack_combo.addItem("No rack cabinet", "")
+        seen = set()
+        for rack in sorted(
+            self.racks,
+            key=lambda row: (_text(row.get("location_name")).lower(), _text(row.get("name")).lower()),
+        ):
+            rack_name = _text(rack.get("name"))
+            if not rack_name or rack_name in seen:
+                continue
+            if _text(rack.get("location_name")) != location_name or int(rack.get("floor", floor) or 0) != floor:
+                continue
+            if bool(rack.get("auto_generated")) and not bool(rack.get("has_installed_assets")):
+                continue
+            seen.add(rack_name)
+            capacity = int(rack.get("capacity_u", 0) or 0)
+            suffix = f" ({capacity}U)" if capacity else ""
+            self.rack_combo.addItem(rack_name + suffix, rack_name)
+        if wanted and wanted not in seen:
+            current_location = _text(self.instance.get("location_name"))
+            if wanted == _text(self.instance.get("rack_name")) and location_name == current_location:
+                self.rack_combo.addItem(f"{wanted} (installed rack)", wanted)
+        index = self.rack_combo.findData(wanted)
+        self.rack_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.rack_combo.blockSignals(False)
+
     def _location_changed(self) -> None:
         name = _text(self.location_combo.currentData())
         if not name:
+            self._populate_rack_combo("")
             return
         location = next(
             (item for item in self.locations if _text(item.get("name")) == name), None
@@ -1000,6 +1154,7 @@ class NetworkInstanceEditorDialog(QDialog):
         self.floor_spin.setValue(int(location.get("floor", 0) or 0))
         self.x_spin.setValue(float(location.get("x", 0.0) or 0.0))
         self.y_spin.setValue(float(location.get("y", 0.0) or 0.0))
+        self._populate_rack_combo(self.default_rack)
 
     def accept(self) -> None:
         instance_id = self.id_edit.text().strip()
@@ -1022,7 +1177,7 @@ class NetworkInstanceEditorDialog(QDialog):
             "floor": int(self.floor_spin.value()),
             "x": float(self.x_spin.value()),
             "y": float(self.y_spin.value()),
-            "rack_name": self.rack_name_edit.text().strip(),
+            "rack_name": _text(self.rack_combo.currentData()),
             "rack_start_u": int(self.rack_start_spin.value()),
             "rack_size_u": int(self.rack_size_spin.value()),
             "management_ip": self.management_ip_edit.text().strip(),
@@ -2422,9 +2577,24 @@ class NetworkPlannerDialog(QDialog):
             != QMessageBox.Yes
         ):
             return
+        progress = QProgressDialog("Preparing automatic network plan...", "", 0, 100, self)
+        progress.setWindowTitle("Automatic network planning")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        progress.show()
+
+        def update_progress(value: int, message: str) -> None:
+            progress.setLabelText(message)
+            progress.setValue(max(0, min(100, int(value))))
+            QApplication.processEvents()
+
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            summary = generate_network_design(self.data, technology)
+            summary = generate_network_design(self.data, technology, progress_callback=update_progress)
         except NetworkPlanningError as exc:
             QMessageBox.critical(self, "Automatic network planning", str(exc))
             return
@@ -2435,6 +2605,8 @@ class NetworkPlannerDialog(QDialog):
             return
         finally:
             QApplication.restoreOverrideCursor()
+            progress.setValue(100)
+            progress.close()
         self.refresh_tables()
         self.on_save(deepcopy(self.data))
         self.tabs.setCurrentWidget(self.summary_text)
@@ -2453,13 +2625,14 @@ class NetworkPlannerDialog(QDialog):
         connection_count = len(self.data.get("network_connections", []))
         assignment_count = len(self.data.get("network_endpoint_assignments", []))
         redundancy_count = len(self.data.get("network_redundancy_groups", []))
+        power_connection_count = len(self.data.get("network_power_connections", []))
         patch_lead_count = len(self.data.get("network_patch_leads", []))
         fibre_cable_count = len(self.data.get("network_fibre_cables", []))
         fibre_node_count = len(self.data.get("network_fibre_nodes", []))
         fibre_splice_count = len(self.data.get("network_fibre_splices", []))
 
         if not any(
-            (instance_count, connection_count, assignment_count, redundancy_count, patch_lead_count, fibre_cable_count, fibre_node_count, fibre_splice_count)
+            (instance_count, connection_count, assignment_count, redundancy_count, power_connection_count, patch_lead_count, fibre_cable_count, fibre_node_count, fibre_splice_count)
         ):
             QMessageBox.information(
                 self,
@@ -2473,7 +2646,8 @@ class NetworkPlannerDialog(QDialog):
             f"Installed assets: {instance_count}\n"
             f"Connections: {connection_count}\n"
             f"Endpoint assignments: {assignment_count}\n"
-            f"Redundancy groups: {redundancy_count}\n\n"
+            f"Redundancy groups: {redundancy_count}\n"
+            f"Power connections: {power_connection_count}\n\n"
             "The network asset library, planner settings, VLANs and routing "
             "records will be preserved."
         )
@@ -2493,6 +2667,7 @@ class NetworkPlannerDialog(QDialog):
         self.data["network_connections"] = []
         self.data["network_endpoint_assignments"] = []
         self.data["network_redundancy_groups"] = []
+        self.data["network_power_connections"] = []
         self.data["network_patch_leads"] = []
         self.data["network_fibre_cables"] = []
         self.data["network_fibre_nodes"] = []
@@ -2576,6 +2751,7 @@ class NetworkPlannerDialog(QDialog):
             assets=self._items("network_assets"),
             locations=self.data.get("locations", []),
             suggested_id=_next_id(self._items("network_asset_instances"), "NI"),
+            racks=rack_selection_records(self.data),
             default_auto_connect=bool(
                 self.data.get("network_settings", {}).get(
                     "auto_connect_new_manual_devices", True
@@ -2606,6 +2782,7 @@ class NetworkPlannerDialog(QDialog):
             self._items("network_assets"),
             self.data.get("locations", []),
             suggested_id=_text(item.get("id")),
+            racks=rack_selection_records(self.data),
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self._replace_or_append("network_asset_instances", index, dialog.result)
@@ -2641,6 +2818,12 @@ class NetworkPlannerDialog(QDialog):
             for connection in self._items("network_connections")
             if _text(connection.get("from_instance_id")) != instance_id
             and _text(connection.get("to_instance_id")) != instance_id
+        ]
+        self.data["network_power_connections"] = [
+            link
+            for link in self._items("network_power_connections")
+            if _text(link.get("from_instance_id")) != instance_id
+            and _text(link.get("to_instance_id")) != instance_id
         ]
         self.data["network_endpoint_assignments"] = [
             assignment
