@@ -186,7 +186,7 @@ NETWORK_MEDIA = {"copper", "fibre", "wireless", "virtual", "stacking", "none"}
 NETWORK_CONNECTION_ROLES = {"input", "output", "uplink"}
 NETWORK_LOCATION_TYPES = {"mer", "polan", "telco_pop", "external_network", "fibre_joint"}
 
-NETWORK_PORT_TYPES = {"rj45", "sfp", "sfp+", "sfp28", "qsfp", "qsfp+", "qsfp28", "qsfp56", "qsfpdd", "osfp", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"}
+NETWORK_PORT_TYPES = {"rj45", "sfp", "sfp+", "sfp28", "sfp56", "qsfp", "qsfp+", "qsfp28", "qsfp56", "qsfpdd", "osfp", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"}
 NETWORK_PORT_USES = {"input", "output", "uplink", "downlink", "management", "console", "pon", "client", "patch", "stacking", "power", "spare", "other"}
 
 
@@ -208,7 +208,7 @@ NETWORK_PORT_SPEED_OPTIONS = [
 ]
 
 PLUGGABLE_OPTIC_PORT_TYPES = {
-    "sfp", "sfp+", "sfp28", "qsfp", "qsfp+", "qsfp28",
+    "sfp", "sfp+", "sfp28", "sfp56", "qsfp", "qsfp+", "qsfp28",
     "qsfp56", "qsfpdd", "osfp",
 }
 
@@ -217,6 +217,7 @@ _DEFAULT_PORT_SPEEDS = {
     "sfp": [100, 1_000],
     "sfp+": [1_000, 10_000],
     "sfp28": [1_000, 10_000, 25_000],
+    "sfp56": [1_000, 10_000, 25_000, 50_000],
     "qsfp": [40_000],
     "qsfp+": [40_000],
     "qsfp28": [40_000, 100_000],
@@ -276,11 +277,12 @@ def compatible_port_speeds(left, right) -> List[int]:
 
 def optic_form_factors_for_cage(port_type: str) -> List[str]:
     cage = _text(port_type).lower()
-    order = ["sfp", "sfp+", "sfp28", "qsfp", "qsfp+", "qsfp28", "qsfp56", "qsfpdd", "osfp"]
+    order = ["sfp", "sfp+", "sfp28", "sfp56", "qsfp", "qsfp+", "qsfp28", "qsfp56", "qsfpdd", "osfp"]
     compatibility = {
         "sfp": {"sfp"},
         "sfp+": {"sfp", "sfp+"},
         "sfp28": {"sfp", "sfp+", "sfp28"},
+        "sfp56": {"sfp", "sfp+", "sfp28", "sfp56"},
         "qsfp": {"qsfp"},
         "qsfp+": {"qsfp", "qsfp+"},
         "qsfp28": {"qsfp", "qsfp+", "qsfp28"},
@@ -848,9 +850,15 @@ def ensure_network_schema(data: dict) -> dict:
                     "port_use": port_use if port_use in NETWORK_PORT_USES else "other",
                     "name_prefix": _text(row.get("name_prefix")),
                     "explicit_names": [_text(value) for value in names if _text(value)],
-                    "supported_speeds_mbps": normalise_port_speeds(
-                        row.get("supported_speeds_mbps", row.get("supported_speeds", []))
-                    ) or default_port_speeds(port_type),
+                    "supported_speeds_mbps": (
+                        normalise_port_speeds(
+                            row.get("supported_speeds_mbps", row.get("supported_speeds", []))
+                        )
+                        if normalise_port_speeds(
+                            row.get("supported_speeds_mbps", row.get("supported_speeds", []))
+                        )
+                        else ([] if asset["asset_type"] == "patch_panel" else default_port_speeds(port_type))
+                    ),
                     "default_speed_mbps": max(0, _as_int(row.get("default_speed_mbps"))),
                     "transmit_power_dbm": "" if _text(row.get("transmit_power_dbm")) == "" else _as_float(row.get("transmit_power_dbm")),
                     "receiver_sensitivity_dbm": "" if _text(row.get("receiver_sensitivity_dbm")) == "" else _as_float(row.get("receiver_sensitivity_dbm")),
