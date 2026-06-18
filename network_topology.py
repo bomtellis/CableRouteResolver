@@ -1871,6 +1871,13 @@ class InteractiveLinkItem(QGraphicsPathItem):
         self.edge_id = _text(edge_id)
         self.context_callback = context_callback
         self.setAcceptHoverEvents(True)
+        # Left clicks belong to the topology canvas.  Letting path items accept
+        # them can leave Qt's path item in a stale pressed/hover paint state at
+        # low zoom, which makes the link appear to vanish.  Right click remains
+        # available for the connection context menu.
+        self.setAcceptedMouseButtons(Qt.RightButton)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        self.setCacheMode(QGraphicsItem.NoCache)
 
     def contextMenuEvent(self, event) -> None:  # noqa: ANN001
         if self.edge_id and callable(self.context_callback):
@@ -1908,6 +1915,8 @@ class LinkLabelItem(QGraphicsObject):
         self._width = min(420.0, max(54.0, float(metrics.horizontalAdvance(text) + 18)))
         self._height = 20.0
         self.setZValue(0.35)
+        self.setAcceptedMouseButtons(Qt.RightButton if self.edge_id else Qt.NoButton)
+        self.setCacheMode(QGraphicsItem.NoCache)
 
     def boundingRect(self) -> QRectF:
         return QRectF(-self._width / 2.0, -self._height / 2.0, self._width, self._height)
@@ -4981,6 +4990,9 @@ class NetworkTopologyDialog(QDialog):
             item = QGraphicsPathItem(underline)
             item.setPen(QPen(QColor("#34424e"), 1.2))
             item.setZValue(-1.5)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            item.setFlag(QGraphicsItem.ItemIsSelectable, False)
+            item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(item)
 
     def _rack_group_key(self, node_id: str) -> Tuple[int, str, str]:
@@ -5134,6 +5146,7 @@ class NetworkTopologyDialog(QDialog):
             label.setBrush(QBrush(QColor("#9fb0bd")))
             label.setPos(rect.left() + 10.0, rect.top() + 8.0)
             label.setZValue(-1.4)
+            label.setAcceptedMouseButtons(Qt.NoButton)
             self.scene.addItem(label)
 
             if bus_nodes:
@@ -5144,6 +5157,7 @@ class NetworkTopologyDialog(QDialog):
                 main_item = QGraphicsPathItem(main_bus)
                 main_item.setPen(QPen(QColor("#6f8dff"), 2.2))
                 main_item.setZValue(-0.98)
+                main_item.setAcceptedMouseButtons(Qt.NoButton)
                 self.scene.addItem(main_item)
 
                 failover_nodes = getattr(self, "_visible_failover_bus_nodes", set())
@@ -5154,6 +5168,7 @@ class NetworkTopologyDialog(QDialog):
                     fail_pen = QPen(QColor("#d68f52"), 2.0, Qt.DashLine)
                     fail_item.setPen(fail_pen)
                     fail_item.setZValue(-0.86)
+                    fail_item.setAcceptedMouseButtons(Qt.NoButton)
                     self.scene.addItem(fail_item)
 
     def _link_colour(self, medium: str) -> QColor:
@@ -5217,12 +5232,13 @@ class NetworkTopologyDialog(QDialog):
             if self._failover_bus_column_x is not None
             else primary_lane - 140.0
         )
-        # Keep at least 120 scene units between the two vertical trunks.  This
-        # remains true when a long label pushes the primary lane further left.
+        # Keep a full routing lane between primary and failover trunks.  The
+        # larger separation also prevents long shared vertical runs from being
+        # painted directly on top of the primary route.
         return min(
             preferred,
-            primary_lane - 120.0,
-            bus_left - required_span - 154.0,
+            primary_lane - 190.0,
+            bus_left - required_span - 224.0,
         )
 
     def _add_link_label(self, text: str, colour: QColor, point: QPointF, edge: Optional[TopologyEdge] = None) -> None:
@@ -5268,6 +5284,7 @@ class NetworkTopologyDialog(QDialog):
             pen.setStyle(Qt.DashLine)
         item.setPen(pen)
         item.setZValue(z_value)
+        item.setAcceptedMouseButtons(Qt.NoButton)
         self.scene.addItem(item)
 
     def _add_link_rail(self, source_id: str, child_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
@@ -5306,7 +5323,18 @@ class NetworkTopologyDialog(QDialog):
 
         for _location, group_child_ids in grouped.items():
             source_pos = positions[source_id]
-            source_start = QPointF(source_pos.x() + self.CARD_W, source_pos.y() + self._node_card_height(source_id) / 2.0)
+            representative_edge = None
+            if group_child_ids:
+                first_child = group_child_ids[0]
+                representative_edge = None if first_child.startswith("client::") else self._edge_by_id(
+                    self.visible_parent_edge.get(first_child, "")
+                )
+            source_start = QPointF(
+                source_pos.x() + self.CARD_W,
+                self._outgoing_fibre_connection_y(
+                    source_id, positions, representative_edge, failover=False
+                ),
+            )
             endpoints = []
             for child_id in group_child_ids:
                 target_pos = positions.get(child_id)
@@ -5599,9 +5627,12 @@ class NetworkTopologyDialog(QDialog):
         source_points: List[Tuple[str, QPointF]] = []
         for source_id in sources:
             source_pos = positions[source_id]
+            source_edge = next((row_edge for row_source, _row_target, row_edge in valid if row_source == source_id), None)
             point = QPointF(
                 source_pos.x() + self.CARD_W,
-                source_pos.y() + self._node_card_height(source_id) / 2.0,
+                self._outgoing_fibre_connection_y(
+                    source_id, positions, source_edge, failover=True
+                ),
             )
             source_points.append((source_id, point))
             y_values.append(point.y())
@@ -5612,6 +5643,7 @@ class NetworkTopologyDialog(QDialog):
         trunk_item = QGraphicsPathItem(trunk)
         trunk_item.setPen(QPen(colour, 2.2, Qt.DashLine))
         trunk_item.setZValue(-0.84)
+        trunk_item.setAcceptedMouseButtons(Qt.NoButton)
         self.scene.addItem(trunk_item)
 
         # Join every standby source to the same vertical trunk.
@@ -5621,6 +5653,7 @@ class NetworkTopologyDialog(QDialog):
             item = QGraphicsPathItem(branch)
             item.setPen(QPen(colour, 2.0, Qt.DashLine))
             item.setZValue(-0.83)
+            item.setAcceptedMouseButtons(Qt.NoButton)
             self.scene.addItem(item)
 
         # Join every protected branch from the common trunk to its destination.
@@ -5642,6 +5675,7 @@ class NetworkTopologyDialog(QDialog):
             item = QGraphicsPathItem(branch)
             item.setPen(QPen(colour, 2.0, Qt.DashLine))
             item.setZValue(-0.82)
+            item.setAcceptedMouseButtons(Qt.NoButton)
             self.scene.addItem(item)
             if bus is not None:
                 self._add_bus_drop(target_id, positions, colour, failover=True, z_value=-0.8, edge=edge)
@@ -5678,7 +5712,13 @@ class NetworkTopologyDialog(QDialog):
             bus_left = min(self._bus_for_node(target_id, failover=True)[1] for target_id, _point, _edge in endpoints)
             bus_right = max(self._bus_for_node(target_id, failover=True)[2] for target_id, _point, _edge in endpoints)
             bus_y = min(point.y() for _target_id, point, _edge in endpoints)
-            source_start = QPointF(source_pos.x() + self.CARD_W + 8.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
+            representative_edge = endpoints[0][2] if endpoints else None
+            source_start = QPointF(
+                source_pos.x() + self.CARD_W + 8.0,
+                self._outgoing_fibre_connection_y(
+                    source_id, positions, representative_edge, failover=True
+                ),
+            )
             if source_start.x() <= bus_left:
                 required_span = max(
                     self._link_label_required_span(edge)
@@ -5707,10 +5747,10 @@ class NetworkTopologyDialog(QDialog):
         route_right = average_target_x >= source_pos.x() + self.CARD_W / 2.0
         if route_right:
             start = QPointF(source_pos.x() + self.CARD_W + 8.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
-            rail_x = source_pos.x() + self.CARD_W + 52.0
+            rail_x = source_pos.x() + self.CARD_W + 142.0
         else:
             start = QPointF(source_pos.x() - 8.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
-            rail_x = source_pos.x() - 52.0
+            rail_x = source_pos.x() - 142.0
 
         self._add_vertical_link_rail(start, endpoints, QColor("#a76a42"), z_value=-0.82, cross_link=True, rail_x=rail_x)
 
@@ -5781,6 +5821,24 @@ class NetworkTopologyDialog(QDialog):
         first_y = centre_y - pitch * (count - 1) / 2.0
         return first_y + selected_index * pitch
 
+    def _outgoing_fibre_connection_y(
+        self,
+        node_id: str,
+        positions: Dict[str, QPointF],
+        edge: Optional[TopologyEdge],
+        failover: bool = False,
+    ) -> float:
+        """Return distinct card-side exits for primary and failover fibre."""
+        pos = positions[node_id]
+        centre_y = pos.y() + self._node_card_height(node_id) / 2.0
+        if edge is None or _text(edge.medium).lower() != "fibre":
+            return centre_y
+        # Keep both exits within the rounded card while making the two routes
+        # visibly independent from the moment they leave the core/distribution
+        # card.
+        offset = min(18.0, max(10.0, self._node_card_height(node_id) * 0.14))
+        return centre_y + offset if failover else centre_y - offset
+
     def _incoming_fibre_connection_x(
         self,
         node_id: str,
@@ -5822,7 +5880,12 @@ class NetworkTopologyDialog(QDialog):
         alternate_cross_link = cross_link and not standby
         target_bus = self._bus_for_node(target_id, failover=failover_style)
         if failover_style or alternate_cross_link:
-            source_center = QPointF(source_pos.x() + self.CARD_W / 2.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
+            source_center = QPointF(
+                source_pos.x() + self.CARD_W / 2.0,
+                self._outgoing_fibre_connection_y(
+                    source_id, positions, edge, failover=failover_style
+                ),
+            )
             target_center = QPointF(
                 target_pos.x() + self.CARD_W / 2.0,
                 self._incoming_fibre_connection_y(target_id, positions, edge, cross_link=True),
@@ -5834,7 +5897,10 @@ class NetworkTopologyDialog(QDialog):
                 start = QPointF(source_pos.x() - 8.0, source_center.y())
                 end = QPointF(target_pos.x() + self.CARD_W + 8.0, target_center.y())
         else:
-            start = QPointF(source_pos.x() + self.CARD_W, source_pos.y() + self._node_card_height(source_id) / 2.0)
+            start = QPointF(
+                source_pos.x() + self.CARD_W,
+                self._outgoing_fibre_connection_y(source_id, positions, edge, failover=False),
+            )
             end = QPointF(
                 target_pos.x(),
                 self._incoming_fibre_connection_y(target_id, positions, edge, cross_link=False),
