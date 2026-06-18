@@ -86,9 +86,15 @@ class FibreNodeItem(QGraphicsObject):
         self.node = node
         self.traced = traced
         self.symbol_scale = max(0.05, float(symbol_scale or 0.12))
-        self._size = max(6.0, min(12.0, 8.0 * self.symbol_scale / 0.12))
-        self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemSendsGeometryChanges | QGraphicsItem.ItemIgnoresTransformations)
-        self.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
+        # Store the symbol dimensions in scene units. The view transform then
+        # enlarges or reduces the icon with the rest of the floor drawing.
+        self._size = max(5.0, min(14.0, 8.0 * self.symbol_scale / 0.12))
+        self.setFlags(
+            QGraphicsItem.ItemIsSelectable
+            | QGraphicsItem.ItemIsMovable
+            | QGraphicsItem.ItemSendsGeometryChanges
+        )
+        self.setCacheMode(QGraphicsItem.ItemCoordinateCache)
         self.setAcceptHoverEvents(True)
         self.setToolTip(self._tooltip())
 
@@ -107,8 +113,9 @@ class FibreNodeItem(QGraphicsObject):
             "handhole": QColor("#77838d"), "chamber": QColor("#53616d"),
         }.get(node_type, QColor("#77838d"))
         border = QColor("#ff8a24") if self.traced else (QColor("#8fc7ff") if self.isSelected() else QColor("#d5dce1"))
-        pen = QPen(border, 1.8 if self.traced or self.isSelected() else 1.0); pen.setCosmetic(True)
-        painter.setPen(pen); painter.setBrush(colour)
+        pen_width = max(0.35, self._size * (0.10 if self.traced or self.isSelected() else 0.065))
+        painter.setPen(QPen(border, pen_width))
+        painter.setBrush(colour)
         rect = self.boundingRect().adjusted(1.0, 1.0, -1.0, -1.0)
         if node_type in {"splice_enclosure", "fibre_joint"}: painter.drawEllipse(rect)
         elif node_type == "splice_cassette":
@@ -116,7 +123,11 @@ class FibreNodeItem(QGraphicsObject):
             painter.drawLine(QPointF(rect.left()+2, -1), QPointF(rect.right()-2, -1)); painter.drawLine(QPointF(rect.left()+2, 2), QPointF(rect.right()-2, 2))
         elif node_type in {"handhole", "chamber"}: painter.drawRect(rect)
         else: painter.drawRoundedRect(rect, 3, 3)
-        painter.setPen(QColor("#ffffff")); font = QFont("Arial"); font.setPixelSize(max(5, int(self._size * 0.34))); font.setBold(True); painter.setFont(font)
+        painter.setPen(QColor("#ffffff"))
+        font = QFont("Arial")
+        font.setPixelSize(max(2, int(round(self._size * 0.28))))
+        font.setBold(True)
+        painter.setFont(font)
         initials = {"splice_enclosure":"SE","splice_cassette":"SC","fibre_joint":"J","termination":"T","handhole":"HH","chamber":"CH"}.get(node_type,"F")
         painter.drawText(self.boundingRect(), Qt.AlignCenter, initials)
 
@@ -164,21 +175,36 @@ class FibreCableBatchItem(QGraphicsObject):
 
     def paint(self, painter, option, widget=None):
         lod = max(0.001, abs(painter.worldTransform().m11()))
-        normal_pen = QPen(QColor("#6f8dff"), max(0.40, 0.72 * self.width_scale / 0.18), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin); normal_pen.setCosmetic(True)
-        traced_pen = QPen(QColor("#ff8a24"), max(0.80, 1.45 * self.width_scale / 0.18), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin); traced_pen.setCosmetic(True)
-        painter.setBrush(Qt.NoBrush); painter.setPen(normal_pen); painter.drawPath(self.normal_path); painter.setPen(traced_pen); painter.drawPath(self.traced_path)
-        # Keep labels hidden at floor-plan zoom. When visible they remain a
-        # compact, near-constant screen size and cannot expand enough to obscure
-        # the underlying DXF. Legacy projects commonly store label_scale=0.30;
-        # the renderer maps that old default to the new compact presentation.
+        # Cable widths are scene dimensions rather than cosmetic screen-pixel
+        # widths. Zooming therefore scales cables, nodes and labels together.
+        normal_pen = QPen(
+            QColor("#6f8dff"),
+            max(0.22, 0.48 * self.width_scale / 0.18),
+            Qt.SolidLine,
+            Qt.RoundCap,
+            Qt.RoundJoin,
+        )
+        traced_pen = QPen(
+            QColor("#ff8a24"),
+            max(0.42, 0.90 * self.width_scale / 0.18),
+            Qt.SolidLine,
+            Qt.RoundCap,
+            Qt.RoundJoin,
+        )
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(normal_pen)
+        painter.drawPath(self.normal_path)
+        painter.setPen(traced_pen)
+        painter.drawPath(self.traced_path)
+
+        # Labels remain hidden at whole-floor zoom for legibility, but their
+        # font and offset are fixed in scene units. Once shown, camera zoom
+        # enlarges them at the same rate as symbols and cable geometry.
         if lod < 0.72:
             return
-        requested_screen_px = 3.8 * self.label_scale / 0.14
-        screen_px = max(3.0, min(4.8, requested_screen_px))
-        font = QFont("Arial"); font.setBold(True); font.setPixelSize(max(1, int(round(screen_px / lod))))
-        painter.setFont(font)
-        offset_x = 2.0 / lod; offset_y = -5.0 / lod
-        exposed = option.exposedRect.adjusted(-20.0 / lod, -20.0 / lod, 20.0 / lod, 20.0 / lod)
+        requested_scene_px = 2.0 * self.label_scale / 0.14
+        scene_px = max(1.4, min(2.8, requested_scene_px))
+        exposed = option.exposedRect.adjusted(-10.0, -10.0, 10.0, 10.0)
         for label in self.labels:
             minimum_lod = float(label.get("minimum_lod", 0.30))
             if lod < minimum_lod:
@@ -186,8 +212,14 @@ class FibreCableBatchItem(QGraphicsObject):
             point = label.get("point", QPointF())
             if not exposed.contains(point):
                 continue
+            font_scale = max(0.6, min(1.4, float(label.get("font_scale", 1.0))))
+            font = QFont("Arial")
+            font.setBold(bool(label.get("bold", True)))
+            font.setPixelSize(max(1, int(round(scene_px * font_scale))))
+            painter.setFont(font)
             painter.setPen(label.get("colour", QColor("#b8c8ff")))
-            painter.drawText(point + QPointF(offset_x, offset_y), _text(label.get("text")))
+            offset = label.get("offset", QPointF(1.5, -3.0))
+            painter.drawText(point + offset, _text(label.get("text")))
 
     @staticmethod
     def _distance_to_segment(point: QPointF, a: QPointF, b: QPointF) -> float:
@@ -500,6 +532,8 @@ class PhysicalFibreTopologyDialog(QDialog):
                     "text": label_text,
                     "colour": QColor("#ffb25f") if traced else QColor("#b8c8ff"),
                     "minimum_lod": minimum_lod,
+                    "offset": QPointF(1.5, -2.5),
+                    "font_scale": 1.0,
                 })
 
             for node in floor_nodes:
@@ -511,7 +545,9 @@ class PhysicalFibreTopologyDialog(QDialog):
                     "point": item.pos(),
                     "text": _text(node.get("label")) or _text(node.get("name")),
                     "colour": QColor("#dce5ea"),
-                    "minimum_lod": 1.10,
+                    "minimum_lod": 0.90,
+                    "offset": QPointF(item._size * 0.62, -item._size * 0.42),
+                    "font_scale": 0.90,
                 })
                 count = splice_counts.get(_text(node.get("id")), 0)
                 if layer.get("show_splice_labels", True) and count:
@@ -519,7 +555,9 @@ class PhysicalFibreTopologyDialog(QDialog):
                         "point": item.pos(),
                         "text": f"{count} splice{'s' if count != 1 else ''}",
                         "colour": QColor("#d5a5f1"),
-                        "minimum_lod": 1.65,
+                        "minimum_lod": 1.35,
+                        "offset": QPointF(item._size * 0.62, item._size * 0.20),
+                        "font_scale": 0.75,
                     })
 
             if cable_records or labels:
@@ -584,7 +622,7 @@ class PhysicalFibreTopologyDialog(QDialog):
             self.status.setText(
                 f"Floor {floor}: {len(cable_records)} routed fibre cables, {len(floor_nodes)} fibre nodes, {floor_splices} core splices · "
                 f"{failed_paths} optical path{'s' if failed_paths != 1 else ''} outside budget · "
-                f"loaded in {elapsed:.2f} s · labels appear only at close zoom"
+                f"loaded in {elapsed:.2f} s · symbols and labels scale with camera zoom"
             )
         finally:
             self._building = False
@@ -602,7 +640,10 @@ class PhysicalFibreTopologyDialog(QDialog):
                 path.moveTo(QPointF(_float(a.get("x")), -_float(a.get("y")))); path.lineTo(QPointF(_float(b.get("x")), -_float(b.get("y"))))
             self._base_graph_cache[floor] = path
         if not path.isEmpty():
-            item = QGraphicsPathItem(path); pen = QPen(QColor("#2d3740"), 0.55); pen.setCosmetic(True); item.setPen(pen); item.setZValue(-2); self.scene.addItem(item)
+            item = QGraphicsPathItem(path)
+            item.setPen(QPen(QColor("#2d3740"), 0.22))
+            item.setZValue(-2)
+            self.scene.addItem(item)
 
     def _fit(self): self.view.fit_content()
     def refresh(self):

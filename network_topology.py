@@ -5380,15 +5380,12 @@ class NetworkTopologyDialog(QDialog):
         if failover_style or alternate_cross_link:
             bend = max(60.0, abs(end.x() - start.x()) * 0.20)
             direction = -1.0 if end.x() >= start.x() else 1.0
-            control_x = (start.x() + end.x()) / 2.0 + direction * bend
-            path.lineTo(QPointF(control_x, start.y()))
-            path.lineTo(QPointF(control_x, end.y()))
-            path.lineTo(end)
+            route_x = (start.x() + end.x()) / 2.0 + direction * bend
         else:
-            mid_x = (start.x() + end.x()) / 2.0
-            path.lineTo(QPointF(mid_x, start.y()))
-            path.lineTo(QPointF(mid_x, end.y()))
-            path.lineTo(end)
+            route_x = (start.x() + end.x()) / 2.0
+        path.lineTo(QPointF(route_x, start.y()))
+        path.lineTo(QPointF(route_x, end.y()))
+        path.lineTo(end)
 
         medium = edge.medium if edge else ("virtual" if client_link else "copper")
         colour = self._edge_colour(edge, medium) if edge is not None else (QColor("#d68f52") if failover_style else self._link_colour(medium))
@@ -5405,20 +5402,12 @@ class NetworkTopologyDialog(QDialog):
             # Keep cable-length labels on a horizontal section of the
             # orthogonal topology link. Using pointAtPercent(0.50) can place
             # the label on the vertical riser when cards have different Y positions.
-            if failover_style:
-                first_length = abs(control_x - start.x())
-                last_length = abs(end.x() - control_x)
-                if last_length >= first_length:
-                    label_point = QPointF((control_x + end.x()) / 2.0, end.y())
-                else:
-                    label_point = QPointF((start.x() + control_x) / 2.0, start.y())
+            first_length = abs(route_x - start.x())
+            last_length = abs(end.x() - route_x)
+            if last_length >= first_length:
+                label_point = QPointF((route_x + end.x()) / 2.0, end.y())
             else:
-                first_length = abs(mid_x - start.x())
-                last_length = abs(end.x() - mid_x)
-                if last_length >= first_length:
-                    label_point = QPointF((mid_x + end.x()) / 2.0, end.y())
-                else:
-                    label_point = QPointF((start.x() + mid_x) / 2.0, start.y())
+                label_point = QPointF((start.x() + route_x) / 2.0, start.y())
             self._add_link_label(edge.label, colour, label_point, edge)
 
     def _card_activated(self, node_id: str) -> None:
