@@ -681,15 +681,22 @@ def sync_fibre_cables_from_connections(data: dict, replace_auto: bool = False) -
 
 
 def calculate_optical_budgets(data: dict) -> List[dict]:
-    """Calculate directed active-optic paths through passive fibre plant.
+    """Calculate optical budgets from installed transceivers and passive plant.
 
-    Cable attenuation, connector and splice losses are summed. Intermediate
-    passive insertion losses (for example splitters) are added. Return loss is
-    reported as the minimum declared value; it is not incorrectly added to the
-    forward attenuation total.
+    SFP/QSFP-family cages obtain transmit, receive, wavelength, insertion and
+    return-loss data from ``network_optic_modules`` rather than from the host
+    switch. Integrated optics such as PON ports retain port/asset fallback for
+    backwards compatibility.
     """
     assets = {_text(row.get("id")): row for row in data.get("network_assets", []) if isinstance(row, dict)}
     instances = {_text(row.get("id")): row for row in data.get("network_asset_instances", []) if isinstance(row, dict)}
+    modules = {_text(row.get("id")): row for row in data.get("network_optic_modules", []) if isinstance(row, dict) and _text(row.get("id"))}
+    modules_by_connection_host: Dict[Tuple[str, str], dict] = {}
+    for module in modules.values():
+        key = (_text(module.get("connection_id")), _text(module.get("host_instance_id")))
+        if key[0] and key[1]:
+            modules_by_connection_host[key] = module
+
     cable_loss_by_connection: Dict[str, float] = defaultdict(float)
     cable_ids_by_connection: Dict[str, List[str]] = defaultdict(list)
     return_loss_by_connection: Dict[str, List[float]] = defaultdict(list)
@@ -714,139 +721,171 @@ def calculate_optical_budgets(data: dict) -> List[dict]:
             continue
         if bool(connection.get("physical_connection")) or bool(connection.get("topology_hidden")):
             continue
-        cid = _text(connection.get("id"))
-        a = _text(connection.get("from_instance_id")); b = _text(connection.get("to_instance_id"))
+        cid = _text(connection.get("id")); a = _text(connection.get("from_instance_id")); b = _text(connection.get("to_instance_id"))
         if not cid or a not in instances or b not in instances or a == b:
             continue
         logical_connections[cid] = connection
         adjacency[a].append((b, cid)); adjacency[b].append((a, cid))
 
-    def optic_values(instance_id: str) -> Tuple[Optional[float], Optional[float], float, float]:
-        asset = assets.get(_text(instances.get(instance_id, {}).get("asset_id")), {})
-        return (
-            _optional_float(asset.get("optical_tx_power_dbm")),
-            _optional_float(asset.get("optical_receiver_sensitivity_dbm")),
-            max(0.0, _float(asset.get("optical_insertion_loss_db"))),
-            max(0.0, _float(asset.get("optical_return_loss_db"))),
-        )
+    cage_types = {"sfp", "sfp+", "sfp28", "qsfp", "qsfp+", "qsfp28", "qsfp56", "qsfpdd", "osfp"}
+    passive_types = {"fibre_splitter", "patch_panel"}
+
+    def observed_port(connection: dict, instance_id: str) -> str:
+        return _text(connection.get("from_port")) if _text(connection.get("from_instance_id")) == instance_id else _text(connection.get("to_port"))
+
+    def port_definition(asset: dict, port_name: str) -> dict:
+        target = _text(port_name).lower()
+        rows = [row for row in asset.get("port_definitions", []) if isinstance(row, dict)]
+        for row in rows:
+            explicit = [_text(value).lower() for value in row.get("explicit_names", []) if _text(value)] if isinstance(row.get("explicit_names", []), list) else []
+            prefix = _text(row.get("name_prefix")).lower()
+            if target in explicit or (prefix and target.startswith(prefix)):
+                return row
+        if len(rows) == 1:
+            return rows[0]
+        return {}
+
+    def optic_values(instance_id: str, connection_id: str) -> dict:
+        instance = instances.get(instance_id, {})
+        host_asset = assets.get(_text(instance.get("asset_id")), {})
+        connection = logical_connections.get(connection_id, {})
+        port = port_definition(host_asset, observed_port(connection, instance_id))
+        port_type = _text(port.get("port_type")).lower()
+        module = modules_by_connection_host.get((connection_id, instance_id))
+        if module is not None:
+            optic_asset = assets.get(_text(module.get("asset_id")), {})
+            return {
+                "tx": _optional_float(optic_asset.get("optical_tx_power_dbm")),
+                "rx": _optional_float(optic_asset.get("optical_receiver_sensitivity_dbm")),
+                "loss": max(0.0, _float(optic_asset.get("optical_insertion_loss_db"))),
+                "return_loss": max(0.0, _float(optic_asset.get("optical_return_loss_db"))),
+                "wavelength_nm": _int(optic_asset.get("optical_wavelength_nm")),
+                "module_id": _text(module.get("id")),
+                "module_name": _text(optic_asset.get("name")) or _text(module.get("id")),
+                "missing_module": False,
+                "passive": False,
+            }
+        asset_type = _text(host_asset.get("asset_type")).lower()
+        passive = asset_type in passive_types
+        if port_type in cage_types and not passive:
+            return {
+                "tx": None, "rx": None, "loss": 0.0, "return_loss": 0.0,
+                "wavelength_nm": 0, "module_id": "", "module_name": "",
+                "missing_module": True, "passive": False,
+            }
+        # Integrated optical interfaces (for example PON) may define values on
+        # the port row, falling back to the host asset for older projects.
+        return {
+            "tx": _optional_float(port.get("transmit_power_dbm", host_asset.get("optical_tx_power_dbm"))),
+            "rx": _optional_float(port.get("receiver_sensitivity_dbm", host_asset.get("optical_receiver_sensitivity_dbm"))),
+            "loss": max(0.0, _float(port.get("insertion_loss_db", host_asset.get("optical_insertion_loss_db")))),
+            "return_loss": max(0.0, _float(port.get("return_loss_db", host_asset.get("optical_return_loss_db")))),
+            "wavelength_nm": _int(port.get("wavelength_nm"), _int(host_asset.get("optical_wavelength_nm"))),
+            "module_id": "", "module_name": _text(host_asset.get("name")),
+            "missing_module": False, "passive": passive,
+        }
 
     optical_paths: List[dict] = []
-    seen: Set[Tuple[str, str, Tuple[str, ...]]] = set()
+    seen: Set[Tuple[str, str, Tuple[str, ...], str]] = set()
     for source_id in sorted(instances):
-        tx, _source_rx, _source_loss, _source_return = optic_values(source_id)
-        if tx is None:
-            continue
-        queue = deque([(source_id, [], [source_id], 0.0, [], [])])
+        queue = deque([(source_id, [], [source_id], 0.0, [], [], None, "", 0.0, 0)])
         while queue and len(optical_paths) < 10000:
-            current, connection_ids, visited_instances, passive_loss, passive_returns, missing_properties = queue.popleft()
+            current, connection_ids, visited_instances, passive_loss, passive_returns, missing_properties, source_tx, source_module_id, source_optic_loss, source_wavelength = queue.popleft()
             if len(connection_ids) > 32:
                 continue
             for neighbour, cid in adjacency.get(current, []):
                 if neighbour in visited_instances:
                     continue
+                current_source_tx = source_tx
+                current_source_module = source_module_id
+                current_source_loss = source_optic_loss
+                current_wavelength = source_wavelength
+                next_missing = list(missing_properties)
+                if current_source_tx is None:
+                    source_values = optic_values(current, cid)
+                    if source_values["missing_module"]:
+                        continue
+                    if source_values["tx"] is None:
+                        continue
+                    current_source_tx = source_values["tx"]
+                    current_source_module = source_values["module_id"]
+                    current_source_loss = source_values["loss"]
+                    current_wavelength = source_values["wavelength_nm"]
+                    if _text(current_source_tx) == "":
+                        next_missing.append(f"{_text(instances.get(current, {}).get('name')) or current} transmit power")
                 next_connection_ids = connection_ids + [cid]
                 next_visited = visited_instances + [neighbour]
-                _n_tx, n_rx, n_loss, n_return = optic_values(neighbour)
-                asset = assets.get(_text(instances.get(neighbour, {}).get("asset_id")), {})
-                asset_type = _text(asset.get("asset_type")).lower()
-                passive = asset_type in {"fibre_splitter", "patch_panel"} or (
-                    n_rx is None and _n_tx is None and n_loss > 0.0
-                )
-                next_missing = list(missing_properties)
+                neighbour_values = optic_values(neighbour, cid)
+                neighbour_asset = assets.get(_text(instances.get(neighbour, {}).get("asset_id")), {})
+                passive = bool(neighbour_values["passive"])
                 if passive:
-                    if _text(asset.get("optical_insertion_loss_db")) == "":
+                    if _text(neighbour_asset.get("optical_insertion_loss_db")) == "" and neighbour_values["loss"] <= 0.0:
                         next_missing.append(f"{_text(instances.get(neighbour, {}).get('name')) or neighbour} insertion loss")
-                    if _text(asset.get("optical_return_loss_db")) == "":
+                    if _text(neighbour_asset.get("optical_return_loss_db")) == "" and neighbour_values["return_loss"] <= 0.0:
                         next_missing.append(f"{_text(instances.get(neighbour, {}).get('name')) or neighbour} return loss")
-                next_passive_loss = passive_loss + (n_loss if passive else 0.0)
-                next_returns = passive_returns + ([n_return] if n_return else [])
-                if neighbour != source_id and n_rx is not None and not passive:
-                    key = (source_id, neighbour, tuple(next_connection_ids))
+                next_passive_loss = passive_loss + (neighbour_values["loss"] if passive else 0.0)
+                next_returns = passive_returns + ([neighbour_values["return_loss"]] if neighbour_values["return_loss"] else [])
+                if neighbour != source_id and neighbour_values["rx"] is not None and not passive:
+                    key = (source_id, neighbour, tuple(next_connection_ids), current_source_module)
                     if key in seen:
                         continue
                     seen.add(key)
                     cable_loss = sum(cable_loss_by_connection.get(value, 0.0) for value in next_connection_ids)
-                    total_loss = cable_loss + next_passive_loss
-                    available = tx - n_rx
+                    active_optic_loss = current_source_loss + neighbour_values["loss"]
+                    total_loss = cable_loss + next_passive_loss + active_optic_loss
+                    available = float(current_source_tx) - float(neighbour_values["rx"])
                     margin = available - total_loss
                     return_values = list(next_returns)
+                    if neighbour_values["return_loss"]:
+                        return_values.append(neighbour_values["return_loss"])
                     for value in next_connection_ids:
                         return_values.extend(return_loss_by_connection.get(value, []))
-                    minimum_return = min(return_values) if return_values else 0.0
-                    path = {
-                        "id": f"OP{len(optical_paths) + 1}",
-                        "source_instance_id": source_id,
-                        "destination_instance_id": neighbour,
+                    link_speeds = [max(0, _int(logical_connections.get(value, {}).get("link_speed_mbps"))) for value in next_connection_ids]
+                    link_speeds = [value for value in link_speeds if value > 0]
+                    optical_paths.append({
+                        "id": f"OP{len(optical_paths) + 1}", "source_instance_id": source_id, "destination_instance_id": neighbour,
+                        "source_optic_module_id": current_source_module, "destination_optic_module_id": neighbour_values["module_id"],
                         "connection_ids": next_connection_ids,
                         "fibre_cable_ids": sorted({cable_id for value in next_connection_ids for cable_id in cable_ids_by_connection.get(value, []) if cable_id}),
-                        "transmit_power_dbm": round(tx, 3),
-                        "receiver_sensitivity_dbm": round(n_rx, 3),
-                        "cable_loss_db": round(cable_loss, 6),
-                        "passive_loss_db": round(next_passive_loss, 6),
-                        "path_loss_db": round(total_loss, 6),
-                        "available_budget_db": round(available, 6),
-                        "margin_db": "" if next_missing else round(margin, 6),
-                        "minimum_return_loss_db": round(minimum_return, 3),
+                        "link_speed_mbps": min(link_speeds) if link_speeds else 0,
+                        "wavelength_nm": current_wavelength or neighbour_values["wavelength_nm"],
+                        "transmit_power_dbm": round(float(current_source_tx), 3), "receiver_sensitivity_dbm": round(float(neighbour_values["rx"]), 3),
+                        "cable_loss_db": round(cable_loss, 6), "passive_loss_db": round(next_passive_loss, 6),
+                        "active_optic_loss_db": round(active_optic_loss, 6), "path_loss_db": round(total_loss, 6),
+                        "available_budget_db": round(available, 6), "margin_db": "" if next_missing else round(margin, 6),
+                        "minimum_return_loss_db": round(min(return_values), 3) if return_values else 0.0,
                         "status": "unconfigured" if next_missing else ("pass" if margin >= 0.0 else "fail"),
                         "missing_properties": ", ".join(dict.fromkeys(next_missing)),
-                        "notes": (
-                            "Optical budget cannot be verified until all passive loss values are configured."
-                            if next_missing
-                            else "Calculated from configured optic transmit power, receiver sensitivity and designated physical fibre losses."
-                        ),
-                    }
-                    optical_paths.append(path)
+                        "notes": "Optical budget cannot be verified until all optic/passive values are configured." if next_missing else "Calculated from installed transceiver transmit/receive values, active optic insertion loss and designated passive fibre losses.",
+                    })
                     continue
-                queue.append((neighbour, next_connection_ids, next_visited, next_passive_loss, next_returns, next_missing))
+                queue.append((neighbour, next_connection_ids, next_visited, next_passive_loss, next_returns, next_missing, current_source_tx, current_source_module, current_source_loss, current_wavelength))
 
-    # Every logical fibre connection must participate in a calculable optical
-    # path.  Add explicit unconfigured records instead of silently omitting
-    # links whose active optics or passive insertion/return-loss data is absent.
-    covered_connection_ids = {
-        _text(cid)
-        for path in optical_paths
-        for cid in path.get("connection_ids", [])
-        if _text(cid)
-    }
-    passive_types = {"fibre_splitter", "patch_panel"}
+    covered_connection_ids = {_text(cid) for path in optical_paths for cid in path.get("connection_ids", []) if _text(cid)}
     for cid, connection in sorted(logical_connections.items()):
         if cid in covered_connection_ids:
             continue
-        source_id = _text(connection.get("from_instance_id"))
-        destination_id = _text(connection.get("to_instance_id"))
+        source_id = _text(connection.get("from_instance_id")); destination_id = _text(connection.get("to_instance_id"))
+        source = optic_values(source_id, cid); destination = optic_values(destination_id, cid)
         missing: List[str] = []
-        for instance_id, side in ((source_id, "source"), (destination_id, "destination")):
-            asset = assets.get(_text(instances.get(instance_id, {}).get("asset_id")), {})
-            asset_type = _text(asset.get("asset_type")).lower()
-            passive = asset_type in passive_types
-            if passive:
-                if _text(asset.get("optical_insertion_loss_db")) == "":
-                    missing.append(f"{side} passive insertion loss")
-                if _text(asset.get("optical_return_loss_db")) == "":
-                    missing.append(f"{side} passive return loss")
+        for values, instance_id, side in ((source, source_id, "source"), (destination, destination_id, "destination")):
+            if values["passive"]:
+                if values["loss"] <= 0.0: missing.append(f"{side} passive insertion loss")
+                if values["return_loss"] <= 0.0: missing.append(f"{side} passive return loss")
             else:
-                if _text(asset.get("optical_tx_power_dbm")) == "":
-                    missing.append(f"{side} transmit power")
-                if _text(asset.get("optical_receiver_sensitivity_dbm")) == "":
-                    missing.append(f"{side} receiver sensitivity")
-        cable_loss = cable_loss_by_connection.get(cid, 0.0)
-        return_values = return_loss_by_connection.get(cid, [])
+                if values["missing_module"]: missing.append(f"{side} pluggable optic module")
+                if values["tx"] is None: missing.append(f"{side} transmit power")
+                if values["rx"] is None: missing.append(f"{side} receiver sensitivity")
+        cable_loss = cable_loss_by_connection.get(cid, 0.0); return_values = return_loss_by_connection.get(cid, [])
         optical_paths.append({
-            "id": f"OP{len(optical_paths) + 1}",
-            "source_instance_id": source_id,
-            "destination_instance_id": destination_id,
-            "connection_ids": [cid],
-            "fibre_cable_ids": sorted({value for value in cable_ids_by_connection.get(cid, []) if value}),
-            "transmit_power_dbm": "",
-            "receiver_sensitivity_dbm": "",
-            "cable_loss_db": round(cable_loss, 6),
-            "passive_loss_db": 0.0,
-            "path_loss_db": round(cable_loss, 6),
-            "available_budget_db": "",
-            "margin_db": "",
-            "minimum_return_loss_db": round(min(return_values), 3) if return_values else 0.0,
-            "status": "unconfigured",
-            "missing_properties": ", ".join(missing) or "complete active optical path",
+            "id": f"OP{len(optical_paths) + 1}", "source_instance_id": source_id, "destination_instance_id": destination_id,
+            "source_optic_module_id": source["module_id"], "destination_optic_module_id": destination["module_id"],
+            "connection_ids": [cid], "fibre_cable_ids": sorted({value for value in cable_ids_by_connection.get(cid, []) if value}),
+            "link_speed_mbps": max(0, _int(connection.get("link_speed_mbps"))),
+            "transmit_power_dbm": "", "receiver_sensitivity_dbm": "", "cable_loss_db": round(cable_loss, 6),
+            "passive_loss_db": 0.0, "active_optic_loss_db": 0.0, "path_loss_db": round(cable_loss, 6),
+            "available_budget_db": "", "margin_db": "", "minimum_return_loss_db": round(min(return_values), 3) if return_values else 0.0,
+            "status": "unconfigured", "missing_properties": ", ".join(dict.fromkeys(missing)) or "complete active optical path",
             "notes": "Optical budget cannot be verified until the listed optic/passive properties are configured.",
         })
 
@@ -859,11 +898,10 @@ def calculate_optical_budgets(data: dict) -> List[dict]:
             margins_by_connection[_text(cid)].append(_float(path.get("margin_db")))
     for cid, connection in logical_connections.items():
         margins = margins_by_connection.get(cid, [])
-        connection["optical_budget_status"] = (
-            "unconfigured" if not margins else ("pass" if min(margins) >= 0.0 else "fail")
-        )
+        connection["optical_budget_status"] = "unconfigured" if not margins else ("pass" if min(margins) >= 0.0 else "fail")
         connection["optical_minimum_margin_db"] = round(min(margins), 6) if margins else ""
     return optical_paths
+
 
 def circuit_trace(data: dict, connection_id: str) -> dict:
     """Return all logical and physical records participating in a circuit."""
@@ -1138,9 +1176,9 @@ def fibre_layer_defaults() -> dict:
         # Physical coordinates are in the project/DXF world coordinate system.
         # Keep symbols and labels deliberately small so they overlay a floor
         # plan without obscuring rooms, routes or nearby fibre records.
-        "symbol_scale": 0.32,
-        "label_scale": 0.55,
-        "cable_width_scale": 0.55,
+        "symbol_scale": 0.18,
+        "label_scale": 0.30,
+        "cable_width_scale": 0.30,
     }
 
 

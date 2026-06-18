@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional
 from network_services import FIBRE_COLOURS, build_fibre_cores, fibre_layer_defaults, set_core_status_from_splices
 
 
-NETWORK_SCHEMA_VERSION = 2
+NETWORK_SCHEMA_VERSION = 3
 
 
 DEFAULT_FIBRE_CABLE_TYPES = [
@@ -110,6 +110,7 @@ def default_physical_fibre_planning() -> dict:
         "splitter_termination_method": "connectorised",
         "max_splices_per_cassette": 24,
         "spare_core_percent": 15.0,
+        "minimum_optical_margin_db": 3.0,
         "splitter_pigtail": True,
     }
 
@@ -152,6 +153,7 @@ NETWORK_DEFAULTS = {
     "network_routes": [],
     "network_ip_allocations": [],
     "network_external_networks": [],
+    "network_optic_modules": [],
     "network_optical_paths": [],
     "network_fibre_cable_types": deepcopy(DEFAULT_FIBRE_CABLE_TYPES),
     "network_fibre_cables": [],
@@ -169,6 +171,7 @@ NETWORK_ASSET_TYPES = {
     "wireless_access_point",
     "optical_line_terminal",
     "optical_network_terminal",
+    "optical_transceiver",
     "ups",
     "pdu",
     "power_device",
@@ -183,9 +186,110 @@ NETWORK_MEDIA = {"copper", "fibre", "wireless", "virtual", "stacking", "none"}
 NETWORK_CONNECTION_ROLES = {"input", "output", "uplink"}
 NETWORK_LOCATION_TYPES = {"mer", "polan", "telco_pop", "external_network", "fibre_joint"}
 
-NETWORK_PORT_TYPES = {"rj45", "sfp", "sfp+", "qsfp", "qsfp28", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"}
+NETWORK_PORT_TYPES = {"rj45", "sfp", "sfp+", "sfp28", "qsfp", "qsfp+", "qsfp28", "qsfp56", "qsfpdd", "osfp", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"}
 NETWORK_PORT_USES = {"input", "output", "uplink", "downlink", "management", "console", "pon", "client", "patch", "stacking", "power", "spare", "other"}
 
+
+
+NETWORK_PORT_SPEED_OPTIONS = [
+    (10, "10 Mb/s"),
+    (100, "100 Mb/s"),
+    (1_000, "1 Gb/s"),
+    (2_500, "2.5 Gb/s"),
+    (5_000, "5 Gb/s"),
+    (10_000, "10 Gb/s"),
+    (25_000, "25 Gb/s"),
+    (40_000, "40 Gb/s"),
+    (50_000, "50 Gb/s"),
+    (100_000, "100 Gb/s"),
+    (200_000, "200 Gb/s"),
+    (400_000, "400 Gb/s"),
+    (800_000, "800 Gb/s"),
+]
+
+PLUGGABLE_OPTIC_PORT_TYPES = {
+    "sfp", "sfp+", "sfp28", "qsfp", "qsfp+", "qsfp28",
+    "qsfp56", "qsfpdd", "osfp",
+}
+
+_DEFAULT_PORT_SPEEDS = {
+    "rj45": [10, 100, 1_000],
+    "sfp": [100, 1_000],
+    "sfp+": [1_000, 10_000],
+    "sfp28": [1_000, 10_000, 25_000],
+    "qsfp": [40_000],
+    "qsfp+": [40_000],
+    "qsfp28": [40_000, 100_000],
+    "qsfp56": [50_000, 100_000, 200_000],
+    "qsfpdd": [100_000, 200_000, 400_000, 800_000],
+    "osfp": [100_000, 200_000, 400_000, 800_000],
+    "pon": [1_000, 2_500, 10_000, 25_000],
+}
+
+
+def normalise_port_speeds(values) -> List[int]:
+    """Return canonical Mbps values from lists or legacy comma-separated text."""
+    if values is None:
+        return []
+    if isinstance(values, (int, float)):
+        values = [values]
+    elif isinstance(values, str):
+        values = values.replace(";", ",").split(",")
+    result: List[int] = []
+    for value in values:
+        text = _text(value).lower().replace("gbps", "g").replace("mbps", "m").replace(" ", "")
+        try:
+            if text.endswith("g"):
+                speed = int(round(float(text[:-1]) * 1000.0))
+            elif text.endswith("m"):
+                speed = int(round(float(text[:-1])))
+            else:
+                speed = int(round(float(text)))
+        except (TypeError, ValueError):
+            continue
+        if speed > 0 and speed not in result:
+            result.append(speed)
+    return sorted(result)
+
+
+def default_port_speeds(port_type: str) -> List[int]:
+    return list(_DEFAULT_PORT_SPEEDS.get(_text(port_type).lower(), []))
+
+
+def port_speed_label(speed_mbps: int) -> str:
+    speed = max(0, _as_int(speed_mbps))
+    if speed >= 1000 and speed % 1000 == 0:
+        return f"{speed // 1000} Gb/s"
+    if speed >= 1000:
+        return f"{speed / 1000.0:g} Gb/s"
+    return f"{speed} Mb/s"
+
+
+def compatible_port_speeds(left, right) -> List[int]:
+    """Intersect declared speeds; an empty passive side is speed-transparent."""
+    left_values = normalise_port_speeds(left)
+    right_values = normalise_port_speeds(right)
+    if left_values and right_values:
+        return sorted(set(left_values) & set(right_values))
+    return left_values or right_values
+
+
+def optic_form_factors_for_cage(port_type: str) -> List[str]:
+    cage = _text(port_type).lower()
+    order = ["sfp", "sfp+", "sfp28", "qsfp", "qsfp+", "qsfp28", "qsfp56", "qsfpdd", "osfp"]
+    compatibility = {
+        "sfp": {"sfp"},
+        "sfp+": {"sfp", "sfp+"},
+        "sfp28": {"sfp", "sfp+", "sfp28"},
+        "qsfp": {"qsfp"},
+        "qsfp+": {"qsfp", "qsfp+"},
+        "qsfp28": {"qsfp", "qsfp+", "qsfp28"},
+        "qsfp56": {"qsfp", "qsfp+", "qsfp28", "qsfp56"},
+        "qsfpdd": {"qsfp", "qsfp+", "qsfp28", "qsfp56", "qsfpdd"},
+        "osfp": {"osfp"},
+    }
+    allowed = compatibility.get(cage, {cage} if cage else set())
+    return [value for value in order if value in allowed]
 
 NETWORK_TOPOLOGY_MODELS = {"collapsed_core", "three_tier"}
 NETWORK_LAYERS = {"core", "aggregation", "access"}
@@ -520,13 +624,13 @@ def ensure_network_schema(data: dict) -> dict:
     for field in ("name", "dxf_layer_prefix", "cable_layer", "node_layer", "splice_layer", "label_layer"):
         merged_layer_settings[field] = _text(merged_layer_settings.get(field)) or fibre_layer_defaults()[field]
     merged_layer_settings["symbol_scale"] = max(
-        0.08, min(2.0, _as_float(merged_layer_settings.get("symbol_scale"), 0.32))
+        0.05, min(2.0, _as_float(merged_layer_settings.get("symbol_scale"), 0.18))
     )
     merged_layer_settings["label_scale"] = max(
-        0.2, min(2.0, _as_float(merged_layer_settings.get("label_scale"), 0.55))
+        0.10, min(2.0, _as_float(merged_layer_settings.get("label_scale"), 0.30))
     )
     merged_layer_settings["cable_width_scale"] = max(
-        0.2, min(2.0, _as_float(merged_layer_settings.get("cable_width_scale"), 0.55))
+        0.08, min(2.0, _as_float(merged_layer_settings.get("cable_width_scale"), 0.30))
     )
     settings["physical_fibre_layer"] = merged_layer_settings
     raw_fibre_planning = settings.get("physical_fibre_planning")
@@ -550,6 +654,7 @@ def ensure_network_schema(data: dict) -> dict:
         fibre_planning[field] = value if value in {"spliced", "connectorised"} else fallback
     fibre_planning["max_splices_per_cassette"] = max(1, min(24, _as_int(fibre_planning.get("max_splices_per_cassette"), 24)))
     fibre_planning["spare_core_percent"] = max(0.0, min(200.0, _as_float(fibre_planning.get("spare_core_percent"), 15.0)))
+    fibre_planning["minimum_optical_margin_db"] = max(0.0, min(30.0, _as_float(fibre_planning.get("minimum_optical_margin_db"), 3.0)))
     fibre_planning["splitter_pigtail"] = bool(fibre_planning.get("splitter_pigtail", True))
     settings["physical_fibre_planning"] = fibre_planning
     if not isinstance(settings.get("poe_power_defaults"), dict):
@@ -567,6 +672,7 @@ def ensure_network_schema(data: dict) -> dict:
         "network_routes",
         "network_ip_allocations",
         "network_external_networks",
+        "network_optic_modules",
         "network_optical_paths",
         "network_fibre_cable_types",
         "network_fibre_cables",
@@ -693,6 +799,21 @@ def ensure_network_schema(data: dict) -> dict:
         ):
             value = _text(asset.get(field)).lower() or default
             asset[field] = value if value in NETWORK_MEDIA else default
+        asset["supported_speeds_mbps"] = normalise_port_speeds(
+            asset.get("supported_speeds_mbps", asset.get("supported_speeds", []))
+        )
+        asset["optic_form_factor"] = _text(asset.get("optic_form_factor")).lower()
+        asset["optic_connector_type"] = _text(asset.get("optic_connector_type")).lower() or "lc"
+        asset["optic_fibre_standard"] = _text(asset.get("optic_fibre_standard")) or _text(asset.get("optical_standard")) or "OS2"
+        asset["optic_reach_m"] = max(0.0, _as_float(asset.get("optic_reach_m")))
+        if asset["asset_type"] == "optical_transceiver":
+            if asset["optic_form_factor"] not in PLUGGABLE_OPTIC_PORT_TYPES:
+                asset["optic_form_factor"] = "sfp"
+            if not asset["supported_speeds_mbps"]:
+                asset["supported_speeds_mbps"] = default_port_speeds(asset["optic_form_factor"])
+            asset["number_of_ports"] = 0
+            asset["rack_units"] = 0
+
         # Optical characteristics are asset-level defaults. Blank values mean
         # the optic has not yet been configured and are not silently treated as 0 dBm.
         for field in ("optical_tx_power_dbm", "optical_receiver_sensitivity_dbm"):
@@ -727,6 +848,10 @@ def ensure_network_schema(data: dict) -> dict:
                     "port_use": port_use if port_use in NETWORK_PORT_USES else "other",
                     "name_prefix": _text(row.get("name_prefix")),
                     "explicit_names": [_text(value) for value in names if _text(value)],
+                    "supported_speeds_mbps": normalise_port_speeds(
+                        row.get("supported_speeds_mbps", row.get("supported_speeds", []))
+                    ) or default_port_speeds(port_type),
+                    "default_speed_mbps": max(0, _as_int(row.get("default_speed_mbps"))),
                     "transmit_power_dbm": "" if _text(row.get("transmit_power_dbm")) == "" else _as_float(row.get("transmit_power_dbm")),
                     "receiver_sensitivity_dbm": "" if _text(row.get("receiver_sensitivity_dbm")) == "" else _as_float(row.get("receiver_sensitivity_dbm")),
                     "insertion_loss_db": "" if _text(row.get("insertion_loss_db")) == "" else max(0.0, _as_float(row.get("insertion_loss_db"))),
@@ -749,6 +874,8 @@ def ensure_network_schema(data: dict) -> dict:
                     "port_use": "input",
                     "name_prefix": "Input",
                     "explicit_names": input_names,
+                    "supported_speeds_mbps": [],
+                    "default_speed_mbps": 0,
                 },
                 {
                     "port_type": "lc",
@@ -756,6 +883,8 @@ def ensure_network_schema(data: dict) -> dict:
                     "port_use": "output",
                     "name_prefix": "Output",
                     "explicit_names": [],
+                    "supported_speeds_mbps": [],
+                    "default_speed_mbps": 0,
                 },
             ]
         elif not port_definitions and asset["number_of_ports"] > 0:
@@ -774,6 +903,8 @@ def ensure_network_schema(data: dict) -> dict:
                     "port_use": default_use,
                     "name_prefix": "",
                     "explicit_names": [],
+                    "supported_speeds_mbps": default_port_speeds(default_type),
+                    "default_speed_mbps": 0,
                 }
             ]
         asset["port_definitions"] = port_definitions
@@ -935,6 +1066,26 @@ def ensure_network_schema(data: dict) -> dict:
         connection["physical_connection"] = bool(connection.get("physical_connection", False))
         connection.setdefault("physical_segment", "")
         connection.setdefault("parent_logical_connection_id", "")
+        connection["link_speed_mbps"] = max(0, _as_int(connection.get("link_speed_mbps")))
+        connection.setdefault("from_optic_module_id", "")
+        connection.setdefault("to_optic_module_id", "")
+
+    optic_module_ids: set[str] = set()
+    for module in data["network_optic_modules"]:
+        if not isinstance(module, dict):
+            continue
+        module.setdefault("id", "")
+        module.setdefault("asset_id", "")
+        module.setdefault("host_instance_id", "")
+        module.setdefault("host_port", "")
+        module.setdefault("connection_id", "")
+        module.setdefault("side", "")
+        module["link_speed_mbps"] = max(0, _as_int(module.get("link_speed_mbps")))
+        module["auto_generated"] = bool(module.get("auto_generated", False))
+        module.setdefault("notes", "")
+        module_id = _text(module.get("id"))
+        if module_id:
+            optic_module_ids.add(module_id)
 
     for assignment in data["network_endpoint_assignments"]:
         if not isinstance(assignment, dict):
@@ -967,6 +1118,9 @@ def ensure_network_schema(data: dict) -> dict:
         )
         assignment["expected_packet_rate_pps"] = max(
             0.0, _as_float(assignment.get("expected_packet_rate_pps"))
+        )
+        assignment["link_speed_mbps"] = max(
+            0, _as_int(assignment.get("link_speed_mbps"))
         )
         assignment["copper_length_m"] = max(
             0.0, _as_float(assignment.get("copper_length_m"))
@@ -1198,6 +1352,9 @@ def ensure_network_schema(data: dict) -> dict:
             "id": _text(path.get("id")),
             "source_instance_id": _text(path.get("source_instance_id")),
             "destination_instance_id": _text(path.get("destination_instance_id")),
+            "source_optic_module_id": _text(path.get("source_optic_module_id")),
+            "destination_optic_module_id": _text(path.get("destination_optic_module_id")),
+            "link_speed_mbps": max(0, _as_int(path.get("link_speed_mbps"))),
             "connection_ids": _normalise_string_list(path.get("connection_ids", [])),
             "fibre_cable_ids": _normalise_string_list(path.get("fibre_cable_ids", [])),
             "transmit_power_dbm": "" if _text(path.get("transmit_power_dbm")) == "" else _as_float(path.get("transmit_power_dbm")),
@@ -1315,6 +1472,7 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     validate_unique_id("network_routes", "Network route")
     validate_unique_id("network_ip_allocations", "IP allocation")
     validate_unique_id("network_external_networks", "External network")
+    optic_module_ids = validate_unique_id("network_optic_modules", "Optic module")
     fibre_cable_type_ids = validate_unique_id("network_fibre_cable_types", "Fibre cable type")
     fibre_cable_ids = validate_unique_id("network_fibre_cables", "Fibre cable")
     fibre_node_ids = validate_unique_id("network_fibre_nodes", "Fibre node")
@@ -1388,10 +1546,99 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                 if _text(asset.get("optical_return_loss_db")) == "":
                     messages.append(f"Passive optical asset {asset_id} requires return loss in dB.")
             else:
-                if _text(asset.get("optical_tx_power_dbm")) == "":
-                    messages.append(f"Active optical asset {asset_id} requires transmit power in dBm.")
-                if _text(asset.get("optical_receiver_sensitivity_dbm")) == "":
-                    messages.append(f"Active optical asset {asset_id} requires receiver sensitivity in dBm.")
+                has_pluggable_cage = any(
+                    _text(row.get("port_type")).lower() in PLUGGABLE_OPTIC_PORT_TYPES
+                    for row in asset.get("port_definitions", [])
+                    if isinstance(row, dict)
+                )
+                if not has_pluggable_cage:
+                    integrated_rows = [
+                        row
+                        for row in asset.get("port_definitions", [])
+                        if isinstance(row, dict)
+                        and _text(row.get("port_type")).lower() in {"pon", "lc", "sc", "mpo"}
+                    ]
+                    has_tx = _text(asset.get("optical_tx_power_dbm")) != "" or any(
+                        _text(row.get("transmit_power_dbm")) != "" for row in integrated_rows
+                    )
+                    has_rx = _text(asset.get("optical_receiver_sensitivity_dbm")) != "" or any(
+                        _text(row.get("receiver_sensitivity_dbm")) != "" for row in integrated_rows
+                    )
+                    if not has_tx:
+                        messages.append(f"Active optical asset {asset_id} requires transmit power in dBm.")
+                    if not has_rx:
+                        messages.append(f"Active optical asset {asset_id} requires receiver sensitivity in dBm.")
+
+    for module in data.get("network_optic_modules", []):
+        if not isinstance(module, dict):
+            continue
+        module_id = _text(module.get("id")) or "(unnamed)"
+        asset = assets_by_id.get(_text(module.get("asset_id")), {})
+        if _text(asset.get("asset_type")) != "optical_transceiver":
+            messages.append(f"Optic module {module_id} must reference an optical transceiver asset.")
+        if _text(module.get("host_instance_id")) not in instances_by_id:
+            messages.append(f"Optic module {module_id} references a missing host instance.")
+        if not _text(module.get("host_port")):
+            messages.append(f"Optic module {module_id} has no host port.")
+        speed = _as_int(module.get("link_speed_mbps"))
+        supported = normalise_port_speeds(asset.get("supported_speeds_mbps"))
+        if speed and supported and speed not in supported:
+            messages.append(f"Optic module {module_id} does not support its selected {port_speed_label(speed)} speed.")
+
+    def _speeds_for_connection_port(instance_id: str, observed_port: str) -> List[int]:
+        instance = instances_by_id.get(instance_id, {})
+        asset = assets_by_id.get(_text(instance.get("asset_id")), {})
+        target = _text(observed_port).lower()
+        if "/" in target:
+            target = target.split("/", 1)[1]
+        for row in asset.get("port_definitions", []):
+            if not isinstance(row, dict):
+                continue
+            prefix = _text(row.get("name_prefix")).lower()
+            explicit = [_text(value).lower() for value in row.get("explicit_names", []) if _text(value)]
+            if target in explicit or (prefix and target.startswith(prefix)):
+                return normalise_port_speeds(row.get("supported_speeds_mbps"))
+        rows = [row for row in asset.get("port_definitions", []) if isinstance(row, dict)]
+        if len(rows) == 1:
+            return normalise_port_speeds(rows[0].get("supported_speeds_mbps"))
+        return []
+
+    for connection in data.get("network_connections", []):
+        if not isinstance(connection, dict):
+            continue
+        speed = _as_int(connection.get("link_speed_mbps"))
+        if speed <= 0:
+            continue
+        left = _speeds_for_connection_port(_text(connection.get("from_instance_id")), _text(connection.get("from_port")))
+        right = _speeds_for_connection_port(_text(connection.get("to_instance_id")), _text(connection.get("to_port")))
+        if left and speed not in left:
+            messages.append(f"Network connection {_text(connection.get('id'))} selects {port_speed_label(speed)} on a source port that does not support it.")
+        if right and speed not in right:
+            messages.append(f"Network connection {_text(connection.get('id'))} selects {port_speed_label(speed)} on a destination port that does not support it.")
+        if left and right and speed not in set(left) & set(right):
+            messages.append(f"Network connection {_text(connection.get('id'))} has no common port speed at {port_speed_label(speed)}.")
+
+    for assignment in data.get("network_endpoint_assignments", []):
+        if not isinstance(assignment, dict):
+            continue
+        speed = _as_int(assignment.get("link_speed_mbps"))
+        if speed <= 0:
+            continue
+        instance_id = _text(assignment.get("network_instance_id"))
+        port = _text(assignment.get("network_port"))
+        supported = _speeds_for_connection_port(instance_id, port)
+        assignment_id = _text(assignment.get("id")) or "(unnamed)"
+        if supported and speed not in supported:
+            messages.append(
+                f"Endpoint assignment {assignment_id} selects {port_speed_label(speed)} "
+                "on a device port that does not support it."
+            )
+        expected = max(0.0, _as_float(assignment.get("expected_bandwidth_mbps")))
+        if expected > speed + 1e-9:
+            messages.append(
+                f"Endpoint assignment {assignment_id} expects {expected:g} Mbps but its "
+                f"selected port rate is only {port_speed_label(speed)}."
+            )
 
     seen_rack_ids: set[str] = set()
     seen_rack_names: set[tuple[int, str, str]] = set()

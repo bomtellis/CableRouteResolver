@@ -39,6 +39,7 @@ NETWORK_ASSET_TYPES = [
     ("wireless_access_point", "Wireless access point"),
     ("optical_line_terminal", "Optical line terminal (OLT)"),
     ("optical_network_terminal", "Optical network terminal (ONT)"),
+    ("optical_transceiver", "Pluggable optical transceiver"),
     ("ups", "Uninterruptible power supply (UPS)"),
     ("pdu", "Power distribution unit (PDU)"),
     ("power_device", "Power device"),
@@ -58,7 +59,7 @@ SPLIT_RATIOS = [
 ]
 FREQUENCY_OPTIONS = ["2.4 GHz", "5 GHz", "6 GHz", "60 GHz", "868 MHz", "433 MHz"]
 NETWORK_TECHNOLOGIES = ["Traditional", "PoLAN"]
-PORT_TYPE_OPTIONS = ["rj45", "sfp", "sfp+", "qsfp", "qsfp28", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"]
+PORT_TYPE_OPTIONS = ["rj45", "sfp", "sfp+", "sfp28", "qsfp", "qsfp+", "qsfp28", "qsfp56", "qsfpdd", "osfp", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"]
 PORT_USE_OPTIONS = ["input", "output", "uplink", "downlink", "management", "console", "pon", "client", "patch", "stacking", "power", "spare", "other"]
 
 from network_auto_planner import (
@@ -73,9 +74,15 @@ from network_fibre_dialogs import (
 )
 from network_schema import (
     MANUFACTURER_PREFERENCE_COMPONENTS,
+    NETWORK_PORT_SPEED_OPTIONS,
+    PLUGGABLE_OPTIC_PORT_TYPES,
+    compatible_port_speeds,
     default_layer_connection_rules,
+    default_port_speeds,
     normalise_layer_connection_rules,
     normalise_manufacturer_preferences,
+    normalise_port_speeds,
+    port_speed_label,
 )
 
 
@@ -136,6 +143,94 @@ def _set_combo_text(combo: QComboBox, value: str) -> None:
         combo.setCurrentIndex(index)
     elif combo.isEditable():
         combo.setEditText(value)
+
+
+class PortSpeedSelectionDialog(QDialog):
+    """Canonical speed picker used by port, optic and connection editors."""
+
+    def __init__(self, parent=None, selected: Optional[Sequence[int]] = None, title: str = "Supported Port Speeds"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.result: Optional[List[int]] = None
+        selected_values = set(normalise_port_speeds(selected or []))
+        layout = QVBoxLayout(self)
+        info = QLabel("Select every line rate supported by this port or optic. Values are stored as canonical Mbps numbers.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.NoSelection)
+        for speed, label in NETWORK_PORT_SPEED_OPTIONS:
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, speed)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if speed in selected_values else Qt.Unchecked)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:
+        self.result = [
+            int(self.list_widget.item(index).data(Qt.UserRole))
+            for index in range(self.list_widget.count())
+            if self.list_widget.item(index).checkState() == Qt.Checked
+        ]
+        super().accept()
+
+
+class PortSpeedButton(QPushButton):
+    def __init__(self, parent=None, speeds: Optional[Sequence[int]] = None):
+        super().__init__(parent)
+        self._speeds = normalise_port_speeds(speeds or [])
+        self.clicked.connect(self._choose)
+        self._refresh_text()
+
+    def speeds(self) -> List[int]:
+        return list(self._speeds)
+
+    def set_speeds(self, speeds: Sequence[int]) -> None:
+        self._speeds = normalise_port_speeds(speeds)
+        self._refresh_text()
+
+    def _refresh_text(self) -> None:
+        self.setText(", ".join(port_speed_label(value) for value in self._speeds) if self._speeds else "Transparent / not declared")
+
+    def _choose(self) -> None:
+        dialog = PortSpeedSelectionDialog(self, self._speeds)
+        if dialog.exec() == QDialog.Accepted and dialog.result is not None:
+            self.set_speeds(dialog.result)
+
+
+def _expanded_instance_ports(instance: dict, asset: dict) -> List[dict]:
+    rows = [row for row in asset.get("port_definitions", []) if isinstance(row, dict) and int(row.get("port_count", 0) or 0) > 0]
+    result: List[dict] = []
+    counters: Dict[str, int] = {}
+    for row in rows:
+        port_type = _text(row.get("port_type")).lower() or "other"
+        port_use = _text(row.get("port_use")).lower() or "other"
+        speeds = normalise_port_speeds(row.get("supported_speeds_mbps")) or default_port_speeds(port_type)
+        explicit = [_text(value) for value in row.get("explicit_names", []) if _text(value)] if isinstance(row.get("explicit_names", []), list) else []
+        count = max(0, int(row.get("port_count", 0) or 0))
+        for name in explicit[:count]:
+            result.append({"name": name, "port_type": port_type, "port_use": port_use, "speeds": speeds})
+        prefix = _text(row.get("name_prefix")) or {
+            "pon": "PON", "sfp": "SFP", "sfp+": "SFP+", "sfp28": "SFP28",
+            "qsfp": "QSFP", "qsfp+": "QSFP+", "qsfp28": "QSFP28",
+            "qsfp56": "QSFP56", "qsfpdd": "QSFP-DD", "osfp": "OSFP",
+            "lc": "LC", "sc": "SC", "mpo": "MPO", "rj45": "",
+        }.get(port_type, port_type.upper())
+        remaining = count - min(count, len(explicit))
+        counters.setdefault(prefix, 0)
+        for _ in range(remaining):
+            counters[prefix] += 1
+            name = f"{prefix}-{counters[prefix]}" if prefix else str(counters[prefix])
+            result.append({"name": name, "port_type": port_type, "port_use": port_use, "speeds": speeds})
+    members = max(1, int(instance.get("stack_member_count", 1) or 1)) if bool(instance.get("logical_stack")) else 1
+    if members > 1:
+        result = [{**row, "name": f"{member}/{row['name']}"} for member in range(1, members + 1) for row in result]
+    return result
 
 
 class NetworkAssetEditorDialog(QDialog):
@@ -271,8 +366,8 @@ class NetworkAssetEditorDialog(QDialog):
         self.uplink_ports_spin.setRange(0, 100_000)
         self.uplink_ports_spin.setValue(int(self.asset.get("uplink_ports", 0) or 0))
 
-        self.port_table = QTableWidget(0, 3)
-        self.port_table.setHorizontalHeaderLabels(["Port type", "Port count", "Port use"])
+        self.port_table = QTableWidget(0, 4)
+        self.port_table.setHorizontalHeaderLabels(["Port type", "Port count", "Port use", "Supported speeds"])
         self.port_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.port_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.port_table.setMinimumHeight(170)
@@ -357,6 +452,28 @@ class NetworkAssetEditorDialog(QDialog):
             "Number of separate functional OLT units that this model can mount within one physical rack unit."
         )
 
+        self.optic_form_factor_combo = QComboBox()
+        self.optic_form_factor_combo.addItems(sorted(PLUGGABLE_OPTIC_PORT_TYPES))
+        _set_combo_text(self.optic_form_factor_combo, _text(self.asset.get("optic_form_factor")) or "sfp")
+        self.optic_speeds_button = PortSpeedButton(self, self.asset.get("supported_speeds_mbps", []))
+        self.optic_connector_combo = QComboBox()
+        self.optic_connector_combo.addItems(["lc", "sc", "mpo"])
+        _set_combo_text(self.optic_connector_combo, _text(self.asset.get("optic_connector_type")) or "lc")
+        self.optic_standard_edit = QLineEdit(_text(self.asset.get("optic_fibre_standard")) or _text(self.asset.get("optical_standard")) or "OS2")
+        self.optic_reach_spin = QDoubleSpinBox()
+        self.optic_reach_spin.setRange(0.0, 10_000_000.0)
+        self.optic_reach_spin.setDecimals(1)
+        self.optic_reach_spin.setSuffix(" m")
+        self.optic_reach_spin.setValue(float(self.asset.get("optic_reach_m", 0.0) or 0.0))
+        self.optic_tx_edit = QLineEdit(_text(self.asset.get("optical_tx_power_dbm")))
+        self.optic_rx_edit = QLineEdit(_text(self.asset.get("optical_receiver_sensitivity_dbm")))
+        self.optic_insertion_edit = QLineEdit(_text(self.asset.get("optical_insertion_loss_db")))
+        self.optic_return_edit = QLineEdit(_text(self.asset.get("optical_return_loss_db")))
+        self.optic_wavelength_spin = QSpinBox()
+        self.optic_wavelength_spin.setRange(0, 100_000)
+        self.optic_wavelength_spin.setSuffix(" nm")
+        self.optic_wavelength_spin.setValue(int(self.asset.get("optical_wavelength_nm", 0) or 0))
+
         self.notes_edit = QTextEdit(_text(self.asset.get("notes")))
         self.notes_edit.setMinimumHeight(90)
 
@@ -386,6 +503,16 @@ class NetworkAssetEditorDialog(QDialog):
         form.addRow("Rack spaces", self.rack_units_spin)
         form.addRow("Switch rack allowance", self.switch_rack_allowance_spin)
         form.addRow("OLT units per rack unit", self.olt_units_per_u_spin)
+        form.addRow("Optic form factor", self.optic_form_factor_combo)
+        form.addRow("Optic supported speeds", self.optic_speeds_button)
+        form.addRow("Optic connector", self.optic_connector_combo)
+        form.addRow("Optic fibre standard", self.optic_standard_edit)
+        form.addRow("Optic maximum reach", self.optic_reach_spin)
+        form.addRow("Optic transmit power (dBm)", self.optic_tx_edit)
+        form.addRow("Optic receiver sensitivity (dBm)", self.optic_rx_edit)
+        form.addRow("Optic insertion loss (dB)", self.optic_insertion_edit)
+        form.addRow("Optic return loss (dB)", self.optic_return_edit)
+        form.addRow("Optic wavelength", self.optic_wavelength_spin)
         form.addRow("Notes", self.notes_edit)
 
         self.asset_type_combo.currentIndexChanged.connect(self._update_visibility)
@@ -403,14 +530,21 @@ class NetworkAssetEditorDialog(QDialog):
         type_combo = QComboBox()
         type_combo.addItems(PORT_TYPE_OPTIONS)
         _set_combo_text(type_combo, _text(row.get("port_type")) or "rj45")
+        type_combo.setProperty("source_row", deepcopy(row))
         use_combo = QComboBox()
         use_combo.addItems(PORT_USE_OPTIONS)
         _set_combo_text(use_combo, _text(row.get("port_use")) or "client")
         count_item = QTableWidgetItem(str(max(1, int(row.get("port_count", 1) or 1))))
         count_item.setTextAlignment(Qt.AlignCenter)
+        speeds = normalise_port_speeds(row.get("supported_speeds_mbps"))
+        if not speeds:
+            speeds = default_port_speeds(_text(row.get("port_type")) or "rj45")
+        speed_button = PortSpeedButton(self.port_table, speeds)
         self.port_table.setCellWidget(table_row, 0, type_combo)
         self.port_table.setItem(table_row, 1, count_item)
         self.port_table.setCellWidget(table_row, 2, use_combo)
+        self.port_table.setCellWidget(table_row, 3, speed_button)
+        type_combo.currentTextChanged.connect(lambda value, button=speed_button: button.set_speeds(default_port_speeds(value)))
         type_combo.currentTextChanged.connect(self._sync_legacy_port_counts)
         use_combo.currentTextChanged.connect(self._sync_legacy_port_counts)
         self._sync_legacy_port_counts()
@@ -429,6 +563,7 @@ class NetworkAssetEditorDialog(QDialog):
         for row in range(self.port_table.rowCount()):
             type_combo = self.port_table.cellWidget(row, 0)
             use_combo = self.port_table.cellWidget(row, 2)
+            speed_button = self.port_table.cellWidget(row, 3)
             item = self.port_table.item(row, 1)
             try:
                 count = max(0, int(item.text() if item else 0))
@@ -436,14 +571,18 @@ class NetworkAssetEditorDialog(QDialog):
                 count = 0
             if count <= 0:
                 continue
-            result.append(
+            source = deepcopy(type_combo.property("source_row") or {}) if type_combo else {}
+            port_type = _text(type_combo.currentText() if type_combo else "other").lower()
+            source.update(
                 {
-                    "port_type": _text(type_combo.currentText() if type_combo else "other").lower(),
+                    "port_type": port_type,
                     "port_count": count,
                     "port_use": _text(use_combo.currentText() if use_combo else "other").lower(),
-                    "name_prefix": "",
+                    "name_prefix": _text(source.get("name_prefix")),
+                    "supported_speeds_mbps": speed_button.speeds() if isinstance(speed_button, PortSpeedButton) else default_port_speeds(port_type),
                 }
             )
+            result.append(source)
         return result
 
     def _sync_legacy_port_counts(self, *_args) -> None:
@@ -482,6 +621,10 @@ class NetworkAssetEditorDialog(QDialog):
         self.max_stack_members_spin.setEnabled(stacking_enabled)
         self.switch_rack_allowance_spin.setEnabled(asset_type == "network_switch")
         self.olt_units_per_u_spin.setEnabled(asset_type == "optical_line_terminal")
+        optic_enabled = asset_type == "optical_transceiver"
+        for widget in (self.optic_form_factor_combo, self.optic_speeds_button, self.optic_connector_combo, self.optic_standard_edit, self.optic_reach_spin, self.optic_tx_edit, self.optic_rx_edit, self.optic_insertion_edit, self.optic_return_edit, self.optic_wavelength_spin):
+            widget.setEnabled(optic_enabled)
+        self.port_table.setEnabled(not optic_enabled)
         capacity_enabled = asset_type in {
             "network_switch", "network_router", "firewall",
             "optical_line_terminal", "optical_network_terminal",
@@ -544,7 +687,7 @@ class NetworkAssetEditorDialog(QDialog):
                     "name_prefix": "Output",
                 },
             ]
-        portless_asset_types = {"ups", "pdu", "power_device", "cable_management"}
+        portless_asset_types = {"ups", "pdu", "power_device", "cable_management", "optical_transceiver"}
         if not port_definitions and asset_type not in portless_asset_types:
             QMessageBox.critical(
                 self, "Invalid asset", "At least one physical port row is required."
@@ -559,7 +702,26 @@ class NetworkAssetEditorDialog(QDialog):
             )
             return
 
+        def optional_float(edit: QLineEdit, label: str):
+            text = edit.text().strip()
+            if not text:
+                return ""
+            try:
+                return float(text)
+            except ValueError:
+                QMessageBox.critical(self, "Invalid asset", f"{label} must be a number or blank.")
+                raise
+
+        try:
+            optic_tx = optional_float(self.optic_tx_edit, "Transmit power")
+            optic_rx = optional_float(self.optic_rx_edit, "Receiver sensitivity")
+            optic_insertion = optional_float(self.optic_insertion_edit, "Insertion loss")
+            optic_return = optional_float(self.optic_return_edit, "Return loss")
+        except ValueError:
+            return
+
         self.result = {
+            **self.asset,
             "id": asset_id,
             "name": name,
             "asset_type": asset_type,
@@ -584,7 +746,7 @@ class NetworkAssetEditorDialog(QDialog):
             "expected_bandwidth_mbps": float(self.expected_bandwidth_spin.value()),
             "expected_packet_rate_pps": float(self.expected_packet_rate_spin.value()),
             "port_definitions": port_definitions,
-            "number_of_ports": sum(row["port_count"] for row in port_definitions),
+            "number_of_ports": 0 if asset_type == "optical_transceiver" else sum(row["port_count"] for row in port_definitions),
             "connections_in": (
                 split_inputs if asset_type == "fibre_splitter"
                 else int(self.connections_in_spin.value())
@@ -618,6 +780,16 @@ class NetworkAssetEditorDialog(QDialog):
                 if asset_type == "optical_line_terminal"
                 else 1
             ),
+            "optic_form_factor": self.optic_form_factor_combo.currentText().strip() if asset_type == "optical_transceiver" else _text(self.asset.get("optic_form_factor")),
+            "supported_speeds_mbps": self.optic_speeds_button.speeds() if asset_type == "optical_transceiver" else normalise_port_speeds(self.asset.get("supported_speeds_mbps")),
+            "optic_connector_type": self.optic_connector_combo.currentText().strip() if asset_type == "optical_transceiver" else _text(self.asset.get("optic_connector_type")),
+            "optic_fibre_standard": self.optic_standard_edit.text().strip() if asset_type == "optical_transceiver" else _text(self.asset.get("optic_fibre_standard")),
+            "optic_reach_m": float(self.optic_reach_spin.value()) if asset_type == "optical_transceiver" else float(self.asset.get("optic_reach_m", 0.0) or 0.0),
+            "optical_tx_power_dbm": optic_tx if asset_type == "optical_transceiver" else self.asset.get("optical_tx_power_dbm", ""),
+            "optical_receiver_sensitivity_dbm": optic_rx if asset_type == "optical_transceiver" else self.asset.get("optical_receiver_sensitivity_dbm", ""),
+            "optical_insertion_loss_db": optic_insertion if asset_type == "optical_transceiver" else self.asset.get("optical_insertion_loss_db", ""),
+            "optical_return_loss_db": optic_return if asset_type == "optical_transceiver" else self.asset.get("optical_return_loss_db", ""),
+            "optical_wavelength_nm": int(self.optic_wavelength_spin.value()) if asset_type == "optical_transceiver" else int(self.asset.get("optical_wavelength_nm", 0) or 0),
             "notes": self.notes_edit.toPlainText().strip(),
         }
         super().accept()
@@ -889,173 +1061,132 @@ class NetworkConnectionEditorDialog(QDialog):
         suggested_id: str = "NC1",
         default_from: str = "",
         default_to: str = "",
+        assets: Optional[Sequence[dict]] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Network Connection")
         self.connection = deepcopy(connection or {})
         self.instances = list(instances or [])
+        if assets is None and hasattr(parent, "data"):
+            assets = getattr(parent, "data", {}).get("network_assets", [])
+        self.assets = {_text(row.get("id")): row for row in (assets or []) if isinstance(row, dict)}
+        self.instances_by_id = {_text(row.get("id")): row for row in self.instances if isinstance(row, dict)}
         self.vlans = list(vlans or [])
         self.result: Optional[dict] = None
-        self.resize(580, 600)
+        self.resize(650, 680)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
         layout.addLayout(form)
-
         self.id_edit = QLineEdit(_text(self.connection.get("id")) or suggested_id)
-        self.from_combo = QComboBox()
-        self.to_combo = QComboBox()
+        self.from_combo = QComboBox(); self.to_combo = QComboBox()
         for instance in sorted(self.instances, key=lambda item: _text(item.get("id"))):
-            instance_id = _text(instance.get("id"))
-            label = f"{instance_id} - {_text(instance.get('name')) or instance_id}"
-            self.from_combo.addItem(label, instance_id)
-            self.to_combo.addItem(label, instance_id)
-        from_value = _text(self.connection.get("from_instance_id")) or default_from
-        to_value = _text(self.connection.get("to_instance_id")) or default_to
-        from_index = self.from_combo.findData(from_value)
-        to_index = self.to_combo.findData(to_value)
-        if from_index >= 0:
-            self.from_combo.setCurrentIndex(from_index)
-        if to_index >= 0:
-            self.to_combo.setCurrentIndex(to_index)
+            instance_id = _text(instance.get("id")); label = f"{instance_id} - {_text(instance.get('name')) or instance_id}"
+            self.from_combo.addItem(label, instance_id); self.to_combo.addItem(label, instance_id)
+        for combo, value in ((self.from_combo, _text(self.connection.get("from_instance_id")) or default_from), (self.to_combo, _text(self.connection.get("to_instance_id")) or default_to)):
+            index = combo.findData(value)
+            if index >= 0: combo.setCurrentIndex(index)
 
-        self.from_port_edit = QLineEdit(_text(self.connection.get("from_port")))
-        self.to_port_edit = QLineEdit(_text(self.connection.get("to_port")))
-        self.role_combo = QComboBox()
-        self.role_combo.addItems(CONNECTION_ROLES)
-        _set_combo_text(
-            self.role_combo, _text(self.connection.get("connection_role")) or "output"
-        )
-        self.medium_combo = QComboBox()
-        self.medium_combo.addItems(CONNECTION_MEDIA[:-1])
-        _set_combo_text(
-            self.medium_combo, _text(self.connection.get("medium")) or "copper"
-        )
-        self.cable_spec_edit = QLineEdit(
-            _text(self.connection.get("cable_specification"))
-        )
-        self.fibre_count_spin = QSpinBox()
-        self.fibre_count_spin.setRange(0, 100_000)
-        self.fibre_count_spin.setValue(int(self.connection.get("fibre_count", 0) or 0))
+        self.from_port_combo = QComboBox(); self.from_port_combo.setEditable(True)
+        self.to_port_combo = QComboBox(); self.to_port_combo.setEditable(True)
+        self.role_combo = QComboBox(); self.role_combo.addItems(CONNECTION_ROLES); _set_combo_text(self.role_combo, _text(self.connection.get("connection_role")) or "output")
+        self.medium_combo = QComboBox(); self.medium_combo.addItems(CONNECTION_MEDIA[:-1]); _set_combo_text(self.medium_combo, _text(self.connection.get("medium")) or "copper")
+        self.speed_combo = QComboBox()
+        self.speed_status = QLabel(); self.speed_status.setWordWrap(True)
+        self.cable_spec_edit = QLineEdit(_text(self.connection.get("cable_specification")))
+        self.fibre_count_spin = QSpinBox(); self.fibre_count_spin.setRange(0, 100_000); self.fibre_count_spin.setValue(int(self.connection.get("fibre_count", 0) or 0))
+        self.vlan_list = QListWidget(); self.vlan_list.setSelectionMode(QAbstractItemView.NoSelection)
+        selected_vlans = {_text(value) for value in self.connection.get("vlan_ids", []) if _text(value)}
+        for vlan in sorted(self.vlans, key=lambda item: int(item.get("vlan_id", 0) or 0)):
+            row_id = _text(vlan.get("id")) or str(vlan.get("vlan_id", "")); item = QListWidgetItem(f"{vlan.get('vlan_id', '')} - {_text(vlan.get('name'))}")
+            item.setData(Qt.UserRole, row_id); item.setFlags(item.flags() | Qt.ItemIsUserCheckable); item.setCheckState(Qt.Checked if row_id in selected_vlans else Qt.Unchecked); self.vlan_list.addItem(item)
+        self.route_profile_combo = QComboBox(); self.route_profile_combo.addItem(""); self.route_profile_combo.addItems(sorted(set(route_profiles or []))); _set_combo_text(self.route_profile_combo, _text(self.connection.get("route_profile")))
+        self.route_path_edit = QLineEdit(" -> ".join(str(value) for value in self.connection.get("route_path", []) if _text(value))); self.route_path_edit.setPlaceholderText("Optional graph node path, separated by ->")
+        self.notes_edit = QTextEdit(_text(self.connection.get("notes"))); self.notes_edit.setMinimumHeight(90)
 
-        self.vlan_list = QListWidget()
-        self.vlan_list.setSelectionMode(QAbstractItemView.NoSelection)
-        selected_vlans = {
-            _text(value)
-            for value in self.connection.get("vlan_ids", [])
-            if _text(value)
-        }
-        for vlan in sorted(
-            self.vlans, key=lambda item: int(item.get("vlan_id", 0) or 0)
-        ):
-            row_id = _text(vlan.get("id")) or str(vlan.get("vlan_id", ""))
-            label = f"{vlan.get('vlan_id', '')} - {_text(vlan.get('name'))}"
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, row_id)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if row_id in selected_vlans else Qt.Unchecked)
-            self.vlan_list.addItem(item)
+        for label, widget in [("Connection ID", self.id_edit), ("From asset", self.from_combo), ("From port", self.from_port_combo), ("To asset", self.to_combo), ("To port", self.to_port_combo), ("Connection role", self.role_combo), ("Medium", self.medium_combo), ("Link speed", self.speed_combo), ("Speed compatibility", self.speed_status), ("Cable specification", self.cable_spec_edit), ("Fibre count", self.fibre_count_spin), ("VLANs", self.vlan_list), ("Route profile", self.route_profile_combo), ("Route path", self.route_path_edit), ("Notes", self.notes_edit)]:
+            form.addRow(label, widget)
 
-        self.route_profile_combo = QComboBox()
-        self.route_profile_combo.addItem("")
-        self.route_profile_combo.addItems(sorted(set(route_profiles or [])))
-        _set_combo_text(
-            self.route_profile_combo, _text(self.connection.get("route_profile"))
-        )
-        self.route_path_edit = QLineEdit(
-            " -> ".join(
-                str(value)
-                for value in self.connection.get("route_path", [])
-                if _text(value)
-            )
-        )
-        self.route_path_edit.setPlaceholderText(
-            "Optional graph node path, separated by ->"
-        )
-        self.notes_edit = QTextEdit(_text(self.connection.get("notes")))
-        self.notes_edit.setMinimumHeight(90)
-
-        form.addRow("Connection ID", self.id_edit)
-        form.addRow("From asset", self.from_combo)
-        form.addRow("From port", self.from_port_edit)
-        form.addRow("To asset", self.to_combo)
-        form.addRow("To port", self.to_port_edit)
-        form.addRow("Connection role", self.role_combo)
-        form.addRow("Medium", self.medium_combo)
-        form.addRow("Cable specification", self.cable_spec_edit)
-        form.addRow("Fibre count", self.fibre_count_spin)
-        form.addRow("VLANs", self.vlan_list)
-        form.addRow("Route profile", self.route_profile_combo)
-        form.addRow("Route path", self.route_path_edit)
-        form.addRow("Notes", self.notes_edit)
-
-        self.medium_combo.currentTextChanged.connect(
-            lambda value: self.fibre_count_spin.setEnabled(value == "fibre")
-        )
+        self.from_combo.currentIndexChanged.connect(self._populate_ports)
+        self.to_combo.currentIndexChanged.connect(self._populate_ports)
+        self.medium_combo.currentTextChanged.connect(self._populate_ports)
+        self.from_port_combo.currentIndexChanged.connect(self._populate_speeds)
+        self.to_port_combo.currentIndexChanged.connect(self._populate_speeds)
+        self.from_port_combo.editTextChanged.connect(self._populate_speeds)
+        self.to_port_combo.editTextChanged.connect(self._populate_speeds)
+        self.medium_combo.currentTextChanged.connect(lambda value: self.fibre_count_spin.setEnabled(value == "fibre"))
+        self._populate_ports()
         self.fibre_count_spin.setEnabled(self.medium_combo.currentText() == "fibre")
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+    def _ports(self, instance_id: str) -> List[dict]:
+        instance = self.instances_by_id.get(instance_id, {})
+        return _expanded_instance_ports(instance, self.assets.get(_text(instance.get("asset_id")), {}))
+
+    def _port_medium(self, row: dict) -> str:
+        return "fibre" if _text(row.get("port_type")) in PLUGGABLE_OPTIC_PORT_TYPES | {"pon", "lc", "sc", "mpo"} else "copper"
+
+    def _populate_one_port_combo(self, combo: QComboBox, instance_id: str, current: str) -> None:
+        combo.blockSignals(True); combo.clear()
+        medium = self.medium_combo.currentText().strip()
+        for row in self._ports(instance_id):
+            if medium in {"fibre", "copper"} and self._port_medium(row) != medium:
+                continue
+            speeds = normalise_port_speeds(row.get("speeds"))
+            suffix = f" · {', '.join(port_speed_label(value) for value in speeds)}" if speeds else ""
+            combo.addItem(f"{_text(row.get('name'))} ({_text(row.get('port_type'))}/{_text(row.get('port_use'))}){suffix}", row)
+        index = next((i for i in range(combo.count()) if _text((combo.itemData(i) or {}).get("name")) == current), -1)
+        if index >= 0: combo.setCurrentIndex(index)
+        elif current: combo.setEditText(current)
+        combo.blockSignals(False)
+
+    def _populate_ports(self, *_args) -> None:
+        self._populate_one_port_combo(self.from_port_combo, _text(self.from_combo.currentData()), _text(self.connection.get("from_port")) if self.from_port_combo.count() == 0 else self.from_port_combo.currentText().split(" (")[0])
+        self._populate_one_port_combo(self.to_port_combo, _text(self.to_combo.currentData()), _text(self.connection.get("to_port")) if self.to_port_combo.count() == 0 else self.to_port_combo.currentText().split(" (")[0])
+        self._populate_speeds()
+
+    def _selected_port(self, combo: QComboBox) -> Tuple[str, dict]:
+        row = combo.currentData() if isinstance(combo.currentData(), dict) else {}
+        return (_text(row.get("name")) or combo.currentText().split(" (")[0].strip(), row)
+
+    def _populate_speeds(self, *_args) -> None:
+        current = int(self.connection.get("link_speed_mbps", 0) or 0) if self.speed_combo.count() == 0 else int(self.speed_combo.currentData() or 0)
+        _from_name, left = self._selected_port(self.from_port_combo); _to_name, right = self._selected_port(self.to_port_combo)
+        left_speeds = normalise_port_speeds(left.get("speeds")); right_speeds = normalise_port_speeds(right.get("speeds")); speeds = compatible_port_speeds(left_speeds, right_speeds)
+        self.speed_combo.blockSignals(True); self.speed_combo.clear()
+        if not speeds:
+            self.speed_combo.addItem("Not declared / transparent", 0)
+        else:
+            for speed in speeds: self.speed_combo.addItem(port_speed_label(speed), speed)
+        index = self.speed_combo.findData(current)
+        if index >= 0: self.speed_combo.setCurrentIndex(index)
+        self.speed_combo.blockSignals(False)
+        incompatible = bool(left_speeds and right_speeds and not set(left_speeds) & set(right_speeds))
+        self.speed_status.setText("No common supported speed. Select different ports." if incompatible else ("Common rates: " + ", ".join(port_speed_label(value) for value in speeds) if speeds else "One or both ports are speed-transparent or not declared."))
+        self.speed_status.setStyleSheet("color:#d65c5c" if incompatible else "")
 
     def _selected_vlans(self) -> List[str]:
-        result = []
-        for index in range(self.vlan_list.count()):
-            item = self.vlan_list.item(index)
-            if item.checkState() == Qt.Checked:
-                result.append(_text(item.data(Qt.UserRole)))
-        return result
+        return [_text(self.vlan_list.item(index).data(Qt.UserRole)) for index in range(self.vlan_list.count()) if self.vlan_list.item(index).checkState() == Qt.Checked]
 
     def accept(self) -> None:
-        connection_id = self.id_edit.text().strip()
-        from_id = _text(self.from_combo.currentData())
-        to_id = _text(self.to_combo.currentData())
+        connection_id = self.id_edit.text().strip(); from_id = _text(self.from_combo.currentData()); to_id = _text(self.to_combo.currentData())
+        from_port, from_row = self._selected_port(self.from_port_combo); to_port, to_row = self._selected_port(self.to_port_combo)
         if not connection_id:
-            QMessageBox.critical(
-                self, "Invalid connection", "Connection ID is required."
-            )
-            return
-        if not from_id or not to_id:
-            QMessageBox.critical(
-                self, "Invalid connection", "Select both connection endpoints."
-            )
-            return
-        if from_id == to_id:
-            QMessageBox.critical(
-                self, "Invalid connection", "Connection endpoints must be different."
-            )
-            return
-        if (
-            not self.from_port_edit.text().strip()
-            or not self.to_port_edit.text().strip()
-        ):
-            QMessageBox.critical(
-                self, "Invalid connection", "Both port identifiers are required."
-            )
-            return
+            QMessageBox.critical(self, "Invalid connection", "Connection ID is required."); return
+        if not from_id or not to_id or from_id == to_id:
+            QMessageBox.critical(self, "Invalid connection", "Select two different connection endpoints."); return
+        if not from_port or not to_port:
+            QMessageBox.critical(self, "Invalid connection", "Both port identifiers are required."); return
+        speed = int(self.speed_combo.currentData() or 0)
+        left = normalise_port_speeds(from_row.get("speeds")); right = normalise_port_speeds(to_row.get("speeds"))
+        if left and right and speed not in set(left) & set(right):
+            QMessageBox.critical(self, "Incompatible port speeds", "The selected ports do not share the selected line rate."); return
         self.result = {
-            "id": connection_id,
-            "from_instance_id": from_id,
-            "from_port": self.from_port_edit.text().strip(),
-            "to_instance_id": to_id,
-            "to_port": self.to_port_edit.text().strip(),
-            "connection_role": self.role_combo.currentText().strip(),
-            "medium": self.medium_combo.currentText().strip(),
-            "cable_specification": self.cable_spec_edit.text().strip(),
-            "fibre_count": (
-                int(self.fibre_count_spin.value())
-                if self.medium_combo.currentText() == "fibre"
-                else 0
-            ),
-            "vlan_ids": self._selected_vlans(),
-            "route_profile": self.route_profile_combo.currentText().strip(),
-            "route_path": [
-                part.strip()
-                for part in self.route_path_edit.text().split("->")
-                if part.strip()
-            ],
-            "notes": self.notes_edit.toPlainText().strip(),
+            **self.connection, "id": connection_id, "from_instance_id": from_id, "from_port": from_port, "to_instance_id": to_id, "to_port": to_port,
+            "connection_role": self.role_combo.currentText().strip(), "medium": self.medium_combo.currentText().strip(), "link_speed_mbps": speed,
+            "cable_specification": self.cable_spec_edit.text().strip(), "fibre_count": int(self.fibre_count_spin.value()) if self.medium_combo.currentText() == "fibre" else 0,
+            "vlan_ids": self._selected_vlans(), "route_profile": self.route_profile_combo.currentText().strip(),
+            "route_path": [part.strip() for part in self.route_path_edit.text().split("->") if part.strip()], "notes": self.notes_edit.toPlainText().strip(),
         }
         super().accept()
 
@@ -2482,6 +2613,7 @@ class NetworkPlannerDialog(QDialog):
             vlans=self._items("network_vlans"),
             route_profiles=list(self.data.get("route_profiles", {}).keys()),
             suggested_id=_next_id(self._items("network_connections"), "NC"),
+            assets=self._items("network_assets"),
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self._replace_or_append("network_connections", -1, dialog.result)
@@ -2497,6 +2629,7 @@ class NetworkPlannerDialog(QDialog):
             self._items("network_vlans"),
             list(self.data.get("route_profiles", {}).keys()),
             suggested_id=_text(item.get("id")),
+            assets=self._items("network_assets"),
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self._replace_or_append("network_connections", index, dialog.result)

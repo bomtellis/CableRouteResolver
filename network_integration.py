@@ -417,6 +417,9 @@ def _open_network_planner(editor) -> None:
             "network_routes",
             "network_ip_allocations",
             "network_external_networks",
+            "network_optic_modules",
+            "network_optical_paths",
+            "network_fibre_cable_types",
             "network_fibre_cables",
             "network_fibre_nodes",
             "network_fibre_splices",
@@ -469,6 +472,7 @@ def _apply_network_payload(editor, payload: dict) -> None:
         "network_connections", "network_endpoint_assignments", "network_patch_leads",
         "network_redundancy_groups", "network_vlans", "network_routes",
         "network_ip_allocations", "network_external_networks",
+        "network_optic_modules", "network_optical_paths", "network_fibre_cable_types",
         "network_fibre_cables", "network_fibre_nodes", "network_fibre_splices",
         "network_design_summary",
     ):
@@ -960,6 +964,7 @@ def _connect_network_asset(editor, x: float, y: float) -> None:
         ),
         default_from=start,
         default_to=picked,
+        assets=editor.store.data.get("network_assets", []),
     )
     if dialog.exec() == QDialog.Accepted and dialog.result:
         _safe_push_undo(editor, "Add network connection")
@@ -1140,6 +1145,7 @@ def _edit_network_connection(editor, connection_id: str) -> None:
         vlans=editor.store.data.get("network_vlans", []),
         route_profiles=list(editor.store.data.get("route_profiles", {}).keys()),
         suggested_id=connection_id,
+        assets=editor.store.data.get("network_assets", []),
     )
     if dialog.exec() != QDialog.Accepted or not dialog.result:
         return

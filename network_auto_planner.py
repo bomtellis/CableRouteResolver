@@ -18,9 +18,15 @@ import os
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from network_schema import (
+    PLUGGABLE_OPTIC_PORT_TYPES,
+    compatible_port_speeds,
+    default_port_speeds,
     ensure_network_schema,
     normalise_layer_connection_rules,
     normalise_manufacturer_preferences,
+    normalise_port_speeds,
+    optic_form_factors_for_cage,
+    port_speed_label,
 )
 from network_services import ensure_physical_fibre_for_design
 
@@ -169,6 +175,8 @@ class PortDemand:
     expected_bandwidth_mbps: float
     expected_packet_rate_pps: float
     room_type_id: str
+    selected_network_port: str = ""
+    selected_link_speed_mbps: int = 0
 
 
 @dataclass
@@ -863,17 +871,111 @@ def _ensure_aggregate_traffic_capacity(
     raise NetworkPlanningError(f"Unable to stabilise traffic capacity for {label}.")
 
 
+def _asset_endpoint_port_slots(asset: dict) -> List[dict]:
+    """Expand client-facing physical ports with their selectable line rates."""
+
+    rows = [
+        row
+        for row in asset.get("port_definitions", [])
+        if isinstance(row, dict) and _int(row.get("port_count")) > 0
+    ]
+    excluded_uses = {"uplink", "input", "pon", "stacking", "power", "console", "management"}
+    endpoint_rows = [
+        row
+        for row in rows
+        if _text(row.get("port_use")).lower() not in excluded_uses
+    ]
+    if not endpoint_rows:
+        endpoint_rows = [
+            row
+            for row in rows
+            if _text(row.get("port_use")).lower() in {"client", "output", "downlink", "other"}
+        ]
+
+    slots: List[dict] = []
+    counters: Dict[str, int] = defaultdict(int)
+    for row in endpoint_rows:
+        port_type = _text(row.get("port_type")).lower() or (
+            "rj45" if _text(asset.get("output_connection_type")).lower() == "copper" else "other"
+        )
+        speeds = normalise_port_speeds(row.get("supported_speeds_mbps"))
+        if not speeds:
+            speeds = default_port_speeds(port_type)
+        explicit = (
+            [_text(value) for value in row.get("explicit_names", []) if _text(value)]
+            if isinstance(row.get("explicit_names", []), list)
+            else []
+        )
+        count = max(0, _int(row.get("port_count")))
+        for name in explicit[:count]:
+            slots.append({"name": name, "port_type": port_type, "speeds": list(speeds)})
+        remaining = count - min(count, len(explicit))
+        prefix = _text(row.get("name_prefix")) or {
+            "rj45": "", "lc": "LC", "sc": "SC", "mpo": "MPO",
+            "sfp": "SFP", "sfp+": "SFP+", "sfp28": "SFP28",
+            "qsfp": "QSFP", "qsfp+": "QSFP+", "qsfp28": "QSFP28",
+            "qsfp56": "QSFP56", "qsfpdd": "QSFP-DD", "osfp": "OSFP",
+        }.get(port_type, port_type.upper())
+        for _ in range(remaining):
+            counters[prefix] += 1
+            name = f"{prefix}-{counters[prefix]}" if prefix else str(counters[prefix])
+            slots.append({"name": name, "port_type": port_type, "speeds": list(speeds)})
+
+    if not slots:
+        port_type = "rj45" if _text(asset.get("output_connection_type")).lower() == "copper" else "other"
+        speeds = default_port_speeds(port_type)
+        slots = [
+            {"name": str(number), "port_type": port_type, "speeds": list(speeds)}
+            for number in range(1, max(0, _int(asset.get("number_of_ports"))) + 1)
+        ]
+    return slots
+
+
+def _endpoint_capacity_asset(asset: dict) -> dict:
+    """Return a planner-only asset copy whose port count excludes uplinks."""
+
+    result = deepcopy(asset)
+    result["number_of_ports"] = len(_asset_endpoint_port_slots(asset))
+    return result
+
+
+def _slot_selected_speed(slot: dict, required_mbps: float) -> int:
+    speeds = normalise_port_speeds(slot.get("speeds"))
+    eligible = [speed for speed in speeds if speed + 1e-9 >= max(0.0, required_mbps)]
+    return min(eligible) if eligible else 0
+
+
+def _can_allocate_endpoint_speeds(asset: dict, items: Sequence[PortDemand]) -> bool:
+    slots = list(_asset_endpoint_port_slots(asset))
+    for item in sorted(items, key=lambda row: -row.expected_bandwidth_mbps):
+        choices = [
+            (
+                _slot_selected_speed(slot, item.expected_bandwidth_mbps)
+                - item.expected_bandwidth_mbps,
+                index,
+            )
+            for index, slot in enumerate(slots)
+            if _slot_selected_speed(slot, item.expected_bandwidth_mbps) > 0
+            or item.expected_bandwidth_mbps <= 0.0
+        ]
+        if not choices:
+            return False
+        _headroom, index = min(choices)
+        slots.pop(index)
+    return True
+
+
 def _pack_ports_to_devices(
     port_items: Sequence[PortDemand],
     device_assets: Sequence[dict],
     spare_fraction: float,
 ) -> List[List[PortDemand]]:
-    # Spare capacity is enforced when selecting the aggregate device mix.
-    # Use each device's physical capacity for the actual port allocation so
-    # rounding on small switches cannot consume the reserved aggregate margin.
+    # Spare capacity is enforced when selecting the aggregate device mix.  The
+    # physical allocation below additionally reserves a real client-facing port
+    # whose declared line rate can carry each endpoint's expected bandwidth.
     devices = [
         {
-            "ports": max(0, _int(asset.get("number_of_ports"))),
+            "slots": list(_asset_endpoint_port_slots(asset)),
             "poe": max(0.0, _float(asset.get("poe_budget_w"))),
             "bandwidth": (
                 max(0.0, _float(asset.get("bandwidth_capacity_gbps"))) * 1000.0
@@ -900,8 +1002,8 @@ def _pack_ports_to_devices(
         ),
     ):
         choices = []
-        for index, device in enumerate(devices):
-            if device["ports"] < 1 or device["poe"] + 1e-9 < item.poe_power_w:
+        for device_index, device in enumerate(devices):
+            if device["poe"] + 1e-9 < item.poe_power_w:
                 continue
             if (
                 device["bandwidth"] is not None
@@ -913,36 +1015,48 @@ def _pack_ports_to_devices(
                 and device["packets"] + 1e-9 < item.expected_packet_rate_pps
             ):
                 continue
-            choices.append(
-                (
+            for slot_index, slot in enumerate(device["slots"]):
+                selected_speed = _slot_selected_speed(slot, item.expected_bandwidth_mbps)
+                if selected_speed <= 0 and item.expected_bandwidth_mbps > 0.0:
+                    continue
+                choices.append(
                     (
-                        device["bandwidth"] - item.expected_bandwidth_mbps
-                        if device["bandwidth"] is not None
-                        else float("inf")
-                    ),
-                    (
-                        device["packets"] - item.expected_packet_rate_pps
-                        if device["packets"] is not None
-                        else float("inf")
-                    ),
-                    device["poe"] - item.poe_power_w,
-                    device["ports"] - 1,
-                    index,
+                        selected_speed - item.expected_bandwidth_mbps,
+                        (
+                            device["bandwidth"] - item.expected_bandwidth_mbps
+                            if device["bandwidth"] is not None
+                            else float("inf")
+                        ),
+                        (
+                            device["packets"] - item.expected_packet_rate_pps
+                            if device["packets"] is not None
+                            else float("inf")
+                        ),
+                        device["poe"] - item.poe_power_w,
+                        len(device["slots"]) - 1,
+                        device_index,
+                        slot_index,
+                        selected_speed,
+                    )
                 )
-            )
         if not choices:
+            required = port_speed_label(int(math.ceil(item.expected_bandwidth_mbps)))
             raise NetworkPlanningError(
                 f"Unable to allocate {item.endpoint_name} port {item.endpoint_port}; "
-                f"it requires {item.poe_power_w:.1f} W PoE."
+                f"it requires {item.poe_power_w:.1f} W PoE and a client port capable "
+                f"of at least {required}."
             )
-        *_, selected = min(choices)
-        devices[selected]["ports"] -= 1
-        devices[selected]["poe"] -= item.poe_power_w
-        if devices[selected]["bandwidth"] is not None:
-            devices[selected]["bandwidth"] -= item.expected_bandwidth_mbps
-        if devices[selected]["packets"] is not None:
-            devices[selected]["packets"] -= item.expected_packet_rate_pps
-        devices[selected]["items"].append(item)
+        *_, selected_device, selected_slot, selected_speed = min(choices)
+        device = devices[selected_device]
+        slot = device["slots"].pop(selected_slot)
+        device["poe"] -= item.poe_power_w
+        if device["bandwidth"] is not None:
+            device["bandwidth"] -= item.expected_bandwidth_mbps
+        if device["packets"] is not None:
+            device["packets"] -= item.expected_packet_rate_pps
+        item.selected_network_port = _text(slot.get("name"))
+        item.selected_link_speed_mbps = max(0, int(selected_speed))
+        device["items"].append(item)
     return [device["items"] for device in devices]
 
 
@@ -990,6 +1104,11 @@ def _clear_previous_auto_design(data: dict) -> None:
         for item in data.get("network_redundancy_groups", [])
         if not bool(item.get("auto_generated"))
     ]
+    data["network_optic_modules"] = [
+        item
+        for item in data.get("network_optic_modules", [])
+        if not bool(item.get("auto_generated"))
+    ]
     data["network_fibre_cables"] = [
         item for item in data.get("network_fibre_cables", [])
         if not bool(item.get("auto_generated"))
@@ -1029,6 +1148,7 @@ class DesignBuilder:
             if _text(item.get("id"))
         }
         self.patch_lead_ids = {_text(item.get("id")) for item in data.get("network_patch_leads", []) if _text(item.get("id"))}
+        self.optic_module_ids = {_text(item.get("id")) for item in data.get("network_optic_modules", []) if _text(item.get("id"))}
         self.assignment_ids = {
             _text(item.get("id"))
             for item in data.get("network_endpoint_assignments", [])
@@ -1044,10 +1164,25 @@ class DesignBuilder:
         self.connections: List[dict] = []
         self.assignments: List[dict] = []
         self.patch_leads: List[dict] = []
+        self.optic_modules: List[dict] = []
         self.locations: List[dict] = []
         self.redundancy_groups: List[dict] = []
         self.total_copper_m = 0.0
         self.total_fibre_m = 0.0
+        self._reserved_ports: Dict[str, set[str]] = defaultdict(set)
+        for connection in data.get("network_connections", []):
+            if not isinstance(connection, dict):
+                continue
+            for side in ("from", "to"):
+                instance_id = _text(connection.get(f"{side}_instance_id"))
+                port = _text(connection.get(f"{side}_port"))
+                if instance_id and port:
+                    self._reserved_ports[instance_id].add(port)
+        for assignment in data.get("network_endpoint_assignments", []):
+            if isinstance(assignment, dict):
+                instance_id = _text(assignment.get("network_instance_id")); port = _text(assignment.get("network_port"))
+                if instance_id and port:
+                    self._reserved_ports[instance_id].add(port)
 
     def add_instance(
         self, asset: dict, name: str, location: dict, role: str, **extra
@@ -1079,88 +1214,508 @@ class DesignBuilder:
         asset_id = _text(instance.get("asset_id"))
         return next((row for row in self.data.get("network_assets", []) if _text(row.get("id")) == asset_id), {})
 
-    def _port_definition(self, instance: dict, port_name: str, medium: str, preferred_use: str = "") -> dict:
+    @staticmethod
+    def _port_medium(port_type: str) -> str:
+        return "fibre" if _text(port_type).lower() in PLUGGABLE_OPTIC_PORT_TYPES | {"pon", "lc", "sc", "mpo"} else "copper"
+
+    def _expanded_ports(self, instance: dict) -> List[dict]:
         asset = self._asset_for_instance(instance)
-        rows = [row for row in asset.get("port_definitions", []) if isinstance(row, dict)]
+        rows = [row for row in asset.get("port_definitions", []) if isinstance(row, dict) and _int(row.get("port_count")) > 0]
+        result: List[dict] = []
+        counters: Dict[str, int] = defaultdict(int)
+        for row in rows:
+            port_type = _text(row.get("port_type")).lower() or "other"
+            port_use = _text(row.get("port_use")).lower() or "other"
+            speeds = normalise_port_speeds(row.get("supported_speeds_mbps")) or default_port_speeds(port_type)
+            explicit = [_text(value) for value in row.get("explicit_names", []) if _text(value)] if isinstance(row.get("explicit_names", []), list) else []
+            count = max(0, _int(row.get("port_count")))
+            for name in explicit[:count]:
+                result.append({**row, "name": name, "port_type": port_type, "port_use": port_use, "medium": self._port_medium(port_type), "supported_speeds_mbps": speeds})
+            remaining = count - min(count, len(explicit))
+            prefix = _text(row.get("name_prefix")) or {
+                "pon": "PON", "sfp": "SFP", "sfp+": "SFP+", "sfp28": "SFP28",
+                "qsfp": "QSFP", "qsfp+": "QSFP+", "qsfp28": "QSFP28",
+                "qsfp56": "QSFP56", "qsfpdd": "QSFP-DD", "osfp": "OSFP",
+                "lc": "LC", "sc": "SC", "mpo": "MPO", "rj45": "",
+            }.get(port_type, port_type.upper())
+            for _ in range(remaining):
+                counters[prefix] += 1
+                name = f"{prefix}-{counters[prefix]}" if prefix else str(counters[prefix])
+                result.append({**row, "name": name, "port_type": port_type, "port_use": port_use, "medium": self._port_medium(port_type), "supported_speeds_mbps": speeds})
+        members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
+        if members > 1:
+            result = [{**row, "name": f"{member}/{row['name']}"} for member in range(1, members + 1) for row in result]
+        return result
+
+    def _port_definition(self, instance: dict, port_name: str, medium: str, preferred_use: str = "") -> dict:
+        ports = self._expanded_ports(instance)
+        target = _text(port_name).lower()
+        exact = next((row for row in ports if _text(row.get("name")).lower() == target), None)
+        if exact is not None:
+            return exact
+        candidates = [row for row in ports if _text(row.get("medium")) == medium]
         if preferred_use:
-            matching = [row for row in rows if _text(row.get("port_use")).lower() == preferred_use]
-            if matching:
-                rows = matching
-        if rows:
-            return rows[0]
-        return {"port_type": "lc" if medium == "fibre" else "rj45", "port_use": preferred_use or "other"}
+            preferred = [row for row in candidates if _text(row.get("port_use")) == preferred_use]
+            if preferred:
+                candidates = preferred
+        return candidates[0] if candidates else {"name": port_name, "port_type": "lc" if medium == "fibre" else "rj45", "port_use": preferred_use or "other", "medium": medium, "supported_speeds_mbps": default_port_speeds("lc" if medium == "fibre" else "rj45")}
+
+    @staticmethod
+    def _requested_use(port_name: str, fallback: str) -> str:
+        value = _text(port_name).lower()
+        for token, use in (("uplink", "uplink"), ("downlink", "downlink"), ("pon", "pon"), ("input", "input"), ("output", "output"), ("client", "client"), ("peer", "uplink")):
+            if token in value:
+                return use
+        return fallback
+
+    def _select_connection_ports(self, from_instance: dict, requested_from: str, to_instance: dict, requested_to: str, medium: str, requested_speed: int, required_bandwidth_mbps: float) -> Tuple[dict, dict, int]:
+        def candidates(instance: dict, requested: str, fallback_use: str) -> List[dict]:
+            instance_id = _text(instance.get("id"))
+            rows = [row for row in self._expanded_ports(instance) if _text(row.get("medium")) == medium and _text(row.get("name")) not in self._reserved_ports.get(instance_id, set())]
+            exact = [row for row in rows if _text(row.get("name")).lower() == _text(requested).lower()]
+            if exact:
+                return exact
+            wanted = self._requested_use(requested, fallback_use)
+            preferred = [row for row in rows if _text(row.get("port_use")) == wanted]
+            return preferred or rows
+
+        left_rows = candidates(from_instance, requested_from, "uplink")
+        right_rows = candidates(to_instance, requested_to, "input")
+        if not left_rows and not self._expanded_ports(from_instance):
+            left_rows = [{"name": requested_from, "port_type": "lc" if medium == "fibre" else "rj45", "port_use": "uplink", "medium": medium, "supported_speeds_mbps": []}]
+        if not right_rows and not self._expanded_ports(to_instance):
+            right_rows = [{"name": requested_to, "port_type": "lc" if medium == "fibre" else "rj45", "port_use": "input", "medium": medium, "supported_speeds_mbps": []}]
+        choices = []
+        for left in left_rows:
+            for right in right_rows:
+                left_speeds = normalise_port_speeds(left.get("supported_speeds_mbps"))
+                right_speeds = normalise_port_speeds(right.get("supported_speeds_mbps"))
+                common = compatible_port_speeds(left_speeds, right_speeds)
+                if left_speeds and right_speeds and not common:
+                    continue
+                if requested_speed > 0:
+                    if common and requested_speed not in common:
+                        continue
+                    selected_speed = requested_speed
+                elif common:
+                    eligible = [value for value in common if value + 1e-9 >= required_bandwidth_mbps]
+                    if not eligible:
+                        continue
+                    selected_speed = min(eligible)
+                else:
+                    selected_speed = 0
+                choices.append((0 if _text(left.get("name")) == _text(requested_from) else 1, 0 if _text(right.get("name")) == _text(requested_to) else 1, selected_speed if selected_speed else 10**12, _text(left.get("name")), _text(right.get("name")), left, right, selected_speed))
+        if not choices:
+            from_name = from_instance.get("name") or from_instance.get("id")
+            to_name = to_instance.get("name") or to_instance.get("id")
+            raise NetworkPlanningError(
+                f"No compatible free {medium} ports exist between {from_name} and {to_name} for "
+                f"{port_speed_label(requested_speed) if requested_speed else f'{required_bandwidth_mbps:g} Mbps required traffic'}."
+            )
+        *_, left, right, selected_speed = min(choices, key=lambda row: row[:5])
+        self._reserved_ports[_text(from_instance.get("id"))].add(_text(left.get("name")))
+        self._reserved_ports[_text(to_instance.get("id"))].add(_text(right.get("name")))
+        return left, right, selected_speed
+
+    def _matching_optic_assets(
+        self, host_asset: dict, port: dict, speed_mbps: int, required_reach_m: float
+    ) -> List[dict]:
+        cage = _text(port.get("port_type")).lower()
+        allowed_forms = optic_form_factors_for_cage(cage)
+        form_speed_matches: List[dict] = []
+        reachable: List[dict] = []
+        for asset in self.data.get("network_assets", []):
+            if not isinstance(asset, dict) or _asset_type(asset) != "optical_transceiver":
+                continue
+            form = _text(asset.get("optic_form_factor")).lower()
+            speeds = normalise_port_speeds(asset.get("supported_speeds_mbps"))
+            if form not in allowed_forms or (speed_mbps > 0 and speeds and speed_mbps not in speeds):
+                continue
+            form_speed_matches.append(asset)
+            reach = max(0.0, _float(asset.get("optic_reach_m")))
+            if reach <= 0.0 or required_reach_m <= reach + 1e-9:
+                reachable.append(asset)
+        if form_speed_matches and not reachable:
+            longest = max(max(0.0, _float(row.get("optic_reach_m"))) for row in form_speed_matches)
+            raise NetworkPlanningError(
+                f"No {cage.upper()} optic supporting {port_speed_label(speed_mbps)} reaches "
+                f"the required {required_reach_m:.1f} m route; the longest declared reach is {longest:.1f} m."
+            )
+        return reachable
+
+    def _create_fallback_optic_asset(
+        self, host_asset: dict, port: dict, speed_mbps: int
+    ) -> dict:
+        cage = _text(port.get("port_type")).lower()
+        asset_id = f"AUTO-OPTIC-{cage.upper().replace('+','P').replace('-','')}-{speed_mbps or 'UNSPEC'}"
+        existing = next(
+            (row for row in self.data.get("network_assets", []) if _text(row.get("id")) == asset_id),
+            None,
+        )
+        if existing is not None:
+            return existing
+        tx = port.get("transmit_power_dbm", host_asset.get("optical_tx_power_dbm", ""))
+        rx = port.get(
+            "receiver_sensitivity_dbm",
+            host_asset.get("optical_receiver_sensitivity_dbm", ""),
+        )
+        optic = {
+            "id": asset_id,
+            "name": (
+                f"Auto {port_speed_label(speed_mbps) if speed_mbps else ''} "
+                f"{cage.upper()} optical transceiver"
+            ).replace("  ", " ").strip(),
+            "asset_type": "optical_transceiver",
+            "manufacturer": "",
+            "model": "",
+            "optic_form_factor": cage,
+            "supported_speeds_mbps": (
+                [speed_mbps]
+                if speed_mbps
+                else normalise_port_speeds(port.get("supported_speeds_mbps"))
+            ),
+            "optic_connector_type": (
+                "mpo"
+                if cage in {"qsfpdd", "osfp"} and speed_mbps >= 400000
+                else "lc"
+            ),
+            "optic_fibre_standard": _text(host_asset.get("optical_standard")) or "OS2",
+            "optic_reach_m": 0.0,
+            "optical_tx_power_dbm": tx,
+            "optical_receiver_sensitivity_dbm": rx,
+            "optical_insertion_loss_db": port.get("insertion_loss_db", ""),
+            "optical_return_loss_db": port.get(
+                "return_loss_db", host_asset.get("optical_return_loss_db", "")
+            ),
+            "optical_wavelength_nm": _int(
+                port.get("wavelength_nm"),
+                _int(host_asset.get("optical_wavelength_nm")),
+            ),
+            "rack_units": 0,
+            "number_of_ports": 0,
+            "port_definitions": [],
+            "auto_network_asset": True,
+            "auto_optic_definition": True,
+            "notes": (
+                "Planner-created optic definition. Configure transmit power, receiver "
+                "sensitivity and reach in the network asset or optical properties dialog."
+            ),
+        }
+        self.data.setdefault("network_assets", []).append(optic)
+        self.asset_ids.add(asset_id)
+        if _text(tx) == "" or _text(rx) == "":
+            self.warnings.append(
+                f"{optic['name']} was created without complete transmit/receive values; "
+                "its optical budget remains unconfigured."
+            )
+        return optic
+
+    def _estimated_fixed_fibre_loss_db(self, length_m: float) -> float:
+        planning = self.settings.get("physical_fibre_planning", {})
+        mode = _text(planning.get("routing_mode")).lower() or "direct"
+        type_id = _text(
+            planning.get(
+                "spine_cable_type_id" if mode == "spine_and_spur" else "default_cable_type_id"
+            )
+        )
+        cable_type = next(
+            (
+                row
+                for row in self.data.get("network_fibre_cable_types", [])
+                if _text(row.get("id")) == type_id
+            ),
+            {},
+        )
+        attenuation = max(0.0, _float(cable_type.get("attenuation_db_per_m"), 0.00035))
+        connector_loss = max(0.0, _float(cable_type.get("connector_loss_db"), 0.5))
+        splice_loss = max(0.0, _float(cable_type.get("splice_loss_db"), 0.1))
+        splice_count = 1 if mode == "spine_and_spur" else 0
+        return max(0.0, float(length_m)) * attenuation + 2.0 * connector_loss + splice_count * splice_loss
+
+    @staticmethod
+    def _optic_endpoint_values(host_asset: dict, port: dict, optic_asset: Optional[dict]) -> dict:
+        source = optic_asset or {}
+        return {
+            "tx": source.get(
+                "optical_tx_power_dbm",
+                port.get("transmit_power_dbm", host_asset.get("optical_tx_power_dbm", "")),
+            ),
+            "rx": source.get(
+                "optical_receiver_sensitivity_dbm",
+                port.get(
+                    "receiver_sensitivity_dbm",
+                    host_asset.get("optical_receiver_sensitivity_dbm", ""),
+                ),
+            ),
+            "insertion": source.get(
+                "optical_insertion_loss_db",
+                port.get("insertion_loss_db", host_asset.get("optical_insertion_loss_db", "")),
+            ),
+            "return_loss": source.get(
+                "optical_return_loss_db",
+                port.get("return_loss_db", host_asset.get("optical_return_loss_db", "")),
+            ),
+            "wavelength": max(
+                0,
+                _int(
+                    source.get(
+                        "optical_wavelength_nm",
+                        port.get("wavelength_nm", host_asset.get("optical_wavelength_nm", 0)),
+                    )
+                ),
+            ),
+            "standard": _text(
+                source.get("optic_fibre_standard") or host_asset.get("optical_standard")
+            ).upper(),
+            "connector": _text(source.get("optic_connector_type")).lower(),
+        }
+
+    def _select_optic_pair(
+        self,
+        from_instance: dict,
+        from_port: dict,
+        to_instance: dict,
+        to_port: dict,
+        speed_mbps: int,
+        route_length_m: float,
+    ) -> Tuple[Optional[dict], Optional[dict], float, Optional[float]]:
+        from_asset = self._asset_for_instance(from_instance)
+        to_asset = self._asset_for_instance(to_instance)
+        from_pluggable = _text(from_port.get("port_type")).lower() in PLUGGABLE_OPTIC_PORT_TYPES
+        to_pluggable = _text(to_port.get("port_type")).lower() in PLUGGABLE_OPTIC_PORT_TYPES
+
+        from_candidates: List[Optional[dict]]
+        to_candidates: List[Optional[dict]]
+        if from_pluggable:
+            rows = self._matching_optic_assets(from_asset, from_port, speed_mbps, route_length_m)
+            from_candidates = rows or [self._create_fallback_optic_asset(from_asset, from_port, speed_mbps)]
+        else:
+            from_candidates = [None]
+        if to_pluggable:
+            rows = self._matching_optic_assets(to_asset, to_port, speed_mbps, route_length_m)
+            to_candidates = rows or [self._create_fallback_optic_asset(to_asset, to_port, speed_mbps)]
+        else:
+            to_candidates = [None]
+
+        passive_types = {"fibre_splitter", "patch_panel"}
+        both_active = (
+            _asset_type(from_asset) not in passive_types
+            and _asset_type(to_asset) not in passive_types
+        )
+        estimated_passive_loss = self._estimated_fixed_fibre_loss_db(route_length_m)
+        required_margin = max(
+            0.0,
+            _float(
+                self.settings.get("physical_fibre_planning", {}).get(
+                    "minimum_optical_margin_db", 3.0
+                )
+            ),
+        )
+        passing: List[tuple] = []
+        incomplete: List[tuple] = []
+        failing: List[tuple] = []
+
+        for left in from_candidates:
+            left_values = self._optic_endpoint_values(from_asset, from_port, left)
+            for right in to_candidates:
+                right_values = self._optic_endpoint_values(to_asset, to_port, right)
+                if (
+                    left_values["connector"]
+                    and right_values["connector"]
+                    and left_values["connector"] != right_values["connector"]
+                ):
+                    continue
+                if (
+                    left_values["standard"]
+                    and right_values["standard"]
+                    and left_values["standard"] != right_values["standard"]
+                ):
+                    continue
+                if (
+                    left_values["wavelength"]
+                    and right_values["wavelength"]
+                    and left_values["wavelength"] != right_values["wavelength"]
+                ):
+                    continue
+
+                left_id = _text((left or {}).get("id"))
+                right_id = _text((right or {}).get("id"))
+                reach_headroom = sum(
+                    max(0.0, _float((optic or {}).get("optic_reach_m")) - route_length_m)
+                    for optic in (left, right)
+                    if optic is not None and _float(optic.get("optic_reach_m")) > 0
+                )
+                if not both_active:
+                    passing.append((0.0, reach_headroom, left_id, right_id, left, right, None))
+                    continue
+
+                configured = all(
+                    _text(value) != ""
+                    for value in (
+                        left_values["tx"],
+                        left_values["rx"],
+                        right_values["tx"],
+                        right_values["rx"],
+                    )
+                )
+                if not configured:
+                    incomplete.append((reach_headroom, left_id, right_id, left, right, None))
+                    continue
+                active_loss = max(0.0, _float(left_values["insertion"])) + max(
+                    0.0, _float(right_values["insertion"])
+                )
+                forward_margin = (
+                    _float(left_values["tx"])
+                    - _float(right_values["rx"])
+                    - estimated_passive_loss
+                    - active_loss
+                )
+                reverse_margin = (
+                    _float(right_values["tx"])
+                    - _float(left_values["rx"])
+                    - estimated_passive_loss
+                    - active_loss
+                )
+                margin = min(forward_margin, reverse_margin)
+                row = (
+                    max(0.0, margin - required_margin),
+                    reach_headroom,
+                    left_id,
+                    right_id,
+                    left,
+                    right,
+                    margin,
+                )
+                if margin + 1e-9 >= required_margin:
+                    passing.append(row)
+                else:
+                    failing.append(row)
+
+        if passing:
+            row = min(passing, key=lambda value: value[:4])
+            return row[4], row[5], estimated_passive_loss, row[6]
+        if incomplete:
+            row = min(incomplete, key=lambda value: value[:3])
+            self.warnings.append(
+                f"The optic pair for {from_instance.get('name') or from_instance.get('id')} "
+                f"to {to_instance.get('name') or to_instance.get('id')} cannot be fully "
+                "budget-checked until transmit and receive values are configured."
+            )
+            return row[3], row[4], estimated_passive_loss, None
+        if failing:
+            best = max(failing, key=lambda value: value[6])
+            raise NetworkPlanningError(
+                f"No compatible optic pair meets the required {required_margin:.2f} dB design "
+                f"margin over the estimated {estimated_passive_loss:.3f} dB passive path. "
+                f"Best calculated margin is {best[6]:.3f} dB."
+            )
+        raise NetworkPlanningError(
+            f"No mutually compatible optical transceivers are available for the selected "
+            f"{port_speed_label(speed_mbps)} ports, connector, wavelength and fibre standard."
+        )
+
+    def _add_optic_module(
+        self,
+        connection_id: str,
+        side: str,
+        instance: dict,
+        port: dict,
+        speed_mbps: int,
+        optic_asset: Optional[dict],
+    ) -> str:
+        if (
+            _text(port.get("port_type")).lower() not in PLUGGABLE_OPTIC_PORT_TYPES
+            or optic_asset is None
+        ):
+            return ""
+        module_id = _next_identifier(self.optic_module_ids, "AUTO-OM-")
+        self.optic_modules.append(
+            {
+                "id": module_id,
+                "asset_id": _text(optic_asset.get("id")),
+                "host_instance_id": _text(instance.get("id")),
+                "host_port": _text(port.get("name")),
+                "connection_id": connection_id,
+                "side": side,
+                "link_speed_mbps": speed_mbps,
+                "auto_generated": True,
+                "notes": (
+                    "Automatically inserted into the selected optical cage by the "
+                    "network planner after speed, reach and light-budget checks."
+                ),
+            }
+        )
+        return module_id
 
     def add_patch_lead(self, *, connection_id: str = "", assignment_id: str = "", instance: dict, port: str, medium: str, peer_instance_id: str = "", peer_port: str = "", endpoint_name: str = "", preferred_use: str = "") -> dict:
         definition = self._port_definition(instance, port, medium, preferred_use)
         default_length = 2.0 if medium in {"copper", "fibre"} else 0.0
         lead = {
-            "id": _next_identifier(self.patch_lead_ids, "AUTO-PL-"),
-            "connection_id": connection_id,
-            "assignment_id": assignment_id,
-            "instance_id": _text(instance.get("id")),
-            "port": str(port),
-            "peer_instance_id": peer_instance_id,
-            "peer_port": str(peer_port),
-            "endpoint_name": endpoint_name,
-            "port_type": _text(definition.get("port_type")) or ("lc" if medium == "fibre" else "rj45"),
-            "port_use": _text(definition.get("port_use")) or preferred_use or "patch",
-            "medium": medium,
+            "id": _next_identifier(self.patch_lead_ids, "AUTO-PL-"), "connection_id": connection_id, "assignment_id": assignment_id,
+            "instance_id": _text(instance.get("id")), "port": str(port), "peer_instance_id": peer_instance_id, "peer_port": str(peer_port),
+            "endpoint_name": endpoint_name, "port_type": _text(definition.get("port_type")) or ("lc" if medium == "fibre" else "rj45"),
+            "port_use": _text(definition.get("port_use")) or preferred_use or "patch", "medium": medium,
             "cable_specification": "OS2 fibre patch lead" if medium == "fibre" else "Category 6A copper patch lead",
-            "length_m": default_length,
-            "auto_generated": True,
+            "length_m": default_length, "auto_generated": True,
         }
         self.patch_leads.append(lead)
         return lead
 
-    def add_connection(
-        self,
-        from_instance: dict,
-        from_port: str,
-        to_instance: dict,
-        to_port: str,
-        medium: str,
-        route_source: str = "",
-        route_destination: str = "",
-        **extra,
-    ) -> dict:
+    def add_connection(self, from_instance: dict, from_port: str, to_instance: dict, to_port: str, medium: str, route_source: str = "", route_destination: str = "", **extra) -> dict:
         generate_patch_leads = bool(extra.pop("generate_patch_leads", True))
+        requested_speed = max(0, _int(extra.pop("link_speed_mbps", 0)))
+        physical_connection = bool(extra.get("physical_connection"))
+        parent_logical_id = _text(extra.get("parent_logical_connection_id"))
+        required_bandwidth = max(0.0, _float(extra.get("expected_bandwidth_mbps")), _float(from_instance.get("expected_bandwidth_mbps")), _float(to_instance.get("expected_bandwidth_mbps")))
+        if physical_connection:
+            selected_from = self._port_definition(from_instance, from_port, medium, self._requested_use(from_port, "uplink"))
+            selected_to = self._port_definition(to_instance, to_port, medium, self._requested_use(to_port, "input"))
+            selected_from = {**selected_from, "name": _text(from_port)}
+            selected_to = {**selected_to, "name": _text(to_port)}
+            parent = next((row for row in self.connections if _text(row.get("id")) == parent_logical_id), None) or next((row for row in self.data.get("network_connections", []) if _text(row.get("id")) == parent_logical_id), None)
+            link_speed = requested_speed or max(0, _int((parent or {}).get("link_speed_mbps")))
+        else:
+            selected_from, selected_to, link_speed = self._select_connection_ports(from_instance, from_port, to_instance, to_port, medium, requested_speed, required_bandwidth)
+            from_port = _text(selected_from.get("name")); to_port = _text(selected_to.get("name"))
         connection_id = _next_identifier(self.connection_ids, "AUTO-NC-")
-        length_m, route_path = (
-            self.graph.route(route_source, route_destination)
-            if route_source and route_destination
-            else (0.0, [])
-        )
-        cable_specification = {
-            "fibre": "OS2 single-mode fibre",
-            "copper": "Category 6A",
-            "stacking": "Switch stack interconnect",
-        }.get(medium, "")
+        length_m, route_path = self.graph.route(route_source, route_destination) if route_source and route_destination else (0.0, [])
+        cable_specification = {"fibre": "OS2 single-mode fibre", "copper": "Category 6A", "stacking": "Switch stack interconnect"}.get(medium, "")
         connection = {
-            "id": connection_id,
-            "from_instance_id": _text(from_instance.get("id")),
-            "from_port": str(from_port),
-            "to_instance_id": _text(to_instance.get("id")),
-            "to_port": str(to_port),
-            "connection_role": "uplink",
-            "medium": medium,
-            "cable_specification": cable_specification,
-            "fibre_count": 2 if medium == "fibre" else 0,
-            "vlan_ids": [],
-            "route_profile": "",
-            "route_path": route_path,
-            "length_m": round(length_m, 3),
-            "notes": "Automatically generated network topology connection.",
-            "auto_generated": True,
-            **extra,
+            "id": connection_id, "from_instance_id": _text(from_instance.get("id")), "from_port": from_port,
+            "to_instance_id": _text(to_instance.get("id")), "to_port": to_port, "connection_role": "uplink",
+            "medium": medium, "link_speed_mbps": link_speed, "cable_specification": cable_specification,
+            "fibre_count": 2 if medium == "fibre" else 0, "vlan_ids": [], "route_profile": "",
+            "route_path": route_path, "length_m": round(length_m, 3),
+            "notes": "Automatically generated network topology connection.", "auto_generated": True, **extra,
         }
+        if medium == "fibre" and not physical_connection:
+            from_optic, to_optic, estimated_loss, estimated_margin = self._select_optic_pair(
+                from_instance, selected_from, to_instance, selected_to, link_speed, length_m
+            )
+            connection["from_optic_module_id"] = self._add_optic_module(
+                connection_id, "from", from_instance, selected_from, link_speed, from_optic
+            )
+            connection["to_optic_module_id"] = self._add_optic_module(
+                connection_id, "to", to_instance, selected_to, link_speed, to_optic
+            )
+            connection["estimated_optical_path_loss_db"] = round(estimated_loss, 6)
+            connection["required_optical_margin_db"] = max(
+                0.0,
+                _float(
+                    self.settings.get("physical_fibre_planning", {}).get(
+                        "minimum_optical_margin_db", 3.0
+                    )
+                ),
+            )
+            connection["estimated_optical_margin_db"] = (
+                "" if estimated_margin is None else round(estimated_margin, 6)
+            )
         self.connections.append(connection)
         if generate_patch_leads and medium in {"copper", "fibre"}:
-            self.add_patch_lead(connection_id=connection_id, instance=from_instance, port=str(from_port), medium=medium, peer_instance_id=_text(to_instance.get("id")), peer_port=str(to_port), preferred_use="uplink")
-            self.add_patch_lead(connection_id=connection_id, instance=to_instance, port=str(to_port), medium=medium, peer_instance_id=_text(from_instance.get("id")), peer_port=str(from_port), preferred_use="input")
-        if medium == "fibre":
-            self.total_fibre_m += length_m
-        else:
-            self.total_copper_m += length_m
+            self.add_patch_lead(connection_id=connection_id, instance=from_instance, port=from_port, medium=medium, peer_instance_id=_text(to_instance.get("id")), peer_port=to_port, preferred_use="uplink")
+            self.add_patch_lead(connection_id=connection_id, instance=to_instance, port=to_port, medium=medium, peer_instance_id=_text(from_instance.get("id")), peer_port=from_port, preferred_use="input")
+        if medium == "fibre": self.total_fibre_m += length_m
+        else: self.total_copper_m += length_m
         return connection
 
     def add_assignment(
@@ -1189,6 +1744,7 @@ class DesignBuilder:
             "poe_power_w": round(item.poe_power_w, 3),
             "expected_bandwidth_mbps": round(item.expected_bandwidth_mbps, 6),
             "expected_packet_rate_pps": round(item.expected_packet_rate_pps, 3),
+            "link_speed_mbps": max(0, int(item.selected_link_speed_mbps)),
             "copper_length_m": round(max(0.0, copper_length_m), 3),
             "route_path": list(route_path),
             "vlan_ids": [],
@@ -1268,6 +1824,7 @@ class DesignBuilder:
             self.assignments
         )
         self.data.setdefault("network_patch_leads", []).extend(self.patch_leads)
+        self.data.setdefault("network_optic_modules", []).extend(self.optic_modules)
         self.data.setdefault("network_redundancy_groups", []).extend(
             self.redundancy_groups
         )
@@ -2044,7 +2601,7 @@ def _assert_generated_capacity(builder: DesignBuilder, spare_fraction: float) ->
             if bool(instance.get("logical_stack"))
             else 1
         )
-        port_capacity = max(0, _int(asset.get("number_of_ports"))) * stack_members
+        port_capacity = len(_asset_endpoint_port_slots(asset)) * stack_members
         poe_capacity = max(0.0, _float(asset.get("poe_budget_w"))) * stack_members
         used_ports, used_poe, used_bandwidth, used_packets = loads.get(
             instance_id, (0, 0.0, 0.0, 0.0)
@@ -2316,6 +2873,7 @@ def _traditional_design(
     switch_candidates = _apply_manufacturer_preference(
         builder.data, switch_candidates, "access_switch", "access switch"
     )
+    switch_candidates = [_endpoint_capacity_asset(asset) for asset in switch_candidates]
 
     access_switches: List[dict] = []
     for room_name in sorted(room_ports):
@@ -2428,14 +2986,11 @@ def _traditional_design(
                 for port_number, item in enumerate(assigned, start=1):
                     length_m, path = builder.graph.route(room_name, item.endpoint_name)
                     length_m += item.extension_distance_m
+                    physical_port = item.selected_network_port or str(port_number)
                     builder.add_assignment(
                         item,
                         instance,
-                        (
-                            f"{member_offset}/{port_number}"
-                            if is_stack
-                            else str(port_number)
-                        ),
+                        (f"{member_offset}/{physical_port}" if is_stack else physical_port),
                         length_m,
                         path,
                         source_location=room_name,
@@ -2455,12 +3010,13 @@ def _traditional_design(
 
 def _fits_any_ont(
     candidates: Sequence[dict],
-    ports: int,
-    poe_w: float,
-    bandwidth_mbps: float,
-    packet_rate_pps: float,
+    items: Sequence[PortDemand],
     spare_fraction: float,
 ) -> bool:
+    ports = len(items)
+    poe_w = sum(item.poe_power_w for item in items)
+    bandwidth_mbps = sum(item.expected_bandwidth_mbps for item in items)
+    packet_rate_pps = sum(item.expected_packet_rate_pps for item in items)
     required_ports = int(math.ceil(ports * (1.0 + spare_fraction)))
     required_poe = poe_w * (1.0 + spare_fraction)
     required_bandwidth = bandwidth_mbps * (1.0 + spare_fraction)
@@ -2468,6 +3024,7 @@ def _fits_any_ont(
     return any(
         _int(asset.get("number_of_ports")) >= required_ports
         and _float(asset.get("poe_budget_w")) + 1e-9 >= required_poe
+        and _can_allocate_endpoint_speeds(asset, items)
         and (
             _float(asset.get("bandwidth_capacity_gbps")) <= 0
             or _float(asset.get("bandwidth_capacity_gbps")) * 1000.0 + 1e-9
@@ -2494,6 +3051,7 @@ def _choose_single_ont(
         for asset in candidates
         if _int(asset.get("number_of_ports"))
         >= math.ceil(ports * (1.0 + spare_fraction))
+        and _can_allocate_endpoint_speeds(asset, items)
         and _float(asset.get("poe_budget_w")) + 1e-9 >= poe * (1.0 + spare_fraction)
         and (
             _float(asset.get("bandwidth_capacity_gbps")) <= 0
@@ -2604,12 +3162,7 @@ def _cluster_polan_ports(
                     next_bandwidth = cluster_bandwidth + item.expected_bandwidth_mbps
                     next_packets = cluster_packets + item.expected_packet_rate_pps
                     if not _fits_any_ont(
-                        ont_candidates,
-                        next_ports,
-                        next_poe,
-                        next_bandwidth,
-                        next_packets,
-                        spare_fraction,
+                        ont_candidates, cluster_items + [item], spare_fraction
                     ):
                         break
                     cluster_items.append(queue.popleft())
@@ -2660,6 +3213,7 @@ def _cluster_polan_ports(
 
             medoid = min(feasible_medoids, key=lambda row: (row[0], row[1], row[2].name))[2]
             asset = _choose_single_ont(ont_candidates, cluster_items, spare_fraction)
+            _pack_ports_to_devices(cluster_items, [asset], spare_fraction)
             clusters.append((asset, cluster_items, medoid))
     return clusters
 
@@ -2732,6 +3286,7 @@ def _polan_design(
     ont_candidates = _apply_manufacturer_preference(
         builder.data, ont_candidates, "optical_network_terminal", "ONT"
     )
+    ont_candidates = [_endpoint_capacity_asset(asset) for asset in ont_candidates]
 
     clusters = _cluster_polan_ports(
         endpoints, ont_candidates, spare_fraction, max_copper_m, builder.graph
@@ -2775,7 +3330,7 @@ def _polan_design(
             builder.add_assignment(
                 item,
                 ont,
-                str(port_number),
+                item.selected_network_port or str(port_number),
                 copper,
                 route_path,
                 ont_location=_text(location.get("name")),
@@ -3157,7 +3712,7 @@ def _polan_design(
                     "OLT PON-port allocation exceeded selected capacity."
                 )
             input_name = "Input-A" if side == "Primary" else "Input-B"
-            protection_group = f"AUTO-PG-{splitter_index}"
+            protection_group = f"AUTO-PG-{splitter_index}" if failover else ""
             builder.add_connection(
                 instances[instance_index],
                 f"PON-{port_number}",
@@ -3172,7 +3727,7 @@ def _polan_design(
                 standby=side != "Primary",
                 fibre_count=1,
             )
-            if side == "Primary":
+            if side == "Primary" and failover:
                 builder.redundancy_groups.append(
                     {
                         "id": protection_group,
@@ -4163,7 +4718,7 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
 
 
 
-_AUTO_FIBRE_PORT_TYPES = {"sfp", "sfp+", "qsfp", "qsfp28", "lc", "sc", "mpo", "pon"}
+_AUTO_FIBRE_PORT_TYPES = set(PLUGGABLE_OPTIC_PORT_TYPES) | {"lc", "sc", "mpo", "pon"}
 
 
 def _auto_connect_layer(instance: dict, asset: dict) -> str:
@@ -4271,6 +4826,7 @@ def _auto_connect_expanded_ports(instance: dict, asset: dict) -> List[dict]:
                     "port_type": port_type,
                     "port_use": port_use,
                     "medium": "fibre" if port_type in _AUTO_FIBRE_PORT_TYPES else "copper",
+                    "supported_speeds_mbps": normalise_port_speeds(row.get("supported_speeds_mbps")) or default_port_speeds(port_type),
                 }
             )
         remaining = count - min(count, len(explicit))
@@ -4302,6 +4858,7 @@ def _auto_connect_expanded_ports(instance: dict, asset: dict) -> List[dict]:
                     "port_type": port_type,
                     "port_use": port_use,
                     "medium": "fibre" if port_type in _AUTO_FIBRE_PORT_TYPES else "copper",
+                    "supported_speeds_mbps": normalise_port_speeds(row.get("supported_speeds_mbps")) or default_port_speeds(port_type),
                 }
             )
 
@@ -4495,16 +5052,54 @@ def auto_connect_manual_devices(
             ),
         )
 
-    def compatible_pair(source_id: str, target_id: str, source_layer: str, target_layer: str) -> Optional[Tuple[dict, dict, str]]:
+    def compatible_pair(source_id: str, target_id: str, source_layer: str, target_layer: str) -> Optional[Tuple[dict, dict, str, int]]:
         source_uses, target_uses, media = port_preferences(source_layer, target_layer)
         source_ports = free_ports(source_id, source_uses, media)
         target_ports = free_ports(target_id, target_uses, media)
+        required = max(0.0, _float(instances.get(source_id, {}).get("expected_bandwidth_mbps")), _float(instances.get(target_id, {}).get("expected_bandwidth_mbps")))
+        choices = []
         for medium in media:
             source_options = [row for row in source_ports if _text(row.get("medium")) == medium]
             target_options = [row for row in target_ports if _text(row.get("medium")) == medium]
-            if source_options and target_options:
-                return source_options[0], target_options[0], medium
-        return None
+            for source_port in source_options:
+                for target_port in target_options:
+                    source_speeds = normalise_port_speeds(source_port.get("supported_speeds_mbps"))
+                    target_speeds = normalise_port_speeds(target_port.get("supported_speeds_mbps"))
+                    common = compatible_port_speeds(source_speeds, target_speeds)
+                    if source_speeds and target_speeds and not common:
+                        continue
+                    if common:
+                        eligible = [value for value in common if value + 1e-9 >= required]
+                        if not eligible:
+                            continue
+                        speed = min(eligible)
+                    else:
+                        speed = 0
+                    choices.append((speed if speed else 10**12, _text(source_port.get("name")), _text(target_port.get("name")), source_port, target_port, medium, speed))
+        if not choices:
+            return None
+        *_, source_port, target_port, medium, speed = min(choices, key=lambda row: row[:3])
+        return source_port, target_port, medium, speed
+
+    module_ids = {_text(row.get("id")) for row in data.get("network_optic_modules", []) if isinstance(row, dict) and _text(row.get("id"))}
+
+    def add_manual_optic(connection: dict, side: str, instance_id: str, port: dict, speed: int) -> str:
+        if _text(port.get("port_type")) not in PLUGGABLE_OPTIC_PORT_TYPES:
+            return ""
+        host_asset = assets.get(_text(instances.get(instance_id, {}).get("asset_id")), {})
+        allowed = optic_form_factors_for_cage(_text(port.get("port_type")))
+        candidates = [asset for asset in data.get("network_assets", []) if isinstance(asset, dict) and _asset_type(asset) == "optical_transceiver" and _text(asset.get("optic_form_factor")) in allowed and (not normalise_port_speeds(asset.get("supported_speeds_mbps")) or speed in normalise_port_speeds(asset.get("supported_speeds_mbps")))]
+        if candidates:
+            optic_asset = min(candidates, key=lambda asset: (_float(asset.get("optic_reach_m")) or 10**12, _text(asset.get("id"))))
+        else:
+            asset_id = f"AUTO-OPTIC-{_text(port.get('port_type')).upper().replace('+','P')}-{speed or 'UNSPEC'}"
+            optic_asset = next((asset for asset in data.get("network_assets", []) if _text(asset.get("id")) == asset_id), None)
+            if optic_asset is None:
+                optic_asset = {"id": asset_id, "name": f"Auto {port_speed_label(speed) if speed else ''} {_text(port.get('port_type')).upper()} optical transceiver".replace("  ", " ").strip(), "asset_type": "optical_transceiver", "optic_form_factor": _text(port.get("port_type")), "supported_speeds_mbps": [speed] if speed else normalise_port_speeds(port.get("supported_speeds_mbps")), "optic_connector_type": "lc", "optic_fibre_standard": _text(host_asset.get("optical_standard")) or "OS2", "optic_reach_m": 0.0, "optical_tx_power_dbm": port.get("transmit_power_dbm", host_asset.get("optical_tx_power_dbm", "")), "optical_receiver_sensitivity_dbm": port.get("receiver_sensitivity_dbm", host_asset.get("optical_receiver_sensitivity_dbm", "")), "optical_insertion_loss_db": port.get("insertion_loss_db", ""), "optical_return_loss_db": port.get("return_loss_db", host_asset.get("optical_return_loss_db", "")), "optical_wavelength_nm": _int(port.get("wavelength_nm"), _int(host_asset.get("optical_wavelength_nm"))), "rack_units": 0, "number_of_ports": 0, "port_definitions": [], "auto_network_asset": True, "auto_optic_definition": True}
+                data.setdefault("network_assets", []).append(optic_asset); assets[asset_id] = optic_asset
+        module_id = _next_identifier(module_ids, "OM")
+        data.setdefault("network_optic_modules", []).append({"id": module_id, "asset_id": _text(optic_asset.get("id")), "host_instance_id": instance_id, "host_port": _text(port.get("name")), "connection_id": _text(connection.get("id")), "side": side, "link_speed_mbps": speed, "auto_generated": False, "auto_connected": True, "notes": "Inserted by guided auto-connect."})
+        return module_id
 
     connection_ids = {
         _text(row.get("id"))
@@ -4580,7 +5175,7 @@ def auto_connect_manual_devices(
             if pair is None:
                 scored_candidates = [row for row in scored_candidates if row[1] != candidate_id]
                 continue
-            source_port, target_port, medium = pair
+            source_port, target_port, medium, link_speed = pair
             length_m, route_path = graph.route(anchor(instances[source_id]), anchor(instances[target_id]))
             connection_id = _next_identifier(connection_ids, "NC")
             link_number = len(existing_candidates) + created_for_device + 1
@@ -4592,6 +5187,7 @@ def auto_connect_manual_devices(
                 "to_port": _text(target_port.get("name")),
                 "connection_role": "uplink",
                 "medium": medium,
+                "link_speed_mbps": link_speed,
                 "cable_specification": "OS2 single-mode fibre" if medium == "fibre" else "Category 6A",
                 "fibre_count": 1 if plan["source_layer"] in {"olt", "splitter"} else 2 if medium == "fibre" else 0,
                 "vlan_ids": [],
@@ -4610,6 +5206,9 @@ def auto_connect_manual_devices(
                 "auto_generated": False,
                 "auto_connected": True,
             }
+            if medium == "fibre":
+                connection["from_optic_module_id"] = add_manual_optic(connection, "from", source_id, source_port, link_speed)
+                connection["to_optic_module_id"] = add_manual_optic(connection, "to", target_id, target_port, link_speed)
             data.setdefault("network_connections", []).append(connection)
             logical_connections.append(connection)
             occupied[source_id].add(connection["from_port"])
@@ -4730,7 +5329,7 @@ def generate_network_design(data: dict, technology: Optional[str] = None) -> dic
         if isinstance(item, dict) and _text(item.get("id"))
     }
     installed_ports = sum(
-        _int(assets_by_id.get(_text(item.get("asset_id")), {}).get("number_of_ports"))
+        len(_asset_endpoint_port_slots(assets_by_id.get(_text(item.get("asset_id")), {})))
         * (
             max(1, _int(item.get("stack_member_count"), 1))
             if bool(item.get("logical_stack"))

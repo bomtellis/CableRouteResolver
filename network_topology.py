@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from network_schema import ensure_network_schema, next_network_id
+from network_schema import default_port_speeds, ensure_network_schema, next_network_id, normalise_port_speeds, port_speed_label
 from network_services import circuit_trace, network_traffic_loads
 from network_auto_planner import auto_connect_manual_devices
 from network_dialogs import NetworkConnectionEditorDialog, NetworkInstanceEditorDialog, NetworkRackEditorDialog
@@ -104,21 +104,22 @@ def _expanded_asset_ports(asset: dict) -> List[dict]:
     for row in _asset_port_definitions(asset):
         port_type = _text(row.get("port_type")).lower() or "other"
         port_use = _text(row.get("port_use")).lower() or "other"
+        supported_speeds = normalise_port_speeds(row.get("supported_speeds_mbps")) or default_port_speeds(port_type)
         explicit_names = [
             _text(value) for value in row.get("explicit_names", []) if _text(value)
         ] if isinstance(row.get("explicit_names", []), list) else []
         count = max(0, _int(row.get("port_count")))
         if explicit_names:
             for name in explicit_names[:count]:
-                result.append({"name": name, "port_type": port_type, "port_use": port_use})
+                result.append({"name": name, "port_type": port_type, "port_use": port_use, "supported_speeds_mbps": supported_speeds})
             count -= min(count, len(explicit_names))
-        prefix = _text(row.get("name_prefix")) or ({"pon":"PON", "sfp":"SFP", "sfp+":"SFP+", "qsfp":"QSFP", "qsfp28":"QSFP28", "lc":"LC", "sc":"SC", "mpo":"MPO", "rj45":""}.get(port_type, port_type.upper()))
+        prefix = _text(row.get("name_prefix")) or ({"pon":"PON", "sfp":"SFP", "sfp+":"SFP+", "sfp28":"SFP28", "qsfp":"QSFP", "qsfp+":"QSFP+", "qsfp28":"QSFP28", "qsfp56":"QSFP56", "qsfpdd":"QSFP-DD", "osfp":"OSFP", "lc":"LC", "sc":"SC", "mpo":"MPO", "rj45":""}.get(port_type, port_type.upper()))
         for _ in range(count):
             counters[prefix] += 1
             # A one-port row whose prefix is already a complete physical name
             # should not be rendered as e.g. Input-A-1.
             name = prefix if count == 1 and not counters[prefix] > 1 and prefix.lower().startswith("input-") else (f"{prefix}-{counters[prefix]}" if prefix else str(counters[prefix]))
-            result.append({"name": name, "port_type": port_type, "port_use": port_use})
+            result.append({"name": name, "port_type": port_type, "port_use": port_use, "supported_speeds_mbps": supported_speeds})
     return result
 
 
@@ -2955,11 +2956,13 @@ class NetworkTopologyDialog(QDialog):
             if edge.source_id == device_id:
                 port = edge.source_port or "Unspecified"
                 peer = self.model.nodes.get(edge.target_id)
-                records[port].append(peer.name if peer else edge.target_id)
+                speed = max(0, _int(edge.connection.get("link_speed_mbps")))
+                records[port].append((peer.name if peer else edge.target_id) + (f" @ {port_speed_label(speed)}" if speed else ""))
             elif edge.target_id == device_id:
                 port = edge.target_port or "Unspecified"
                 peer = self.model.nodes.get(edge.source_id)
-                records[port].append(peer.name if peer else edge.source_id)
+                speed = max(0, _int(edge.connection.get("link_speed_mbps")))
+                records[port].append((peer.name if peer else edge.source_id) + (f" @ {port_speed_label(speed)}" if speed else ""))
         device = self.model.nodes.get(device_id)
         defined_ports = _expanded_asset_ports(device.asset) if device is not None else []
         if defined_ports:
@@ -3006,6 +3009,7 @@ class NetworkTopologyDialog(QDialog):
             connected = port_records.get(port, [])
             occupied = bool(connected)
             node_id = f"port::{switch_id}::{index}"
+            port_definition = _port_definition_for_name(switch.asset, port)
             node = TopologyNode(
                 node_id=node_id,
                 name=f"Port {port}",
@@ -3022,8 +3026,9 @@ class NetworkTopologyDialog(QDialog):
                 details={
                     "parent_instance_id": switch_id,
                     "port_name": port,
-                    "port_type": _port_definition_for_name(switch.asset, port).get("port_type", "other"),
-                    "port_use": _port_definition_for_name(switch.asset, port).get("port_use", "other"),
+                    "port_type": port_definition.get("port_type", "other"),
+                    "port_use": port_definition.get("port_use", "other"),
+                    "supported_speeds_mbps": normalise_port_speeds(port_definition.get("supported_speeds_mbps")) or default_port_speeds(port_definition.get("port_type", "other")),
                     "connected_devices": connected,
                     "occupied": occupied,
                     "traced": self._port_is_traced(switch_id, port),
@@ -3057,6 +3062,7 @@ class NetworkTopologyDialog(QDialog):
         result: List[TopologyNode] = []
         for index, port in enumerate(ordered_names, start=1):
             connected = records.get(port, [])
+            port_definition = _port_definition_for_name(device.asset, port)
             node_id = f"rackport::{device_id}::{index}"
             node = TopologyNode(
                 node_id=node_id,
@@ -3074,8 +3080,9 @@ class NetworkTopologyDialog(QDialog):
                 details={
                     "parent_instance_id": device_id,
                     "port_name": port,
-                    "port_type": _port_definition_for_name(device.asset, port).get("port_type", "other"),
-                    "port_use": _port_definition_for_name(device.asset, port).get("port_use", "other"),
+                    "port_type": port_definition.get("port_type", "other"),
+                    "port_use": port_definition.get("port_use", "other"),
+                    "supported_speeds_mbps": normalise_port_speeds(port_definition.get("supported_speeds_mbps")) or default_port_speeds(port_definition.get("port_type", "other")),
                     "connected_devices": connected,
                     "occupied": bool(connected),
                     "traced": self._port_is_traced(device_id, port),
@@ -5767,6 +5774,7 @@ class NetworkTopologyDialog(QDialog):
             vlans=self.data.get("network_vlans", []),
             route_profiles=list(self.data.get("route_profiles", {}).keys()),
             suggested_id=connection["id"],
+            assets=self.data.get("network_assets", []),
         )
         self._link_draft = {}
         self.add_link_button.setText("Add link")
@@ -5790,6 +5798,7 @@ class NetworkTopologyDialog(QDialog):
             suggested_id=next_network_id(self.data.get("network_connections", []), "NC"),
             default_from=default_from,
             default_to=default_to,
+            assets=self.data.get("network_assets", []),
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self.data.setdefault("network_connections", []).append(dialog.result)
@@ -5802,7 +5811,8 @@ class NetworkTopologyDialog(QDialog):
             return
         dialog = NetworkConnectionEditorDialog(
             self, rows[index], self.data.get("network_asset_instances", []), self.data.get("network_vlans", []),
-            list(self.data.get("route_profiles", {}).keys()), connection_id
+            list(self.data.get("route_profiles", {}).keys()), connection_id,
+            assets=self.data.get("network_assets", [])
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             rows[index] = dialog.result
@@ -5856,6 +5866,7 @@ class NetworkTopologyDialog(QDialog):
             "network_settings", "network_assets", "network_asset_instances", "network_connections",
             "network_endpoint_assignments", "network_patch_leads", "network_redundancy_groups",
             "network_vlans", "network_routes", "network_ip_allocations", "network_external_networks",
+            "network_optic_modules", "network_optical_paths", "network_fibre_cable_types",
             "network_fibre_cables", "network_fibre_nodes", "network_fibre_splices", "network_design_summary",
         ):
             if key in payload:

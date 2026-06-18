@@ -227,6 +227,7 @@ def _port_schedule(data: dict) -> List[dict]:
                         "connection_id": "",
                         "connection_role": "",
                         "medium": "",
+                        "link_speed_mbps": 0,
                         "connected_to_instance": "",
                         "connected_to_port": "",
                         "endpoint_name": "",
@@ -253,6 +254,7 @@ def _port_schedule(data: dict) -> List[dict]:
                         "connection_id": _text(assignment.get("id")),
                         "connection_role": "output",
                         "medium": "copper",
+                        "link_speed_mbps": max(0, _int(assignment.get("link_speed_mbps"))),
                         "connected_to_instance": _text(assignment.get("endpoint_name")),
                         "connected_to_port": _text(assignment.get("endpoint_port")),
                         "endpoint_name": _text(assignment.get("endpoint_name")),
@@ -280,6 +282,7 @@ def _port_schedule(data: dict) -> List[dict]:
                         "connection_id": _text(connection.get("id")),
                         "connection_role": _text(connection.get("connection_role")),
                         "medium": _text(connection.get("medium")),
+                        "link_speed_mbps": max(0, _int(connection.get("link_speed_mbps"))),
                         "connected_to_instance": _text(connection.get(f"{other_side}_instance_id")),
                         "connected_to_port": _text(connection.get(f"{other_side}_port")),
                         "endpoint_name": "",
@@ -314,6 +317,9 @@ def _patching_schedule(data: dict, medium: str) -> List[dict]:
                 "connection_id": _text(connection.get("id")),
                 "connection_role": _text(connection.get("connection_role")),
                 "medium": _text(connection.get("medium")),
+                "link_speed_mbps": max(0, _int(connection.get("link_speed_mbps"))),
+                "from_optic_module_id": _text(connection.get("from_optic_module_id")),
+                "to_optic_module_id": _text(connection.get("to_optic_module_id")),
                 "from_instance_id": _text(connection.get("from_instance_id")),
                 "from_instance_name": from_desc.get("instance_name", ""),
                 "from_location": from_desc.get("location_name", ""),
@@ -369,6 +375,9 @@ def _patching_schedule(data: dict, medium: str) -> List[dict]:
                     "connection_id": _text(assignment.get("id")),
                     "connection_role": "output",
                     "medium": "copper",
+                    "link_speed_mbps": max(0, _int(assignment.get("link_speed_mbps"))),
+                    "from_optic_module_id": "",
+                    "to_optic_module_id": "",
                     "from_instance_id": panel_instance_id or logical_instance_id,
                     "from_instance_name": physical_desc.get("instance_name", ""),
                     "from_location": physical_desc.get("location_name", ""),
@@ -734,6 +743,42 @@ def _splice_cassette_schedule(data: dict) -> List[dict]:
     return sorted(rows, key=lambda row: (row["floor"], row["enclosure_id"], row["tray_number"], row["cassette_id"]))
 
 
+def _optic_module_schedule(data: dict) -> List[dict]:
+    assets = {_text(row.get("id")): row for row in data.get("network_assets", []) if isinstance(row, dict)}
+    instances = {_text(row.get("id")): row for row in data.get("network_asset_instances", []) if isinstance(row, dict)}
+    rows = []
+    for module in data.get("network_optic_modules", []):
+        if not isinstance(module, dict):
+            continue
+        asset = assets.get(_text(module.get("asset_id")), {})
+        host = instances.get(_text(module.get("host_instance_id")), {})
+        rows.append({
+            "module_id": _text(module.get("id")),
+            "asset_id": _text(module.get("asset_id")),
+            "optic_name": _text(asset.get("name")),
+            "manufacturer": _text(asset.get("manufacturer")),
+            "model": _text(asset.get("model")),
+            "form_factor": _text(asset.get("optic_form_factor")),
+            "connector_type": _text(asset.get("optic_connector_type")),
+            "fibre_standard": _text(asset.get("optic_fibre_standard")),
+            "supported_speeds_mbps": ", ".join(str(_int(value)) for value in asset.get("supported_speeds_mbps", []) if _int(value) > 0),
+            "selected_speed_mbps": max(0, _int(module.get("link_speed_mbps"))),
+            "host_instance_id": _text(module.get("host_instance_id")),
+            "host_instance_name": _text(host.get("name")),
+            "host_port": _text(module.get("host_port")),
+            "connection_id": _text(module.get("connection_id")),
+            "side": _text(module.get("side")),
+            "transmit_power_dbm": asset.get("optical_tx_power_dbm", ""),
+            "receiver_sensitivity_dbm": asset.get("optical_receiver_sensitivity_dbm", ""),
+            "insertion_loss_db": asset.get("optical_insertion_loss_db", ""),
+            "return_loss_db": asset.get("optical_return_loss_db", ""),
+            "wavelength_nm": asset.get("optical_wavelength_nm", ""),
+            "maximum_reach_m": asset.get("optic_reach_m", ""),
+            "notes": _text(module.get("notes")),
+        })
+    return sorted(rows, key=lambda row: (row["host_instance_id"], row["host_port"], row["module_id"]))
+
+
 def _optical_budget_schedule(data: dict) -> List[dict]:
     calculate_optical_budgets(data)
     return sorted([
@@ -741,12 +786,17 @@ def _optical_budget_schedule(data: dict) -> List[dict]:
             "path_id": _text(row.get("id")),
             "source_instance_id": _text(row.get("source_instance_id")),
             "destination_instance_id": _text(row.get("destination_instance_id")),
+            "source_optic_module_id": _text(row.get("source_optic_module_id")),
+            "destination_optic_module_id": _text(row.get("destination_optic_module_id")),
+            "link_speed_mbps": max(0, _int(row.get("link_speed_mbps"))),
+            "wavelength_nm": max(0, _int(row.get("wavelength_nm"))),
             "connection_ids": ", ".join(_text(v) for v in row.get("connection_ids", []) if _text(v)),
             "fibre_cable_ids": ", ".join(_text(v) for v in row.get("fibre_cable_ids", []) if _text(v)),
             "transmit_power_dbm": "" if _text(row.get("transmit_power_dbm")) == "" else _float(row.get("transmit_power_dbm")),
             "receiver_sensitivity_dbm": "" if _text(row.get("receiver_sensitivity_dbm")) == "" else _float(row.get("receiver_sensitivity_dbm")),
             "cable_loss_db": _float(row.get("cable_loss_db")),
             "passive_loss_db": _float(row.get("passive_loss_db")),
+            "active_optic_loss_db": _float(row.get("active_optic_loss_db")),
             "path_loss_db": _float(row.get("path_loss_db")),
             "available_budget_db": "" if _text(row.get("available_budget_db")) == "" else _float(row.get("available_budget_db")),
             "margin_db": "" if _text(row.get("margin_db")) == "" else _float(row.get("margin_db")),
@@ -862,7 +912,7 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
             "port_schedule",
             [
                 "instance_id", "instance_name", "asset_id", "asset_name", "asset_type", "location_name",
-                "floor", "logical_stack", "stack_member_count", "port", "status", "connection_id", "connection_role", "medium",
+                "floor", "logical_stack", "stack_member_count", "port", "status", "connection_id", "connection_role", "medium", "link_speed_mbps",
                 "connected_to_instance", "connected_to_port", "endpoint_name", "endpoint_port",
                 "endpoint_asset_name", "department_id", "department_name", "poe_power_w",
                 "expected_bandwidth_mbps", "expected_packet_rate_pps", "copper_length_m",
@@ -873,7 +923,7 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
         (
             "copper_patching_schedule",
             [
-                "connection_id", "connection_role", "medium", "from_instance_id", "from_instance_name",
+                "connection_id", "connection_role", "medium", "link_speed_mbps", "from_optic_module_id", "to_optic_module_id", "from_instance_id", "from_instance_name",
                 "from_location", "from_port", "logical_serving_instance_id", "logical_serving_instance_name",
                 "logical_serving_port", "physical_termination_type", "to_instance_id", "to_instance_name", "to_location",
                 "to_port", "endpoint_name", "endpoint_port", "endpoint_asset_name", "department_id",
@@ -886,7 +936,7 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
         (
             "fibre_patching_schedule",
             [
-                "connection_id", "connection_role", "medium", "from_instance_id", "from_instance_name",
+                "connection_id", "connection_role", "medium", "link_speed_mbps", "from_optic_module_id", "to_optic_module_id", "from_instance_id", "from_instance_name",
                 "from_location", "from_port", "logical_serving_instance_id", "logical_serving_instance_name",
                 "logical_serving_port", "physical_termination_type", "to_instance_id", "to_instance_name", "to_location",
                 "to_port", "endpoint_name", "endpoint_port", "endpoint_asset_name", "department_id",
@@ -959,8 +1009,13 @@ def write_network_schedules(data: dict, output_directory: Path, prefix: str = "n
             _splice_cassette_schedule(data),
         ),
         (
+            "optic_module_schedule",
+            ["module_id", "asset_id", "optic_name", "manufacturer", "model", "form_factor", "connector_type", "fibre_standard", "supported_speeds_mbps", "selected_speed_mbps", "host_instance_id", "host_instance_name", "host_port", "connection_id", "side", "transmit_power_dbm", "receiver_sensitivity_dbm", "insertion_loss_db", "return_loss_db", "wavelength_nm", "maximum_reach_m", "notes"],
+            _optic_module_schedule(data),
+        ),
+        (
             "optical_budget_schedule",
-            ["path_id", "source_instance_id", "destination_instance_id", "connection_ids", "fibre_cable_ids", "transmit_power_dbm", "receiver_sensitivity_dbm", "cable_loss_db", "passive_loss_db", "path_loss_db", "available_budget_db", "margin_db", "minimum_return_loss_db", "status", "missing_properties", "notes"],
+            ["path_id", "source_instance_id", "destination_instance_id", "source_optic_module_id", "destination_optic_module_id", "link_speed_mbps", "wavelength_nm", "connection_ids", "fibre_cable_ids", "transmit_power_dbm", "receiver_sensitivity_dbm", "cable_loss_db", "passive_loss_db", "active_optic_loss_db", "path_loss_db", "available_budget_db", "margin_db", "minimum_return_loss_db", "status", "missing_properties", "notes"],
             _optical_budget_schedule(data),
         ),
         (
