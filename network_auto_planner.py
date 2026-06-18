@@ -5802,36 +5802,62 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
             preferred = _text(instance.get("target_rack_name") or instance.get("rack_name"))
             copper_rows = copper_by_switch.get(_text(instance.get("id")), [])
             fibre_rows = fibre_by_owner.get(_text(instance.get("id")), [])
-            copper_extra = sum(
-                max(1, _int(panel.get("_calculated_rack_units"), 1)) + manager_u
-                for panel in copper_rows
-            )
-            fibre_extra = sum(
-                max(1, _int(panel.get("_calculated_rack_units"), 1)) + manager_u
-                for panel in fibre_rows
-            )
-            rack = choose_bottom(units + copper_extra + fibre_extra, powered, preferred)
+            # Select a rack for the active device itself.  Patch-panel and
+            # cable-management allowances are deliberately not added to one
+            # monolithic requirement: a high-density OLT/core can legitimately
+            # terminate across several adjacent racks.  Requiring every panel
+            # to fit beside the device produced impossible requests such as
+            # 66U in a 42U rack even though the installation was valid when
+            # distributed across two cabinets.
+            rack = choose_bottom(units, powered, preferred)
             place_bottom(instance, rack, units, powered)
+
             # Bottom-to-top order is switch, cable manager, copper patch panel;
             # therefore the rack elevation reads panel / manager / switch.
+            # Keep panels with the device where possible, then spill complete
+            # manager/panel pairs into additional racks rather than failing the
+            # entire plan.
+            copper_rack = rack
             for panel_index, panel in enumerate(copper_rows, start=1):
+                panel_u = max(1, _int(panel.get("_calculated_rack_units"), 1))
+                pair_u = manager_u + panel_u
+                if copper_rack["bottom_next"] + pair_u - 1 > copper_rack["top_next"]:
+                    copper_rack = choose_bottom(pair_u, False)
                 builder.add_instance(
                     manager_asset,
                     f"AUTO {location_name} Copper Cable Manager {instance.get('id')} {panel_index}",
                     location,
                     "cable_management",
-                    rack_name=rack["name"],
-                    rack_start_u=rack["bottom_next"],
+                    rack_name=copper_rack["name"],
+                    rack_start_u=copper_rack["bottom_next"],
                     rack_size_u=rack_size_u,
                     route_anchor=location_name,
                     associated_patch_panel_id=_text(panel.get("id")),
                     associated_switch_id=_text(instance.get("id")),
                 )
-                rack["bottom_next"] += manager_u
-                panel_u = max(1, _int(panel.get("_calculated_rack_units"), 1))
-                place_bottom(panel, rack, panel_u, False)
+                copper_rack["bottom_next"] += manager_u
+                place_bottom(panel, copper_rack, panel_u, False)
+
+            # Fibre panels remain top-mounted.  Fill the device rack first and
+            # then reuse any other rack with sufficient top clearance before
+            # creating another cabinet.  This also lets modular panels share
+            # otherwise unused rack capacity while retaining their association
+            # with the terminating equipment.
+            fibre_rack = rack
             for panel in fibre_rows:
-                place_fibre_panel(panel, rack)
+                panel_u = max(1, _int(panel.get("_calculated_rack_units"), 1))
+                required_u = panel_u + manager_u
+                if fibre_rack["top_next"] - required_u + 1 < fibre_rack["bottom_next"]:
+                    fibre_rack = next(
+                        (
+                            row for row in racks
+                            if row["top_next"] - required_u + 1 >= row["bottom_next"]
+                        ),
+                        None,
+                    )
+                    if fibre_rack is None:
+                        fibre_rack = create_rack()
+                place_fibre_panel(panel, fibre_rack)
 
         # Any unassociated copper panels are still installed with a manager.
         associated_ids = {id(p) for rows in copper_by_switch.values() for p in rows}
