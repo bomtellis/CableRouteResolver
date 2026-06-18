@@ -2186,7 +2186,12 @@ class TopologyGraphicsView(QGraphicsView):
         # disappear.  Full viewport updates are slightly more work but are
         # deterministic and apply to topology, rack and port views alike.
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
-        self.setOptimizationFlag(QGraphicsView.DontSavePainterState, True)
+        # Custom cards, rack objects, labels and routed paths do not all wrap
+        # their paint bodies in save/restore pairs. Let QGraphicsView preserve
+        # painter state between items; otherwise a click-triggered repaint can
+        # leak pen/brush/composition state and leave links or rack objects
+        # invisible until the scene is rebuilt.
+        self.setOptimizationFlag(QGraphicsView.DontSavePainterState, False)
         self.setOptimizationFlag(QGraphicsView.DontAdjustForAntialiasing, False)
         self.setCacheMode(QGraphicsView.CacheNone)
 
@@ -2209,9 +2214,11 @@ class TopologyGraphicsView(QGraphicsView):
         self.setFocusPolicy(Qt.StrongFocus)
 
         self._panning = False
+        self._pending_pan = False
         self._rubber_band_selecting = False
         self._pan_button = Qt.NoButton
         self._pan_start = QPoint()
+        self._pending_pan_start = QPoint()
         self._pan_render_reduced = False
         # Keep enough room to pan past the diagram without making the scene
         # extent look like an oversized bounding box around the topology.  The
@@ -2235,6 +2242,12 @@ class TopologyGraphicsView(QGraphicsView):
                 if item.flags() & QGraphicsItem.ItemIsSelectable:
                     return item
                 item = item.parentItem()
+        return None
+
+    def _scene_item_at(self, position: QPoint) -> Optional[QGraphicsItem]:
+        """Return any scene item beneath *position*, including passive art."""
+        for item in self.items(position):
+            return item
         return None
 
     @staticmethod
@@ -2270,9 +2283,6 @@ class TopologyGraphicsView(QGraphicsView):
         viewport = self.viewport()
         if viewport is not None:
             viewport.update()
-        scene = self.scene()
-        if scene is not None:
-            scene.invalidate(scene.sceneRect(), QGraphicsScene.AllLayers)
 
     def contextMenuEvent(self, event) -> None:  # noqa: ANN001
         position = self._event_view_position(event)
@@ -2297,7 +2307,7 @@ class TopologyGraphicsView(QGraphicsView):
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.LeftButton:
-            if self._interactive_item_at(event.position().toPoint()) is None:
+            if self._scene_item_at(event.position().toPoint()) is None:
                 self.emptySceneDoubleClicked.emit(
                     self.mapToScene(event.position().toPoint())
                 )
@@ -2308,11 +2318,12 @@ class TopologyGraphicsView(QGraphicsView):
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         position = self._event_view_position(event)
         clicked_item = self._interactive_item_at(position)
+        scene_item = clicked_item or self._scene_item_at(position)
 
         # The view owns middle-button panning everywhere, including over rack
         # equipment and decorative/link paths.  No scene item sees the press.
         if event.button() == Qt.MiddleButton:
-            self._start_pan(event, Qt.MiddleButton)
+            self._queue_pan(event, Qt.MiddleButton)
             return
 
         # A right-button press is handled later by contextMenuEvent.  Avoid
@@ -2325,6 +2336,7 @@ class TopologyGraphicsView(QGraphicsView):
         if (
             event.button() == Qt.LeftButton
             and clicked_item is None
+            and scene_item is None
             and event.modifiers() & (Qt.ShiftModifier | Qt.ControlModifier)
         ):
             self._rubber_band_selecting = True
@@ -2333,16 +2345,36 @@ class TopologyGraphicsView(QGraphicsView):
             self._request_full_repaint()
             return
 
-        # Left mouse pans only when clicking empty scene space or a passive
-        # fibre/copper path.  Cards and ports retain their normal activation.
+        # Left mouse pans only when clicking truly empty scene space.  Passive
+        # link/rack/background items are still scene items; treating them as
+        # empty was the panning regression that made clicked graphics vanish
+        # until the next scene rebuild.
+        if event.button() == Qt.LeftButton and clicked_item is None and scene_item is None:
+            self._queue_pan(event, Qt.LeftButton)
+            return
+
         if event.button() == Qt.LeftButton and clicked_item is None:
-            self._start_pan(event, Qt.LeftButton)
+            event.accept()
+            self._request_full_repaint()
             return
 
         super().mousePressEvent(event)
         self._request_full_repaint()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: ANN001
+        if self._pending_pan:
+            current = self._event_view_position(event)
+            if (current - self._pending_pan_start).manhattanLength() < QApplication.startDragDistance():
+                event.accept()
+                return
+            self._begin_pan(self._pan_button, self._pending_pan_start)
+            delta = current - self._pan_start
+            self._pan_start = current
+            if delta.x() or delta.y():
+                self._pan_viewport_by(delta.x(), delta.y())
+            event.accept()
+            return
+
         if not self._panning:
             super().mouseMoveEvent(event)
             return
@@ -2359,6 +2391,7 @@ class TopologyGraphicsView(QGraphicsView):
 
     def _finish_pan(self) -> None:
         self._panning = False
+        self._pending_pan = False
         self._pan_button = Qt.NoButton
         self.viewport().unsetCursor()
         if self._pan_render_reduced:
@@ -2367,6 +2400,13 @@ class TopologyGraphicsView(QGraphicsView):
         self._request_full_repaint()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if self._pending_pan and event.button() == self._pan_button:
+            self._pending_pan = False
+            self._pan_button = Qt.NoButton
+            event.accept()
+            self._request_full_repaint()
+            return
+
         if self._rubber_band_selecting and event.button() == Qt.LeftButton:
             super().mouseReleaseEvent(event)
             self._rubber_band_selecting = False
@@ -2384,6 +2424,9 @@ class TopologyGraphicsView(QGraphicsView):
         self._request_full_repaint()
 
     def leaveEvent(self, event) -> None:  # noqa: ANN001
+        if self._pending_pan:
+            self._pending_pan = False
+            self._pan_button = Qt.NoButton
         if self._panning:
             self._finish_pan()
         super().leaveEvent(event)
@@ -2453,18 +2496,25 @@ class TopologyGraphicsView(QGraphicsView):
 
         super().keyPressEvent(event)
 
-    def _start_pan(self, event, button) -> None:  # noqa: ANN001
+    def _queue_pan(self, event, button) -> None:  # noqa: ANN001
+        self._pending_pan = True
+        self._pan_button = button
+        self._pending_pan_start = self._event_view_position(event)
+        self.viewport().setFocus()
+        event.accept()
+        self._request_full_repaint()
+
+    def _begin_pan(self, button, start: QPoint) -> None:  # noqa: ANN001
+        self._pending_pan = False
         self._panning = True
         self._pan_button = button
         # Text antialiasing across hundreds or thousands of cards is expensive
         # while the viewport is moving.  Defer reducing render quality until
         # mouseMoveEvent confirms that this is a drag rather than a click.
         self._pan_render_reduced = False
-        self._pan_start = self._event_view_position(event)
+        self._pan_start = QPoint(start)
         self.viewport().setCursor(Qt.ClosedHandCursor)
         self.viewport().setFocus()
-        self._request_full_repaint()
-        event.accept()
 
     def _pan_viewport_by(self, dx: int, dy: int) -> None:
         current_center = self.mapToScene(self.viewport().rect().center())
