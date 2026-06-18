@@ -4891,6 +4891,13 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             rack_name,
         )
 
+    def panel_pool_key(instance: dict) -> Optional[Tuple[int, str]]:
+        """Pool modular panel capacity across all racks at one location."""
+        key = rack_key(instance)
+        if key is None:
+            return None
+        return key[0], key[1]
+
     eligible: List[Tuple[dict, dict, dict]] = []
     for row in list(builder.connections):
         if _text(row.get("medium")).lower() != "fibre":
@@ -4942,6 +4949,7 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
 
     default_cable_cores = max(2, _int(builder.settings.get("default_fibre_core_count"), 12))
     connection_plan: Dict[str, dict] = {}
+    required_positions_by_pool: Dict[Tuple[int, str], int] = defaultdict(int)
     required_positions_by_rack: Dict[Tuple[int, str, str], int] = defaultdict(int)
     for logical, a, b in eligible:
         logical_id = _text(logical.get("id"))
@@ -4951,31 +4959,54 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             used_cores,
             declared_core_count if declared_core_count > 0 else default_cable_cores,
         )
-        connector_positions = max(1, int(math.ceil(cable_core_count / float(fibres_per_position))))
-        active_positions = max(1, int(math.ceil(used_cores / float(fibres_per_position))))
+        full_breakout_positions = max(
+            1,
+            int(math.ceil(cable_core_count / float(fibres_per_position))),
+        )
+        active_positions = max(
+            1,
+            int(math.ceil(used_cores / float(fibres_per_position))),
+        )
         connectorised_breakout = cable_core_count >= mpo_threshold
         termination_mode = "connectorised" if connectorised_breakout else default_mode
         rear_connector = planned_mpo_connector if termination_mode == "connectorised" else "splice"
+        # A connectorised MPO/MTP trunk keeps unused fibres on the rear trunk;
+        # only fibres actually patched into service consume front LC/SC adapter
+        # positions.  Spliced cables still present every installed core at the
+        # front.  This prevents large trunks from creating many almost-empty
+        # modular panels while preserving their full cable-core metadata.
+        connector_positions = (
+            active_positions if connectorised_breakout else full_breakout_positions
+        )
         connection_plan[logical_id] = {
             "used_cores": used_cores,
             "cable_core_count": cable_core_count,
             "connector_positions": connector_positions,
+            "full_breakout_positions": full_breakout_positions,
             "active_positions": active_positions,
             "termination_mode": termination_mode,
             "rear_connector": rear_connector,
             "connectorised_breakout": connectorised_breakout,
         }
         for instance in (a, b):
-            key = rack_key(instance)
-            if key is not None:
-                required_positions_by_rack[key] += connector_positions
+            rack = rack_key(instance)
+            pool = panel_pool_key(instance)
+            if rack is not None and pool is not None:
+                required_positions_by_pool[pool] += connector_positions
+                required_positions_by_rack[rack] += connector_positions
 
     locations = {
         _text(row.get("name")): row
         for row in builder.data.get("locations", [])
         if isinstance(row, dict) and _text(row.get("name"))
     }
-    panels_by_rack: Dict[Tuple[int, str, str], List[dict]] = defaultdict(list)
+    panels_by_pool: Dict[Tuple[int, str], List[dict]] = defaultdict(list)
+    preferred_rack_by_pool: Dict[Tuple[int, str], str] = {}
+    for (floor, location_name, rack_name), demand in sorted(
+        required_positions_by_rack.items(),
+        key=lambda item: (-item[1], item[0][2]),
+    ):
+        preferred_rack_by_pool.setdefault((floor, location_name), rack_name)
 
     def empty_cassettes() -> List[dict]:
         return [
@@ -4995,15 +5026,20 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             for index in range(1, cassette_count + 1)
         ]
 
-    def add_panel(key: Tuple[int, str, str]) -> dict:
-        floor, location_name, rack_name = key
+    def add_panel(key: Tuple[int, str], preferred_rack: str = "") -> dict:
+        floor, location_name = key
+        rack_name = (
+            _text(preferred_rack)
+            or preferred_rack_by_pool.get(key, "")
+            or f"AUTO-RACK-{location_name}"
+        )
         location = locations.get(location_name) or {
             "name": location_name,
             "floor": floor,
             "x": 0.0,
             "y": 0.0,
         }
-        panel_index = len(panels_by_rack[key]) + 1
+        panel_index = len(panels_by_pool[key]) + 1
         panel = builder.add_instance(
             panel_asset,
             f"AUTO {location_name} {rack_name} Modular Fibre Patch Panel {panel_index}",
@@ -5020,11 +5056,14 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             external_field_termination=True,
             fibre_cassettes=empty_cassettes(),
         )
-        panels_by_rack[key].append(panel)
+        panels_by_pool[key].append(panel)
         instance_by_id[_text(panel.get("id"))] = panel
         return panel
 
-    for key, used in sorted(required_positions_by_rack.items()):
+    # Apply spare capacity once per location rather than once per rack.  The
+    # allocator below still keeps every panel association and can place the
+    # shared panel in whichever adjacent rack has top space during repacking.
+    for key, used in sorted(required_positions_by_pool.items()):
         required = max(1, int(math.ceil(used * (1.0 + spare_fraction))))
         for _ in range(max(1, int(math.ceil(required / float(capacity))))):
             add_panel(key)
@@ -5052,19 +5091,27 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         cable_core_count: int,
         termination_mode: str,
         rear_connector: str,
+        exclude_panel_ids: Optional[Set[str]] = None,
     ) -> List[dict]:
-        key = rack_key(instance)
-        if key is None:
+        key = panel_pool_key(instance)
+        rack = rack_key(instance)
+        if key is None or rack is None:
             raise NetworkPlanningError("Cannot allocate a fibre panel outside a rack.")
+        excluded = {_text(value) for value in (exclude_panel_ids or set()) if _text(value)}
         remaining = max(1, int(count))
-        remaining_fibres = max(1, int(cable_core_count))
+        # Front connector utilisation follows count.  cable_core_count remains
+        # recorded on the trunk so unpresented MPO/MTP spare fibres are not lost.
+        remaining_fibres = max(1, min(int(cable_core_count), remaining * fibres_per_position))
         allocations: List[dict] = []
-        panels = panels_by_rack[key]
+        panels = panels_by_pool[key]
         panel_cursor = 0
         while remaining > 0:
             if panel_cursor >= len(panels):
-                add_panel(key)
+                add_panel(key, preferred_rack=rack[2])
             panel = panels[panel_cursor]
+            if _text(panel.get("id")) in excluded:
+                panel_cursor += 1
+                continue
             names = panel_port_names(panel)
             cassette_rows = panel.setdefault("fibre_cassettes", empty_cassettes())
             progress = False
@@ -5147,6 +5194,13 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                 if isinstance(row, dict)
             )
             panel["available_connector_count"] = max(0, capacity - _int(panel.get("termination_count")))
+            panel["front_connector_capacity"] = capacity
+            panel["front_connector_used"] = _int(panel.get("termination_count"))
+            panel["front_connector_available"] = _int(panel.get("available_connector_count"))
+            panel["front_connector_utilisation_percent"] = round(
+                100.0 * _int(panel.get("termination_count")) / float(capacity),
+                2,
+            ) if capacity else 0.0
             associated = [_text(value) for value in panel.get("associated_instance_ids", []) if _text(value)]
             instance_id = _text(instance.get("id"))
             if instance_id and instance_id not in associated:
@@ -5232,6 +5286,14 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         b_port = _text(logical.get("to_port"))
         b_allocations: List[dict] = []
         if rack_key(b) is not None:
+            # When both ends are in the same location, avoid terminating the
+            # two ends of one backbone on the exact same panel.  Other incoming
+            # fibres may still share all remaining capacity on either panel.
+            excluded_panels = {
+                _text(row.get("panel_id"))
+                for row in a_allocations
+                if _text(row.get("panel_id"))
+            } if panel_pool_key(a) == panel_pool_key(b) else set()
             b_allocations = allocate(
                 b,
                 adapter_count,
@@ -5239,6 +5301,7 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                 cable_core_count=cable_core_count,
                 termination_mode=termination_mode,
                 rear_connector=rear_connector,
+                exclude_panel_ids=excluded_panels,
             )
             b_panel_ports = flatten_ports(b_allocations)
             b_termination = b_allocations[0]["panel"]

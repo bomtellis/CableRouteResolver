@@ -23,6 +23,7 @@ from PySide6.QtGui import (
     QFontMetrics,
     QPainter,
     QPainterPath,
+    QPainterPathStroker,
     QPen,
 )
 from PySide6.QtWidgets import (
@@ -444,6 +445,11 @@ class TopologyModel:
         self._descendant_cache: Dict[str, int] = {}
         self._cross_edges_cache: Optional[List[TopologyEdge]] = None
         self.traffic: dict = {}
+        # Physical occupancy includes topology-hidden patch leads, cassette
+        # terminations and backbone allocations.  Rack/front-panel views use
+        # this map so passive panel ports remain red even when their physical
+        # links are deliberately omitted from the logical topology graph.
+        self.occupied_ports_by_instance: Dict[str, Set[str]] = defaultdict(set)
         self._build()
 
     def _build(self) -> None:
@@ -462,6 +468,51 @@ class TopologyModel:
 
         connection_counts: Dict[str, int] = defaultdict(int)
         occupied_ports_by_instance: Dict[str, Set[str]] = defaultdict(set)
+        patch_panel_ids: Set[str] = set()
+        for instance in self.data.get("network_asset_instances", []):
+            if not isinstance(instance, dict):
+                continue
+            instance_id = _text(instance.get("id"))
+            asset = self.assets.get(_text(instance.get("asset_id")), {})
+            if instance_id and (
+                _text(asset.get("asset_type")).lower() == "patch_panel"
+                or _text(instance.get("design_role")).lower()
+                in {"fibre_patch_panel", "copper_patch_panel"}
+            ):
+                patch_panel_ids.add(instance_id)
+
+        def add_occupied_ports(instance_id: str, values) -> None:
+            instance_id = _text(instance_id)
+            if not instance_id:
+                return
+            if isinstance(values, str):
+                candidates = [values]
+            elif isinstance(values, (list, tuple, set)):
+                candidates = values
+            else:
+                candidates = []
+            for value in candidates:
+                port_name = _text(value)
+                if port_name and port_name != "0":
+                    occupied_ports_by_instance[instance_id].add(port_name)
+
+        def add_allocation_ports(allocations) -> None:
+            if not isinstance(allocations, (list, tuple)):
+                return
+            for allocation in allocations:
+                if not isinstance(allocation, dict):
+                    continue
+                panel_id = _text(
+                    allocation.get("panel_instance_id")
+                    or allocation.get("panel_id")
+                )
+                add_occupied_ports(
+                    panel_id,
+                    allocation.get("ports")
+                    or allocation.get("front_connector_names")
+                    or allocation.get("used_front_connector_names"),
+                )
+
         for assignment in self.data.get("network_endpoint_assignments", []):
             if not isinstance(assignment, dict):
                 continue
@@ -483,6 +534,39 @@ class TopologyModel:
                 occupied_ports_by_instance[source_id].add(source_port)
             if target_id and target_port and target_port != "0":
                 occupied_ports_by_instance[target_id].add(target_port)
+
+            # Modular fibre records carry all terminated front connectors in
+            # list/allocation fields while from_port/to_port identify only the
+            # first connector used by the physical segment.  Count every named
+            # connector so the rack face shows the true cassette utilisation.
+            for key in (
+                "from_terminated_panel_ports",
+                "from_field_terminated_panel_ports",
+            ):
+                add_occupied_ports(source_id, connection.get(key))
+            for key in (
+                "to_terminated_panel_ports",
+                "to_field_terminated_panel_ports",
+            ):
+                add_occupied_ports(target_id, connection.get(key))
+            for key in (
+                "panel_termination_allocations",
+                "from_panel_termination_allocations",
+                "to_panel_termination_allocations",
+            ):
+                add_allocation_ports(connection.get(key))
+
+            generic_panel_ports = []
+            for key in ("terminated_panel_ports", "field_terminated_panel_ports"):
+                value = connection.get(key)
+                if isinstance(value, (list, tuple, set)):
+                    generic_panel_ports.extend(value)
+            if generic_panel_ports:
+                if source_id in patch_panel_ids:
+                    add_occupied_ports(source_id, generic_panel_ports)
+                if target_id in patch_panel_ids:
+                    add_occupied_ports(target_id, generic_panel_ports)
+
             # Physical patch cables and panel backbones are retained in the
             # data model and rack/port views, but must not alter the logical
             # topology between active devices.
@@ -532,6 +616,27 @@ class TopologyModel:
             if peer_instance_id and peer_port and peer_port != "0":
                 occupied_ports_by_instance[peer_instance_id].add(peer_port)
 
+        # Cassette state is authoritative even when a project was saved before
+        # the corresponding physical connection rows were generated or when
+        # those rows are hidden from the topology.  Merge it into occupancy.
+        for instance in self.data.get("network_asset_instances", []):
+            if not isinstance(instance, dict):
+                continue
+            instance_id = _text(instance.get("id"))
+            if not instance_id:
+                continue
+            for cassette in instance.get("fibre_cassettes", []):
+                if not isinstance(cassette, dict):
+                    continue
+                add_occupied_ports(
+                    instance_id,
+                    cassette.get("used_front_connector_names"),
+                )
+        self.occupied_ports_by_instance = {
+            instance_id: set(port_names)
+            for instance_id, port_names in occupied_ports_by_instance.items()
+        }
+
         for instance in self.data.get("network_asset_instances", []):
             if not isinstance(instance, dict):
                 continue
@@ -539,6 +644,41 @@ class TopologyModel:
             if not instance_id:
                 continue
             asset = self.assets.get(_text(instance.get("asset_id")), {})
+            asset_type = _text(asset.get("asset_type")).lower() or "other"
+            port_definition_capacity = sum(
+                max(0, _int(row.get("port_count")))
+                for row in _asset_port_definitions(asset)
+            )
+            generic_port_capacity = max(
+                port_definition_capacity,
+                max(
+                    0,
+                    _int(asset.get("number_of_ports")),
+                    _int(asset.get("connections_in"))
+                    + _int(asset.get("connections_out"))
+                    + _int(asset.get("uplink_ports")),
+                    _int(asset.get("connections_out"))
+                    + _int(asset.get("uplink_ports")),
+                    _int(asset.get("number_of_pon_ports")),
+                    _int(asset.get("pon_ports")),
+                    _int(asset.get("sfp_ports")) + _int(asset.get("rj45_ports")),
+                ),
+            )
+            if asset_type == "patch_panel":
+                # A passive panel's input and output fields describe the two
+                # sides of the same adapter, not two independent front ports.
+                # Prefer explicit front-port/cassette capacity so a 48-position
+                # modular panel is shown as 48 rather than 96 ports.
+                cassette_capacity = max(
+                    0,
+                    _int(asset.get("patch_panel_cassette_count"))
+                    * _int(asset.get("patch_panel_cassette_capacity")),
+                )
+                generic_port_capacity = max(
+                    port_definition_capacity,
+                    _int(asset.get("number_of_ports")),
+                    cassette_capacity,
+                )
             location_name = _text(instance.get("location_name"))
             location = self.locations.get(location_name, {})
             assignments = assignments_by_instance.get(instance_id, [])
@@ -547,7 +687,7 @@ class TopologyModel:
             node = TopologyNode(
                 node_id=instance_id,
                 name=_text(instance.get("name")) or instance_id,
-                asset_type=_text(asset.get("asset_type")).lower() or "other",
+                asset_type=asset_type,
                 role=_text(instance.get("design_role")).lower(),
                 asset=asset,
                 instance=instance,
@@ -558,18 +698,7 @@ class TopologyModel:
                 model=_text(asset.get("model")),
                 management_ip=_text(instance.get("management_ip")),
                 port_capacity=max(
-                    sum(_int(row.get("port_count")) for row in _asset_port_definitions(asset)) * stack_members,
-                    max(
-                        0,
-                        _int(asset.get("number_of_ports")),
-                        _int(asset.get("connections_in"))
-                        + _int(asset.get("connections_out"))
-                        + _int(asset.get("uplink_ports")),
-                        _int(asset.get("connections_out")) + _int(asset.get("uplink_ports")),
-                        _int(asset.get("number_of_pon_ports")),
-                        _int(asset.get("pon_ports")),
-                        _int(asset.get("sfp_ports")) + _int(asset.get("rj45_ports")),
-                    ) * stack_members,
+                    generic_port_capacity * stack_members,
                     len(occupied_ports_by_instance.get(instance_id, set())),
                 ),
                 ports_used=len(occupied_ports_by_instance.get(instance_id, set())),
@@ -892,6 +1021,7 @@ class TopologyModel:
 class TopologyCardItem(QGraphicsObject):
     activated = Signal(str)
     branchToggleRequested = Signal(str)
+    cardDoubleClicked = Signal(str)
     contextRequested = Signal(str, object)
 
     WIDTH = 232.0
@@ -913,6 +1043,7 @@ class TopologyCardItem(QGraphicsObject):
         self.has_children = has_children
         self.expanded = expanded
         self.search_match = False
+        self._branch_badge_pressed = False
         self._height = self._calculate_height()
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
@@ -971,6 +1102,12 @@ class TopologyCardItem(QGraphicsObject):
         if self.search_match != match:
             self.search_match = match
             self.update()
+
+    def _branch_badge_rect(self) -> QRectF:
+        return QRectF(self.WIDTH - 31.0, self._height - 24.0, 22.0, 16.0)
+
+    def _branch_badge_contains(self, point: QPointF) -> bool:
+        return bool(self.has_children and self._branch_badge_rect().adjusted(-4.0, -4.0, 4.0, 4.0).contains(point))
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: ANN001
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -1104,7 +1241,7 @@ class TopologyCardItem(QGraphicsObject):
         painter.drawText(QRectF(112.0, 75.0, 105.0, 16.0), Qt.AlignRight | Qt.AlignVCenter, right_stat)
 
         if self.has_children:
-            badge_rect = QRectF(self.WIDTH - 31.0, self._height - 24.0, 22.0, 16.0)
+            badge_rect = self._branch_badge_rect()
             painter.setBrush(QColor("#34414d"))
             painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(badge_rect, 7.0, 7.0)
@@ -1161,6 +1298,10 @@ class TopologyCardItem(QGraphicsObject):
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.LeftButton:
+            if self._branch_badge_contains(event.pos()):
+                self._branch_badge_pressed = True
+                event.accept()
+                return
             super().mousePressEvent(event)
             self.activated.emit(self.node.node_id)
             event.accept()
@@ -1168,12 +1309,26 @@ class TopologyCardItem(QGraphicsObject):
 
         super().mousePressEvent(event)
 
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.LeftButton and self._branch_badge_pressed:
+            self._branch_badge_pressed = False
+            if self._branch_badge_contains(event.pos()):
+                self.branchToggleRequested.emit(self.node.node_id)
+            event.accept()
+            return
+        self._branch_badge_pressed = False
+        super().mouseReleaseEvent(event)
+
     def contextMenuEvent(self, event) -> None:  # noqa: ANN001
         self.contextRequested.emit(self.node.node_id, event.screenPos())
         event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
-        self.branchToggleRequested.emit(self.node.node_id)
+        if event.button() == Qt.LeftButton and self._branch_badge_contains(event.pos()):
+            self._branch_badge_pressed = False
+            event.accept()
+            return
+        self.cardDoubleClicked.emit(self.node.node_id)
         event.accept()
 
 
@@ -1227,6 +1382,7 @@ class RackEquipmentItem(QGraphicsObject):
     dragStarted = Signal(str)
     dragMoved = Signal(str, object)
     dragFinished = Signal(str, object)
+    dragCancelled = Signal(str)
 
     def __init__(
         self,
@@ -1250,6 +1406,7 @@ class RackEquipmentItem(QGraphicsObject):
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
         self.setAcceptHoverEvents(True)
         self._drag_origin = QPointF()
+        self._drag_press_screen = QPoint()
         self._drag_active = False
         self._build_port_rects()
 
@@ -1475,6 +1632,7 @@ class RackEquipmentItem(QGraphicsObject):
                     event.accept()
                     return
             self._drag_origin = QPointF(self.pos())
+            self._drag_press_screen = QPoint(event.screenPos())
             self._drag_active = True
             super().mousePressEvent(event)
             self.activated.emit(self.node.node_id)
@@ -1490,12 +1648,20 @@ class RackEquipmentItem(QGraphicsObject):
 
     def mouseReleaseEvent(self, event) -> None:
         delta = self.pos() - self._drag_origin
-        moved = self._drag_active and (abs(delta.x()) + abs(delta.y())) > 0.5
+        screen_delta = QPoint(event.screenPos()) - self._drag_press_screen
+        threshold = max(6, QApplication.startDragDistance())
+        moved = self._drag_active and screen_delta.manhattanLength() >= threshold
         super().mouseReleaseEvent(event)
         self._drag_active = False
         if moved:
             self.dragFinished.emit(self.node.node_id, QPointF(self.pos()))
             event.accept()
+        else:
+            if abs(delta.x()) + abs(delta.y()) > 0.0:
+                # A normal click can move a QGraphicsItem by a fraction of a
+                # scene unit. Restore it rather than validating a rack move.
+                self.setPos(self._drag_origin)
+            self.dragCancelled.emit(self.node.node_id)
 
     def contextMenuEvent(self, event) -> None:
         point = event.pos()
@@ -1703,6 +1869,7 @@ class SplitterFrontPanelItem(QGraphicsObject):
     dragStarted = Signal(str)
     dragMoved = Signal(str, object)
     dragFinished = Signal(str, object)
+    dragCancelled = Signal(str)
 
     def __init__(
         self,
@@ -1724,6 +1891,7 @@ class SplitterFrontPanelItem(QGraphicsObject):
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, bool(movable))
         self.setAcceptHoverEvents(True)
         self._drag_origin = QPointF()
+        self._drag_press_screen = QPoint()
         self._drag_active = False
         self._build_port_rects()
 
@@ -1829,6 +1997,7 @@ class SplitterFrontPanelItem(QGraphicsObject):
                     self.portActivated.emit(node_id)
                     event.accept(); return
             self._drag_origin = QPointF(self.pos())
+            self._drag_press_screen = QPoint(event.screenPos())
             self._drag_active = True
             super().mousePressEvent(event)
             self.activated.emit(self.node.node_id)
@@ -1843,12 +2012,20 @@ class SplitterFrontPanelItem(QGraphicsObject):
 
     def mouseReleaseEvent(self, event) -> None:
         delta = self.pos() - self._drag_origin
-        moved = self._drag_active and (abs(delta.x()) + abs(delta.y())) > 0.5
+        screen_delta = QPoint(event.screenPos()) - self._drag_press_screen
+        threshold = max(6, QApplication.startDragDistance())
+        moved = self._drag_active and screen_delta.manhattanLength() >= threshold
         super().mouseReleaseEvent(event)
         self._drag_active = False
         if moved:
             self.dragFinished.emit(self.node.node_id, QPointF(self.pos()))
             event.accept()
+        else:
+            if abs(delta.x()) + abs(delta.y()) > 0.0:
+                # A normal click can move a QGraphicsItem by a fraction of a
+                # scene unit. Restore it rather than validating a rack move.
+                self.setPos(self._drag_origin)
+            self.dragCancelled.emit(self.node.node_id)
 
     def contextMenuEvent(self, event) -> None:
         for node_id, rect in self._port_rects.items():
@@ -1865,38 +2042,32 @@ class SplitterFrontPanelItem(QGraphicsObject):
 
 
 class InteractiveLinkItem(QGraphicsPathItem):
-    """Topology path that exposes logical-link actions on right click."""
+    """Passive topology path with an edge identifier for view-level menus.
+
+    QGraphicsPathItem's default press/hover handling is unreliable with a
+    partially-updated accelerated QGraphicsView: a click can invalidate only a
+    fragment of a negative-Z path and make the whole link appear to vanish.
+    Links therefore accept no mouse buttons.  TopologyGraphicsView performs
+    explicit hit testing for the right-click connection menu instead.
+    """
+
     def __init__(self, path: QPainterPath, edge_id: str = "", context_callback=None):
         super().__init__(path)
         self.edge_id = _text(edge_id)
         self.context_callback = context_callback
-        self.setAcceptHoverEvents(True)
-        # Left clicks belong to the topology canvas.  Letting path items accept
-        # them can leave Qt's path item in a stale pressed/hover paint state at
-        # low zoom, which makes the link appear to vanish.  Right click remains
-        # available for the connection context menu.
-        self.setAcceptedMouseButtons(Qt.RightButton)
+        self.setData(0, self.edge_id)
+        self.setAcceptHoverEvents(False)
+        self.setAcceptedMouseButtons(Qt.NoButton)
         self.setFlag(QGraphicsItem.ItemIsSelectable, False)
         self.setCacheMode(QGraphicsItem.NoCache)
 
-    def contextMenuEvent(self, event) -> None:  # noqa: ANN001
-        if self.edge_id and callable(self.context_callback):
-            self.context_callback(self.edge_id, event.screenPos())
-            event.accept()
-            return
-        super().contextMenuEvent(event)
+    def boundingRect(self) -> QRectF:
+        return super().boundingRect().adjusted(-6.0, -6.0, 6.0, 6.0)
 
-    def hoverEnterEvent(self, event) -> None:  # noqa: ANN001
-        pen = self.pen()
-        pen.setWidthF(max(3.5, pen.widthF() + 1.2))
-        self.setPen(pen)
-        super().hoverEnterEvent(event)
-
-    def hoverLeaveEvent(self, event) -> None:  # noqa: ANN001
-        pen = self.pen()
-        pen.setWidthF(max(1.0, pen.widthF() - 1.2))
-        self.setPen(pen)
-        super().hoverLeaveEvent(event)
+    def shape(self) -> QPainterPath:
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(12.0, self.pen().widthF() + 8.0))
+        return stroker.createStroke(self.path())
 
 
 class LinkLabelItem(QGraphicsObject):
@@ -1915,7 +2086,9 @@ class LinkLabelItem(QGraphicsObject):
         self._width = min(420.0, max(54.0, float(metrics.horizontalAdvance(text) + 18)))
         self._height = 20.0
         self.setZValue(0.35)
-        self.setAcceptedMouseButtons(Qt.RightButton if self.edge_id else Qt.NoButton)
+        self.setData(0, self.edge_id)
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        self.setAcceptHoverEvents(False)
         self.setCacheMode(QGraphicsItem.NoCache)
 
     def boundingRect(self) -> QRectF:
@@ -1996,6 +2169,7 @@ class TopologyGraphicsView(QGraphicsView):
     nodeSelected = Signal(str)
     branchToggleRequested = Signal(str)
     emptySceneDoubleClicked = Signal(object)
+    edgeContextRequested = Signal(str, object)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -2005,13 +2179,16 @@ class TopologyGraphicsView(QGraphicsView):
             | QPainter.TextAntialiasing
         )
 
-        # Updating the whole viewport on every pan/selection is expensive on
-        # large topologies.  Restrict repaints to changed item bounds and cache
-        # the static background instead.
-        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
+        # Negative-Z paths, location enclosures and rack patch leads must be
+        # repainted as one composited frame.  Bounding-rectangle updates and a
+        # cached background can leave accelerated/HiDPI viewports with stale
+        # holes after any mouse button is pressed, making links appear to
+        # disappear.  Full viewport updates are slightly more work but are
+        # deterministic and apply to topology, rack and port views alike.
+        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         self.setOptimizationFlag(QGraphicsView.DontSavePainterState, True)
-        self.setOptimizationFlag(QGraphicsView.DontAdjustForAntialiasing, True)
-        self.setCacheMode(QGraphicsView.CacheBackground)
+        self.setOptimizationFlag(QGraphicsView.DontAdjustForAntialiasing, False)
+        self.setCacheMode(QGraphicsView.CacheNone)
 
         self.setTransformationAnchor(QGraphicsView.NoAnchor)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
@@ -2060,6 +2237,64 @@ class TopologyGraphicsView(QGraphicsView):
                 item = item.parentItem()
         return None
 
+    @staticmethod
+    def _event_view_position(event) -> QPoint:  # noqa: ANN001
+        """Return a viewport QPoint for mouse and context-menu event variants."""
+        position = getattr(event, "position", None)
+        if callable(position):
+            value = position()
+            return value.toPoint() if hasattr(value, "toPoint") else QPoint(value)
+        pos = getattr(event, "pos", None)
+        if callable(pos):
+            value = pos()
+            return value.toPoint() if hasattr(value, "toPoint") else QPoint(value)
+        return QPoint()
+
+    def _edge_id_at(self, position: QPoint) -> str:
+        """Return the uppermost visible link/label edge id at *position*."""
+        for hit in self.items(position):
+            item = hit
+            while item is not None:
+                edge_id = _text(getattr(item, "edge_id", ""))
+                if not edge_id:
+                    try:
+                        edge_id = _text(item.data(0))
+                    except (AttributeError, TypeError):
+                        edge_id = ""
+                if edge_id:
+                    return edge_id
+                item = item.parentItem()
+        return ""
+
+    def _request_full_repaint(self) -> None:
+        viewport = self.viewport()
+        if viewport is not None:
+            viewport.update()
+        scene = self.scene()
+        if scene is not None:
+            scene.invalidate(scene.sceneRect(), QGraphicsScene.AllLayers)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: ANN001
+        position = self._event_view_position(event)
+        edge_id = self._edge_id_at(position)
+        if edge_id:
+            global_pos = event.globalPos() if hasattr(event, "globalPos") else self.mapToGlobal(position)
+            self.edgeContextRequested.emit(edge_id, global_pos)
+            event.accept()
+            QTimer.singleShot(0, self._request_full_repaint)
+            return
+
+        # Empty-scene right clicks intentionally do nothing.  Passing them to
+        # QGraphicsScene can target a stale item left behind by a closed menu,
+        # after which the next left click raises inside Qt's scene dispatcher.
+        if self._interactive_item_at(position) is None:
+            event.accept()
+            QTimer.singleShot(0, self._request_full_repaint)
+            return
+
+        super().contextMenuEvent(event)
+        QTimer.singleShot(0, self._request_full_repaint)
+
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.LeftButton:
             if self._interactive_item_at(event.position().toPoint()) is None:
@@ -2071,12 +2306,19 @@ class TopologyGraphicsView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
-        position = event.position().toPoint()
+        position = self._event_view_position(event)
         clicked_item = self._interactive_item_at(position)
 
-        # Middle mouse pans from anywhere.
+        # The view owns middle-button panning everywhere, including over rack
+        # equipment and decorative/link paths.  No scene item sees the press.
         if event.button() == Qt.MiddleButton:
             self._start_pan(event, Qt.MiddleButton)
+            return
+
+        # A right-button press is handled later by contextMenuEvent.  Avoid
+        # giving QGraphicsScene a pressed item that can enter a stale state.
+        if event.button() == Qt.RightButton:
+            event.accept()
             return
 
         # Shift/Ctrl drag on empty space performs rubber-band multi-selection.
@@ -2088,36 +2330,41 @@ class TopologyGraphicsView(QGraphicsView):
             self._rubber_band_selecting = True
             self.setDragMode(QGraphicsView.RubberBandDrag)
             super().mousePressEvent(event)
+            self._request_full_repaint()
             return
 
-        # Left mouse pans only when clicking empty scene space.
+        # Left mouse pans only when clicking empty scene space or a passive
+        # fibre/copper path.  Cards and ports retain their normal activation.
         if event.button() == Qt.LeftButton and clicked_item is None:
             self._start_pan(event, Qt.LeftButton)
             return
 
-        # Forward clicks on cards and labels to the scene.
         super().mousePressEvent(event)
+        self._request_full_repaint()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: ANN001
         if not self._panning:
             super().mouseMoveEvent(event)
             return
 
-        current = event.position().toPoint()
+        current = self._event_view_position(event)
         delta = current - self._pan_start
         self._pan_start = current
-
         if delta.x() or delta.y():
-            # Do not change the painter state merely because the user clicked
-            # empty space.  Some OpenGL/HiDPI combinations temporarily blank
-            # the graphics view when all render hints are removed on press.
-            # Reduce rendering quality only after a real drag begins.
-            if not self._pan_render_reduced:
-                self.setRenderHints(QPainter.RenderHints())
-                self._pan_render_reduced = True
+            # Do not remove render hints during a pan.  On accelerated HiDPI
+            # viewports that transition can blank negative-Z graphics until a
+            # later full redraw, which looked like links and rack items vanished.
             self._pan_viewport_by(delta.x(), delta.y())
-
         event.accept()
+
+    def _finish_pan(self) -> None:
+        self._panning = False
+        self._pan_button = Qt.NoButton
+        self.viewport().unsetCursor()
+        if self._pan_render_reduced:
+            self.setRenderHints(self._normal_render_hints)
+            self._pan_render_reduced = False
+        self._request_full_repaint()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
         if self._rubber_band_selecting and event.button() == Qt.LeftButton:
@@ -2125,31 +2372,20 @@ class TopologyGraphicsView(QGraphicsView):
             self._rubber_band_selecting = False
             self.setDragMode(QGraphicsView.NoDrag)
             event.accept()
+            self._request_full_repaint()
             return
 
         if self._panning and event.button() == self._pan_button:
-            self._panning = False
-            self._pan_button = Qt.NoButton
-            self.viewport().unsetCursor()
-            if self._pan_render_reduced:
-                self.setRenderHints(self._normal_render_hints)
-                self._pan_render_reduced = False
-            self.viewport().update()
+            self._finish_pan()
             event.accept()
             return
 
         super().mouseReleaseEvent(event)
+        self._request_full_repaint()
 
     def leaveEvent(self, event) -> None:  # noqa: ANN001
         if self._panning:
-            self._panning = False
-            self._pan_button = Qt.NoButton
-            self.viewport().unsetCursor()
-            if self._pan_render_reduced:
-                self.setRenderHints(self._normal_render_hints)
-                self._pan_render_reduced = False
-            self.viewport().update()
-
+            self._finish_pan()
         super().leaveEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: ANN001
@@ -2224,9 +2460,10 @@ class TopologyGraphicsView(QGraphicsView):
         # while the viewport is moving.  Defer reducing render quality until
         # mouseMoveEvent confirms that this is a drag rather than a click.
         self._pan_render_reduced = False
-        self._pan_start = event.position().toPoint()
+        self._pan_start = self._event_view_position(event)
         self.viewport().setCursor(Qt.ClosedHandCursor)
         self.viewport().setFocus()
+        self._request_full_repaint()
         event.accept()
 
     def _pan_viewport_by(self, dx: int, dy: int) -> None:
@@ -2383,6 +2620,8 @@ class NetworkTopologyDialog(QDialog):
         # target direction here follows the visible topology hierarchy rather
         # than the storage order of the underlying connection record.
         self._visible_drawn_fibre_edges: List[Tuple[str, str, TopologyEdge]] = []
+        self._failover_lane_by_key: Dict[Tuple[str, str, str, str], int] = {}
+        self._drawn_bus_drops: Set[Tuple[str, bool, Tuple[str, str, str, str]]] = set()
         self._floor_match_cache: Dict[Tuple[str, int], bool] = {}
         self._logical_children_cache: Dict[str, Tuple[str, ...]] = {}
         self._collapsed_edge_cache: Dict[Tuple[str, str], TopologyEdge] = {}
@@ -2451,6 +2690,7 @@ class NetworkTopologyDialog(QDialog):
 
         self.scene.selectionChanged.connect(self._scene_selection_changed)
         self.view.emptySceneDoubleClicked.connect(self._rack_empty_space_double_clicked)
+        self.view.edgeContextRequested.connect(self._edge_context_menu)
         self._initial_scene_pending = True
         self.status_label.setText("Preparing topology view…")
         QTimer.singleShot(0, self._initial_rebuild_scene)
@@ -3478,6 +3718,9 @@ class NetworkTopologyDialog(QDialog):
             asset_name = _text(assignment.get("endpoint_asset_name"))
             records[port].append(endpoint + (f" — {asset_name}" if asset_name else ""))
             poe_by_port[port] += max(0.0, _float(assignment.get("poe_power_w")))
+        for port in sorted(self.model.occupied_ports_by_instance.get(device_id, set())):
+            if port and not records.get(port):
+                records[port].append("Physical fibre termination")
         for peer_id, edge in self.model.adjacency.get(device_id, []):
             if edge.source_id == device_id:
                 port = edge.source_port or "Unspecified"
@@ -4455,20 +4698,22 @@ class NetworkTopologyDialog(QDialog):
             if self.rack_focus is None and self.switch_port_focus is None
             else []
         )
+        visible_cross_edges = self._deduplicate_visible_cross_edges(visible_cross_edges)
+        self._drawn_bus_drops.clear()
 
         # Register every visible fibre using its actual drawing direction.
         # Connection records are not guaranteed to store from/to in upstream-
         # to-downstream order, which previously made some secondary fibres use
         # the card centre while access/distribution fibres used separate ports.
         self._visible_drawn_fibre_edges = []
-        seen_drawn_fibres: Set[Tuple[str, str, str]] = set()
+        seen_drawn_fibres: Set[Tuple[str, str, str, str]] = set()
         for child_id, parent_id in self.visible_parent.items():
             if child_id.startswith("client::"):
                 continue
             edge = self._edge_by_id(self.visible_parent_edge.get(child_id, ""))
             if edge is None or _text(edge.medium).lower() != "fibre":
                 continue
-            key = (parent_id, child_id, edge.edge_id)
+            key = self._edge_visual_key(edge, parent_id, child_id)
             if key not in seen_drawn_fibres:
                 seen_drawn_fibres.add(key)
                 self._visible_drawn_fibre_edges.append((parent_id, child_id, edge))
@@ -4476,10 +4721,11 @@ class NetworkTopologyDialog(QDialog):
             if _text(edge.medium).lower() != "fibre":
                 continue
             source_id, target_id = self._cross_link_origin_target(edge)
-            key = (source_id, target_id, edge.edge_id)
+            key = self._edge_visual_key(edge, source_id, target_id)
             if key not in seen_drawn_fibres:
                 seen_drawn_fibres.add(key)
                 self._visible_drawn_fibre_edges.append((source_id, target_id, edge))
+        self._prepare_failover_lanes()
 
         if self.rack_focus is None:
             for edge in visible_cross_edges:
@@ -4526,15 +4772,36 @@ class NetworkTopologyDialog(QDialog):
                 self._add_link(parent_id, child_id, positions, edge, client_link=child_id.startswith("client::"))
 
         if self.show_redundant_check.isChecked() and self.rack_focus is None and self.switch_port_focus is None:
-            # Draw every redundant fibre as an independent routed connection,
-            # matching the access/distribution presentation.  Primary and
-            # secondary fibres therefore terminate at separate positions on the
-            # downstream card instead of merging into a shared failover trunk.
+            # Standby links from the same upstream device share one dedicated
+            # vertical riser, then branch horizontally to their separate card
+            # connection positions.  This retains distinct primary/failover
+            # terminations without drawing one full-height orange line per OLT.
+            failover_groups: Dict[
+                Tuple[str, int, int],
+                List[Tuple[str, str, TopologyEdge]],
+            ] = defaultdict(list)
             for edge in visible_cross_edges:
                 if edge.source_id not in positions or edge.target_id not in positions:
                     continue
                 source_id, target_id = self._cross_link_origin_target(edge)
-                self._add_link(source_id, target_id, positions, edge, cross_link=True)
+                if self._edge_is_failover(edge) and _text(edge.medium).lower() == "fibre":
+                    failover_groups[
+                        self._failover_riser_key(edge, source_id, target_id)
+                    ].append((source_id, target_id, edge))
+                else:
+                    self._add_link(source_id, target_id, positions, edge, cross_link=True)
+            for rows in failover_groups.values():
+                if len(rows) > 1:
+                    self._add_shared_failover_trunk(rows, positions)
+                elif rows:
+                    source_id, target_id, edge = rows[0]
+                    self._add_link(
+                        source_id,
+                        target_id,
+                        positions,
+                        edge,
+                        cross_link=True,
+                    )
 
         if self.switch_port_focus is not None:
             switch_id = _text(self.switch_port_focus)
@@ -4621,7 +4888,12 @@ class NetworkTopologyDialog(QDialog):
                     item.dragStarted.connect(self._rack_drag_started)
                     item.dragMoved.connect(self._rack_drag_moved)
                     item.dragFinished.connect(self._rack_drag_finished)
-                item.branchToggleRequested.connect(self._card_double_clicked)
+                    item.dragCancelled.connect(self._rack_drag_cancelled)
+                if isinstance(item, TopologyCardItem):
+                    item.branchToggleRequested.connect(self.toggle_branch)
+                    item.cardDoubleClicked.connect(self._card_double_clicked)
+                else:
+                    item.branchToggleRequested.connect(self._card_double_clicked)
                 self.scene.addItem(item)
                 self.node_items[node_id] = item
 
@@ -4793,6 +5065,9 @@ class NetworkTopologyDialog(QDialog):
         item.setBrush(Qt.NoBrush)
         item.setZValue(0.72)
         item.setToolTip(label)
+        item.setAcceptedMouseButtons(Qt.NoButton)
+        item.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        item.setCacheMode(QGraphicsItem.NoCache)
         self.scene.addItem(item)
         return True
 
@@ -4983,6 +5258,9 @@ class NetworkTopologyDialog(QDialog):
                 rect.top() - label_rect.height() - 20.0,
             )
             label.setZValue(-0.2)
+            label.setAcceptedMouseButtons(Qt.NoButton)
+            label.setFlag(QGraphicsItem.ItemIsSelectable, False)
+            label.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(label)
 
             underline = QPainterPath(QPointF(rect.left(), rect.top() - 16.0))
@@ -5131,6 +5409,9 @@ class NetworkTopologyDialog(QDialog):
             item.setBrush(QColor(29, 40, 50, 150))
             item.setPen(QPen(QColor("#344653"), 1.0, Qt.DashLine))
             item.setZValue(-1.5)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            item.setFlag(QGraphicsItem.ItemIsSelectable, False)
+            item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(item)
 
             label_text = rack or location
@@ -5147,6 +5428,8 @@ class NetworkTopologyDialog(QDialog):
             label.setPos(rect.left() + 10.0, rect.top() + 8.0)
             label.setZValue(-1.4)
             label.setAcceptedMouseButtons(Qt.NoButton)
+            label.setFlag(QGraphicsItem.ItemIsSelectable, False)
+            label.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(label)
 
             if bus_nodes:
@@ -5158,6 +5441,7 @@ class NetworkTopologyDialog(QDialog):
                 main_item.setPen(QPen(QColor("#6f8dff"), 2.2))
                 main_item.setZValue(-0.98)
                 main_item.setAcceptedMouseButtons(Qt.NoButton)
+                main_item.setCacheMode(QGraphicsItem.NoCache)
                 self.scene.addItem(main_item)
 
                 failover_nodes = getattr(self, "_visible_failover_bus_nodes", set())
@@ -5169,6 +5453,7 @@ class NetworkTopologyDialog(QDialog):
                     fail_item.setPen(fail_pen)
                     fail_item.setZValue(-0.86)
                     fail_item.setAcceptedMouseButtons(Qt.NoButton)
+                    fail_item.setCacheMode(QGraphicsItem.NoCache)
                     self.scene.addItem(fail_item)
 
     def _link_colour(self, medium: str) -> QColor:
@@ -5191,6 +5476,109 @@ class NetworkTopologyDialog(QDialog):
             or bool(edge.connection.get("standby", False))
             or _text(edge.connection.get("redundancy_role")).lower()
             in {"secondary", "standby", "failover"}
+        )
+
+    @staticmethod
+    def _edge_visual_group_id(edge: Optional[TopologyEdge]) -> str:
+        if edge is None:
+            return ""
+        connection = edge.connection if isinstance(edge.connection, dict) else {}
+        return (
+            _text(connection.get("link_aggregation_group_id"))
+            or _text(connection.get("parent_logical_connection_id"))
+            or _text(connection.get("collapsed_terminal_edge_id"))
+            or _text(edge.edge_id)
+        )
+
+    def _edge_visual_key(
+        self,
+        edge: Optional[TopologyEdge],
+        source_id: str = "",
+        target_id: str = "",
+    ) -> Tuple[str, str, str, str]:
+        if edge is None:
+            pair = tuple(sorted((_text(source_id), _text(target_id))))
+            return (pair[0], pair[1], "primary", "")
+        source = _text(source_id) or _text(edge.source_id)
+        target = _text(target_id) or _text(edge.target_id)
+        pair = tuple(sorted((source, target)))
+        role = "failover" if self._edge_is_failover(edge) else "primary"
+        return (pair[0], pair[1], role, self._edge_visual_group_id(edge))
+
+    def _deduplicate_visible_cross_edges(
+        self,
+        edges: Sequence[TopologyEdge],
+    ) -> List[TopologyEdge]:
+        """Collapse LACP/physical members into one logical topology line.
+
+        A tree edge already represents the primary logical connection.  Other
+        members of the same LAG must not be redrawn as cross-links.  Secondary
+        LAG members are similarly represented by one failover line, while
+        genuinely independent connections (different logical ids) remain.
+        """
+        represented: Set[Tuple[str, str, str, str]] = set()
+        for child_id, parent_id in self.visible_parent.items():
+            if child_id.startswith("client::"):
+                continue
+            tree_edge = self._edge_by_id(self.visible_parent_edge.get(child_id, ""))
+            if tree_edge is not None:
+                represented.add(self._edge_visual_key(tree_edge, parent_id, child_id))
+
+        result: List[TopologyEdge] = []
+        for edge in sorted(
+            edges,
+            key=lambda value: (
+                1 if self._edge_is_failover(value) else 0,
+                self._edge_visual_group_id(value),
+                value.edge_id,
+            ),
+        ):
+            source_id, target_id = self._cross_link_origin_target(edge)
+            key = self._edge_visual_key(edge, source_id, target_id)
+            if key in represented:
+                continue
+            represented.add(key)
+            result.append(edge)
+        return result
+
+    def _failover_riser_key(
+        self,
+        edge: Optional[TopologyEdge],
+        source_id: str = "",
+        target_id: str = "",
+    ) -> Tuple[str, int, int]:
+        """Return the common-riser identity for a visible standby fibre.
+
+        All standby links leaving one upstream device for the same downstream
+        layer share a vertical riser.  Protection-group/LACP member identifiers
+        remain available for deduplication, but no longer force one separate
+        orange vertical line per OLT or per aggregated member.
+        """
+        source = _text(source_id) or (_text(edge.source_id) if edge else "")
+        target = _text(target_id) or (_text(edge.target_id) if edge else "")
+        return (
+            source,
+            self._topology_layer(source) if source else -1,
+            self._topology_layer(target) if target else -1,
+        )
+
+    def _prepare_failover_lanes(self) -> None:
+        keys = sorted({
+            self._failover_riser_key(edge, source_id, target_id)
+            for source_id, target_id, edge in self._visible_drawn_fibre_edges
+            if self._edge_is_failover(edge)
+        })
+        self._failover_lane_by_key = {key: index for index, key in enumerate(keys)}
+
+    def _failover_lane_index(
+        self,
+        edge: Optional[TopologyEdge],
+        source_id: str = "",
+        target_id: str = "",
+    ) -> int:
+        return self._failover_lane_by_key.get(
+            self._failover_riser_key(edge, source_id, target_id),
+            0,
         )
 
     def _edge_colour(self, edge: Optional[TopologyEdge], medium: str = "") -> QColor:
@@ -5224,21 +5612,27 @@ class NetworkTopologyDialog(QDialog):
         )
         return min(preferred, bus_left - required_span - 34.0)
 
-    def _failover_fibre_lane_x(self, bus_left: float, required_span: float) -> float:
-        """Return a failover lane kept clear of the primary fibre lane."""
+    def _failover_fibre_lane_x(
+        self,
+        bus_left: float,
+        required_span: float,
+        edge: Optional[TopologyEdge] = None,
+        source_id: str = "",
+        target_id: str = "",
+    ) -> float:
+        """Return a dedicated lane for one visible failover connection."""
         primary_lane = self._primary_fibre_lane_x(bus_left, required_span)
+        lane_index = self._failover_lane_index(edge, source_id, target_id)
+        lane_offset = lane_index * 72.0
         preferred = (
             self._failover_bus_column_x
             if self._failover_bus_column_x is not None
             else primary_lane - 140.0
-        )
-        # Keep a full routing lane between primary and failover trunks.  The
-        # larger separation also prevents long shared vertical runs from being
-        # painted directly on top of the primary route.
+        ) - lane_offset
         return min(
             preferred,
-            primary_lane - 190.0,
-            bus_left - required_span - 224.0,
+            primary_lane - 190.0 - lane_offset,
+            bus_left - required_span - 224.0 - lane_offset,
         )
 
     def _add_link_label(self, text: str, colour: QColor, point: QPointF, edge: Optional[TopologyEdge] = None) -> None:
@@ -5271,12 +5665,22 @@ class NetworkTopologyDialog(QDialog):
         target_pos = positions.get(node_id)
         if bus is None or target_pos is None:
             return
+        visual_key = self._edge_visual_key(edge)
+        drop_key = (node_id, bool(failover), visual_key)
+        if drop_key in self._drawn_bus_drops:
+            return
+        self._drawn_bus_drops.add(drop_key)
+
         bus_anchor, _bus_left, _bus_right = bus
         top = QPointF(
-            self._incoming_fibre_connection_x(node_id, positions, edge),
+            self._incoming_fibre_connection_x(node_id, positions, edge, failover=failover),
             target_pos.y(),
         )
-        path = QPainterPath(bus_anchor)
+        # Start directly above the selected card connector.  The previous
+        # centre-of-bus start created diagonal/common drops and stacked primary
+        # and failover fibres over one another.
+        bus_point = QPointF(top.x(), bus_anchor.y())
+        path = QPainterPath(bus_point)
         path.lineTo(top)
         item = QGraphicsPathItem(path)
         pen = QPen(colour, 2.0)
@@ -5285,6 +5689,7 @@ class NetworkTopologyDialog(QDialog):
         item.setPen(pen)
         item.setZValue(z_value)
         item.setAcceptedMouseButtons(Qt.NoButton)
+        item.setCacheMode(QGraphicsItem.NoCache)
         self.scene.addItem(item)
 
     def _add_link_rail(self, source_id: str, child_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
@@ -5370,6 +5775,8 @@ class NetworkTopologyDialog(QDialog):
                 trunk_item = QGraphicsPathItem(trunk)
                 trunk_item.setPen(trunk_pen)
                 trunk_item.setZValue(-1.0)
+                trunk_item.setAcceptedMouseButtons(Qt.NoButton)
+                trunk_item.setCacheMode(QGraphicsItem.NoCache)
                 self.scene.addItem(trunk_item)
                 for child_id, end, edge in endpoints:
                     failover = self._edge_is_failover(edge)
@@ -5396,6 +5803,8 @@ class NetworkTopologyDialog(QDialog):
             trunk_item = QGraphicsPathItem(trunk)
             trunk_item.setPen(trunk_pen)
             trunk_item.setZValue(-1.0)
+            trunk_item.setAcceptedMouseButtons(Qt.NoButton)
+            trunk_item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(trunk_item)
 
             for child_id, end, edge in endpoints:
@@ -5441,6 +5850,8 @@ class NetworkTopologyDialog(QDialog):
         trunk_item = QGraphicsPathItem(trunk)
         trunk_item.setPen(trunk_pen)
         trunk_item.setZValue(z_value)
+        trunk_item.setAcceptedMouseButtons(Qt.NoButton)
+        trunk_item.setCacheMode(QGraphicsItem.NoCache)
         self.scene.addItem(trunk_item)
 
         for child_id, end, edge in endpoints:
@@ -5618,9 +6029,15 @@ class NetworkTopologyDialog(QDialog):
         all_target_x = [point.x() for _target_id, point, _edge in target_rows]
         min_target_x = min(all_target_x)
         max_label_span = max(self._link_label_required_span(edge) for _t, _p, edge in target_rows)
+        representative_edge = target_rows[0][2] if target_rows else None
+        representative_target = target_rows[0][0] if target_rows else ""
+        representative_source = sources[0] if sources else ""
         trunk_x = self._failover_fibre_lane_x(
             min_target_x,
             max(150.0, max_label_span + 38.0),
+            representative_edge,
+            representative_source,
+            representative_target,
         )
 
         y_values: List[float] = []
@@ -5644,6 +6061,7 @@ class NetworkTopologyDialog(QDialog):
         trunk_item.setPen(QPen(colour, 2.2, Qt.DashLine))
         trunk_item.setZValue(-0.84)
         trunk_item.setAcceptedMouseButtons(Qt.NoButton)
+        trunk_item.setCacheMode(QGraphicsItem.NoCache)
         self.scene.addItem(trunk_item)
 
         # Join every standby source to the same vertical trunk.
@@ -5654,6 +6072,7 @@ class NetworkTopologyDialog(QDialog):
             item.setPen(QPen(colour, 2.0, Qt.DashLine))
             item.setZValue(-0.83)
             item.setAcceptedMouseButtons(Qt.NoButton)
+            item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(item)
 
         # Join every protected branch from the common trunk to its destination.
@@ -5676,6 +6095,7 @@ class NetworkTopologyDialog(QDialog):
             item.setPen(QPen(colour, 2.0, Qt.DashLine))
             item.setZValue(-0.82)
             item.setAcceptedMouseButtons(Qt.NoButton)
+            item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(item)
             if bus is not None:
                 self._add_bus_drop(target_id, positions, colour, failover=True, z_value=-0.8, edge=edge)
@@ -5724,7 +6144,10 @@ class NetworkTopologyDialog(QDialog):
                     self._link_label_required_span(edge)
                     for _target_id, _point, edge in endpoints
                 )
-                entry_x = self._failover_fibre_lane_x(bus_left, required_span)
+                entry_x = self._failover_fibre_lane_x(
+                    bus_left, required_span, representative_edge, source_id,
+                    endpoints[0][0] if endpoints else "",
+                )
                 bus_entry_x = bus_left
             else:
                 entry_x = bus_right + 68.0
@@ -5736,6 +6159,8 @@ class NetworkTopologyDialog(QDialog):
             trunk_item = QGraphicsPathItem(trunk)
             trunk_item.setPen(QPen(QColor("#d68f52"), 2.0, Qt.DashLine))
             trunk_item.setZValue(-0.82)
+            trunk_item.setAcceptedMouseButtons(Qt.NoButton)
+            trunk_item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(trunk_item)
             for target_id, end, edge in endpoints:
                 self._add_bus_drop(target_id, positions, QColor("#d68f52"), failover=True, z_value=-0.8, edge=edge)
@@ -5833,30 +6258,60 @@ class NetworkTopologyDialog(QDialog):
         centre_y = pos.y() + self._node_card_height(node_id) / 2.0
         if edge is None or _text(edge.medium).lower() != "fibre":
             return centre_y
-        # Keep both exits within the rounded card while making the two routes
-        # visibly independent from the moment they leave the core/distribution
-        # card.
+        # Keep primary above centre.  Every visible failover connection from
+        # the same source receives its own lower-side exit slot so dual-homed
+        # OLT paths do not share the first horizontal segment.
         offset = min(18.0, max(10.0, self._node_card_height(node_id) * 0.14))
-        return centre_y + offset if failover else centre_y - offset
+        if not failover:
+            return centre_y - offset
+        rows = sorted({
+            self._failover_riser_key(candidate, source_id, target_id)
+            for source_id, target_id, candidate in self._visible_drawn_fibre_edges
+            if source_id == node_id and self._edge_is_failover(candidate)
+        })
+        key = next(
+            (
+                self._failover_riser_key(candidate, source_id, target_id)
+                for source_id, target_id, candidate in self._visible_drawn_fibre_edges
+                if source_id == node_id
+                and edge is not None
+                and _text(candidate.edge_id) == _text(edge.edge_id)
+            ),
+            self._failover_riser_key(edge, node_id, ""),
+        )
+        try:
+            slot = rows.index(key)
+        except ValueError:
+            slot = 0
+        available = max(10.0, self._node_card_height(node_id) / 2.0 - 12.0)
+        pitch = min(10.0, available / max(1, len(rows)))
+        return centre_y + min(available, offset + slot * pitch)
 
     def _incoming_fibre_connection_x(
         self,
         node_id: str,
         positions: Dict[str, QPointF],
         edge: Optional[TopologyEdge],
+        failover: bool = False,
     ) -> float:
         """Return a separate top-edge position for bus-fed primary/failover fibres."""
         pos = positions[node_id]
         centre_x = pos.x() + self.CARD_W / 2.0
         if edge is None or _text(edge.medium).lower() != "fibre":
             return centre_x
+        incoming = self._incoming_fibre_edges_for_node(node_id, edge)
         selected_index, count = self._incoming_fibre_slot_index(node_id, edge)
         if count <= 1:
             return centre_x
         usable_width = max(20.0, self.CARD_W - 72.0)
         pitch = min(34.0, usable_width / max(1, count - 1))
         first_x = centre_x - pitch * (count - 1) / 2.0
-        return first_x + selected_index * pitch
+        x = first_x + selected_index * pitch
+        has_primary = any(not self._edge_is_failover(candidate) for candidate in incoming)
+        has_failover = any(self._edge_is_failover(candidate) for candidate in incoming)
+        if has_primary and has_failover:
+            x += 18.0 if failover else -18.0
+        return x
 
     def _add_link(
         self,
@@ -5910,14 +6365,21 @@ class NetworkTopologyDialog(QDialog):
             target_right_of_source = bus_anchor.x() >= start.x()
             required_span = self._link_label_required_span(edge)
             if target_right_of_source and failover_style:
-                entry_x = self._failover_fibre_lane_x(bus_left, required_span)
+                entry_x = self._failover_fibre_lane_x(
+                    bus_left, required_span, edge, source_id, target_id
+                )
             elif target_right_of_source:
                 entry_x = self._primary_fibre_lane_x(bus_left, required_span)
             else:
                 # Right-to-left links use mirrored, independently separated
                 # lanes on the far side of the destination bus.
                 primary_right = bus_right + required_span + 34.0
-                entry_x = primary_right + (120.0 if failover_style else 0.0)
+                lane_offset = (
+                    120.0
+                    + self._failover_lane_index(edge, source_id, target_id) * 72.0
+                    if failover_style else 0.0
+                )
+                entry_x = primary_right + lane_offset
             bus_entry_x = bus_left if target_right_of_source else bus_right
             path = QPainterPath(start)
             path.lineTo(QPointF(entry_x, start.y()))
@@ -5943,7 +6405,11 @@ class NetworkTopologyDialog(QDialog):
             return
         path = QPainterPath(start)
         if failover_style or alternate_cross_link:
-            bend = max(60.0, abs(end.x() - start.x()) * 0.20)
+            lane_offset = (
+                self._failover_lane_index(edge, source_id, target_id) * 72.0
+                if failover_style else 0.0
+            )
+            bend = max(60.0, abs(end.x() - start.x()) * 0.20) + lane_offset
             direction = -1.0 if end.x() >= start.x() else 1.0
             route_x = (start.x() + end.x()) / 2.0 + direction * bend
         else:
@@ -6893,6 +7359,11 @@ class NetworkTopologyDialog(QDialog):
             },
         }
 
+    def _rack_drag_cancelled(self, node_id: str) -> None:
+        state = self._rack_drag_state
+        if state and _text(state.get("anchor_id")) == _text(node_id):
+            self._rack_drag_state = {}
+
     def _rack_drag_moved(self, node_id: str, scene_position) -> None:
         """Keep every selected rack item aligned with the active drag item."""
         state = self._rack_drag_state
@@ -6960,6 +7431,9 @@ class NetworkTopologyDialog(QDialog):
         desired_start = top_u - units + 1
         original_start = max(1, _int(anchor_original.get("rack_start_u"), 1))
         delta_u = desired_start - original_start
+        if delta_u == 0 and rack_delta == 0:
+            self.rebuild_scene(fit=False)
+            return
 
         self._apply_rack_group_move(
             ids,
@@ -7083,8 +7557,9 @@ class NetworkTopologyDialog(QDialog):
                     QMessageBox.warning(
                         self,
                         operation_label,
-                        f"The move would overlap {other_id} in {plan['rack_name']} at "
-                        f"U{other_start}-U{other_end}.",
+                        f"The move would overlap "
+                        f"{_text(rows.get(other_id, {}).get('name')) or other_id} "
+                        f"in {plan['rack_name']} at U{other_start}-U{other_end}.",
                     )
                     self.rebuild_scene(fit=False)
                     return False
