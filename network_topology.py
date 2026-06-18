@@ -1332,6 +1332,15 @@ class TopologyCardItem(QGraphicsObject):
         event.accept()
 
 
+def _make_passive_graphics_item(item: QGraphicsItem) -> QGraphicsItem:
+    """Make decorative scene art unable to participate in mouse dispatch."""
+    item.setAcceptedMouseButtons(Qt.NoButton)
+    item.setAcceptHoverEvents(False)
+    item.setFlag(QGraphicsItem.ItemIsSelectable, False)
+    item.setCacheMode(QGraphicsItem.NoCache)
+    return item
+
+
 class RackCabinetBackgroundItem(QGraphicsObject):
     """Paint a complete rack frame, grid and U labels as one graphics item."""
 
@@ -1344,7 +1353,7 @@ class RackCabinetBackgroundItem(QGraphicsObject):
         self.unit_pitch = float(unit_pitch)
         self.used = max(0, int(used))
         self.selected = bool(selected)
-        self.setAcceptedMouseButtons(Qt.NoButton)
+        _make_passive_graphics_item(self)
         self.setZValue(-2.0)
 
     def boundingRect(self) -> QRectF:
@@ -1408,6 +1417,7 @@ class RackEquipmentItem(QGraphicsObject):
         self._drag_origin = QPointF()
         self._drag_press_screen = QPoint()
         self._drag_active = False
+        self._drag_moving = False
         self._build_port_rects()
 
     def boundingRect(self) -> QRectF:
@@ -1634,25 +1644,32 @@ class RackEquipmentItem(QGraphicsObject):
             self._drag_origin = QPointF(self.pos())
             self._drag_press_screen = QPoint(event.screenPos())
             self._drag_active = True
+            self._drag_moving = False
             super().mousePressEvent(event)
             self.activated.emit(self.node.node_id)
-            self.dragStarted.emit(self.node.node_id)
             event.accept()
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
         super().mouseMoveEvent(event)
-        if self._drag_active:
-            self.dragMoved.emit(self.node.node_id, QPointF(self.pos()))
+        if not self._drag_active:
+            return
+        screen_delta = QPoint(event.screenPos()) - self._drag_press_screen
+        threshold = max(6, QApplication.startDragDistance())
+        if not self._drag_moving:
+            if screen_delta.manhattanLength() < threshold:
+                return
+            self._drag_moving = True
+            self.dragStarted.emit(self.node.node_id)
+        self.dragMoved.emit(self.node.node_id, QPointF(self.pos()))
 
     def mouseReleaseEvent(self, event) -> None:
         delta = self.pos() - self._drag_origin
-        screen_delta = QPoint(event.screenPos()) - self._drag_press_screen
-        threshold = max(6, QApplication.startDragDistance())
-        moved = self._drag_active and screen_delta.manhattanLength() >= threshold
+        moved = self._drag_active and self._drag_moving
         super().mouseReleaseEvent(event)
         self._drag_active = False
+        self._drag_moving = False
         if moved:
             self.dragFinished.emit(self.node.node_id, QPointF(self.pos()))
             event.accept()
@@ -1893,6 +1910,7 @@ class SplitterFrontPanelItem(QGraphicsObject):
         self._drag_origin = QPointF()
         self._drag_press_screen = QPoint()
         self._drag_active = False
+        self._drag_moving = False
         self._build_port_rects()
 
     def boundingRect(self) -> QRectF:
@@ -1999,24 +2017,31 @@ class SplitterFrontPanelItem(QGraphicsObject):
             self._drag_origin = QPointF(self.pos())
             self._drag_press_screen = QPoint(event.screenPos())
             self._drag_active = True
+            self._drag_moving = False
             super().mousePressEvent(event)
             self.activated.emit(self.node.node_id)
-            self.dragStarted.emit(self.node.node_id)
             event.accept(); return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
         super().mouseMoveEvent(event)
-        if self._drag_active:
-            self.dragMoved.emit(self.node.node_id, QPointF(self.pos()))
+        if not self._drag_active:
+            return
+        screen_delta = QPoint(event.screenPos()) - self._drag_press_screen
+        threshold = max(6, QApplication.startDragDistance())
+        if not self._drag_moving:
+            if screen_delta.manhattanLength() < threshold:
+                return
+            self._drag_moving = True
+            self.dragStarted.emit(self.node.node_id)
+        self.dragMoved.emit(self.node.node_id, QPointF(self.pos()))
 
     def mouseReleaseEvent(self, event) -> None:
         delta = self.pos() - self._drag_origin
-        screen_delta = QPoint(event.screenPos()) - self._drag_press_screen
-        threshold = max(6, QApplication.startDragDistance())
-        moved = self._drag_active and screen_delta.manhattanLength() >= threshold
+        moved = self._drag_active and self._drag_moving
         super().mouseReleaseEvent(event)
         self._drag_active = False
+        self._drag_moving = False
         if moved:
             self.dragFinished.emit(self.node.node_id, QPointF(self.pos()))
             event.accept()
@@ -2089,6 +2114,7 @@ class LinkLabelItem(QGraphicsObject):
         self.setData(0, self.edge_id)
         self.setAcceptedMouseButtons(Qt.NoButton)
         self.setAcceptHoverEvents(False)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, False)
         self.setCacheMode(QGraphicsItem.NoCache)
 
     def boundingRect(self) -> QRectF:
@@ -2219,6 +2245,7 @@ class TopologyGraphicsView(QGraphicsView):
         self._pan_button = Qt.NoButton
         self._pan_start = QPoint()
         self._pending_pan_start = QPoint()
+        self._swallowed_mouse_buttons: Set[object] = set()
         self._pan_render_reduced = False
         # Keep enough room to pan past the diagram without making the scene
         # extent look like an oversized bounding box around the topology.  The
@@ -2284,6 +2311,19 @@ class TopologyGraphicsView(QGraphicsView):
         if viewport is not None:
             viewport.update()
 
+    def _swallow_mouse_button(self, button) -> None:  # noqa: ANN001
+        if button != Qt.NoButton:
+            self._swallowed_mouse_buttons.add(button)
+
+    def _release_swallowed_mouse_button(self, event) -> bool:  # noqa: ANN001
+        button = event.button()
+        if button not in self._swallowed_mouse_buttons:
+            return False
+        self._swallowed_mouse_buttons.discard(button)
+        event.accept()
+        self._request_full_repaint()
+        return True
+
     def contextMenuEvent(self, event) -> None:  # noqa: ANN001
         position = self._event_view_position(event)
         edge_id = self._edge_id_at(position)
@@ -2307,35 +2347,46 @@ class TopologyGraphicsView(QGraphicsView):
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.LeftButton:
-            if self._scene_item_at(event.position().toPoint()) is None:
+            position = self._event_view_position(event)
+            if self._scene_item_at(position) is None:
                 self.emptySceneDoubleClicked.emit(
-                    self.mapToScene(event.position().toPoint())
+                    self.mapToScene(position)
                 )
                 event.accept()
+                return
+            if self._interactive_item_at(position) is None:
+                event.accept()
+                self._request_full_repaint()
                 return
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         position = self._event_view_position(event)
-        clicked_item = self._interactive_item_at(position)
-        scene_item = clicked_item or self._scene_item_at(position)
+        interactive_item = self._interactive_item_at(position)
+        scene_item = interactive_item or self._scene_item_at(position)
+        button = event.button()
 
-        # The view owns middle-button panning everywhere, including over rack
-        # equipment and decorative/link paths.  No scene item sees the press.
-        if event.button() == Qt.MiddleButton:
-            self._queue_pan(event, Qt.MiddleButton)
+        if button in self._swallowed_mouse_buttons:
+            self._swallowed_mouse_buttons.discard(button)
+
+        # The view owns middle-button panning everywhere.  It starts only after
+        # a real drag so a middle-click on a line/background is just a click.
+        if button == Qt.MiddleButton:
+            self._queue_pan(event, button)
             return
 
-        # A right-button press is handled later by contextMenuEvent.  Avoid
-        # giving QGraphicsScene a pressed item that can enter a stale state.
-        if event.button() == Qt.RightButton:
+        # Right-click menus are driven by contextMenuEvent.  The press is
+        # consumed here, and the matching release is consumed below, so the
+        # scene never receives an unmatched right-button release.
+        if button == Qt.RightButton:
+            self._swallow_mouse_button(button)
             event.accept()
             return
 
         # Shift/Ctrl drag on empty space performs rubber-band multi-selection.
         if (
-            event.button() == Qt.LeftButton
-            and clicked_item is None
+            button == Qt.LeftButton
+            and interactive_item is None
             and scene_item is None
             and event.modifiers() & (Qt.ShiftModifier | Qt.ControlModifier)
         ):
@@ -2349,11 +2400,15 @@ class TopologyGraphicsView(QGraphicsView):
         # link/rack/background items are still scene items; treating them as
         # empty was the panning regression that made clicked graphics vanish
         # until the next scene rebuild.
-        if event.button() == Qt.LeftButton and clicked_item is None and scene_item is None:
-            self._queue_pan(event, Qt.LeftButton)
+        if button == Qt.LeftButton and interactive_item is None and scene_item is None:
+            self._queue_pan(event, button)
             return
 
-        if event.button() == Qt.LeftButton and clicked_item is None:
+        # A passive item was clicked.  It has no scene-level mouse behavior, so
+        # consume both press and release in the view instead of handing Qt an
+        # orphan release later.
+        if button == Qt.LeftButton and interactive_item is None:
+            self._swallow_mouse_button(button)
             event.accept()
             self._request_full_repaint()
             return
@@ -2393,6 +2448,8 @@ class TopologyGraphicsView(QGraphicsView):
         self._panning = False
         self._pending_pan = False
         self._pan_button = Qt.NoButton
+        self._swallowed_mouse_buttons.discard(Qt.MiddleButton)
+        self._swallowed_mouse_buttons.discard(Qt.LeftButton)
         self.viewport().unsetCursor()
         if self._pan_render_reduced:
             self.setRenderHints(self._normal_render_hints)
@@ -2405,6 +2462,9 @@ class TopologyGraphicsView(QGraphicsView):
             self._pan_button = Qt.NoButton
             event.accept()
             self._request_full_repaint()
+            return
+
+        if self._release_swallowed_mouse_button(event):
             return
 
         if self._rubber_band_selecting and event.button() == Qt.LeftButton:
@@ -2427,6 +2487,7 @@ class TopologyGraphicsView(QGraphicsView):
         if self._pending_pan:
             self._pending_pan = False
             self._pan_button = Qt.NoButton
+        self._swallowed_mouse_buttons.clear()
         if self._panning:
             self._finish_pan()
         super().leaveEvent(event)
@@ -5431,6 +5492,7 @@ class NetworkTopologyDialog(QDialog):
         room_title.setBrush(QBrush(QColor("#ffffff")))
         room_title.setPos(rack_left_start, 24.0)
         room_title.setZValue(-1.0)
+        _make_passive_graphics_item(room_title)
         self.scene.addItem(room_title)
 
     def _add_location_groups(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
@@ -5491,6 +5553,7 @@ class NetworkTopologyDialog(QDialog):
                 main_item.setPen(QPen(QColor("#6f8dff"), 2.2))
                 main_item.setZValue(-0.98)
                 main_item.setAcceptedMouseButtons(Qt.NoButton)
+                main_item.setFlag(QGraphicsItem.ItemIsSelectable, False)
                 main_item.setCacheMode(QGraphicsItem.NoCache)
                 self.scene.addItem(main_item)
 
@@ -5503,6 +5566,7 @@ class NetworkTopologyDialog(QDialog):
                     fail_item.setPen(fail_pen)
                     fail_item.setZValue(-0.86)
                     fail_item.setAcceptedMouseButtons(Qt.NoButton)
+                    fail_item.setFlag(QGraphicsItem.ItemIsSelectable, False)
                     fail_item.setCacheMode(QGraphicsItem.NoCache)
                     self.scene.addItem(fail_item)
 
@@ -5739,6 +5803,7 @@ class NetworkTopologyDialog(QDialog):
         item.setPen(pen)
         item.setZValue(z_value)
         item.setAcceptedMouseButtons(Qt.NoButton)
+        item.setFlag(QGraphicsItem.ItemIsSelectable, False)
         item.setCacheMode(QGraphicsItem.NoCache)
         self.scene.addItem(item)
 
@@ -5826,6 +5891,7 @@ class NetworkTopologyDialog(QDialog):
                 trunk_item.setPen(trunk_pen)
                 trunk_item.setZValue(-1.0)
                 trunk_item.setAcceptedMouseButtons(Qt.NoButton)
+                trunk_item.setFlag(QGraphicsItem.ItemIsSelectable, False)
                 trunk_item.setCacheMode(QGraphicsItem.NoCache)
                 self.scene.addItem(trunk_item)
                 for child_id, end, edge in endpoints:
@@ -5854,6 +5920,7 @@ class NetworkTopologyDialog(QDialog):
             trunk_item.setPen(trunk_pen)
             trunk_item.setZValue(-1.0)
             trunk_item.setAcceptedMouseButtons(Qt.NoButton)
+            trunk_item.setFlag(QGraphicsItem.ItemIsSelectable, False)
             trunk_item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(trunk_item)
 
@@ -5901,6 +5968,7 @@ class NetworkTopologyDialog(QDialog):
         trunk_item.setPen(trunk_pen)
         trunk_item.setZValue(z_value)
         trunk_item.setAcceptedMouseButtons(Qt.NoButton)
+        trunk_item.setFlag(QGraphicsItem.ItemIsSelectable, False)
         trunk_item.setCacheMode(QGraphicsItem.NoCache)
         self.scene.addItem(trunk_item)
 
@@ -6111,6 +6179,7 @@ class NetworkTopologyDialog(QDialog):
         trunk_item.setPen(QPen(colour, 2.2, Qt.DashLine))
         trunk_item.setZValue(-0.84)
         trunk_item.setAcceptedMouseButtons(Qt.NoButton)
+        trunk_item.setFlag(QGraphicsItem.ItemIsSelectable, False)
         trunk_item.setCacheMode(QGraphicsItem.NoCache)
         self.scene.addItem(trunk_item)
 
@@ -6122,6 +6191,7 @@ class NetworkTopologyDialog(QDialog):
             item.setPen(QPen(colour, 2.0, Qt.DashLine))
             item.setZValue(-0.83)
             item.setAcceptedMouseButtons(Qt.NoButton)
+            item.setFlag(QGraphicsItem.ItemIsSelectable, False)
             item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(item)
 
@@ -6145,6 +6215,7 @@ class NetworkTopologyDialog(QDialog):
             item.setPen(QPen(colour, 2.0, Qt.DashLine))
             item.setZValue(-0.82)
             item.setAcceptedMouseButtons(Qt.NoButton)
+            item.setFlag(QGraphicsItem.ItemIsSelectable, False)
             item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(item)
             if bus is not None:
@@ -6210,6 +6281,7 @@ class NetworkTopologyDialog(QDialog):
             trunk_item.setPen(QPen(QColor("#d68f52"), 2.0, Qt.DashLine))
             trunk_item.setZValue(-0.82)
             trunk_item.setAcceptedMouseButtons(Qt.NoButton)
+            trunk_item.setFlag(QGraphicsItem.ItemIsSelectable, False)
             trunk_item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(trunk_item)
             for target_id, end, edge in endpoints:
