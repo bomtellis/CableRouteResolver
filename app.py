@@ -1,6 +1,5 @@
 import os
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED, as_completed
-from itertools import combinations
 from copy import deepcopy
 import re
 import subprocess
@@ -84,7 +83,6 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QGraphicsPathItem,
     QDockWidget,
-    QTabWidget,
     QListWidgetItem,
 )
 
@@ -3525,6 +3523,20 @@ class CableRouteEditor(QMainWindow):
         canvas = getattr(self, "canvas", None)
         if canvas is None:
             return
+
+        # Mouse-move updates happen many times per second.  On large projects
+        # redrawing the complete edge/routing layer every time is slow enough
+        # that the dragged marker can appear not to move until release.  Prefer
+        # the renderer's lightweight live-drag path, then let on_left_release()
+        # perform the full edge/object redraw once the final position is known.
+        if (
+            getattr(self, "drag_mode_active", False)
+            and getattr(self, "dragging_point_name", None)
+            and hasattr(canvas, "notify_moving_object_changed")
+        ):
+            canvas.notify_moving_object_changed()
+            return
+
         if hasattr(canvas, "notify_store_changed"):
             canvas.notify_store_changed()
             return

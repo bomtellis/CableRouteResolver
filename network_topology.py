@@ -133,6 +133,11 @@ def _expanded_asset_ports(asset: dict) -> List[dict]:
     return result
 
 
+# Keep rack-view mouse interactions disabled while the disappearing-rack issue
+# is isolated. The view owns this gate so item-level handlers stay normal.
+RACK_VIEW_MOUSE_EVENTS_ENABLED = False
+
+
 def _canonical_port_name(asset: dict, observed_name: str, defined_ports: Sequence[dict]) -> str:
     """Map legacy/generated aliases onto the declared physical port list.
 
@@ -1337,7 +1342,6 @@ def _make_passive_graphics_item(item: QGraphicsItem) -> QGraphicsItem:
     item.setAcceptedMouseButtons(Qt.NoButton)
     item.setAcceptHoverEvents(False)
     item.setFlag(QGraphicsItem.ItemIsSelectable, False)
-    item.setCacheMode(QGraphicsItem.NoCache)
     return item
 
 
@@ -1652,16 +1656,18 @@ class RackEquipmentItem(QGraphicsObject):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
-        super().mouseMoveEvent(event)
         if not self._drag_active:
+            super().mouseMoveEvent(event)
             return
         screen_delta = QPoint(event.screenPos()) - self._drag_press_screen
         threshold = max(6, QApplication.startDragDistance())
         if not self._drag_moving:
             if screen_delta.manhattanLength() < threshold:
+                event.accept()
                 return
             self._drag_moving = True
             self.dragStarted.emit(self.node.node_id)
+        super().mouseMoveEvent(event)
         self.dragMoved.emit(self.node.node_id, QPointF(self.pos()))
 
     def mouseReleaseEvent(self, event) -> None:
@@ -2024,16 +2030,18 @@ class SplitterFrontPanelItem(QGraphicsObject):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
-        super().mouseMoveEvent(event)
         if not self._drag_active:
+            super().mouseMoveEvent(event)
             return
         screen_delta = QPoint(event.screenPos()) - self._drag_press_screen
         threshold = max(6, QApplication.startDragDistance())
         if not self._drag_moving:
             if screen_delta.manhattanLength() < threshold:
+                event.accept()
                 return
             self._drag_moving = True
             self.dragStarted.emit(self.node.node_id)
+        super().mouseMoveEvent(event)
         self.dragMoved.emit(self.node.node_id, QPointF(self.pos()))
 
     def mouseReleaseEvent(self, event) -> None:
@@ -2292,6 +2300,39 @@ class TopologyGraphicsView(QGraphicsView):
             return value.toPoint() if hasattr(value, "toPoint") else QPoint(value)
         return QPoint()
 
+    def _rack_mouse_events_blocked(self) -> bool:
+        parent = self.parent()
+        return bool(
+            not RACK_VIEW_MOUSE_EVENTS_ENABLED
+            and parent is not None
+            and getattr(parent, "rack_focus", None) is not None
+        )
+
+    def _log_blocked_rack_mouse_event(self, event_name: str, event) -> None:  # noqa: ANN001
+        position = self._event_view_position(event)
+        parent = self.parent()
+        rack_focus = getattr(parent, "rack_focus", None) if parent is not None else None
+        button = getattr(event, "button", lambda: Qt.NoButton)()
+        print(
+            "Rack-view mouse event blocked: "
+            f"event={event_name} button={int(button)} "
+            f"view=({position.x()},{position.y()}) rack_focus={rack_focus}",
+            flush=True,
+        )
+
+    def _block_rack_mouse_event(self, event_name: str, event, *, reset_gesture: bool = False) -> bool:  # noqa: ANN001
+        if not self._rack_mouse_events_blocked():
+            return False
+        self._log_blocked_rack_mouse_event(event_name, event)
+        if reset_gesture:
+            self._pending_pan = False
+            self._panning = False
+            self._pan_button = Qt.NoButton
+            self._swallowed_mouse_buttons.clear()
+            self._resume_scene_interaction()
+        event.accept()
+        return True
+
     def _edge_id_at(self, position: QPoint) -> str:
         """Return the uppermost visible link/label edge id at *position*."""
         for hit in self.items(position):
@@ -2346,6 +2387,8 @@ class TopologyGraphicsView(QGraphicsView):
         return True
 
     def contextMenuEvent(self, event) -> None:  # noqa: ANN001
+        if self._block_rack_mouse_event("context", event):
+            return
         position = self._event_view_position(event)
         edge_id = self._edge_id_at(position)
         if edge_id:
@@ -2367,6 +2410,8 @@ class TopologyGraphicsView(QGraphicsView):
         QTimer.singleShot(0, self._request_full_repaint)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
+        if self._block_rack_mouse_event("double_click", event):
+            return
         if event.button() == Qt.LeftButton:
             position = self._event_view_position(event)
             if self._edge_id_at(position):
@@ -2385,6 +2430,8 @@ class TopologyGraphicsView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
+        if self._block_rack_mouse_event("press", event):
+            return
         position = self._event_view_position(event)
         edge_id = self._edge_id_at(position)
         interactive_item = self._interactive_item_at(position)
@@ -2471,6 +2518,8 @@ class TopologyGraphicsView(QGraphicsView):
         self._request_full_repaint()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: ANN001
+        if self._block_rack_mouse_event("move", event):
+            return
         if self._pending_pan:
             current = self._event_view_position(event)
             if (current - self._pending_pan_start).manhattanLength() < QApplication.startDragDistance():
@@ -2511,6 +2560,8 @@ class TopologyGraphicsView(QGraphicsView):
         self._request_full_repaint()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if self._block_rack_mouse_event("release", event, reset_gesture=True):
+            return
         button = event.button()
 
         if button == Qt.MiddleButton:
@@ -4894,7 +4945,10 @@ class NetworkTopologyDialog(QDialog):
     def rebuild_scene(self, fit: bool = False) -> None:
         selected_id = ""
         selected_items = self.scene.selectedItems()
-        if selected_items and isinstance(selected_items[0], TopologyCardItem):
+        if selected_items and isinstance(
+            selected_items[0],
+            (TopologyCardItem, RackEquipmentItem, SplitterFrontPanelItem, RackPduItem),
+        ):
             selected_id = selected_items[0].node.node_id
 
         self.scene.clear()

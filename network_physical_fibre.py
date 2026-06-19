@@ -10,7 +10,7 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFrame, QGraphicsItem, QGraphicsObject,
-    QGraphicsPathItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QMenu,
+    QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QHBoxLayout, QLabel, QMenu,
     QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -76,6 +76,122 @@ class FibreMapView(QGraphicsView):
             self.resetTransform(); self.fitInView(rect, Qt.KeepAspectRatio)
 
 
+class FibreMapLabelItem(QGraphicsSimpleTextItem):
+    """Screen-stable label for map annotations.
+
+    The physical-fibre map uses project/DXF world coordinates, so text painted
+    directly into the scene can become stretched or widely spaced after view
+    transforms. These labels stay in device text coordinates while their anchor
+    remains tied to the floor-plan position.
+    """
+    def __init__(
+        self,
+        text: str,
+        colour: QColor,
+        offset: QPointF = QPointF(0.0, 0.0),
+        font_px: int = 12,
+        bold: bool = False,
+        minimum_lod: float = 0.0,
+        background: Optional[QColor] = None,
+        z_value: float = 1.0,
+    ):
+        label_text = _text(text)
+        super().__init__(label_text)
+        self.label_text = label_text
+        self.offset = QPointF(offset)
+        self.font_px = max(8, int(font_px))
+        self.bold = bool(bold)
+        self.minimum_lod = max(0.0, float(minimum_lod or 0.0))
+        self.background = QColor(background) if background is not None else None
+        font = QFont("Arial")
+        font.setPixelSize(self.font_px)
+        font.setBold(self.bold)
+        self.setFont(font)
+        self.setBrush(QColor(colour))
+        self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        self.setZValue(z_value)
+
+    def boundingRect(self):
+        return super().boundingRect().translated(self.offset).adjusted(-4.0, -3.0, 4.0, 3.0)
+
+    def _view_lod(self) -> float:
+        views = self.scene().views() if self.scene() else []
+        return abs(views[0].transform().m11()) if views else 1.0
+
+    def paint(self, painter, option, widget=None):
+        if not self.label_text or self._view_lod() < self.minimum_lod:
+            return
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        text_rect = super().boundingRect().translated(self.offset)
+        if self.background is not None:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self.background)
+            painter.drawRoundedRect(text_rect.adjusted(-4.0, -2.0, 4.0, 2.0), 4.0, 4.0)
+        painter.save()
+        painter.translate(self.offset)
+        super().paint(painter, option, widget)
+        painter.restore()
+
+
+class FibreFloorContextItem(QGraphicsObject):
+    """Low-contrast building context drawn behind the fibre overlay."""
+    def __init__(
+        self,
+        route_edges: Sequence[tuple[QPointF, QPointF]],
+        room_points: Sequence[QPointF],
+        departments: Sequence[dict],
+    ):
+        super().__init__()
+        self.room_points = list(room_points)
+        self.departments = list(departments)
+        self.route_path = QPainterPath()
+        self._bounds = QRectF()
+        first = True
+        for start, end in route_edges:
+            self.route_path.moveTo(start)
+            self.route_path.lineTo(end)
+            edge_bounds = QRectF(start, end).normalized()
+            self._bounds = edge_bounds if first else self._bounds.united(edge_bounds)
+            first = False
+        for point in self.room_points:
+            marker = QRectF(point.x() - 0.6, point.y() - 0.6, 1.2, 1.2)
+            self._bounds = marker if first else self._bounds.united(marker)
+            first = False
+        for department in self.departments:
+            point = department.get("point", QPointF())
+            marker = QRectF(point.x() - 4.5, point.y() - 4.5, 9.0, 9.0)
+            self._bounds = marker if first else self._bounds.united(marker)
+            first = False
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        self.setZValue(-4.0)
+
+    def boundingRect(self):
+        return self._bounds.adjusted(-6.0, -6.0, 6.0, 6.0) if not self._bounds.isNull() else QRectF()
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        if self.room_points:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(105, 121, 132, 72))
+            lod = max(0.001, abs(painter.worldTransform().m11()))
+            radius = 0.75 if lod >= 0.75 else 1.05
+            exposed = option.exposedRect.adjusted(-2.0, -2.0, 2.0, 2.0)
+            for point in self.room_points:
+                if exposed.contains(point):
+                    painter.drawEllipse(point, radius, radius)
+        if not self.route_path.isEmpty():
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#40505b"), 0.32, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(self.route_path)
+        for department in self.departments:
+            point = department.get("point", QPointF())
+            rect = QRectF(point.x() - 3.2, point.y() - 3.2, 6.4, 6.4)
+            painter.setPen(QPen(QColor("#7ae1d0"), 0.38))
+            painter.setBrush(QColor(47, 155, 139, 62))
+            painter.drawRoundedRect(rect, 1.5, 1.5)
+
+
 class FibreNodeItem(QGraphicsObject):
     contextRequested = Signal(str, object)
     moved = Signal(str, float, float)
@@ -86,17 +202,17 @@ class FibreNodeItem(QGraphicsObject):
         self.node = node
         self.traced = traced
         self.symbol_scale = max(0.035, float(symbol_scale or 0.075))
-        # Store the symbol dimensions in scene units. The view transform then
-        # enlarges or reduces the icon with the rest of the floor drawing.
-        self._size = max(3.2, min(10.0, 5.0 * self.symbol_scale / 0.075))
+        self._size = max(20.0, min(44.0, 26.0 * self.symbol_scale / 0.075))
         self.setFlags(
             QGraphicsItem.ItemIsSelectable
             | QGraphicsItem.ItemIsMovable
             | QGraphicsItem.ItemSendsGeometryChanges
+            | QGraphicsItem.ItemIgnoresTransformations
         )
-        self.setCacheMode(QGraphicsItem.ItemCoordinateCache)
+        self.setCacheMode(QGraphicsItem.NoCache)
         self.setAcceptHoverEvents(True)
         self.setToolTip(self._tooltip())
+        self.setZValue(2.0)
 
     def boundingRect(self):
         return QRectF(-self._size / 2.0, -self._size / 2.0, self._size, self._size)
@@ -113,20 +229,20 @@ class FibreNodeItem(QGraphicsObject):
             "handhole": QColor("#77838d"), "chamber": QColor("#53616d"),
         }.get(node_type, QColor("#77838d"))
         border = QColor("#ff8a24") if self.traced else (QColor("#8fc7ff") if self.isSelected() else QColor("#d5dce1"))
-        pen_width = max(0.35, self._size * (0.10 if self.traced or self.isSelected() else 0.065))
+        pen_width = 2.8 if self.traced or self.isSelected() else 1.7
         painter.setPen(QPen(border, pen_width))
         painter.setBrush(colour)
-        inset = max(0.35, self._size * 0.09)
+        inset = 2.8
         rect = self.boundingRect().adjusted(inset, inset, -inset, -inset)
         if node_type in {"splice_enclosure", "fibre_joint"}: painter.drawEllipse(rect)
         elif node_type == "splice_cassette":
-            painter.drawRoundedRect(rect.adjusted(0, 2, 0, -2), 2, 2)
-            painter.drawLine(QPointF(rect.left()+2, -1), QPointF(rect.right()-2, -1)); painter.drawLine(QPointF(rect.left()+2, 2), QPointF(rect.right()-2, 2))
+            painter.drawRoundedRect(rect.adjusted(0, 3, 0, -3), 4, 4)
+            painter.drawLine(QPointF(rect.left()+4, -3), QPointF(rect.right()-4, -3)); painter.drawLine(QPointF(rect.left()+4, 3), QPointF(rect.right()-4, 3))
         elif node_type in {"handhole", "chamber"}: painter.drawRect(rect)
-        else: painter.drawRoundedRect(rect, 3, 3)
+        else: painter.drawRoundedRect(rect, 5, 5)
         painter.setPen(QColor("#ffffff"))
         font = QFont("Arial")
-        font.setPixelSize(max(1, int(round(self._size * 0.24))))
+        font.setPixelSize(max(9, int(round(self._size * 0.30))))
         font.setBold(True)
         painter.setFont(font)
         initials = {"splice_enclosure":"SE","splice_cassette":"SC","fibre_joint":"J","termination":"T","handhole":"HH","chamber":"CH"}.get(node_type,"F")
@@ -140,14 +256,12 @@ class FibreNodeItem(QGraphicsObject):
 
 
 class FibreCableBatchItem(QGraphicsObject):
-    """One graphics item for all static fibre paths and labels on a floor."""
-    def __init__(self, records: Sequence[dict], labels: Sequence[dict], context_callback: Callable[[str, QPoint], None], width_scale: float = 0.18, label_scale: float = 0.09):
+    """One graphics item for a batch of static fibre paths on a floor."""
+    def __init__(self, records: Sequence[dict], context_callback: Callable[[str, QPoint], None], width_scale: float = 0.18):
         super().__init__()
         self.records = list(records)
-        self.labels = list(labels)
         self.context_callback = context_callback
         self.width_scale = max(0.05, float(width_scale or 0.18))
-        self.label_scale = max(0.035, float(label_scale or 0.09))
         self.normal_path = QPainterPath(); self.traced_path = QPainterPath(); self._bounds = QRectF()
         first = True
         for record in self.records:
@@ -160,10 +274,6 @@ class FibreCableBatchItem(QGraphicsObject):
                 target_path.lineTo(point)
             bounds = record.get("bounds", QRectF())
             self._bounds = bounds if first else self._bounds.united(bounds); first = False
-        for label in self.labels:
-            point = label.get("point", QPointF())
-            marker = QRectF(point.x()-1, point.y()-1, 2, 2)
-            self._bounds = marker if first else self._bounds.united(marker); first = False
         self.setZValue(-0.2)
         # A device-coordinate pixmap cache is expensive for floor-sized paths
         # and is rebuilt whenever the view scale changes. Batched vector paths
@@ -175,9 +285,8 @@ class FibreCableBatchItem(QGraphicsObject):
         return self._bounds.adjusted(-4, -4, 4, 4) if not self._bounds.isNull() else QRectF(-1, -1, 2, 2)
 
     def paint(self, painter, option, widget=None):
-        lod = max(0.001, abs(painter.worldTransform().m11()))
         # Cable widths are scene dimensions rather than cosmetic screen-pixel
-        # widths. Zooming therefore scales cables, nodes and labels together.
+        # widths so routed plant remains proportional to the floor geometry.
         normal_pen = QPen(
             QColor("#6f8dff"),
             max(0.22, 0.48 * self.width_scale / 0.18),
@@ -197,30 +306,6 @@ class FibreCableBatchItem(QGraphicsObject):
         painter.drawPath(self.normal_path)
         painter.setPen(traced_pen)
         painter.drawPath(self.traced_path)
-
-        # Labels remain hidden at whole-floor zoom for legibility, but their
-        # font and offset are fixed in scene units. Once shown, camera zoom
-        # enlarges them at the same rate as symbols and cable geometry.
-        if lod < 0.72:
-            return
-        requested_scene_px = 1.25 * self.label_scale / 0.09
-        scene_px = max(0.85, min(2.0, requested_scene_px))
-        exposed = option.exposedRect.adjusted(-10.0, -10.0, 10.0, 10.0)
-        for label in self.labels:
-            minimum_lod = float(label.get("minimum_lod", 0.30))
-            if lod < minimum_lod:
-                continue
-            point = label.get("point", QPointF())
-            if not exposed.contains(point):
-                continue
-            font_scale = max(0.6, min(1.4, float(label.get("font_scale", 1.0))))
-            font = QFont("Arial")
-            font.setBold(bool(label.get("bold", True)))
-            font.setPixelSize(max(1, int(round(scene_px * font_scale))))
-            painter.setFont(font)
-            painter.setPen(label.get("colour", QColor("#b8c8ff")))
-            offset = label.get("offset", QPointF(1.5, -3.0))
-            painter.drawText(point + offset, _text(label.get("text")))
 
     @staticmethod
     def _distance_to_segment(point: QPointF, a: QPointF, b: QPointF) -> float:
@@ -267,7 +352,7 @@ class PhysicalFibreTopologyDialog(QDialog):
         self.trace = circuit_trace(self.data, initial_trace_connection_id) if initial_trace_connection_id else {}
         self._route_points_cache: Optional[Dict[str, dict]] = None
         self._cable_geometry_cache: Dict[int, List[dict]] = {}
-        self._base_graph_cache: Dict[int, QPainterPath] = {}
+        self._base_graph_cache: Dict[int, dict] = {}
         self._instances_cache: Optional[Dict[str, dict]] = None
         self._building = False
         self._initial_build_pending = True
@@ -365,7 +450,7 @@ class PhysicalFibreTopologyDialog(QDialog):
     def _invalidate_geometry(self, changed: Optional[Sequence[str]] = None):
         keys = set(changed or ())
         if not keys or keys.intersection({
-            "corridors", "locations", "data_points", "transitions",
+            "corridors", "locations", "data_points", "transitions", "departments",
             "network_asset_instances", "network_fibre_cables",
         }):
             self._route_points_cache = None
@@ -517,10 +602,11 @@ class PhysicalFibreTopologyDialog(QDialog):
             floor = self._floor(); layer = self._layer_settings()
             self.layer_label.setText(f"DXF layers: {layer.get('cable_layer','NET-FIBRE-CABLE')} / {layer.get('splice_layer','NET-FIBRE-SPLICE')}")
             symbol_scale = self._compact_scale(layer.get("symbol_scale"), (0.32, 0.18, 0.12), 0.075, 0.035, 0.24)
-            label_scale = self._compact_scale(layer.get("label_scale"), (0.55, 0.30, 0.18, 0.14), 0.09, 0.035, 0.18)
             width_scale = self._compact_scale(layer.get("cable_width_scale"), (0.55, 0.30, 0.22), 0.18, 0.05, 0.32)
             route_points = self._all_route_points()
-            if layer.get("show_base_graph", True): self._draw_base_graph(floor, route_points)
+            context_rect = QRectF()
+            if layer.get("show_base_graph", True):
+                context_rect = self._draw_base_graph(floor, route_points)
             traced_cables = set(self.trace.get("fibre_cable_ids", [])); traced_splices = set(self.trace.get("splice_ids", []))
 
             floor_nodes = [
@@ -568,8 +654,10 @@ class PhysicalFibreTopologyDialog(QDialog):
                     "text": label_text,
                     "colour": QColor("#ffb25f") if traced else QColor("#b8c8ff"),
                     "minimum_lod": minimum_lod,
-                    "offset": QPointF(1.0, -1.7),
-                    "font_scale": 1.0,
+                    "offset": QPointF(9.0, -7.0),
+                    "font_px": 12,
+                    "bold": traced,
+                    "background": QColor(13, 20, 27, 190),
                 })
 
             for node in floor_nodes:
@@ -582,8 +670,10 @@ class PhysicalFibreTopologyDialog(QDialog):
                     "text": _text(node.get("label")) or _text(node.get("name")),
                     "colour": QColor("#dce5ea"),
                     "minimum_lod": 0.90,
-                    "offset": QPointF(item._size * 0.58, -item._size * 0.36),
-                    "font_scale": 0.90,
+                    "offset": QPointF(item._size * 0.56, -item._size * 0.18),
+                    "font_px": 12,
+                    "bold": True,
+                    "background": QColor(13, 20, 27, 180),
                 })
                 count = splice_counts.get(_text(node.get("id")), 0)
                 if layer.get("show_splice_labels", True) and count:
@@ -592,8 +682,9 @@ class PhysicalFibreTopologyDialog(QDialog):
                         "text": f"{count} splice{'s' if count != 1 else ''}",
                         "colour": QColor("#d5a5f1"),
                         "minimum_lod": 1.35,
-                        "offset": QPointF(item._size * 0.58, item._size * 0.16),
-                        "font_scale": 0.75,
+                        "offset": QPointF(item._size * 0.56, item._size * 0.32),
+                        "font_px": 11,
+                        "background": QColor(13, 20, 27, 170),
                     })
 
             if cable_records or labels:
@@ -614,26 +705,33 @@ class PhysicalFibreTopologyDialog(QDialog):
                     )
 
                 tiled_records: Dict[tuple[int, int], List[dict]] = defaultdict(list)
-                tiled_labels: Dict[tuple[int, int], List[dict]] = defaultdict(list)
                 geometry_midpoints = {record["cable_id"]: record["midpoint"] for record in geometry}
                 for record in cable_records:
                     tiled_records[tile_key(geometry_midpoints.get(record["cable_id"], QPointF()))].append(record)
-                for label in labels:
-                    tiled_labels[tile_key(label.get("point", QPointF()))].append(label)
-                for key in sorted(set(tiled_records) | set(tiled_labels)):
+                for key in sorted(tiled_records):
                     self.scene.addItem(FibreCableBatchItem(
                         tiled_records.get(key, []),
-                        tiled_labels.get(key, []),
                         self._cable_context,
                         width_scale,
-                        label_scale,
                     ))
+                for label in labels:
+                    label_item = FibreMapLabelItem(
+                        _text(label.get("text")),
+                        label.get("colour", QColor("#dce5ea")),
+                        label.get("offset", QPointF(9.0, -7.0)),
+                        _int(label.get("font_px"), 12),
+                        bool(label.get("bold", False)),
+                        float(label.get("minimum_lod", 0.0)),
+                        label.get("background"),
+                        3.0,
+                    )
+                    label_item.setPos(label.get("point", QPointF()))
+                    self.scene.addItem(label_item)
 
             content_rect = QRectF()
             have_bounds = False
-            base_path = self._base_graph_cache.get(floor)
-            if base_path is not None and not base_path.isEmpty():
-                content_rect = base_path.boundingRect(); have_bounds = True
+            if not context_rect.isEmpty():
+                content_rect = context_rect; have_bounds = True
             for record in geometry:
                 bounds = record.get("bounds", QRectF())
                 if bounds.isEmpty():
@@ -658,28 +756,54 @@ class PhysicalFibreTopologyDialog(QDialog):
             self.status.setText(
                 f"Floor {floor}: {len(cable_records)} routed fibre cables, {len(floor_nodes)} fibre nodes, {floor_splices} core splices · "
                 f"{failed_paths} optical path{'s' if failed_paths != 1 else ''} outside budget · "
-                f"loaded in {elapsed:.2f} s · symbols and labels scale with camera zoom"
+                f"loaded in {elapsed:.2f} s · crisp symbols, labels and floor context"
             )
         finally:
             self._building = False
             self.view.setUpdatesEnabled(True)
             self.view.viewport().update()
 
-    def _draw_base_graph(self, floor, points):
-        path = self._base_graph_cache.get(floor)
-        if path is None:
-            path = QPainterPath()
+    def _draw_base_graph(self, floor, points) -> QRectF:
+        context = self._base_graph_cache.get(floor)
+        if context is None:
+            edges = []
+            room_points = []
+            departments = []
             for edge in self.data.get("corridors", {}).get("edges", []):
                 if not isinstance(edge, dict): continue
                 a = points.get(_text(edge.get("from"))); b = points.get(_text(edge.get("to")))
                 if not a or not b or _int(a.get("floor")) != floor or _int(b.get("floor")) != floor: continue
-                path.moveTo(QPointF(_float(a.get("x")), -_float(a.get("y")))); path.lineTo(QPointF(_float(b.get("x")), -_float(b.get("y"))))
-            self._base_graph_cache[floor] = path
-        if not path.isEmpty():
-            item = QGraphicsPathItem(path)
-            item.setPen(QPen(QColor("#2d3740"), 0.22))
-            item.setZValue(-2)
+                edges.append((QPointF(_float(a.get("x")), -_float(a.get("y"))), QPointF(_float(b.get("x")), -_float(b.get("y")))))
+            for row in self.data.get("locations", []):
+                if isinstance(row, dict) and _int(row.get("floor")) == floor:
+                    room_points.append(QPointF(_float(row.get("x")), -_float(row.get("y"))))
+            for row in self.data.get("departments", []):
+                if not isinstance(row, dict) or _int(row.get("floor")) != floor:
+                    continue
+                departments.append({
+                    "id": _text(row.get("id")),
+                    "name": _text(row.get("name")) or _text(row.get("id")),
+                    "point": QPointF(_float(row.get("x")), -_float(row.get("y"))),
+                })
+            context = {"edges": edges, "room_points": room_points, "departments": departments}
+            self._base_graph_cache[floor] = context
+        item = FibreFloorContextItem(context.get("edges", []), context.get("room_points", []), context.get("departments", []))
+        if not item.boundingRect().isEmpty():
             self.scene.addItem(item)
+        for department in context.get("departments", []):
+            label_item = FibreMapLabelItem(
+                department.get("name", ""),
+                QColor("#9af2e4"),
+                QPointF(8.0, -8.0),
+                12,
+                True,
+                0.36,
+                QColor(10, 25, 29, 160),
+                -3.0,
+            )
+            label_item.setPos(department.get("point", QPointF()))
+            self.scene.addItem(label_item)
+        return item.boundingRect()
 
     def _fit(self): self.view.fit_content()
     def refresh(self):

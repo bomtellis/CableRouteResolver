@@ -936,6 +936,21 @@ class GpuDxfGraphView(_ViewBase):
 
     notify_store_changed = invalidate_store_cache
 
+    def invalidate_moving_object_cache(self) -> None:
+        """Refresh movable graph objects during a drag without redrawing edges.
+
+        Large projects can contain thousands of routing/cable edges.  Repainting
+        that edge layer for every mouse-move makes dragged items appear frozen
+        until the button is released.  During the live drag the endpoint marker
+        positions are the important visual feedback, so only the object layer is
+        invalidated.  The editor performs one full edge/object refresh on
+        release so connected routes end in the correct final position.
+        """
+        self._frame_snapshot = None
+        self.request_redraw(DirtyLayer.OBJECTS)
+
+    notify_moving_object_changed = invalidate_moving_object_cache
+
     def _dxf_source_key(self, scene: Any) -> Tuple[Any, ...]:
         entities = getattr(scene, "entities", None) if scene is not None else None
         return (
