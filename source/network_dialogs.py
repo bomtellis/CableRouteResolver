@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QWizard,
+    QWizardPage,
 )
 
 NETWORK_ASSET_TYPES = [
@@ -76,13 +78,14 @@ from network_fibre_dialogs import (
     FibreSpliceEditorDialog, PatchLeadEditorDialog,
 )
 from network_schema import (
+    ASSET_MODEL_PREFERENCE_COMPONENTS,
     MANUFACTURER_PREFERENCE_COMPONENTS,
-    MODULAR_PANEL_FRONT_CONNECTORS,
     NETWORK_PORT_SPEED_OPTIONS,
     PLUGGABLE_OPTIC_PORT_TYPES,
     compatible_port_speeds,
     default_layer_connection_rules,
     default_port_speeds,
+    normalise_asset_model_preferences,
     normalise_layer_connection_rules,
     normalise_manufacturer_preferences,
     normalise_port_speeds,
@@ -288,46 +291,21 @@ class NetworkAssetEditorDialog(QDialog):
             self.patch_panel_format_combo.setCurrentIndex(format_index)
 
         self.patch_panel_cassette_count_spin = QSpinBox()
-        self.patch_panel_cassette_count_spin.setRange(1, 48)
+        self.patch_panel_cassette_count_spin.setRange(1, 4)
         self.patch_panel_cassette_count_spin.setValue(
-            max(1, min(48, int(self.asset.get("patch_panel_cassette_count", 4) or 4)))
+            max(1, min(4, int(self.asset.get("patch_panel_cassette_count", 4) or 4)))
         )
         self.patch_panel_cassette_count_spin.setSuffix(" cassettes")
         self.patch_panel_cassette_count_spin.setToolTip(
-            "Number of cassette positions fitted in the modular panel."
+            "Number of cassette positions fitted in the modular panel. Maximum four."
         )
-        self.patch_panel_cassette_capacity_spin = QSpinBox()
-        self.patch_panel_cassette_capacity_spin.setRange(1, 96)
-        self.patch_panel_cassette_capacity_spin.setValue(
-            max(1, min(96, int(self.asset.get("patch_panel_cassette_capacity", 12) or 12)))
-        )
-        self.patch_panel_cassette_capacity_spin.setSuffix(" fibres")
-
-        self.patch_panel_cassette_rows_spin = QSpinBox()
-        self.patch_panel_cassette_rows_spin.setRange(1, 12)
-        self.patch_panel_cassette_rows_spin.setValue(
-            max(1, min(12, int(self.asset.get("patch_panel_cassette_rows", 1) or 1)))
-        )
-        self.patch_panel_cassette_columns_spin = QSpinBox()
-        self.patch_panel_cassette_columns_spin.setRange(1, 24)
-        self.patch_panel_cassette_columns_spin.setValue(
-            max(1, min(24, int(self.asset.get("patch_panel_cassette_columns", 4) or 4)))
-        )
-        self.patch_panel_cassette_port_rows_spin = QSpinBox()
-        self.patch_panel_cassette_port_rows_spin.setRange(1, 12)
-        self.patch_panel_cassette_port_rows_spin.setValue(
-            max(1, min(12, int(self.asset.get("patch_panel_cassette_port_rows", 1) or 1)))
-        )
-        self.patch_panel_cassette_port_columns_spin = QSpinBox()
-        self.patch_panel_cassette_port_columns_spin.setRange(1, 48)
-        self.patch_panel_cassette_port_columns_spin.setValue(
-            max(1, min(48, int(self.asset.get("patch_panel_cassette_port_columns", 12) or 12)))
-        )
+        self.patch_panel_cassette_capacity_label = QLabel("12 front connector positions per cassette")
+        self.patch_panel_cassette_capacity_label.setWordWrap(True)
 
         self.patch_panel_cassette_front_combo = QComboBox()
-        self.patch_panel_cassette_front_combo.addItem("LC duplex", "lc_duplex")
-        self.patch_panel_cassette_front_combo.addItem("SC simplex", "sc_simplex")
-        self.patch_panel_cassette_front_combo.addItem("SC duplex", "sc_duplex")
+        self.patch_panel_cassette_front_combo.addItem("12 duplex LC connectors", "lc_duplex")
+        self.patch_panel_cassette_front_combo.addItem("12 simplex SC connectors", "sc_simplex")
+        self.patch_panel_cassette_front_combo.addItem("12 duplex SC connectors", "sc_duplex")
         front_value = _text(self.asset.get("patch_panel_cassette_front_connector")).lower() or "lc_duplex"
         front_index = self.patch_panel_cassette_front_combo.findData(front_value)
         self.patch_panel_cassette_front_combo.setCurrentIndex(max(0, front_index))
@@ -636,11 +614,7 @@ class NetworkAssetEditorDialog(QDialog):
         general_form.addRow("Patch panel medium", self.patch_panel_type_combo)
         general_form.addRow("Patch panel construction", self.patch_panel_format_combo)
         general_form.addRow("Modular cassette quantity", self.patch_panel_cassette_count_spin)
-        general_form.addRow("Cassette capacity", self.patch_panel_cassette_capacity_spin)
-        general_form.addRow("Cassette rows", self.patch_panel_cassette_rows_spin)
-        general_form.addRow("Cassette columns", self.patch_panel_cassette_columns_spin)
-        general_form.addRow("Port rows per cassette", self.patch_panel_cassette_port_rows_spin)
-        general_form.addRow("Port columns per cassette", self.patch_panel_cassette_port_columns_spin)
+        general_form.addRow("Cassette capacity", self.patch_panel_cassette_capacity_label)
         general_form.addRow("Cassette front connector", self.patch_panel_cassette_front_combo)
         general_form.addRow("Cassette termination", self.patch_panel_cassette_mode_combo)
         general_form.addRow("Rear MPO/MTP connector", self.patch_panel_cassette_rear_combo)
@@ -704,7 +678,6 @@ class NetworkAssetEditorDialog(QDialog):
         self.patch_panel_type_combo.currentTextChanged.connect(self._update_visibility)
         self.patch_panel_format_combo.currentIndexChanged.connect(self._update_visibility)
         self.patch_panel_cassette_count_spin.valueChanged.connect(self._update_visibility)
-        self.patch_panel_cassette_capacity_spin.valueChanged.connect(self._update_visibility)
         self.patch_panel_cassette_mode_combo.currentIndexChanged.connect(self._update_visibility)
         self.supports_stacking_check.toggled.connect(self._update_visibility)
         self._update_visibility()
@@ -802,39 +775,13 @@ class NetworkAssetEditorDialog(QDialog):
         self.patch_panel_type_combo.setEnabled(is_patch_panel)
         self.patch_panel_format_combo.setEnabled(is_fibre_patch_panel)
         self.patch_panel_cassette_count_spin.setEnabled(is_modular_patch_panel)
-        self.patch_panel_cassette_capacity_spin.setEnabled(is_modular_patch_panel)
-        self.patch_panel_cassette_rows_spin.setEnabled(is_modular_patch_panel)
-        self.patch_panel_cassette_columns_spin.setEnabled(is_modular_patch_panel)
-        self.patch_panel_cassette_port_rows_spin.setEnabled(is_modular_patch_panel)
-        self.patch_panel_cassette_port_columns_spin.setEnabled(is_modular_patch_panel)
+        self.patch_panel_cassette_capacity_label.setEnabled(is_modular_patch_panel)
         self.patch_panel_cassette_front_combo.setEnabled(is_modular_patch_panel)
         self.patch_panel_cassette_mode_combo.setEnabled(is_modular_patch_panel)
         connectorised_cassette = is_modular_patch_panel and _text(self.patch_panel_cassette_mode_combo.currentData()).lower() == "connectorised"
         self.patch_panel_cassette_rear_combo.setEnabled(connectorised_cassette)
         self.patch_panel_cassette_rear_count_spin.setEnabled(connectorised_cassette)
         self.patch_panel_mpo_threshold_spin.setEnabled(is_modular_patch_panel)
-        if is_modular_patch_panel:
-            cassette_front = _text(self.patch_panel_cassette_front_combo.currentData()).lower() or "lc_duplex"
-            fibres_per_position = max(
-                1,
-                int(
-                    MODULAR_PANEL_FRONT_CONNECTORS.get(
-                        cassette_front,
-                        MODULAR_PANEL_FRONT_CONNECTORS["lc_duplex"],
-                    ).get("fibres_per_position", 1)
-                ),
-            )
-            fibre_capacity = (
-                int(self.patch_panel_cassette_count_spin.value())
-                * int(self.patch_panel_cassette_capacity_spin.value())
-            )
-            front_positions = max(1, (fibre_capacity + fibres_per_position - 1) // fibres_per_position)
-            derived_units = max(1, (front_positions + 47) // 48)
-            if int(self.rack_units_spin.value()) != derived_units:
-                self.rack_units_spin.setValue(derived_units)
-            self.rack_units_spin.setEnabled(False)
-        else:
-            self.rack_units_spin.setEnabled(True)
         self.split_ratio_combo.setEnabled(asset_type == "fibre_splitter")
         self.olt_max_split_ratio_combo.setEnabled(
             asset_type == "optical_line_terminal"
@@ -966,45 +913,22 @@ class NetworkAssetEditorDialog(QDialog):
             return
 
         cassette_count = int(self.patch_panel_cassette_count_spin.value()) if is_modular_patch_panel else 0
-        cassette_capacity = int(self.patch_panel_cassette_capacity_spin.value()) if is_modular_patch_panel else 0
-        cassette_rows = int(self.patch_panel_cassette_rows_spin.value()) if is_modular_patch_panel else 0
-        cassette_columns = int(self.patch_panel_cassette_columns_spin.value()) if is_modular_patch_panel else 0
-        cassette_port_rows = int(self.patch_panel_cassette_port_rows_spin.value()) if is_modular_patch_panel else 0
-        cassette_port_columns = int(self.patch_panel_cassette_port_columns_spin.value()) if is_modular_patch_panel else 0
         cassette_front = _text(self.patch_panel_cassette_front_combo.currentData()).lower() if is_modular_patch_panel else ""
         cassette_mode = _text(self.patch_panel_cassette_mode_combo.currentData()).lower() if is_modular_patch_panel else ""
         cassette_rear = _text(self.patch_panel_cassette_rear_combo.currentData()).lower() if is_modular_patch_panel else ""
         cassette_rear_count = int(self.patch_panel_cassette_rear_count_spin.value()) if is_modular_patch_panel else 0
-        if is_modular_patch_panel:
-            fibres_per_position = max(
-                1,
-                int(
-                    MODULAR_PANEL_FRONT_CONNECTORS.get(
-                        cassette_front,
-                        MODULAR_PANEL_FRONT_CONNECTORS["lc_duplex"],
-                    ).get("fibres_per_position", 1)
-                ),
-            )
-            fibre_capacity = cassette_count * cassette_capacity
-            front_positions_per_cassette = max(1, (cassette_capacity + fibres_per_position - 1) // fibres_per_position)
-            front_positions_total = cassette_count * front_positions_per_cassette
-            modular_rack_units = max(1, (front_positions_total + 47) // 48)
-        else:
-            front_positions_per_cassette = 0
-            front_positions_total = 0
-            modular_rack_units = int(self.rack_units_spin.value())
         if is_modular_patch_panel:
             port_type = "sc" if cassette_front.startswith("sc_") else "lc"
             connector_label = "SC" if port_type == "sc" else "LC"
             explicit_names = [
                 f"C{cassette}-{connector_label}-{position:02d}"
                 for cassette in range(1, cassette_count + 1)
-                for position in range(1, front_positions_per_cassette + 1)
+                for position in range(1, 13)
             ]
             port_definitions = [
                 {
                     "port_type": port_type,
-                    "port_count": front_positions_total,
+                    "port_count": cassette_count * 12,
                     "port_use": "patch",
                     "name_prefix": connector_label,
                     "explicit_names": explicit_names,
@@ -1028,11 +952,7 @@ class NetworkAssetEditorDialog(QDialog):
             "patch_panel_format": "modular_cassette" if is_modular_patch_panel else "fixed",
             "modular_patch_panel": is_modular_patch_panel,
             "patch_panel_cassette_count": cassette_count,
-            "patch_panel_cassette_capacity": cassette_capacity,
-            "patch_panel_cassette_rows": cassette_rows,
-            "patch_panel_cassette_columns": cassette_columns,
-            "patch_panel_cassette_port_rows": cassette_port_rows,
-            "patch_panel_cassette_port_columns": cassette_port_columns,
+            "patch_panel_cassette_capacity": 12 if is_modular_patch_panel else 0,
             "patch_panel_cassette_front_connector": cassette_front,
             "patch_panel_cassette_termination_mode": cassette_mode,
             "patch_panel_cassette_rear_connector": cassette_rear if cassette_mode == "connectorised" else "",
@@ -1061,12 +981,12 @@ class NetworkAssetEditorDialog(QDialog):
             "number_of_ports": 0 if asset_type == "optical_transceiver" else sum(row["port_count"] for row in port_definitions),
             "connections_in": (
                 split_inputs if asset_type == "fibre_splitter"
-                else front_positions_total if is_modular_patch_panel
+                else cassette_count * 12 if is_modular_patch_panel
                 else int(self.connections_in_spin.value())
             ),
             "connections_out": (
                 split_outputs if asset_type == "fibre_splitter"
-                else front_positions_total if is_modular_patch_panel
+                else cassette_count * 12 if is_modular_patch_panel
                 else int(self.connections_out_spin.value())
             ),
             "uplink_ports": int(self.uplink_ports_spin.value()),
@@ -1083,7 +1003,7 @@ class NetworkAssetEditorDialog(QDialog):
             "input_connection_type": self.input_type_combo.currentText().strip(),
             "output_connection_type": self.output_type_combo.currentText().strip(),
             "uplink_connection_type": self.uplink_type_combo.currentText().strip(),
-            "rack_units": modular_rack_units,
+            "rack_units": int(self.rack_units_spin.value()),
             "switch_rack_unit_allowance": (
                 int(self.switch_rack_allowance_spin.value())
                 if asset_type == "network_switch"
@@ -1847,6 +1767,942 @@ def _planner_working_copy(data: dict) -> dict:
     return result
 
 
+class PlanningResolutionDialog(QDialog):
+    """Show a failed planner constraint and apply a selected retry override."""
+
+    def __init__(self, parent, error: NetworkPlanningError, data: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Resolve automatic planning issue")
+        self.resize(760, 560)
+        self.error = error
+        self.data = data
+        self.details = dict(getattr(error, "details", {}) or {})
+        self.selected_action = ""
+
+        layout = QVBoxLayout(self)
+        heading = QLabel("The automatic planner could not satisfy a network constraint.")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        message = QLabel(str(error))
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        diagnostics = QTextEdit()
+        diagnostics.setReadOnly(True)
+        diagnostics.setMaximumHeight(190)
+        diagnostics.setPlainText(self._diagnostic_text())
+        layout.addWidget(diagnostics)
+
+        form = QFormLayout()
+        self.action_combo = QComboBox()
+        self._populate_actions()
+        self.action_combo.currentIndexChanged.connect(self._action_changed)
+        form.addRow("Resolution", self.action_combo)
+
+        self.asset_combo = QComboBox()
+        form.addRow("Selected asset", self.asset_combo)
+
+        self.minimum_switch_count_spin = QSpinBox()
+        self.minimum_switch_count_spin.setRange(1, 9999)
+        current_switches = max(
+            0, int(self.details.get("current_location_switch_count", 0) or 0)
+        )
+        suggested_switches = max(
+            0, int(self.details.get("suggested_device_count", 0) or 0)
+        )
+        self.minimum_switch_count_spin.setValue(
+            max(1, current_switches + 1, suggested_switches)
+        )
+        self.minimum_switch_count_spin.setToolTip(
+            "Minimum number of access switches the retry must install at the "
+            "affected location. Increase or reduce this value to override the "
+            "planner recommendation."
+        )
+        form.addRow("Minimum access switches", self.minimum_switch_count_spin)
+        layout.addLayout(form)
+
+        note = QLabel(
+            "The selected override is saved in Network Settings. The guided setup "
+            "is not reopened; if another comms room reaches a separate constraint, "
+            "the next resolution is shown with all earlier choices retained. "
+            "Overrides can be cleared later from the planner settings."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Cancel)
+        apply_button = buttons.button(QDialogButtonBox.Apply)
+        apply_button.setText("Apply and retry")
+        apply_button.clicked.connect(self._accept_resolution)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._action_changed()
+
+    def _diagnostic_text(self) -> str:
+        lines = []
+        required = float(self.details.get("required_bandwidth_mbps", 0.0) or 0.0)
+        maximum = float(
+            self.details.get("max_compatible_capacity_mbps", 0.0) or 0.0
+        )
+        shortfall = float(self.details.get("shortfall_mbps", 0.0) or 0.0)
+        if required > 0.0:
+            lines.append(f"Required traffic: {required:.3f} Mbps")
+        if maximum > 0.0:
+            lines.append(f"Best compatible port bundle: {maximum:.3f} Mbps")
+        if shortfall > 0.0:
+            lines.append(f"Capacity shortfall: {shortfall:.3f} Mbps")
+        if self.details.get("location_name"):
+            lines.append(f"Location: {self.details.get('location_name')}")
+        if self.details.get("from_name"):
+            lines.append(f"Downstream device: {self.details.get('from_name')}")
+        if self.details.get("to_name"):
+            lines.append(f"Upstream device: {self.details.get('to_name')}")
+
+        actual_ports = int(self.details.get("actual_port_count", 0) or 0)
+        required_ports = int(
+            self.details.get("required_port_count_with_spare", 0) or 0
+        )
+        available_ports = int(
+            self.details.get("available_port_count", 0) or 0
+        )
+        spare_percent = float(
+            self.details.get("spare_capacity_percent", 0.0) or 0.0
+        )
+        if actual_ports > 0:
+            lines.append(f"Current port demand: {actual_ports}")
+        if required_ports > 0:
+            lines.append(
+                f"Ports required with {spare_percent:.1f}% spare: {required_ports}"
+            )
+        if available_ports > 0:
+            lines.append(f"Installed port capacity: {available_ports}")
+        if self.details.get("switches_without_spare") is not None:
+            lines.append(
+                "Switches without spare: "
+                f"{int(self.details.get('switches_without_spare', 0) or 0)}"
+            )
+        if self.details.get("switches_with_spare") is not None:
+            lines.append(
+                "Switches with spare: "
+                f"{int(self.details.get('switches_with_spare', 0) or 0)}"
+            )
+        if self.details.get("stacks_without_spare") is not None:
+            lines.append(
+                "Logical stacks without spare: "
+                f"{int(self.details.get('stacks_without_spare', 0) or 0)}"
+            )
+        if self.details.get("stacks_with_spare") is not None:
+            lines.append(
+                "Logical stacks with spare: "
+                f"{int(self.details.get('stacks_with_spare', 0) or 0)}"
+            )
+        if self.details.get("max_stack_members") is not None:
+            lines.append(
+                "Maximum members per stack: "
+                f"{int(self.details.get('max_stack_members', 0) or 0)}"
+            )
+
+        capabilities = self.details.get("capabilities", []) or []
+        if capabilities:
+            lines.extend(["", "Compatible same-speed bundles currently available:"])
+            for row in capabilities:
+                speed = int(row.get("speed_mbps", 0) or 0)
+                members = int(row.get("max_members", 0) or 0)
+                capacity = float(row.get("capacity_mbps", 0.0) or 0.0)
+                lines.append(
+                    f"  {members} × {port_speed_label(speed)} = {capacity:.3f} Mbps"
+                )
+
+        access = self.details.get("access_alternatives", []) or []
+        upstream = self.details.get("upstream_alternatives", []) or []
+        if access:
+            lines.extend(["", "Access-switch alternatives:"])
+            for row in access[:12]:
+                status = "meets demand" if row.get("meets_required") else "insufficient alone"
+                lines.append(
+                    f"  {row.get('name')}: {float(row.get('capacity_mbps', 0)):.3f} Mbps ({status})"
+                )
+        if upstream:
+            lines.extend(["", "Upstream-switch alternatives:"])
+            for row in upstream[:12]:
+                status = "meets demand" if row.get("meets_required") else "insufficient alone"
+                lines.append(
+                    f"  {row.get('name')}: {float(row.get('capacity_mbps', 0)):.3f} Mbps ({status})"
+                )
+        if not lines:
+            lines.append(
+                "No structured capacity data was available. Review the asset library, "
+                "port definitions and planner settings."
+            )
+        return "\n".join(lines)
+
+    def _populate_actions(self) -> None:
+        location = _text(self.details.get("location_name"))
+        from_role = _text(self.details.get("from_role")).lower()
+        error_code = getattr(self.error, "code", "")
+        if error_code == "access_stack_spare_capacity" and location:
+            self.action_combo.addItem(
+                "Install another rack and create an overflow stack for spare capacity (recommended)",
+                "add_spare_capacity_rack",
+            )
+            self.action_combo.addItem(
+                "Defer spare access-port capacity at this location",
+                "defer_location_spare_capacity",
+            )
+        if location and error_code != "access_stack_spare_capacity" and (
+            from_role in {"access", "access_switch"}
+            or error_code == "access_uplink_capacity"
+        ):
+            self.action_combo.addItem(
+                "Add an access switch and redistribute traffic (recommended)",
+                "add_access_switch",
+            )
+        if self.details.get("access_alternatives"):
+            self.action_combo.addItem(
+                "Use a selected access-switch model at this location",
+                "select_access_asset",
+            )
+        if self.details.get("upstream_alternatives"):
+            self.action_combo.addItem(
+                "Use a selected upstream core/aggregation switch model",
+                "select_upstream_asset",
+            )
+        if getattr(self.error, "code", "") in {
+            "link_capacity",
+            "access_uplink_capacity",
+        }:
+            self.action_combo.addItem(
+                "Create the best available link and ignore the bandwidth shortfall",
+                "ignore_bandwidth",
+            )
+            self.action_combo.addItem(
+                "Retry without spare traffic capacity", "remove_spare_capacity"
+            )
+        self.action_combo.addItem(
+            "Open the asset library and review the design manually", "review_assets"
+        )
+
+    def _action_changed(self, *_args) -> None:
+        action = _text(self.action_combo.currentData())
+        self.asset_combo.clear()
+        alternatives = []
+        if action == "select_access_asset":
+            alternatives = self.details.get("access_alternatives", []) or []
+        elif action == "select_upstream_asset":
+            alternatives = self.details.get("upstream_alternatives", []) or []
+        for row in alternatives:
+            capacity = float(row.get("capacity_mbps", 0.0) or 0.0)
+            status = "meets demand" if row.get("meets_required") else "requires multiple devices"
+            self.asset_combo.addItem(
+                f"{row.get('name')} — {capacity:.3f} Mbps ({status})",
+                _text(row.get("asset_id")),
+            )
+        self.asset_combo.setEnabled(bool(alternatives))
+        self.minimum_switch_count_spin.setEnabled(action == "add_access_switch")
+
+    def _accept_resolution(self) -> None:
+        action = _text(self.action_combo.currentData())
+        settings = self.data.setdefault("network_settings", {})
+        overrides = settings.setdefault("auto_planner_resolution_overrides", {})
+        if not isinstance(overrides, dict):
+            overrides = {}
+            settings["auto_planner_resolution_overrides"] = overrides
+        access_assets = overrides.setdefault("access_asset_by_location", {})
+        upstream_assets = overrides.setdefault("upstream_asset_by_layer", {})
+        minimum_switches = overrides.setdefault(
+            "minimum_access_switches_by_location", {}
+        )
+        spare_modes = overrides.setdefault(
+            "spare_capacity_mode_by_location", {}
+        )
+
+        location = _text(self.details.get("location_name"))
+        if action == "add_spare_capacity_rack":
+            if not location:
+                return
+            spare_modes[location] = "new_rack"
+        elif action == "defer_location_spare_capacity":
+            if not location:
+                return
+            spare_modes[location] = "defer"
+        elif action == "add_access_switch":
+            requested = max(1, int(self.minimum_switch_count_spin.value()))
+            minimum_switches[location] = max(
+                int(minimum_switches.get(location, 0) or 0),
+                requested,
+            )
+            settings["auto_add_switches_for_bandwidth"] = True
+        elif action == "select_access_asset":
+            asset_id = _text(self.asset_combo.currentData())
+            if not asset_id or not location:
+                return
+            access_assets[location] = asset_id
+        elif action == "select_upstream_asset":
+            asset_id = _text(self.asset_combo.currentData())
+            if not asset_id:
+                return
+            to_role = _text(self.details.get("to_role")).lower()
+            layer = "aggregation" if "aggregation" in to_role else "core"
+            upstream_assets[layer] = asset_id
+        elif action == "ignore_bandwidth":
+            settings["ignore_link_bandwidth_errors"] = True
+        elif action == "remove_spare_capacity":
+            settings["spare_capacity_percent"] = 0.0
+        elif action == "review_assets":
+            self.selected_action = action
+            self.accept()
+            return
+        else:
+            return
+
+        self.selected_action = action
+        self.accept()
+
+
+
+class PlanningResolutionSequenceDialog(QDialog):
+    """Resolve repeated spare-capacity constraints without restarting setup."""
+
+    def __init__(self, parent, error: NetworkPlanningError, data: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Resolve repeated automatic planning issues")
+        self.resize(820, 560)
+        self.error = error
+        self.data = data
+        details = dict(getattr(error, "details", {}) or {})
+        self.issues = [
+            dict(issue)
+            for issue in details.get("issues", []) or []
+            if isinstance(issue, dict) and _text(issue.get("location_name"))
+        ]
+        self.current_index = 0
+        self.decisions: Dict[str, str] = {}
+        self.selected_actions: Dict[str, str] = {}
+
+        layout = QVBoxLayout(self)
+        heading = QLabel(
+            "The same stack and cabinet constraint occurs in more than one "
+            "comms room. Work through each affected room below. The guided "
+            "planner setup remains active, every decision is retained, and the "
+            "network is recalculated only after all currently known occurrences "
+            "have been resolved."
+        )
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        self.issue_progress_label = QLabel()
+        layout.addWidget(self.issue_progress_label)
+
+        self.issue_message_label = QLabel()
+        self.issue_message_label.setWordWrap(True)
+        layout.addWidget(self.issue_message_label)
+
+        self.diagnostics = QTextEdit()
+        self.diagnostics.setReadOnly(True)
+        self.diagnostics.setMaximumHeight(230)
+        layout.addWidget(self.diagnostics)
+
+        form = QFormLayout()
+        self.action_combo = QComboBox()
+        self.action_combo.addItem(
+            "Install another cabinet and the required overflow switch stack "
+            "(recommended)",
+            "new_rack",
+        )
+        self.action_combo.addItem(
+            "Defer spare access-port capacity in this comms room",
+            "defer",
+        )
+        form.addRow("Resolution", self.action_combo)
+        layout.addLayout(form)
+
+        self.apply_remaining_check = QCheckBox(
+            "Use this resolution for all remaining matching comms rooms"
+        )
+        self.apply_remaining_check.setChecked(False)
+        layout.addWidget(self.apply_remaining_check)
+
+        note = QLabel(
+            "Installing another cabinet preserves the configured spare capacity "
+            "and adds the required switches. Deferring spare capacity affects "
+            "only the selected comms room; the global spare percentage remains "
+            "active elsewhere."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QHBoxLayout()
+        self.previous_button = QPushButton("Previous issue")
+        self.previous_button.clicked.connect(self._previous_issue)
+        buttons.addWidget(self.previous_button)
+        buttons.addStretch(1)
+        cancel_button = QPushButton("Cancel planning")
+        cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(cancel_button)
+        self.apply_button = QPushButton()
+        self.apply_button.clicked.connect(self._apply_current_issue)
+        buttons.addWidget(self.apply_button)
+        layout.addLayout(buttons)
+
+        if not self.issues:
+            self.reject()
+            return
+        self._show_current_issue()
+
+    def _current_issue(self) -> dict:
+        return self.issues[self.current_index]
+
+    def _issue_diagnostic_text(self, issue: dict) -> str:
+        actual_ports = int(issue.get("actual_port_count", 0) or 0)
+        required_ports = int(
+            issue.get("required_port_count_with_spare", 0) or 0
+        )
+        spare_percent = float(issue.get("spare_capacity_percent", 0.0) or 0.0)
+        switches_without = int(issue.get("switches_without_spare", 0) or 0)
+        switches_with = int(issue.get("switches_with_spare", 0) or 0)
+        stacks_without = int(issue.get("stacks_without_spare", 0) or 0)
+        stacks_with = int(issue.get("stacks_with_spare", 0) or 0)
+        max_members = int(issue.get("max_stack_members", 0) or 0)
+        extra_racks = int(issue.get("suggested_extra_rack_count", 1) or 1)
+        rack_size = int(issue.get("rack_size_u", 0) or 0)
+        return "\n".join(
+            [
+                f"Current endpoint port demand: {actual_ports}",
+                f"Ports required with {spare_percent:.1f}% spare: {required_ports}",
+                f"Access switches: {switches_without} without spare → "
+                f"{switches_with} with spare",
+                f"Logical stacks: {stacks_without} without spare → "
+                f"{stacks_with} with spare",
+                f"Maximum members per stack: {max_members}",
+                f"Additional cabinet requirement: {max(1, extra_racks)}",
+                f"Configured cabinet size: {rack_size}U" if rack_size else "",
+            ]
+        ).strip()
+
+    def _show_current_issue(self) -> None:
+        issue = self._current_issue()
+        location = _text(issue.get("location_name"))
+        count = len(self.issues)
+        self.issue_progress_label.setText(
+            f"Recurring issue {self.current_index + 1} of {count}: {location}"
+        )
+        self.issue_message_label.setText(
+            f"Spare capacity at {location} requires another logical access "
+            "switch stack and therefore another cabinet. Choose how this room "
+            "should be handled, then continue to the next occurrence."
+        )
+        self.diagnostics.setPlainText(self._issue_diagnostic_text(issue))
+
+        saved_action = self.decisions.get(location, "new_rack")
+        index = self.action_combo.findData(saved_action)
+        if index >= 0:
+            self.action_combo.setCurrentIndex(index)
+
+        self.previous_button.setEnabled(self.current_index > 0)
+        is_last = self.current_index >= count - 1
+        self.apply_button.setText(
+            "Apply decisions and continue planning"
+            if is_last
+            else "Apply and show next issue"
+        )
+        self.apply_remaining_check.setVisible(not is_last)
+        self.apply_remaining_check.setChecked(False)
+
+    def _remember_current_selection(self) -> str:
+        issue = self._current_issue()
+        location = _text(issue.get("location_name"))
+        action = _text(self.action_combo.currentData()).lower()
+        if action not in {"new_rack", "defer"}:
+            return ""
+        self.decisions[location] = action
+        return action
+
+    def _previous_issue(self) -> None:
+        if self.current_index <= 0:
+            return
+        self._remember_current_selection()
+        self.current_index -= 1
+        self._show_current_issue()
+
+    def _apply_current_issue(self) -> None:
+        action = self._remember_current_selection()
+        if not action:
+            QMessageBox.warning(
+                self,
+                "Planning decision required",
+                "Choose how the current comms room should be resolved.",
+            )
+            return
+
+        if self.apply_remaining_check.isChecked():
+            for issue in self.issues[self.current_index + 1 :]:
+                location = _text(issue.get("location_name"))
+                if location:
+                    self.decisions[location] = action
+            self._commit_and_accept()
+            return
+
+        if self.current_index < len(self.issues) - 1:
+            self.current_index += 1
+            self._show_current_issue()
+            return
+
+        self._commit_and_accept()
+
+    def _commit_and_accept(self) -> None:
+        missing = [
+            _text(issue.get("location_name"))
+            for issue in self.issues
+            if _text(issue.get("location_name")) not in self.decisions
+        ]
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Incomplete planning decisions",
+                "Resolve every affected comms room before continuing.",
+            )
+            return
+
+        settings = self.data.setdefault("network_settings", {})
+        overrides = settings.setdefault("auto_planner_resolution_overrides", {})
+        if not isinstance(overrides, dict):
+            overrides = {}
+            settings["auto_planner_resolution_overrides"] = overrides
+        spare_modes = overrides.setdefault("spare_capacity_mode_by_location", {})
+        if not isinstance(spare_modes, dict):
+            spare_modes = {}
+            overrides["spare_capacity_mode_by_location"] = spare_modes
+
+        for location, action in self.decisions.items():
+            spare_modes[location] = action
+        self.selected_actions = dict(self.decisions)
+        self.accept()
+
+
+class AutoPlannerSetupWizard(QWizard):
+    """Guided network hierarchy, cabinet and exact-model selection."""
+
+    def __init__(self, parent, data: dict):
+        super().__init__(parent)
+        self.data = data
+        self.settings = data.setdefault("network_settings", {})
+        self.setWindowTitle("Automatic Network Planner Setup")
+        self.resize(860, 650)
+        self.setWizardStyle(QWizard.ModernStyle)
+        self.setOption(QWizard.NoBackButtonOnStartPage, True)
+
+        design_page = QWizardPage()
+        design_page.setTitle("Choose the network architecture")
+        design_page.setSubTitle(
+            "Select the technology, hierarchy and resilience before choosing equipment models."
+        )
+        design_form = QFormLayout(design_page)
+
+        self.technology_combo = QComboBox()
+        self.technology_combo.addItems(NETWORK_TECHNOLOGIES)
+        _set_combo_text(
+            self.technology_combo,
+            _text(self.settings.get("technology")) or "Traditional",
+        )
+        design_form.addRow("Network technology", self.technology_combo)
+
+        self.topology_combo = QComboBox()
+        self.topology_combo.addItem("Collapsed core (core + access)", "collapsed_core")
+        self.topology_combo.addItem(
+            "Three layer (core + aggregation + access)", "three_tier"
+        )
+        topology_index = self.topology_combo.findData(
+            _text(self.settings.get("topology_model")) or "collapsed_core"
+        )
+        if topology_index >= 0:
+            self.topology_combo.setCurrentIndex(topology_index)
+        design_form.addRow("Traditional hierarchy", self.topology_combo)
+
+        self.redundant_check = QCheckBox("Generate independent redundant paths")
+        self.redundant_check.setChecked(
+            bool(self.settings.get("redundant_core", True))
+        )
+        design_form.addRow("", self.redundant_check)
+
+        self.link_count_spin = QSpinBox()
+        self.link_count_spin.setRange(1, 16)
+        self.link_count_spin.setValue(
+            max(1, int(self.settings.get("independent_link_count", 2) or 2))
+        )
+        self.link_count_spin.setToolTip(
+            "Number of separate uplinks to each downstream switch or stack."
+        )
+        design_form.addRow("Independent uplinks", self.link_count_spin)
+
+        self.spare_spin = QDoubleSpinBox()
+        self.spare_spin.setRange(0.0, 100.0)
+        self.spare_spin.setDecimals(1)
+        self.spare_spin.setSuffix(" %")
+        self.spare_spin.setValue(
+            float(self.settings.get("spare_capacity_percent", 15.0) or 0.0)
+        )
+        design_form.addRow("Spare port, PoE and traffic capacity", self.spare_spin)
+        self.addPage(design_page)
+
+        rack_page = QWizardPage()
+        rack_page.setTitle("Choose the cabinet deployment model")
+        rack_page.setSubTitle(
+            "Top of Rack keeps every final copper termination with its serving access stack. "
+            "End of Row consolidates switching and permits patch-panel pairs to use adjacent cabinets."
+        )
+        rack_form = QFormLayout(rack_page)
+        self.rack_model_combo = QComboBox()
+        self.rack_model_combo.addItem(
+            "Top of Rack — local access stack per cabinet", "top_of_rack"
+        )
+        self.rack_model_combo.addItem(
+            "End of Row — consolidated access switching", "end_of_row"
+        )
+        rack_index = self.rack_model_combo.findData(
+            _text(self.settings.get("rack_deployment_model")) or "end_of_row"
+        )
+        if rack_index >= 0:
+            self.rack_model_combo.setCurrentIndex(rack_index)
+        rack_form.addRow("Cabinet strategy", self.rack_model_combo)
+
+        self.aggregation_mode_combo = QComboBox()
+        self.aggregation_mode_combo.addItem(
+            "Dedicated aggregation cabinet", "dedicated"
+        )
+        self.aggregation_mode_combo.addItem(
+            "Share the End-of-Row cabinet", "shared_eor"
+        )
+        aggregation_index = self.aggregation_mode_combo.findData(
+            _text(self.settings.get("aggregation_rack_mode")) or "dedicated"
+        )
+        if aggregation_index >= 0:
+            self.aggregation_mode_combo.setCurrentIndex(aggregation_index)
+        self.aggregation_mode_combo.setToolTip(
+            "Used by three-layer Traditional designs. Dedicated mode isolates aggregation equipment; "
+            "shared mode places it in the End-of-Row cabinet where capacity permits."
+        )
+        rack_form.addRow("Aggregation placement", self.aggregation_mode_combo)
+
+        self.rack_size_spin = QSpinBox()
+        self.rack_size_spin.setRange(1, 200)
+        self.rack_size_spin.setSuffix("U")
+        self.rack_size_spin.setValue(
+            max(1, int(self.settings.get("default_rack_size_u", 42) or 42))
+        )
+        rack_form.addRow("Rack cabinet size", self.rack_size_spin)
+
+        tor_note = QLabel(
+            "With Top of Rack, the planner sizes each access stack together with its copper "
+            "patch panels, cable managers and UPS allowance. Final endpoint connections cannot "
+            "cross cabinets. Fibre uplinks and peer links may use the adjacent cabinet route."
+        )
+        tor_note.setWordWrap(True)
+        rack_form.addRow("", tor_note)
+        self.addPage(rack_page)
+
+        models_page = QWizardPage()
+        models_page.setTitle("Select preferred equipment models")
+        models_page.setSubTitle(
+            "Choose a model for any generated layer. Strict selections prohibit automatic fallback; "
+            "non-strict selections are preferred but may be replaced when capacity or port compatibility requires it."
+        )
+        models_layout = QVBoxLayout(models_page)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        models_form = QFormLayout(content)
+        scroll.setWidget(content)
+        models_layout.addWidget(scroll)
+
+        preferences = normalise_asset_model_preferences(
+            self.settings.get("asset_model_preferences")
+        )
+        self.model_controls: Dict[str, Tuple[QComboBox, QCheckBox]] = {}
+        for component, label in ASSET_MODEL_PREFERENCE_COMPONENTS.items():
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            combo = QComboBox()
+            combo.addItem("Automatic selection", "")
+            for asset in self._component_assets(component):
+                asset_id = _text(asset.get("id"))
+                combo.addItem(self._asset_label(asset), asset_id)
+            selected_ids = preferences.get(component, {}).get(
+                "preferred_asset_ids", []
+            )
+            if selected_ids:
+                selected_index = combo.findData(_text(selected_ids[0]))
+                if selected_index >= 0:
+                    combo.setCurrentIndex(selected_index)
+            strict = QCheckBox("Strict")
+            strict.setChecked(bool(preferences.get(component, {}).get("strict")))
+            strict.setToolTip(
+                "Do not use another model when this selected model cannot satisfy the design."
+            )
+            strict.setEnabled(bool(_text(combo.currentData())))
+            combo.currentIndexChanged.connect(
+                lambda _index, c=combo, check=strict: check.setEnabled(
+                    bool(_text(c.currentData()))
+                )
+            )
+            row_layout.addWidget(combo, 1)
+            row_layout.addWidget(strict)
+            models_form.addRow(label, row_widget)
+            self.model_controls[component] = (combo, strict)
+        self.addPage(models_page)
+
+        review_page = QWizardPage()
+        review_page.setTitle("Review and generate")
+        review_page.setSubTitle(
+            "The selected preferences are saved with the project and used for this and later planner runs."
+        )
+        review_layout = QVBoxLayout(review_page)
+        self.review_text = QLabel()
+        self.review_text.setTextFormat(Qt.PlainText)
+        self.review_text.setWordWrap(True)
+        self.review_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        review_layout.addWidget(self.review_text)
+        review_layout.addStretch(1)
+        self.addPage(review_page)
+
+        self.technology_combo.currentTextChanged.connect(self._update_availability)
+        self.topology_combo.currentIndexChanged.connect(self._update_availability)
+        self.rack_model_combo.currentIndexChanged.connect(self._update_availability)
+        self.currentIdChanged.connect(self._update_review)
+        self._update_availability()
+        self._update_review()
+
+    def _update_review(self, *_args) -> None:
+        technology = self.technology_combo.currentText().strip() or "Traditional"
+        lines = [f"Technology: {technology}"]
+        if technology.lower() == "traditional":
+            lines.extend(
+                [
+                    f"Hierarchy: {self.topology_combo.currentText()}",
+                    f"Resilience: {'Redundant' if self.redundant_check.isChecked() else 'Single path'}",
+                    f"Independent uplinks: {self.link_count_spin.value()}",
+                    f"Cabinet strategy: {self.rack_model_combo.currentText()}",
+                ]
+            )
+            if self.aggregation_mode_combo.isEnabled():
+                lines.append(
+                    f"Aggregation placement: {self.aggregation_mode_combo.currentText()}"
+                )
+        lines.extend(
+            [
+                f"Rack size: {self.rack_size_spin.value()}U",
+                f"Spare capacity: {self.spare_spin.value():.1f}%",
+                "",
+                "Preferred models:",
+            ]
+        )
+        selected_count = 0
+        for component, (combo, strict) in self.model_controls.items():
+            if not combo.isEnabled() or not _text(combo.currentData()):
+                continue
+            selected_count += 1
+            suffix = " (strict)" if strict.isChecked() else " (preferred)"
+            lines.append(
+                f"  {ASSET_MODEL_PREFERENCE_COMPONENTS.get(component, component)}: "
+                f"{combo.currentText()}{suffix}"
+            )
+        if selected_count == 0:
+            lines.append("  Automatic selection for every applicable component")
+        lines.extend(
+            [
+                "",
+                "Finish applies these settings and starts the capacity, port, rack and optical validation pass.",
+            ]
+        )
+        self.review_text.setText("\n".join(lines))
+
+    @staticmethod
+    def _asset_label(asset: dict) -> str:
+        parts = [
+            _text(asset.get("manufacturer")),
+            _text(asset.get("model")),
+        ]
+        product = " ".join(value for value in parts if value).strip()
+        name = _text(asset.get("name"))
+        asset_id = _text(asset.get("id"))
+        if product and name and name.casefold() not in product.casefold():
+            product = f"{product} — {name}"
+        return f"{product or name or asset_id} [{asset_id}]"
+
+    def _component_assets(self, component: str) -> List[dict]:
+        rows = [
+            row
+            for row in self.data.get("network_assets", [])
+            if isinstance(row, dict) and _text(row.get("id"))
+        ]
+
+        def asset_type(row: dict) -> str:
+            return _text(row.get("asset_type")).lower()
+
+        def layer(row: dict) -> str:
+            return _text(
+                row.get("network_layer") or row.get("design_layer")
+            ).lower()
+
+        def name(row: dict) -> str:
+            return _text(row.get("name")).lower()
+
+        if component == "access_switch":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) == "network_switch"
+                and (
+                    layer(row) == "access"
+                    or (
+                        _text(row.get("output_connection_type")).lower()
+                        == "copper"
+                        and not any(
+                            word in name(row)
+                            for word in ("core", "aggregation", "distribution")
+                        )
+                    )
+                )
+            ]
+        elif component == "aggregation_switch":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) == "network_switch"
+                and (
+                    layer(row) in {"aggregation", "distribution"}
+                    or any(word in name(row) for word in ("aggregation", "distribution"))
+                )
+            ]
+        elif component == "core_switch":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) == "network_switch"
+                and (layer(row) == "core" or "core" in name(row))
+            ]
+        elif component == "edge_router":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) in {"network_router", "firewall"}
+            ]
+        elif component == "wireless_access_point":
+            selected = [row for row in rows if asset_type(row) == "wireless_access_point"]
+        elif component == "optical_line_terminal":
+            selected = [row for row in rows if asset_type(row) == "optical_line_terminal"]
+        elif component == "optical_network_terminal":
+            selected = [row for row in rows if asset_type(row) == "optical_network_terminal"]
+        elif component == "fibre_splitter":
+            selected = [row for row in rows if asset_type(row) == "fibre_splitter"]
+        elif component == "copper_patch_panel":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) == "patch_panel"
+                and _text(row.get("patch_panel_type")).lower() == "copper"
+            ]
+        elif component == "fibre_patch_panel":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) == "patch_panel"
+                and _text(row.get("patch_panel_type")).lower() == "fibre"
+            ]
+        elif component == "rack_ups":
+            selected = [row for row in rows if asset_type(row) == "ups"]
+        elif component == "rack_pdu":
+            selected = [row for row in rows if asset_type(row) == "pdu"]
+        elif component == "cable_management":
+            selected = [row for row in rows if asset_type(row) == "cable_management"]
+        else:
+            selected = []
+        return sorted(
+            selected,
+            key=lambda row: (
+                _text(row.get("manufacturer")).casefold(),
+                _text(row.get("model")).casefold(),
+                _text(row.get("name")).casefold(),
+                _text(row.get("id")),
+            ),
+        )
+
+    def _update_availability(self, *_args) -> None:
+        traditional = self.technology_combo.currentText().strip().lower() == "traditional"
+        three_tier = _text(self.topology_combo.currentData()) == "three_tier"
+        self.topology_combo.setEnabled(traditional)
+        self.rack_model_combo.setEnabled(traditional)
+        self.redundant_check.setEnabled(traditional)
+        self.link_count_spin.setEnabled(traditional)
+        aggregation_available = (
+            traditional
+            and three_tier
+            and _text(self.rack_model_combo.currentData()) == "end_of_row"
+        )
+        self.aggregation_mode_combo.setEnabled(aggregation_available)
+        if not aggregation_available:
+            dedicated_index = self.aggregation_mode_combo.findData("dedicated")
+            if dedicated_index >= 0:
+                self.aggregation_mode_combo.setCurrentIndex(dedicated_index)
+        for component, (combo, strict) in self.model_controls.items():
+            relevant = True
+            if component in {
+                "access_switch",
+                "aggregation_switch",
+                "copper_patch_panel",
+            }:
+                relevant = traditional
+            elif component in {
+                "optical_line_terminal",
+                "optical_network_terminal",
+                "fibre_splitter",
+            }:
+                relevant = not traditional
+            if component == "aggregation_switch":
+                relevant = traditional and three_tier
+            combo.setEnabled(relevant)
+            strict.setEnabled(relevant and bool(_text(combo.currentData())))
+
+    def apply_settings(self) -> None:
+        settings = self.data.setdefault("network_settings", {})
+        technology = self.technology_combo.currentText().strip()
+        settings["technology"] = technology
+        settings["topology_model"] = (
+            _text(self.topology_combo.currentData()) or "collapsed_core"
+        )
+        settings["redundant_core"] = bool(self.redundant_check.isChecked())
+        settings["independent_link_count"] = int(self.link_count_spin.value())
+        settings["spare_capacity_percent"] = float(self.spare_spin.value())
+        settings["rack_deployment_model"] = (
+            _text(self.rack_model_combo.currentData()) or "end_of_row"
+        )
+        aggregation_mode = (
+            _text(self.aggregation_mode_combo.currentData()) or "dedicated"
+        )
+        if (
+            technology.lower() != "traditional"
+            or settings["topology_model"] != "three_tier"
+            or settings["rack_deployment_model"] != "end_of_row"
+        ):
+            aggregation_mode = "dedicated"
+        settings["aggregation_rack_mode"] = aggregation_mode
+        settings["default_rack_size_u"] = int(self.rack_size_spin.value())
+        settings["tor_keep_final_connections_in_cabinet"] = True
+        settings["tor_allow_adjacent_cabinet_uplinks"] = True
+
+        preferences: Dict[str, dict] = {}
+        for component, (combo, strict) in self.model_controls.items():
+            asset_id = _text(combo.currentData())
+            preferences[component] = {
+                "preferred_asset_ids": [asset_id] if asset_id else [],
+                "strict": bool(strict.isChecked() and asset_id),
+            }
+        settings["asset_model_preferences"] = normalise_asset_model_preferences(
+            preferences
+        )
+
+
 class NetworkPlannerDialog(QDialog):
     def __init__(self, parent, data: dict, on_save: Callable[[dict], None]):
         super().__init__(parent)
@@ -1887,6 +2743,36 @@ class NetworkPlannerDialog(QDialog):
         )
         if topology_index >= 0:
             self.topology_model_combo.setCurrentIndex(topology_index)
+
+        self.rack_deployment_combo = QComboBox()
+        self.rack_deployment_combo.addItem(
+            "Top of Rack — local access stack per cabinet", "top_of_rack"
+        )
+        self.rack_deployment_combo.addItem(
+            "End of Row — consolidated access switching", "end_of_row"
+        )
+        rack_index = self.rack_deployment_combo.findData(
+            _text(settings.get("rack_deployment_model")) or "end_of_row"
+        )
+        if rack_index >= 0:
+            self.rack_deployment_combo.setCurrentIndex(rack_index)
+        self.rack_deployment_combo.setToolTip(
+            "Top of Rack keeps final copper patching inside the access-switch cabinet. "
+            "End of Row permits consolidated switching across adjacent cabinets."
+        )
+
+        self.aggregation_rack_combo = QComboBox()
+        self.aggregation_rack_combo.addItem(
+            "Dedicated aggregation cabinet", "dedicated"
+        )
+        self.aggregation_rack_combo.addItem(
+            "Share End-of-Row cabinet", "shared_eor"
+        )
+        aggregation_index = self.aggregation_rack_combo.findData(
+            _text(settings.get("aggregation_rack_mode")) or "dedicated"
+        )
+        if aggregation_index >= 0:
+            self.aggregation_rack_combo.setCurrentIndex(aggregation_index)
 
         self.independent_link_count_spin = QSpinBox()
         self.independent_link_count_spin.setRange(1, 16)
@@ -2008,7 +2894,43 @@ class NetworkPlannerDialog(QDialog):
             "compatible free ports after a device is placed manually."
         )
 
-        self.auto_design_button = QPushButton("Generate Minimum-Component Network")
+        self.auto_add_bandwidth_switches_check = QCheckBox(
+            "Automatically add access switches when uplink bandwidth is exceeded"
+        )
+        self.auto_add_bandwidth_switches_check.setChecked(
+            bool(settings.get("auto_add_switches_for_bandwidth", True))
+        )
+        self.auto_add_bandwidth_switches_check.setToolTip(
+            "Split endpoint traffic across additional access switches when one "
+            "switch cannot form a sufficiently large same-speed uplink bundle."
+        )
+
+        self.ignore_link_bandwidth_check = QCheckBox(
+            "Allow best-effort links that do not meet calculated bandwidth"
+        )
+        self.ignore_link_bandwidth_check.setChecked(
+            bool(settings.get("ignore_link_bandwidth_errors", False))
+        )
+        self.ignore_link_bandwidth_check.setToolTip(
+            "Use only as a manual override. The generated design records a warning "
+            "for every undersized link."
+        )
+
+        self.clear_planner_overrides_button = QPushButton(
+            "Clear automatic planner resolution overrides"
+        )
+        self.clear_planner_overrides_button.setToolTip(
+            "Remove manually selected switch models and minimum switch counts "
+            "created by the planning-resolution dialog."
+        )
+        self.clear_planner_overrides_button.clicked.connect(
+            self.clear_planner_resolution_overrides
+        )
+
+        self.auto_design_button = QPushButton("Launch Guided Automatic Planner")
+        self.auto_design_button.setToolTip(
+            "Open the guided architecture, rack strategy and model-selection wizard, then generate the network."
+        )
         self.auto_design_button.clicked.connect(self.generate_automatic_design)
 
         self.clear_installed_button = QPushButton(
@@ -2036,6 +2958,8 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("Network technology", self.technology_combo)
         settings_layout.addRow("Expected MER locations", self.expected_mer_spin)
         settings_layout.addRow("Traditional topology", self.topology_model_combo)
+        settings_layout.addRow("Rack deployment model", self.rack_deployment_combo)
+        settings_layout.addRow("Aggregation rack placement", self.aggregation_rack_combo)
         settings_layout.addRow(
             "Independent links per target", self.independent_link_count_spin
         )
@@ -2060,6 +2984,9 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("", self.redundant_core_check)
         settings_layout.addRow("", self.olt_failover_check)
         settings_layout.addRow("", self.auto_connect_manual_check)
+        settings_layout.addRow("", self.auto_add_bandwidth_switches_check)
+        settings_layout.addRow("", self.ignore_link_bandwidth_check)
+        settings_layout.addRow("", self.clear_planner_overrides_button)
         settings_layout.addRow("", self.auto_design_button)
         settings_layout.addRow("", self.sync_physical_fibre_button)
         settings_layout.addRow("", self.generate_ip_plan_button)
@@ -2158,6 +3085,12 @@ class NetworkPlannerDialog(QDialog):
 
         self.topology_model_combo.currentIndexChanged.connect(
             self._load_layer_profile_defaults
+        )
+        self.topology_model_combo.currentIndexChanged.connect(
+            self._update_layer_rule_availability
+        )
+        self.rack_deployment_combo.currentIndexChanged.connect(
+            self._update_layer_rule_availability
         )
         self.redundant_core_check.toggled.connect(
             self._load_layer_profile_defaults
@@ -2716,9 +3649,12 @@ class NetworkPlannerDialog(QDialog):
             self.layer_rules_table.removeRow(row)
 
     def _update_layer_rule_availability(self, *_args) -> None:
-        enabled = self.technology_combo.currentText().strip().lower() == "traditional"
+        traditional = (
+            self.technology_combo.currentText().strip().lower() == "traditional"
+        )
         for widget in (
             self.topology_model_combo,
+            self.rack_deployment_combo,
             self.independent_link_count_spin,
             self.redundant_core_check,
             self.layer_rules_table,
@@ -2726,7 +3662,20 @@ class NetworkPlannerDialog(QDialog):
             self.add_layer_rule_button,
             self.remove_layer_rule_button,
         ):
-            widget.setEnabled(enabled)
+            widget.setEnabled(traditional)
+
+        three_tier = (
+            _text(self.topology_model_combo.currentData()) == "three_tier"
+        )
+        end_of_row = (
+            _text(self.rack_deployment_combo.currentData()) == "end_of_row"
+        )
+        aggregation_available = traditional and three_tier and end_of_row
+        self.aggregation_rack_combo.setEnabled(aggregation_available)
+        if not aggregation_available:
+            dedicated_index = self.aggregation_rack_combo.findData("dedicated")
+            if dedicated_index >= 0:
+                self.aggregation_rack_combo.setCurrentIndex(dedicated_index)
 
     def _manufacturer_preferences_from_table(self) -> Dict[str, dict]:
         result: Dict[str, dict] = {}
@@ -2741,6 +3690,34 @@ class NetworkPlannerDialog(QDialog):
                 result[component] = {"preferred_manufacturers": names, "strict": bool(strict_check.isChecked()) if strict_check else False}
         return normalise_manufacturer_preferences(result)
 
+    def clear_planner_resolution_overrides(self) -> None:
+        settings = self.data.setdefault("network_settings", {})
+        overrides = settings.get("auto_planner_resolution_overrides", {})
+        has_overrides = isinstance(overrides, dict) and any(
+            bool(value) for value in overrides.values()
+        )
+        if not has_overrides:
+            QMessageBox.information(
+                self,
+                "Planner overrides",
+                "There are no manual automatic-planner overrides to clear.",
+            )
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Clear planner overrides",
+                "Clear selected switch models and minimum switch counts created "
+                "by planning issue resolutions?",
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        settings["auto_planner_resolution_overrides"] = {}
+        QMessageBox.information(
+            self, "Planner overrides", "Automatic-planner overrides were cleared."
+        )
+
     def _sync_planner_settings(self) -> None:
         settings = self.data.setdefault("network_settings", {})
         settings["technology"] = self.technology_combo.currentText().strip()
@@ -2749,6 +3726,21 @@ class NetworkPlannerDialog(QDialog):
         settings["topology_model"] = (
             _text(self.topology_model_combo.currentData()) or "collapsed_core"
         )
+        settings["rack_deployment_model"] = (
+            _text(self.rack_deployment_combo.currentData()) or "end_of_row"
+        )
+        aggregation_mode = (
+            _text(self.aggregation_rack_combo.currentData()) or "dedicated"
+        )
+        if (
+            settings["technology"].lower() != "traditional"
+            or settings["topology_model"] != "three_tier"
+            or settings["rack_deployment_model"] != "end_of_row"
+        ):
+            aggregation_mode = "dedicated"
+        settings["aggregation_rack_mode"] = aggregation_mode
+        settings["tor_keep_final_connections_in_cabinet"] = True
+        settings["tor_allow_adjacent_cabinet_uplinks"] = True
         settings["independent_link_count"] = int(
             self.independent_link_count_spin.value()
         )
@@ -2761,6 +3753,12 @@ class NetworkPlannerDialog(QDialog):
         settings["manufacturer_preferences"] = self._manufacturer_preferences_from_table()
         settings["auto_connect_new_manual_devices"] = bool(
             self.auto_connect_manual_check.isChecked()
+        )
+        settings["auto_add_switches_for_bandwidth"] = bool(
+            self.auto_add_bandwidth_switches_check.isChecked()
+        )
+        settings["ignore_link_bandwidth_errors"] = bool(
+            self.ignore_link_bandwidth_check.isChecked()
         )
         settings["spare_capacity_percent"] = float(self.spare_capacity_spin.value())
         settings["default_expected_bandwidth_mbps"] = float(self.default_expected_bandwidth_spin.value())
@@ -2790,6 +3788,12 @@ class NetworkPlannerDialog(QDialog):
         lines = [
             f"Technology: {summary.get('technology', '')}",
             f"Topology: {summary.get('topology_model', '')}",
+            f"Rack deployment: {summary.get('rack_deployment_model', 'end_of_row')}",
+            f"Aggregation placement: {summary.get('aggregation_rack_mode', 'dedicated')}",
+            f"Planned cabinets: {summary.get('rack_count', 0)}",
+            f"Final cross-cabinet connections: {summary.get('final_cross_cabinet_connections', 0)}",
+            f"Adjacent cabinet uplinks: {summary.get('adjacent_cabinet_uplinks', 0)}",
+            f"Cabinet-row uplinks: {summary.get('cabinet_row_uplinks', 0)}",
             f"Independent links: {summary.get('independent_link_count', '')}",
             f"Objective: {summary.get('objective', '')}",
             "",
@@ -2803,6 +3807,8 @@ class NetworkPlannerDialog(QDialog):
             f"Installed endpoint bandwidth capacity: {summary.get('installed_bandwidth_capacity_mbps', 0)} Mbps",
             f"Installed endpoint packet capacity: {summary.get('installed_packet_throughput_pps', 0)} pps",
             f"Spare capacity: {summary.get('spare_capacity_percent', 0)}%",
+            f"Auto-add switches for bandwidth: {'Yes' if summary.get('auto_add_switches_for_bandwidth', True) else 'No'}",
+            f"Bandwidth shortfall override: {'Enabled' if summary.get('ignore_link_bandwidth_errors', False) else 'Disabled'}",
             f"Estimated copper: {summary.get('estimated_copper_length_m', 0)} m",
             f"Estimated fibre: {summary.get('estimated_fibre_length_m', 0)} m",
             f"PoLAN ONTs per splitter limit: {summary.get('polan_max_onts_per_splitter', '')}",
@@ -2825,6 +3831,68 @@ class NetworkPlannerDialog(QDialog):
                     f"  {source} {arrow} {target}: {rule.get('links_per_target', 1)} link(s), "
                     f"minimum {rule.get('minimum_distinct_sources', 1)} distinct source(s)"
                 )
+        model_preferences = normalise_asset_model_preferences(
+            summary.get("asset_model_preferences", {})
+        )
+        selected_models = [
+            (component, policy)
+            for component, policy in model_preferences.items()
+            if policy.get("preferred_asset_ids")
+        ]
+        if selected_models:
+            lines.extend(["", "Preferred equipment models:"])
+            asset_names = {
+                _text(asset.get("id")): (
+                    _text(asset.get("name")) or _text(asset.get("id"))
+                )
+                for asset in self.data.get("network_assets", [])
+                if isinstance(asset, dict)
+            }
+            for component, policy in selected_models:
+                ids = policy.get("preferred_asset_ids", [])
+                names = [asset_names.get(_text(value), _text(value)) for value in ids]
+                strict_text = " (strict)" if policy.get("strict") else ""
+                lines.append(
+                    f"  {ASSET_MODEL_PREFERENCE_COMPONENTS.get(component, component)}: "
+                    + ", ".join(names)
+                    + strict_text
+                )
+        overrides = summary.get("planner_resolution_overrides", {}) or {}
+        if isinstance(overrides, dict) and any(bool(value) for value in overrides.values()):
+            lines.extend(["", "Manual planner overrides:"])
+            for location, asset_id in sorted(
+                (overrides.get("access_asset_by_location", {}) or {}).items()
+            ):
+                lines.append(f"  Access switch at {location}: {asset_id}")
+            for layer, asset_id in sorted(
+                (overrides.get("upstream_asset_by_layer", {}) or {}).items()
+            ):
+                lines.append(f"  {layer.title()} switch model: {asset_id}")
+            for location, count in sorted(
+                (overrides.get("minimum_access_switches_by_location", {}) or {}).items()
+            ):
+                lines.append(f"  Minimum access switches at {location}: {count}")
+            for location, mode in sorted(
+                (overrides.get("spare_capacity_mode_by_location", {}) or {}).items()
+            ):
+                description = (
+                    "defer access-port spare capacity"
+                    if mode == "defer"
+                    else "install a separate spare-capacity rack"
+                )
+                lines.append(f"  Spare capacity at {location}: {description}")
+        deferred_locations = summary.get(
+            "deferred_spare_capacity_locations", []
+        ) or []
+        if deferred_locations:
+            lines.extend(["", "Deferred access-port spare capacity:"])
+            lines.extend(f"  {location}" for location in deferred_locations)
+        extra_rack_locations = summary.get(
+            "additional_spare_capacity_rack_locations", []
+        ) or []
+        if extra_rack_locations:
+            lines.extend(["", "Additional spare-capacity racks:"])
+            lines.extend(f"  {location}" for location in extra_rack_locations)
         warnings = summary.get("warnings", []) or []
         if warnings:
             lines.extend(["", "Warnings:"])
@@ -2840,6 +3908,54 @@ class NetworkPlannerDialog(QDialog):
         return pickle.loads(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
 
     def generate_automatic_design(self) -> None:
+        # Capture edits made on the main settings tab before opening the guided
+        # setup. The wizard then becomes the authoritative launch step.
+        self._sync_planner_settings()
+        wizard = AutoPlannerSetupWizard(self, self.data)
+        if wizard.exec() != QDialog.Accepted:
+            return
+        previous_topology = _text(
+            self.topology_model_combo.currentData()
+        ) or "collapsed_core"
+        wizard.apply_settings()
+        settings = self.data.setdefault("network_settings", {})
+
+        _set_combo_text(
+            self.technology_combo,
+            _text(settings.get("technology")) or "Traditional",
+        )
+        topology_index = self.topology_model_combo.findData(
+            _text(settings.get("topology_model")) or "collapsed_core"
+        )
+        if topology_index >= 0:
+            self.topology_model_combo.setCurrentIndex(topology_index)
+        rack_index = self.rack_deployment_combo.findData(
+            _text(settings.get("rack_deployment_model")) or "end_of_row"
+        )
+        if rack_index >= 0:
+            self.rack_deployment_combo.setCurrentIndex(rack_index)
+        aggregation_index = self.aggregation_rack_combo.findData(
+            _text(settings.get("aggregation_rack_mode")) or "dedicated"
+        )
+        if aggregation_index >= 0:
+            self.aggregation_rack_combo.setCurrentIndex(aggregation_index)
+        self.redundant_core_check.setChecked(
+            bool(settings.get("redundant_core", True))
+        )
+        self.independent_link_count_spin.setValue(
+            max(1, int(settings.get("independent_link_count", 2) or 2))
+        )
+        self.spare_capacity_spin.setValue(
+            float(settings.get("spare_capacity_percent", 15.0) or 0.0)
+        )
+        self.default_rack_size_spin.setValue(
+            max(1, int(settings.get("default_rack_size_u", 42) or 42))
+        )
+        current_topology = _text(
+            self.topology_model_combo.currentData()
+        ) or "collapsed_core"
+        if current_topology != previous_topology:
+            self._load_layer_profile_defaults()
         self._sync_planner_settings()
         technology = self.technology_combo.currentText().strip()
         existing_auto = any(
@@ -2858,36 +3974,183 @@ class NetworkPlannerDialog(QDialog):
             != QMessageBox.Yes
         ):
             return
-        progress = QProgressDialog("Preparing automatic network plan...", "", 0, 100, self)
+
+        summary = None
+        applied_resolution_signatures = set()
+
+        def planning_error_signature(error: NetworkPlanningError) -> tuple:
+            code = _text(getattr(error, "code", ""))
+            details = dict(getattr(error, "details", {}) or {})
+            issues = details.get("issues", []) or []
+            if isinstance(issues, list) and issues:
+                return (
+                    code,
+                    tuple(
+                        sorted(
+                            (
+                                _text(issue.get("location_name")),
+                                int(issue.get("actual_port_count", 0) or 0),
+                                int(
+                                    issue.get(
+                                        "required_port_count_with_spare", 0
+                                    )
+                                    or 0
+                                ),
+                                int(issue.get("switches_with_spare", 0) or 0),
+                                int(issue.get("stacks_with_spare", 0) or 0),
+                            )
+                            for issue in issues
+                            if isinstance(issue, dict)
+                        )
+                    ),
+                )
+            return (
+                code,
+                _text(details.get("location_name")),
+                _text(details.get("from_name")),
+                _text(details.get("to_name")),
+                round(float(details.get("required_bandwidth_mbps", 0.0) or 0.0), 6),
+                int(details.get("current_location_switch_count", 0) or 0),
+                int(details.get("required_port_count_with_spare", 0) or 0),
+            )
+
+        max_resolution_rounds = max(
+            32, min(256, len(self.data.get("locations", [])) * 4 + 16)
+        )
+        progress = QProgressDialog(
+            "Preparing automatic network plan...", "", 0, 100, self
+        )
         progress.setWindowTitle("Automatic network planning")
         progress.setWindowModality(Qt.WindowModal)
         progress.setCancelButton(None)
         progress.setMinimumDuration(0)
         progress.setAutoClose(False)
         progress.setAutoReset(False)
-        progress.setValue(0)
-        progress.show()
 
-        def update_progress(value: int, message: str) -> None:
-            progress.setLabelText(message)
-            progress.setValue(max(0, min(100, int(value))))
-            QApplication.processEvents()
+        for _attempt in range(max_resolution_rounds):
+            snapshot = self._save_payload()
+            progress_message = (
+                "Preparing automatic network plan..."
+                if _attempt == 0
+                else (
+                    "Continuing the same planning session with "
+                    f"{len(applied_resolution_signatures)} saved decision set(s)..."
+                )
+            )
+            progress.setLabelText(progress_message)
+            progress.setValue(0)
+            progress.show()
 
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            summary = generate_network_design(self.data, technology, progress_callback=update_progress)
-        except NetworkPlanningError as exc:
-            QMessageBox.critical(self, "Automatic network planning", str(exc))
-            return
-        except Exception as exc:
+            def update_progress(value: int, message: str) -> None:
+                progress.setLabelText(message)
+                progress.setValue(max(0, min(100, int(value))))
+                QApplication.processEvents()
+
+            planning_error = None
+            unexpected_error = None
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                summary = generate_network_design(
+                    self.data,
+                    technology,
+                    progress_callback=update_progress,
+                )
+            except NetworkPlanningError as exc:
+                planning_error = exc
+            except Exception as exc:
+                unexpected_error = exc
+            finally:
+                QApplication.restoreOverrideCursor()
+                progress.setValue(100)
+                progress.hide()
+
+            if summary is not None:
+                break
+
+            # A failed pass may have removed the previous generated design before
+            # reaching the failing constraint. Restore the complete planner state
+            # before presenting choices or returning to manual editing.
+            for key in _PLANNER_MUTABLE_KEYS:
+                if key in snapshot:
+                    self.data[key] = snapshot[key]
+                else:
+                    self.data.pop(key, None)
+
+            if unexpected_error is not None:
+                progress.close()
+                QMessageBox.critical(
+                    self,
+                    "Automatic network planning",
+                    f"Unexpected planning error:\n{unexpected_error}",
+                )
+                return
+
+            if planning_error is None:
+                progress.close()
+                QMessageBox.critical(
+                    self,
+                    "Automatic network planning",
+                    "The planner stopped without returning a diagnostic.",
+                )
+                return
+
+            signature = planning_error_signature(planning_error)
+            if signature in applied_resolution_signatures:
+                progress.close()
+                QMessageBox.critical(
+                    self,
+                    "Automatic network planning",
+                    "The same planning issue was returned after its saved "
+                    "resolution was applied. The solver has stopped rather than "
+                    "asking for the same decision again. Review the affected "
+                    "asset model, stack limit and rack settings.\n\n"
+                    f"{planning_error}",
+                )
+                return
+
+            error_code = _text(getattr(planning_error, "code", ""))
+            if error_code == "access_stack_spare_capacity_batch":
+                resolution = PlanningResolutionSequenceDialog(
+                    self, planning_error, self.data
+                )
+                if resolution.exec() != QDialog.Accepted:
+                    progress.close()
+                    return
+            else:
+                resolution = PlanningResolutionDialog(
+                    self, planning_error, self.data
+                )
+                if resolution.exec() != QDialog.Accepted:
+                    progress.close()
+                    return
+                if resolution.selected_action == "review_assets":
+                    progress.close()
+                    self.tabs.setCurrentWidget(self.assets_tab)
+                    self.refresh_tables()
+                    return
+
+            applied_resolution_signatures.add(signature)
+            settings = self.data.setdefault("network_settings", {})
+            self.auto_add_bandwidth_switches_check.setChecked(
+                bool(settings.get("auto_add_switches_for_bandwidth", True))
+            )
+            self.ignore_link_bandwidth_check.setChecked(
+                bool(settings.get("ignore_link_bandwidth_errors", False))
+            )
+            self.spare_capacity_spin.setValue(
+                float(settings.get("spare_capacity_percent", 0.0) or 0.0)
+            )
+        else:
+            progress.close()
             QMessageBox.critical(
-                self, "Automatic network planning", f"Unexpected planning error:\n{exc}"
+                self,
+                "Automatic network planning",
+                "The planner could not resolve the design after all permitted decision rounds. "
+                "Review the asset library and the saved planner overrides.",
             )
             return
-        finally:
-            QApplication.restoreOverrideCursor()
-            progress.setValue(100)
-            progress.close()
+
+        progress.close()
         self.refresh_tables()
         self.on_save(self._save_payload())
         self.tabs.setCurrentWidget(self.summary_text)

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 import ipaddress
-import math
 from typing import Dict, Iterable, List, Optional
 
 from network_services import FIBRE_COLOURS, build_fibre_cores, fibre_layer_defaults, set_core_status_from_splices
 
 
-NETWORK_SCHEMA_VERSION = 9
+NETWORK_SCHEMA_VERSION = 10
 
 
 DEFAULT_FIBRE_CABLE_TYPES = [
@@ -127,7 +126,15 @@ NETWORK_DEFAULTS = {
         "independent_link_count": 2,
         "layer_connection_rules": [],
         "manufacturer_preferences": {},
+        "asset_model_preferences": {},
+        "rack_deployment_model": "end_of_row",
+        "aggregation_rack_mode": "dedicated",
+        "tor_keep_final_connections_in_cabinet": True,
+        "tor_allow_adjacent_cabinet_uplinks": True,
         "auto_connect_new_manual_devices": True,
+        "auto_add_switches_for_bandwidth": True,
+        "ignore_link_bandwidth_errors": False,
+        "auto_planner_resolution_overrides": {},
         "spare_capacity_percent": 15.0,
         "traditional_max_copper_m": 90.0,
         "polan_max_ont_copper_m": 30.0,
@@ -339,6 +346,14 @@ MANUFACTURER_PREFERENCE_COMPONENTS = {
     "cable_management": "Cable-management panels",
 }
 
+# Exact-model preferences use asset IDs rather than manufacturer names.  The
+# component keys deliberately mirror the manufacturer preference table so a
+# model can be pinned at any generated layer without adding planner-specific
+# fields to individual assets.
+ASSET_MODEL_PREFERENCE_COMPONENTS = dict(MANUFACTURER_PREFERENCE_COMPONENTS)
+RACK_DEPLOYMENT_MODELS = {"top_of_rack", "end_of_row"}
+AGGREGATION_RACK_MODES = {"dedicated", "shared_eor"}
+
 
 def default_layer_connection_rules(
     topology_model: str = "collapsed_core",
@@ -541,6 +556,34 @@ def normalise_manufacturer_preferences(value) -> Dict[str, dict]:
     return result
 
 
+def normalise_asset_model_preferences(value) -> Dict[str, dict]:
+    """Return ordered exact-model preferences keyed by planner component.
+
+    ``preferred_asset_ids`` contains network-asset IDs in priority order.  A
+    strict policy excludes all other models; a non-strict policy only ranks the
+    selected models ahead of automatic alternatives.
+    """
+
+    source = value if isinstance(value, dict) else {}
+    result: Dict[str, dict] = {}
+    for component in ASSET_MODEL_PREFERENCE_COMPONENTS:
+        raw = source.get(component, {})
+        strict = False
+        preferred: List[str] = []
+        if isinstance(raw, dict):
+            preferred = _normalise_string_list(
+                raw.get("preferred_asset_ids", raw.get("asset_ids", []))
+            )
+            strict = bool(raw.get("strict", False))
+        elif isinstance(raw, (list, tuple, str)):
+            preferred = _normalise_string_list(raw)
+        result[component] = {
+            "preferred_asset_ids": preferred,
+            "strict": strict,
+        }
+    return result
+
+
 def ensure_network_schema(data: dict) -> dict:
     """Ensure that *data* contains a complete, backwards-compatible network schema."""
 
@@ -558,7 +601,15 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("independent_link_count", 2)
     settings.setdefault("layer_connection_rules", [])
     settings.setdefault("manufacturer_preferences", {})
+    settings.setdefault("asset_model_preferences", {})
+    settings.setdefault("rack_deployment_model", "end_of_row")
+    settings.setdefault("aggregation_rack_mode", "dedicated")
+    settings.setdefault("tor_keep_final_connections_in_cabinet", True)
+    settings.setdefault("tor_allow_adjacent_cabinet_uplinks", True)
     settings.setdefault("auto_connect_new_manual_devices", True)
+    settings.setdefault("auto_add_switches_for_bandwidth", True)
+    settings.setdefault("ignore_link_bandwidth_errors", False)
+    settings.setdefault("auto_planner_resolution_overrides", {})
     settings.setdefault("spare_capacity_percent", 15.0)
     settings.setdefault("traditional_max_copper_m", 90.0)
     settings.setdefault("polan_max_ont_copper_m", 30.0)
@@ -605,9 +656,76 @@ def ensure_network_schema(data: dict) -> dict:
     settings["manufacturer_preferences"] = normalise_manufacturer_preferences(
         settings.get("manufacturer_preferences")
     )
+    settings["asset_model_preferences"] = normalise_asset_model_preferences(
+        settings.get("asset_model_preferences")
+    )
+    rack_model = _text(settings.get("rack_deployment_model")).lower()
+    settings["rack_deployment_model"] = (
+        rack_model if rack_model in RACK_DEPLOYMENT_MODELS else "end_of_row"
+    )
+    aggregation_mode = _text(settings.get("aggregation_rack_mode")).lower()
+    settings["aggregation_rack_mode"] = (
+        aggregation_mode
+        if aggregation_mode in AGGREGATION_RACK_MODES
+        else "dedicated"
+    )
+    settings["tor_keep_final_connections_in_cabinet"] = bool(
+        settings.get("tor_keep_final_connections_in_cabinet", True)
+    )
+    settings["tor_allow_adjacent_cabinet_uplinks"] = bool(
+        settings.get("tor_allow_adjacent_cabinet_uplinks", True)
+    )
     settings["auto_connect_new_manual_devices"] = bool(
         settings.get("auto_connect_new_manual_devices", True)
     )
+    settings["auto_add_switches_for_bandwidth"] = bool(
+        settings.get("auto_add_switches_for_bandwidth", True)
+    )
+    settings["ignore_link_bandwidth_errors"] = bool(
+        settings.get("ignore_link_bandwidth_errors", False)
+    )
+    overrides = settings.get("auto_planner_resolution_overrides")
+    if not isinstance(overrides, dict):
+        overrides = {}
+
+    access_assets = overrides.get("access_asset_by_location")
+    access_assets = access_assets if isinstance(access_assets, dict) else {}
+    access_assets = {
+        _text(location): _text(asset_id)
+        for location, asset_id in access_assets.items()
+        if _text(location) and _text(asset_id)
+    }
+
+    upstream_assets = overrides.get("upstream_asset_by_layer")
+    upstream_assets = upstream_assets if isinstance(upstream_assets, dict) else {}
+    upstream_assets = {
+        _text(layer).lower(): _text(asset_id)
+        for layer, asset_id in upstream_assets.items()
+        if _text(layer).lower() in {"core", "aggregation"} and _text(asset_id)
+    }
+
+    minimum_switches = overrides.get("minimum_access_switches_by_location")
+    minimum_switches = minimum_switches if isinstance(minimum_switches, dict) else {}
+    minimum_switches = {
+        _text(location): max(1, _as_int(count, 1))
+        for location, count in minimum_switches.items()
+        if _text(location) and _as_int(count, 0) > 0
+    }
+
+    spare_modes = overrides.get("spare_capacity_mode_by_location")
+    spare_modes = spare_modes if isinstance(spare_modes, dict) else {}
+    spare_modes = {
+        _text(location): _text(mode).lower()
+        for location, mode in spare_modes.items()
+        if _text(location) and _text(mode).lower() in {"defer", "new_rack"}
+    }
+
+    settings["auto_planner_resolution_overrides"] = {
+        "access_asset_by_location": access_assets,
+        "upstream_asset_by_layer": upstream_assets,
+        "minimum_access_switches_by_location": minimum_switches,
+        "spare_capacity_mode_by_location": spare_modes,
+    }
     settings["spare_capacity_percent"] = max(
         0.0, _as_float(settings.get("spare_capacity_percent"), 15.0)
     )
@@ -771,50 +889,14 @@ def ensure_network_schema(data: dict) -> dict:
         asset["patch_panel_format"] = "modular_cassette" if is_modular_fibre_panel else "fixed"
         asset["modular_patch_panel"] = is_modular_fibre_panel
         asset["patch_panel_cassette_count"] = (
-            max(1, min(48, _as_int(asset.get("patch_panel_cassette_count"), 4)))
+            max(1, min(4, _as_int(asset.get("patch_panel_cassette_count"), 4)))
             if is_modular_fibre_panel
             else 0
         )
-        asset["patch_panel_cassette_capacity"] = (
-            max(1, min(96, _as_int(asset.get("patch_panel_cassette_capacity"), 12)))
-            if is_modular_fibre_panel
-            else 0
-        )
-        cassette_count_for_layout = asset["patch_panel_cassette_count"] or 1
-        asset["patch_panel_cassette_rows"] = (
-            max(1, min(12, _as_int(asset.get("patch_panel_cassette_rows"), max(1, (cassette_count_for_layout + 3) // 4))))
-            if is_modular_fibre_panel
-            else 0
-        )
-        asset["patch_panel_cassette_columns"] = (
-            max(1, min(24, _as_int(asset.get("patch_panel_cassette_columns"), min(4, cassette_count_for_layout))))
-            if is_modular_fibre_panel
-            else 0
-        )
-        front_connector_for_layout = _text(asset.get("patch_panel_cassette_front_connector")).lower() or "lc_duplex"
-        front_for_layout = MODULAR_PANEL_FRONT_CONNECTORS.get(
-            front_connector_for_layout,
-            MODULAR_PANEL_FRONT_CONNECTORS["lc_duplex"],
-        )
-        cassette_capacity_for_layout = max(
-            1,
-            int(
-                math.ceil(
-                    (asset["patch_panel_cassette_capacity"] or 12)
-                    / float(max(1, _as_int(front_for_layout.get("fibres_per_position"), 1)))
-                )
-            ),
-        )
-        asset["patch_panel_cassette_port_rows"] = (
-            max(1, min(12, _as_int(asset.get("patch_panel_cassette_port_rows"), max(1, (cassette_capacity_for_layout + 11) // 12))))
-            if is_modular_fibre_panel
-            else 0
-        )
-        asset["patch_panel_cassette_port_columns"] = (
-            max(1, min(48, _as_int(asset.get("patch_panel_cassette_port_columns"), min(12, cassette_capacity_for_layout))))
-            if is_modular_fibre_panel
-            else 0
-        )
+        # A modular panel accepts up to four field-replaceable cassettes.  Each
+        # cassette exposes twelve front connector positions.  LC cassettes are
+        # duplex by default, while SC cassettes can be simplex or duplex.
+        asset["patch_panel_cassette_capacity"] = 12 if is_modular_fibre_panel else 0
         front_connector = _text(asset.get("patch_panel_cassette_front_connector")).lower() or "lc_duplex"
         if front_connector not in MODULAR_PANEL_FRONT_CONNECTORS:
             front_connector = "lc_duplex"
@@ -1028,21 +1110,18 @@ def ensure_network_schema(data: dict) -> dict:
         port_definitions = [row for row in port_definitions if row["port_count"] > 0]
 
         if asset.get("modular_patch_panel"):
-            cassette_count = max(1, min(48, _as_int(asset.get("patch_panel_cassette_count"), 4)))
-            cassette_capacity = max(1, min(96, _as_int(asset.get("patch_panel_cassette_capacity"), 12)))
+            cassette_count = max(1, min(4, _as_int(asset.get("patch_panel_cassette_count"), 4)))
+            cassette_capacity = 12
             front_key = _text(asset.get("patch_panel_cassette_front_connector")).lower() or "lc_duplex"
             front = MODULAR_PANEL_FRONT_CONNECTORS.get(front_key, MODULAR_PANEL_FRONT_CONNECTORS["lc_duplex"])
-            fibres_per_position = max(1, _as_int(front.get("fibres_per_position"), 1))
-            front_positions_per_cassette = max(1, int(math.ceil(cassette_capacity / float(fibres_per_position))))
-            front_positions_total = cassette_count * front_positions_per_cassette
             explicit_names = [
                 f"C{cassette}-{front['label']}-{position:02d}"
                 for cassette in range(1, cassette_count + 1)
-                for position in range(1, front_positions_per_cassette + 1)
+                for position in range(1, cassette_capacity + 1)
             ]
             asset["patch_panel_cassette_count"] = cassette_count
             asset["patch_panel_cassette_capacity"] = cassette_capacity
-            asset["number_of_ports"] = front_positions_total
+            asset["number_of_ports"] = cassette_count * cassette_capacity
             asset["connections_in"] = asset["number_of_ports"]
             asset["connections_out"] = asset["number_of_ports"]
             asset["input_connection_type"] = "fibre"
@@ -1108,15 +1187,6 @@ def ensure_network_schema(data: dict) -> dict:
         asset["port_definitions"] = port_definitions
         if port_definitions:
             asset["number_of_ports"] = sum(row["port_count"] for row in port_definitions)
-        if asset["asset_type"] == "patch_panel" and _text(asset.get("patch_panel_type")).lower() == "fibre":
-            fibres_per_position = 1
-            if asset.get("modular_patch_panel"):
-                front_key = _text(asset.get("patch_panel_cassette_front_connector")).lower() or "lc_duplex"
-                front = MODULAR_PANEL_FRONT_CONNECTORS.get(front_key, MODULAR_PANEL_FRONT_CONNECTORS["lc_duplex"])
-                fibres_per_position = max(1, _as_int(front.get("fibres_per_position"), 1))
-            rack_positions = int(math.ceil(max(0, asset["number_of_ports"]) / float(fibres_per_position)))
-            minimum_panel_units = max(1, int((rack_positions + 47) // 48))
-            asset["rack_units"] = max(_as_int(asset.get("rack_units"), 1), minimum_panel_units)
 
     # Recover planner-owned PoLAN placement rows if an older save path kept
     # generated instances but omitted their generated locations.  The instance
@@ -1233,8 +1303,7 @@ def ensure_network_schema(data: dict) -> dict:
             raw_cassettes = []
         normalised_cassettes = []
         if bool(asset.get("modular_patch_panel")):
-            max_cassettes = max(1, min(48, _as_int(asset.get("patch_panel_cassette_count"), 4)))
-            cassette_capacity = max(1, min(96, _as_int(asset.get("patch_panel_cassette_capacity"), 12)))
+            max_cassettes = max(1, min(4, _as_int(asset.get("patch_panel_cassette_count"), 4)))
             default_front = _text(asset.get("patch_panel_cassette_front_connector")).lower() or "lc_duplex"
             default_mode = _text(asset.get("patch_panel_cassette_termination_mode")).lower() or "spliced"
             default_rear = _text(asset.get("patch_panel_cassette_rear_connector")).lower() or "mpo-24"
@@ -1248,11 +1317,6 @@ def ensure_network_schema(data: dict) -> dict:
                 front_key = _text(row.get("front_connector", default_front)).lower() or default_front
                 if front_key not in MODULAR_PANEL_FRONT_CONNECTORS:
                     front_key = default_front
-                front = MODULAR_PANEL_FRONT_CONNECTORS.get(front_key, MODULAR_PANEL_FRONT_CONNECTORS["lc_duplex"])
-                front_capacity = max(
-                    1,
-                    int(math.ceil(cassette_capacity / float(max(1, _as_int(front.get("fibres_per_position"), 1))))),
-                )
                 mode = _text(row.get("termination_mode", default_mode)).lower() or default_mode
                 if mode not in MODULAR_PANEL_TERMINATION_MODES:
                     mode = default_mode
@@ -1263,11 +1327,11 @@ def ensure_network_schema(data: dict) -> dict:
                     **row,
                     "position": position,
                     "front_connector": front_key,
-                    "front_connector_capacity": front_capacity,
+                    "front_connector_capacity": 12,
                     "termination_mode": mode,
                     "rear_connector": rear if mode == "connectorised" else "splice",
                     "rear_connector_count": max(0, min(4, _as_int(row.get("rear_connector_count"), 1 if mode == "connectorised" else 0))),
-                    "used_front_connectors": max(0, min(front_capacity, _as_int(row.get("used_front_connectors"), 0))),
+                    "used_front_connectors": max(0, min(12, _as_int(row.get("used_front_connectors"), 0))),
                     "used_fibres": max(0, _as_int(row.get("used_fibres"), 0)),
                     "cable_ids": _normalise_string_list(row.get("cable_ids", [])),
                     "associated_instance_ids": _normalise_string_list(row.get("associated_instance_ids", [])),
@@ -1864,10 +1928,10 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
             rear_count = _as_int(asset.get("patch_panel_cassette_rear_connector_count"), 0)
             if _text(asset.get("patch_panel_type")).lower() != "fibre":
                 messages.append(f"Modular patch panel {asset_id} must use fibre media.")
-            if cassette_count < 1 or cassette_count > 48:
-                messages.append(f"Modular patch panel {asset_id} must contain between one and 48 cassette positions.")
-            if cassette_capacity < 1 or cassette_capacity > 96:
-                messages.append(f"Modular patch panel {asset_id} cassettes must provide between one and 96 fibres each.")
+            if cassette_count < 1 or cassette_count > 4:
+                messages.append(f"Modular patch panel {asset_id} must contain between one and four cassette positions.")
+            if cassette_capacity != 12:
+                messages.append(f"Modular patch panel {asset_id} cassettes must provide 12 front connector positions each.")
             if front_connector not in MODULAR_PANEL_FRONT_CONNECTORS:
                 messages.append(f"Modular patch panel {asset_id} has an unsupported cassette front connector.")
             if termination_mode not in MODULAR_PANEL_TERMINATION_MODES:
@@ -1877,9 +1941,7 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                     messages.append(f"Modular patch panel {asset_id} requires an MPO/MTP rear connector type.")
                 if rear_count < 1 or rear_count > 4:
                     messages.append(f"Modular patch panel {asset_id} must accept between one and four rear MPO/MTP connectors per cassette.")
-            front = MODULAR_PANEL_FRONT_CONNECTORS.get(front_connector, MODULAR_PANEL_FRONT_CONNECTORS["lc_duplex"])
-            fibres_per_position = max(1, _as_int(front.get("fibres_per_position"), 1))
-            expected_ports = max(0, cassette_count) * int(math.ceil(max(0, cassette_capacity) / float(fibres_per_position)))
+            expected_ports = max(0, cassette_count) * 12
             declared_ports = sum(
                 max(0, _as_int(row.get("port_count")))
                 for row in asset.get("port_definitions", [])

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import re
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -116,6 +116,7 @@ def _asset_port_definitions(asset: dict) -> List[dict]:
     asset_type = _text(asset.get("asset_type")).lower()
     port_type = "pon" if asset_type in {"optical_line_terminal", "optical_network_terminal"} else ("lc" if asset_type == "fibre_splitter" or _text(asset.get("patch_panel_type")).lower() == "fibre" else "rj45")
     return [{"port_type": port_type, "port_count": count, "port_use": "patch" if asset_type == "patch_panel" else "client", "name_prefix": ""}]
+
 
 def _expanded_asset_ports(asset: dict) -> List[dict]:
     result = []
@@ -835,7 +836,7 @@ class TopologyModel:
         parent_rank = self._hierarchy_rank(parent_id)
         child_rank = self._hierarchy_rank(child_id)
 
-        if child_rank < parent_rank:
+        if child_rank <= parent_rank:
             return False
 
         parent_is_access = parent.role == "access_switch" or parent.asset_type == "wireless_access_point"
@@ -849,11 +850,10 @@ class TopologyModel:
         """Orient every connected component into one coherent rank-aware forest.
 
         All minimum-rank devices in a component are roots (for example two
-        independent carrier services).  Descendants are first attached only to
-        a strictly upstream tier.  Any malformed/equal-tier remainder is then
-        attached by the least-violating real edge, preventing connected areas
-        from becoming isolated pseudo-roots while peer and standby links remain
-        cross-links.
+        independent carrier services).  Descendants are attached only when the
+        edge moves to a strictly downstream tier.  Any same-tier or upstream
+        remainder becomes another component root so peer, standby and passive
+        cross-links do not turn into the visible tree.
         """
         sorted_adjacency = {
             node_id: sorted(edges, key=self._edge_sort_key)
@@ -894,7 +894,7 @@ class TopologyModel:
                 for neighbour, edge in sorted_adjacency.get(current, []):
                     if neighbour not in component or neighbour in assigned:
                         continue
-                    if self._hierarchy_rank(neighbour) <= current_rank:
+                    if not self._can_descend(current, neighbour):
                         continue
                     assigned.add(neighbour)
                     self.parent[neighbour] = current
@@ -912,13 +912,14 @@ class TopologyModel:
                     for parent_id, edge in self.adjacency.get(child_id, []):
                         if parent_id not in assigned:
                             continue
+                        if not self._can_descend(parent_id, child_id):
+                            continue
                         parent_rank = self._hierarchy_rank(parent_id)
-                        penalty = 0 if parent_rank < child_rank else (1 if parent_rank == child_rank else 2)
                         choices.append(
                             (
-                                penalty,
                                 self.level.get(parent_id, 0),
                                 parent_rank,
+                                child_rank,
                                 self._node_root_key(parent_id),
                                 self._node_root_key(child_id),
                                 parent_id,
@@ -1308,7 +1309,8 @@ class TopologyCardItem(QGraphicsObject):
         painter.drawRoundedRect(footer_rect, 6.0, 6.0)
         painter.setFont(QFont("Arial", 7))
         painter.setPen(QColor("#e5c8ff"))
-        painter.drawText(footer_rect, Qt.AlignCenter, f"{stack_links} stack links - 2 fibre uplinks")
+        fibre_uplinks = max(0, _int(getattr(self.node, "connection_count", 0)))
+        painter.drawText(footer_rect, Qt.AlignCenter, f"{stack_links} stack links - {fibre_uplinks} fibre uplinks")
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.LeftButton:
@@ -1486,14 +1488,52 @@ class RackEquipmentItem(QGraphicsObject):
             return 'sfp'
         return 'rj45'
 
+    def _stack_member_count(self) -> int:
+        if not bool(self.node.instance.get("logical_stack")):
+            return 1
+        return max(1, _int(self.node.instance.get("stack_member_count"), 1))
+
+    def _stack_member_rects(self) -> List[QRectF]:
+        members = self._stack_member_count()
+        if members <= 1:
+            return [self.boundingRect()]
+        gap = max(3.0, min(7.0, self._height * 0.012))
+        member_h = max(10.0, (self._height - gap * (members - 1)) / members)
+        return [
+            QRectF(0.0, index * (member_h + gap), self._width, member_h)
+            for index in range(members)
+        ]
+
+    def _stack_member_for_port(self, port_node: TopologyNode, index: int) -> int:
+        members = self._stack_member_count()
+        if members <= 1:
+            return 0
+        for key in ("stack_member", "member", "switch_member"):
+            member = _int(port_node.details.get(key), 0)
+            if member > 0:
+                return min(members - 1, member - 1)
+        port_name = _text(port_node.details.get("port_name"))
+        match = re.match(r"^\s*(\d+)\s*[/:\-.]", port_name)
+        if match:
+            member = _int(match.group(1), 1)
+            return min(members - 1, max(0, member - 1))
+        per_member = max(1, int(math.ceil(len(self.port_nodes) / float(members))))
+        return min(members - 1, index // per_member)
+
     def _build_port_rects(self) -> None:
         self._port_rects.clear()
         self._cassette_rects.clear()
         self._compact_vertical_lc = False
         if not self.port_nodes or self._width < 42.0 or self._height < 14.0:
             return
+        if self.node.asset_type == "network_switch" and self._stack_member_count() > 1:
+            self._build_stack_member_port_rects()
+            return
         if self.node.asset_type == "patch_panel" and bool(self.node.asset.get("modular_patch_panel")):
             self._build_modular_patch_panel_port_rects()
+            return
+        if self.node.asset_type == "network_switch":
+            self._build_network_switch_port_rects()
             return
         port_kinds = [
             self._port_kind(
@@ -1587,6 +1627,145 @@ class RackEquipmentItem(QGraphicsObject):
             if x + pw <= right + 0.5 and y + ph <= bottom + 0.5:
                 self._port_rects[port_node.node_id] = QRectF(x, y, pw, ph)
 
+    def _build_stack_member_port_rects(self) -> None:
+        member_rects = self._stack_member_rects()
+        ports_by_member: Dict[int, List[TopologyNode]] = defaultdict(list)
+        for index, port_node in enumerate(self.port_nodes):
+            ports_by_member[self._stack_member_for_port(port_node, index)].append(port_node)
+
+        scale = self._width / 482.6
+        ear_w = min(15.0, self._width * 0.045)
+        for member_index, member_ports in ports_by_member.items():
+            if member_index >= len(member_rects):
+                continue
+            rect = member_rects[member_index]
+            left = rect.left() + ear_w + max(5.0, 7.0 * scale)
+            right = rect.right() - ear_w - max(5.0, 7.0 * scale)
+            top = rect.top() + max(8.0, rect.height() * 0.28)
+            bottom = rect.bottom() - max(3.0, rect.height() * 0.10)
+            usable_w = max(8.0, right - left)
+            usable_h = max(4.0, bottom - top)
+            uplink_uses = {"uplink", "input", "stacking", "management", "console", "power"}
+            access_ports: List[TopologyNode] = []
+            uplink_ports: List[TopologyNode] = []
+            for port_node in member_ports:
+                port_use = _text(port_node.details.get("port_use")).lower()
+                kind = self._port_kind(port_node.details.get("port_type") or port_node.details.get("port_name", ""))
+                if port_use in uplink_uses or kind in {"sfp", "qsfp", "lc", "sc", "mpo"}:
+                    uplink_ports.append(port_node)
+                else:
+                    access_ports.append(port_node)
+
+            uplink_w = min(max(30.0, 42.0 * scale), usable_w * 0.22) if uplink_ports else 0.0
+            access_right = right - uplink_w - (max(3.0, 5.0 * scale) if uplink_ports else 0.0)
+            access_w = max(8.0, access_right - left)
+            rows = 2
+            columns = max(1, int(math.ceil(max(1, len(access_ports)) / float(rows))))
+            if len(access_ports) >= 40:
+                columns = 24
+            gap_x = max(0.7, 1.2 * scale)
+            gap_y = max(0.8, 1.4 * scale)
+            port_w = max(1.8, min(7.0 * scale, (access_w - gap_x * max(0, columns - 1)) / columns))
+            port_h = max(2.8, min(7.2 * scale, (usable_h - gap_y) / rows))
+            block_w = columns * port_w + max(0, columns - 1) * gap_x
+            block_h = rows * port_h + gap_y
+            x0 = left + max(0.0, (access_w - block_w) / 2.0)
+            y0 = top + max(0.0, (usable_h - block_h) / 2.0)
+            for index, port_node in enumerate(access_ports):
+                row = index % rows
+                col = index // rows
+                if col >= columns:
+                    break
+                self._port_rects[port_node.node_id] = QRectF(
+                    x0 + col * (port_w + gap_x),
+                    y0 + row * (port_h + gap_y),
+                    port_w,
+                    port_h,
+                )
+
+            if uplink_ports:
+                u_cols = max(1, min(2, int(math.ceil(len(uplink_ports) / 2.0))))
+                u_rows = max(1, int(math.ceil(len(uplink_ports) / float(u_cols))))
+                u_gap_x = max(0.8, 1.2 * scale)
+                u_gap_y = max(0.8, 1.2 * scale)
+                u_w = max(3.0, min(8.0 * scale, (uplink_w - u_gap_x * max(0, u_cols - 1)) / u_cols))
+                u_h = max(2.8, min(7.0 * scale, (usable_h - u_gap_y * max(0, u_rows - 1)) / u_rows))
+                ux0 = access_right + max(3.0, 5.0 * scale)
+                uy0 = top + max(0.0, (usable_h - (u_rows * u_h + max(0, u_rows - 1) * u_gap_y)) / 2.0)
+                for index, port_node in enumerate(uplink_ports):
+                    row, col = divmod(index, u_cols)
+                    self._port_rects[port_node.node_id] = QRectF(
+                        ux0 + col * (u_w + u_gap_x),
+                        uy0 + row * (u_h + u_gap_y),
+                        u_w,
+                        u_h,
+                    )
+
+    def _build_network_switch_port_rects(self) -> None:
+        scale = self._width / 482.6
+        ear_w = min(15.0, self._width * 0.045)
+        left = ear_w + max(5.0, 7.0 * scale)
+        right = self._width - ear_w - max(5.0, 7.0 * scale)
+        top = max(8.0, self._height * 0.28)
+        bottom = self._height - max(3.0, self._height * 0.10)
+        usable_w = max(8.0, right - left)
+        usable_h = max(4.0, bottom - top)
+        uplink_uses = {"uplink", "input", "stacking", "management", "console", "power"}
+        access_ports: List[TopologyNode] = []
+        uplink_ports: List[TopologyNode] = []
+        for port_node in self.port_nodes:
+            port_use = _text(port_node.details.get("port_use")).lower()
+            kind = self._port_kind(port_node.details.get("port_type") or port_node.details.get("port_name", ""))
+            if port_use in uplink_uses or kind in {"sfp", "qsfp", "lc", "sc", "mpo"}:
+                uplink_ports.append(port_node)
+            else:
+                access_ports.append(port_node)
+
+        uplink_w = min(max(30.0, 42.0 * scale), usable_w * 0.22) if uplink_ports else 0.0
+        access_right = right - uplink_w - (max(3.0, 5.0 * scale) if uplink_ports else 0.0)
+        access_w = max(8.0, access_right - left)
+        rows = 2
+        columns = max(1, int(math.ceil(max(1, len(access_ports)) / float(rows))))
+        if len(access_ports) >= 40:
+            columns = 24
+        gap_x = max(0.7, 1.2 * scale)
+        gap_y = max(0.8, 1.4 * scale)
+        port_w = max(1.8, min(7.0 * scale, (access_w - gap_x * max(0, columns - 1)) / columns))
+        port_h = max(2.8, min(7.2 * scale, (usable_h - gap_y) / rows))
+        block_w = columns * port_w + max(0, columns - 1) * gap_x
+        block_h = rows * port_h + gap_y
+        x0 = left + max(0.0, (access_w - block_w) / 2.0)
+        y0 = top + max(0.0, (usable_h - block_h) / 2.0)
+        for index, port_node in enumerate(access_ports):
+            row = index % rows
+            col = index // rows
+            if col >= columns:
+                break
+            self._port_rects[port_node.node_id] = QRectF(
+                x0 + col * (port_w + gap_x),
+                y0 + row * (port_h + gap_y),
+                port_w,
+                port_h,
+            )
+
+        if uplink_ports:
+            u_cols = max(1, min(2, int(math.ceil(len(uplink_ports) / 2.0))))
+            u_rows = max(1, int(math.ceil(len(uplink_ports) / float(u_cols))))
+            u_gap_x = max(0.8, 1.2 * scale)
+            u_gap_y = max(0.8, 1.2 * scale)
+            u_w = max(3.0, min(8.0 * scale, (uplink_w - u_gap_x * max(0, u_cols - 1)) / u_cols))
+            u_h = max(2.8, min(7.0 * scale, (usable_h - u_gap_y * max(0, u_rows - 1)) / u_rows))
+            ux0 = access_right + max(3.0, 5.0 * scale)
+            uy0 = top + max(0.0, (usable_h - (u_rows * u_h + max(0, u_rows - 1) * u_gap_y)) / 2.0)
+            for index, port_node in enumerate(uplink_ports):
+                row, col = divmod(index, u_cols)
+                self._port_rects[port_node.node_id] = QRectF(
+                    ux0 + col * (u_w + u_gap_x),
+                    uy0 + row * (u_h + u_gap_y),
+                    u_w,
+                    u_h,
+                )
+
     def _build_modular_patch_panel_port_rects(self) -> None:
         scale = self._width / 482.6
         ear_w = min(15.0, self._width * 0.045)
@@ -1651,6 +1830,38 @@ class RackEquipmentItem(QGraphicsObject):
                     port_h,
                 )
 
+    def _paint_stack_member_faces(self, painter: QPainter, ear_w: float) -> None:
+        member_rects = self._stack_member_rects()
+        members = len(member_rects)
+        name = QFontMetrics(QFont("Arial", 6)).elidedText(
+            self.node.name,
+            Qt.ElideRight,
+            max(20, int(self._width - 2 * ear_w - 74.0)),
+        )
+        for index, member_rect in enumerate(member_rects, start=1):
+            face = member_rect.adjusted(1.8, 1.2, -1.8, -1.2)
+            painter.setPen(QPen(QColor("#71808b"), 0.9))
+            painter.setBrush(QColor("#26323c"))
+            painter.drawRoundedRect(face, 2.5, 2.5)
+            painter.setBrush(QColor("#151c22"))
+            painter.drawRect(QRectF(face.left(), face.top() + 1.0, ear_w, max(2.0, face.height() - 2.0)))
+            painter.drawRect(QRectF(face.right() - ear_w, face.top() + 1.0, ear_w, max(2.0, face.height() - 2.0)))
+            label_font = QFont("Arial", 5 if face.height() < 34.0 else 6)
+            label_font.setBold(True)
+            painter.setFont(label_font)
+            painter.setPen(QColor("#dce5ea"))
+            label_rect = QRectF(
+                face.left() + ear_w + 3.0,
+                face.top() + 1.0,
+                max(12.0, face.width() - 2 * ear_w - 6.0),
+                min(10.0, face.height() * 0.28),
+            )
+            painter.drawText(
+                label_rect,
+                Qt.AlignLeft | Qt.AlignVCenter,
+                f"SW{index}/{members}  {name}",
+            )
+
     def paint(self, painter: QPainter, option, widget=None) -> None:
         rect = self.boundingRect()
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -1664,12 +1875,15 @@ class RackEquipmentItem(QGraphicsObject):
         painter.drawRect(QRectF(1.0, 2.0, ear_w, max(2.0, rect.height()-4.0)))
         painter.drawRect(QRectF(rect.right()-ear_w-1.0, 2.0, ear_w, max(2.0, rect.height()-4.0)))
 
-        painter.setPen(QColor('#dce5ea'))
-        font = QFont('Arial', 7 if rect.height() >= 28 else 5)
-        font.setBold(True)
-        painter.setFont(font)
-        name_rect = QRectF(ear_w + 4.0, 1.0, max(10.0, rect.width() - 2 * ear_w - 8.0), min(10.0, rect.height() * 0.28))
-        painter.drawText(name_rect, Qt.AlignCenter, QFontMetrics(font).elidedText(self.node.name, Qt.ElideRight, int(name_rect.width())))
+        if self.node.asset_type == "network_switch" and self._stack_member_count() > 1:
+            self._paint_stack_member_faces(painter, ear_w)
+        else:
+            painter.setPen(QColor('#dce5ea'))
+            font = QFont('Arial', 7 if rect.height() >= 28 else 5)
+            font.setBold(True)
+            painter.setFont(font)
+            name_rect = QRectF(ear_w + 4.0, 1.0, max(10.0, rect.width() - 2 * ear_w - 8.0), min(10.0, rect.height() * 0.28))
+            painter.drawText(name_rect, Qt.AlignCenter, QFontMetrics(font).elidedText(self.node.name, Qt.ElideRight, int(name_rect.width())))
 
         for cassette, cassette_rect in sorted(self._cassette_rects.items()):
             painter.setBrush(QColor("#1a242c"))
@@ -1875,6 +2089,9 @@ class SwitchFrontPanelItem(QGraphicsObject):
         if self.node.asset_type == "patch_panel" and bool(self.node.asset.get("modular_patch_panel")):
             self._build_modular_patch_panel_port_rects()
             return
+        if self.node.asset_type == "network_switch":
+            self._build_network_switch_port_rects()
+            return
         port_kinds = [
             self._port_kind(
                 port_node.details.get('port_type')
@@ -1931,6 +2148,69 @@ class SwitchFrontPanelItem(QGraphicsObject):
             x = margin_x + col * (max_w + gap_x) + (max_w - pw) / 2.0
             y = start_y + row * row_pitch + (max(rj_h, sfp_h) - ph) / 2.0
             self._port_rects[port_node.node_id] = QRectF(x, y, pw, ph)
+
+    def _build_network_switch_port_rects(self) -> None:
+        uplink_uses = {"uplink", "input", "stacking", "management", "console", "power"}
+        access_ports: List[TopologyNode] = []
+        uplink_ports: List[TopologyNode] = []
+        for port_node in self.port_nodes:
+            port_use = _text(port_node.details.get("port_use")).lower()
+            kind = self._port_kind(port_node.details.get("port_type") or port_node.details.get("port_name", ""))
+            if port_use in uplink_uses or kind in {"sfp", "qsfp", "lc", "sc", "mpo"}:
+                uplink_ports.append(port_node)
+            else:
+                access_ports.append(port_node)
+
+        margin_x = 42.0
+        title_h = 24.0
+        bottom_margin = 12.0
+        usable_w = max(20.0, self._width - margin_x * 2.0)
+        usable_h = max(10.0, self._height - title_h - bottom_margin)
+        uplink_w = min(max(86.0, self._width * 0.12), usable_w * 0.22) if uplink_ports else 0.0
+        access_gap = 18.0 if uplink_ports else 0.0
+        access_w = max(20.0, usable_w - uplink_w - access_gap)
+
+        rows = 2
+        columns = max(1, int(math.ceil(max(1, len(access_ports)) / float(rows))))
+        if len(access_ports) >= 40:
+            columns = 24
+        gap_x = max(2.0, self._width * 0.0024)
+        gap_y = max(5.0, self._height * 0.045)
+        port_w = max(4.0, (access_w - gap_x * max(0, columns - 1)) / columns)
+        port_h = max(5.0, min(15.0, (usable_h - gap_y) / rows))
+        block_w = columns * port_w + max(0, columns - 1) * gap_x
+        block_h = rows * port_h + gap_y
+        x0 = margin_x + max(0.0, (access_w - block_w) / 2.0)
+        y0 = title_h + max(0.0, (usable_h - block_h) / 2.0)
+        for index, port_node in enumerate(access_ports):
+            row = index % rows
+            col = index // rows
+            if col >= columns:
+                break
+            self._port_rects[port_node.node_id] = QRectF(
+                x0 + col * (port_w + gap_x),
+                y0 + row * (port_h + gap_y),
+                port_w,
+                port_h,
+            )
+
+        if uplink_ports:
+            u_cols = max(1, min(4, int(math.ceil(len(uplink_ports) / 2.0))))
+            u_rows = max(1, int(math.ceil(len(uplink_ports) / float(u_cols))))
+            u_gap_x = max(2.0, self._width * 0.002)
+            u_gap_y = max(3.0, self._height * 0.03)
+            u_w = max(5.0, (uplink_w - u_gap_x * max(0, u_cols - 1)) / u_cols)
+            u_h = max(4.5, min(13.0, (usable_h - u_gap_y * max(0, u_rows - 1)) / u_rows))
+            ux0 = margin_x + access_w + access_gap
+            uy0 = title_h + max(0.0, (usable_h - (u_rows * u_h + max(0, u_rows - 1) * u_gap_y)) / 2.0)
+            for index, port_node in enumerate(uplink_ports):
+                row, col = divmod(index, u_cols)
+                self._port_rects[port_node.node_id] = QRectF(
+                    ux0 + col * (u_w + u_gap_x),
+                    uy0 + row * (u_h + u_gap_y),
+                    u_w,
+                    u_h,
+                )
 
     def _build_modular_patch_panel_port_rects(self) -> None:
         margin_x = 42.0
@@ -3074,6 +3354,236 @@ class TopologyGraphicsView(QGraphicsView):
         self._request_full_repaint()
 
 
+class CommsRoomIsometricDialog(QDialog):
+    """Read-only 2.5D location view showing rack positions and mounted kit."""
+
+    def __init__(self, owner, floor: int, location: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.owner = owner
+        self.floor = int(floor)
+        self.location = _text(location)
+        self.setWindowTitle(f"Comms room layout - {self.location or 'Unassigned'} F{self.floor}")
+        self.resize(1180, 720)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        self.scene = RetainedGraphicsScene(self)
+        self.view = QGraphicsView(self.scene)
+        self.view.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        self.view.setBackgroundBrush(QColor("#111820"))
+        self.view.setFrameShape(QFrame.NoFrame)
+        self.view.setDragMode(QGraphicsView.ScrollHandDrag)
+        layout.addWidget(self.view, 1)
+        self._draw_room()
+
+    def showEvent(self, event) -> None:  # noqa: ANN001
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit)
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit)
+
+    def _fit(self) -> None:
+        rect = self.scene.itemsBoundingRect().adjusted(-80.0, -70.0, 80.0, 90.0)
+        if rect.isEmpty():
+            return
+        self.view.fitInView(rect, Qt.KeepAspectRatio)
+
+    @staticmethod
+    def _equipment_colour(node: TopologyNode) -> QColor:
+        asset_type = _text(node.asset_type).lower()
+        role = _text(node.role).lower()
+        if asset_type == "network_switch":
+            return QColor("#2b6fa3") if "access" in role else QColor("#3560a8")
+        if asset_type in {"patch_panel", "fibre_splitter"}:
+            return QColor("#62717d")
+        if asset_type == "optical_line_terminal":
+            return QColor("#4f61b8")
+        if asset_type in {"network_router", "firewall"}:
+            return QColor("#9b5e52")
+        if asset_type == "pdu":
+            return QColor("#6e3c86")
+        if asset_type in {"ups", "power_device"}:
+            return QColor("#866d36")
+        return QColor("#3f515d")
+
+    @staticmethod
+    def _short_label(text: str, width: float, font: QFont) -> str:
+        return QFontMetrics(font).elidedText(_text(text), Qt.ElideRight, max(12, int(width)))
+
+    def _rack_nodes(self, rack_name: str) -> List[TopologyNode]:
+        node_ids = self.owner._rack_nodes_by_location.get((self.floor, self.location), [])
+        nodes = [
+            self.owner.model.nodes[node_id]
+            for node_id in node_ids
+            if node_id in self.owner.model.nodes
+            and _text(self.owner.model.nodes[node_id].instance.get("rack_name")) == rack_name
+        ]
+        return sorted(
+            nodes,
+            key=lambda node: (
+                max(1, _int(node.instance.get("rack_start_u"), 1)),
+                node.name.lower(),
+            ),
+        )
+
+    def _draw_rack(self, rack_name: str, x: float, y: float) -> QRectF:
+        key = (self.floor, self.location, rack_name)
+        capacity = max(1, self.owner._rack_capacity_for_key(key))
+        used = max(0, self.owner._rack_used_for_key(key))
+        front_w = 118.0
+        front_h = max(210.0, min(310.0, capacity * 7.0))
+        skew_x = 36.0
+        skew_y = -24.0
+
+        front = QRectF(x, y, front_w, front_h)
+        top_path = QPainterPath(QPointF(front.left(), front.top()))
+        top_path.lineTo(QPointF(front.left() + skew_x, front.top() + skew_y))
+        top_path.lineTo(QPointF(front.right() + skew_x, front.top() + skew_y))
+        top_path.lineTo(QPointF(front.right(), front.top()))
+        top_path.closeSubpath()
+        side_path = QPainterPath(QPointF(front.right(), front.top()))
+        side_path.lineTo(QPointF(front.right() + skew_x, front.top() + skew_y))
+        side_path.lineTo(QPointF(front.right() + skew_x, front.bottom() + skew_y))
+        side_path.lineTo(QPointF(front.right(), front.bottom()))
+        side_path.closeSubpath()
+        front_path = QPainterPath()
+        front_path.addRoundedRect(front, 5.0, 5.0)
+
+        for path, fill, z in (
+            (top_path, QColor("#27343d"), 0.0),
+            (side_path, QColor("#1b252d"), 0.1),
+            (front_path, QColor("#202b34"), 0.2),
+        ):
+            item = QGraphicsPathItem(path)
+            item.setPen(QPen(QColor("#536371"), 1.1))
+            item.setBrush(fill)
+            item.setZValue(z)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            self.scene.addItem(item)
+
+        pitch = front_h / float(capacity)
+        for step in range(0, capacity + 1, 4):
+            yy = front.bottom() - step * pitch
+            line = QPainterPath(QPointF(front.left() + 5.0, yy))
+            line.lineTo(QPointF(front.right() - 5.0, yy))
+            item = QGraphicsPathItem(line)
+            item.setPen(QPen(QColor("#33434e"), 0.45))
+            item.setZValue(0.25)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            self.scene.addItem(item)
+
+        font = QFont("Arial", 5)
+        font.setBold(True)
+        for node in self._rack_nodes(rack_name):
+            start_u = max(1, _int(node.instance.get("rack_start_u"), 1))
+            entries: List[Tuple[int, int, str]] = []
+            if (
+                node.asset_type == "network_switch"
+                and bool(node.instance.get("logical_stack"))
+                and _int(node.instance.get("stack_member_count"), 1) > 1
+            ):
+                members = max(1, _int(node.instance.get("stack_member_count"), 1))
+                member_units = max(
+                    1,
+                    _int(
+                        node.asset.get("switch_rack_unit_allowance"),
+                        _int(node.asset.get("rack_units"), 1),
+                    ),
+                )
+                for member in range(1, members + 1):
+                    entries.append(
+                        (
+                            start_u + (member - 1) * member_units,
+                            member_units,
+                            f"{node.name} SW{member}",
+                        )
+                    )
+            else:
+                entries.append((start_u, max(1, self.owner._node_rack_units(node.node_id)), node.name))
+            for item_start_u, units, label_text in entries:
+                if item_start_u > capacity:
+                    continue
+                top_u = min(capacity, item_start_u + units - 1)
+                item_y = front.bottom() - top_u * pitch + 1.0
+                item_h = max(5.0, units * pitch - 2.0)
+                item_rect = QRectF(front.left() + 8.0, item_y, front.width() - 16.0, item_h)
+                path = QPainterPath()
+                path.addRoundedRect(item_rect, 2.2, 2.2)
+                equipment = QGraphicsPathItem(path)
+                equipment.setPen(QPen(self._equipment_colour(node).lighter(130), 0.8))
+                equipment.setBrush(self._equipment_colour(node))
+                equipment.setZValue(0.45)
+                equipment.setToolTip(f"{label_text}\nU{item_start_u} - {units}U")
+                self.scene.addItem(equipment)
+                if item_h >= 10.0:
+                    label = QGraphicsSimpleTextItem(self._short_label(label_text, item_rect.width() - 6.0, font))
+                    label.setFont(font)
+                    label.setBrush(QBrush(QColor("#eef5f8")))
+                    label.setPos(item_rect.left() + 3.0, item_rect.top() + max(0.0, (item_h - label.boundingRect().height()) / 2.0))
+                    label.setZValue(0.6)
+                    label.setAcceptedMouseButtons(Qt.NoButton)
+                    self.scene.addItem(label)
+
+        label_font = QFont("Arial", 8)
+        label_font.setBold(True)
+        label = QGraphicsSimpleTextItem(f"{rack_name}  {used}/{capacity}U")
+        label.setFont(label_font)
+        label.setBrush(QBrush(QColor("#e4edf2")))
+        label.setPos(front.left(), front.bottom() + 10.0)
+        label.setZValue(1.0)
+        label.setAcceptedMouseButtons(Qt.NoButton)
+        self.scene.addItem(label)
+        return front.united(QRectF(front.right(), front.top() + skew_y, skew_x, front_h))
+
+    def _draw_room(self) -> None:
+        rack_names = self.owner._rack_names_for_location(self.floor, self.location)
+        title = QGraphicsSimpleTextItem(f"{self.location or 'Unassigned location'} - floor {self.floor}")
+        title_font = QFont("Arial", 13)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        title.setBrush(QBrush(QColor("#f1f6f8")))
+        title.setPos(24.0, 20.0)
+        title.setAcceptedMouseButtons(Qt.NoButton)
+        self.scene.addItem(title)
+
+        if not rack_names:
+            empty = QGraphicsSimpleTextItem("No racks are defined for this location.")
+            empty.setFont(QFont("Arial", 10))
+            empty.setBrush(QBrush(QColor("#9aa8b3")))
+            empty.setPos(24.0, 66.0)
+            self.scene.addItem(empty)
+            self.scene.setSceneRect(self.scene.itemsBoundingRect().adjusted(-40.0, -40.0, 40.0, 40.0))
+            return
+
+        x = 42.0
+        y = 104.0
+        gap = 72.0
+        union: Optional[QRectF] = None
+        for rack_name in rack_names:
+            rect = self._draw_rack(rack_name, x, y)
+            union = QRectF(rect) if union is None else union.united(rect)
+            x += rect.width() + gap
+
+        if union is not None:
+            floor_path = QPainterPath()
+            floor_rect = union.adjusted(-34.0, 34.0, 54.0, 70.0)
+            floor_path.moveTo(floor_rect.left(), floor_rect.bottom())
+            floor_path.lineTo(floor_rect.left() + 44.0, floor_rect.top())
+            floor_path.lineTo(floor_rect.right(), floor_rect.top())
+            floor_path.lineTo(floor_rect.right() - 44.0, floor_rect.bottom())
+            floor_path.closeSubpath()
+            floor_item = QGraphicsPathItem(floor_path)
+            floor_item.setPen(QPen(QColor("#283742"), 1.0))
+            floor_item.setBrush(QColor("#151e25"))
+            floor_item.setZValue(-1.0)
+            floor_item.setAcceptedMouseButtons(Qt.NoButton)
+            self.scene.addItem(floor_item)
+
+        self.scene.setSceneRect(self.scene.itemsBoundingRect().adjusted(-70.0, -70.0, 90.0, 110.0))
+
+
 class NetworkTopologyDialog(QDialog):
     """Editable logical topology, rack elevation and device-port workspace."""
 
@@ -3146,6 +3656,7 @@ class NetworkTopologyDialog(QDialog):
         self._floor_match_cache: Dict[Tuple[str, int], bool] = {}
         self._logical_children_cache: Dict[str, Tuple[str, ...]] = {}
         self._collapsed_edge_cache: Dict[Tuple[str, str], TopologyEdge] = {}
+        self._room_view_dialogs: List[CommsRoomIsometricDialog] = []
         self._build_runtime_indexes()
 
         self.setWindowTitle("Network Topology Editor")
@@ -3414,6 +3925,12 @@ class NetworkTopologyDialog(QDialog):
         self.rack_view_button.clicked.connect(self._open_selected_rack_view)
         panel_layout.addWidget(self.rack_view_button)
 
+        self.room_view_button = QPushButton("Open comms room view")
+        self.room_view_button.setToolTip("Show a 2.5D rack-row view of the selected location")
+        self.room_view_button.setEnabled(False)
+        self.room_view_button.clicked.connect(self._open_selected_room_view)
+        panel_layout.addWidget(self.room_view_button)
+
         self.port_view_button = QPushButton("Open device port view")
         self.port_view_button.setToolTip("Show physical ports, direct connections and traced paths through passive equipment")
         self.port_view_button.setEnabled(False)
@@ -3423,6 +3940,7 @@ class NetworkTopologyDialog(QDialog):
         self.branch_button = QPushButton("Expand branch")
         self.branch_button.setEnabled(False)
         self.rack_view_button.setEnabled(False)
+        self.room_view_button.setEnabled(False)
         self.port_view_button.setEnabled(False)
         self.branch_button.clicked.connect(self._toggle_selected_branch)
         panel_layout.addWidget(self.branch_button)
@@ -3446,6 +3964,7 @@ class NetworkTopologyDialog(QDialog):
         self.details_layout.addStretch(1)
         self.branch_button.setEnabled(False)
         self.rack_view_button.setEnabled(False)
+        self.room_view_button.setEnabled(False)
         self.port_view_button.setEnabled(False)
 
     def _detail_row(self, label: str, value: str, emphasise: bool = False) -> None:
@@ -3674,6 +4193,9 @@ class NetworkTopologyDialog(QDialog):
         rack_key = self._rack_group_key(node.node_id)
         self.rack_view_button.setEnabled(not node.pseudo and rack_key != (0, "", ""))
         self.rack_view_button.setProperty("node_id", node.node_id)
+        room_key = self._room_group_key(node.node_id)
+        self.room_view_button.setEnabled(not node.pseudo and room_key != (0, ""))
+        self.room_view_button.setProperty("node_id", node.node_id)
         self.port_view_button.setEnabled(not node.pseudo and self._supports_port_view(node))
         self.port_view_button.setProperty("node_id", node.node_id)
 
@@ -4103,7 +4625,20 @@ class NetworkTopologyDialog(QDialog):
         if cached is None:
             cached = tuple(_expanded_asset_ports(node.asset))
             self._expanded_ports_cache[asset_id] = cached
-        return list(cached)
+        ports = list(cached)
+        members = (
+            max(1, _int(node.instance.get("stack_member_count"), 1))
+            if bool(node.instance.get("logical_stack"))
+            else 1
+        )
+        if members <= 1:
+            return ports
+        expanded: List[dict] = []
+        for member in range(1, members + 1):
+            for row in ports:
+                name = _text(row.get("name"))
+                expanded.append({**row, "name": f"{member}/{name}" if name else str(member)})
+        return expanded
 
     def _collect_rack_visible(self) -> List[str]:
         visible: List[str] = []
@@ -4138,6 +4673,24 @@ class NetworkTopologyDialog(QDialog):
             "telco_pop",
             "external_network",
         }
+
+    @staticmethod
+    def _stack_member_count(node: TopologyNode) -> int:
+        if node.asset_type != "network_switch" or not bool(node.instance.get("logical_stack")):
+            return 1
+        return max(1, _int(node.instance.get("stack_member_count"), 1))
+
+    @staticmethod
+    def _port_stack_member_number(port_node: TopologyNode) -> int:
+        for key in ("stack_member", "member", "switch_member"):
+            member = _int(port_node.details.get(key), 0)
+            if member > 0:
+                return member
+        port_name = _text(port_node.details.get("port_name"))
+        match = re.match(r"^\s*(\d+)\s*[/:\-.]", port_name)
+        if match:
+            return max(1, _int(match.group(1), 1))
+        return 1
 
     def _passive_patch_description(self, node: TopologyNode) -> str:
         parts = [node.name]
@@ -4403,7 +4956,7 @@ class NetworkTopologyDialog(QDialog):
             connected = port_records.get(port, [])
             occupied = bool(connected)
             node_id = f"port::{switch_id}::{index}"
-            port_definition = _port_definition_for_name(switch.asset, port)
+            port_definition = port_definitions_by_name.get(port) or _port_definition_for_name(switch.asset, port)
             node = TopologyNode(
                 node_id=node_id,
                 name=f"Port {port}",
@@ -4461,7 +5014,7 @@ class NetworkTopologyDialog(QDialog):
         result: List[TopologyNode] = []
         for index, port in enumerate(ordered_names, start=1):
             connected = records.get(port, [])
-            port_definition = _port_definition_for_name(device.asset, port)
+            port_definition = port_definitions_by_name.get(port) or _port_definition_for_name(device.asset, port)
             node_id = f"rackport::{device_id}::{index}"
             node = TopologyNode(
                 node_id=node_id,
@@ -4724,13 +5277,18 @@ class NetworkTopologyDialog(QDialog):
         for root_id in roots:
             measure(root_id)
 
+        fixed_bus_nodes = set(getattr(self, "_location_bus_by_node", {})) | set(
+            getattr(self, "_failover_bus_by_node", {})
+        )
+
         def place(node_id: str, band_top: float) -> None:
             node_band = band_height.get(node_id, self._node_card_height(node_id))
             own_height = self._node_card_height(node_id)
-            positions[node_id] = QPointF(
-                positions[node_id].x(),
-                band_top + (node_band - own_height) / 2.0,
-            )
+            if node_id not in fixed_bus_nodes:
+                positions[node_id] = QPointF(
+                    positions[node_id].x(),
+                    band_top + (node_band - own_height) / 2.0,
+                )
             child_ids = children_for(node_id)
             if not child_ids:
                 return
@@ -5134,8 +5692,11 @@ class NetworkTopologyDialog(QDialog):
             if layer == 6:
                 return 480.0 + expansion_allowance
             return layer_gap + min(160.0, expansion_allowance)
-        bus_lane_h = 96.0
-        group_gap_y = 150.0
+        bus_lane_h = 124.0
+        rack_group_gap_x = 44.0
+        location_gap_x = 160.0
+        location_gap_y = 72.0
+        pseudo_gap_y = 150.0
         # Distribution devices (including OLTs) are stacked vertically so each
         # physical device occupies its own row instead of forming one long row.
         distribution_rows_per_column = 10_000
@@ -5152,15 +5713,91 @@ class NetworkTopologyDialog(QDialog):
                 width = columns * self.CARD_W + max(0, columns - 1) * self.X_GAP
                 height = rows * max_height + max(0, rows - 1) * distribution_row_gap
                 return width, height, rows, columns, max_height
-            width = len(node_ids) * self.CARD_W + max(0, len(node_ids) - 1) * self.X_GAP
+            node_gap = 44.0 if layer == 5 else self.X_GAP
+            width = len(node_ids) * self.CARD_W + max(0, len(node_ids) - 1) * node_gap
             return width, max_height, 1, len(node_ids), max_height
 
+        layer_layouts: Dict[int, List[dict]] = {}
         for layer in all_layers:
-            max_width = self.CARD_W
-            for (_floor, _location, _rack), node_ids in grouped[layer].items():
-                group_width, _group_height, _rows, _columns, _max_height = group_layout_size(layer, node_ids)
-                max_width = max(max_width, group_width)
-            column_widths[layer] = max_width
+            rack_groups = sorted(
+                grouped[layer].items(),
+                key=lambda item: (-item[0][0], item[0][1].lower(), item[0][2].lower()),
+            )
+            by_location: Dict[Tuple[int, str], List[Tuple[Tuple[int, str, str], List[str]]]] = defaultdict(list)
+            for key, node_ids in rack_groups:
+                floor, location, _rack = key
+                by_location[(floor, location)].append((key, node_ids))
+
+            location_blocks: List[dict] = []
+            for location_key, rows in sorted(by_location.items(), key=lambda item: (-item[0][0], item[0][1].lower())):
+                rack_entries: List[dict] = []
+                for rack_key, node_ids in sorted(rows, key=lambda item: item[0][2].lower()):
+                    ordered = sorted(
+                        node_ids,
+                        key=lambda node_id: (
+                            0 if bool(self._node_for(node_id).instance.get("logical_stack")) else 1,
+                            self._node_for(node_id).name.lower(),
+                        ),
+                    )
+                    group_width, group_height, grid_rows, _grid_columns, grid_card_h = group_layout_size(layer, ordered)
+                    is_switch_group = layer == 5 and any(
+                        (self._node_for(node_id) and self._node_for(node_id).asset_type == "network_switch")
+                        for node_id in ordered
+                    )
+                    block_height = group_height + (bus_lane_h if is_switch_group else 0.0)
+                    rack_entries.append(
+                        {
+                            "key": rack_key,
+                            "ordered": ordered,
+                            "width": group_width,
+                            "height": block_height,
+                            "group_height": group_height,
+                            "grid_rows": grid_rows,
+                            "grid_card_h": grid_card_h,
+                            "is_switch_group": is_switch_group,
+                        }
+                    )
+                if not rack_entries:
+                    continue
+
+                cursor_x = 0.0
+                width = 0.0
+                height = 0.0
+                for entry in rack_entries:
+                    entry["x"] = cursor_x
+                    entry["y"] = 0.0
+                    cursor_x += entry["width"] + rack_group_gap_x
+                    height = max(height, entry["height"])
+                    width = max(width, cursor_x - rack_group_gap_x)
+                location_blocks.append(
+                    {
+                        "key": location_key,
+                        "racks": rack_entries,
+                        "width": max(self.CARD_W, width),
+                        "height": max(self.CARD_H, height),
+                    }
+                )
+
+            cursor_x = 0.0
+            cursor_y = 0.0
+            layer_width = 0.0
+            layer_height = self.CARD_H
+            for block in location_blocks:
+                if layer == 5:
+                    block["x"] = 0.0
+                    block["y"] = cursor_y
+                    cursor_y += block["height"] + location_gap_y
+                    layer_width = max(layer_width, block["width"])
+                    layer_height = max(layer_height, cursor_y - location_gap_y)
+                else:
+                    block["x"] = cursor_x
+                    block["y"] = 0.0
+                    cursor_x += block["width"] + location_gap_x
+                    layer_width = max(layer_width, cursor_x - location_gap_x)
+                    layer_height = max(layer_height, block["height"])
+
+            layer_layouts[layer] = location_blocks
+            column_widths[layer] = max(self.CARD_W, layer_width)
 
         column_lefts: Dict[int, float] = {}
         cursor_x = 0.0
@@ -5175,47 +5812,62 @@ class NetworkTopologyDialog(QDialog):
         self._failover_bus_column_x = column_lefts[access_layer] - 310.0
 
         for layer in all_layers:
-            group_top = 0.0
-            layer_groups = sorted(
-                grouped[layer].items(),
-                key=lambda item: (-item[0][0], item[0][1].lower(), item[0][2].lower()),
-            )
-            for (_floor, _location, _rack), node_ids in layer_groups:
-                ordered = sorted(
-                    node_ids,
-                    key=lambda node_id: (
-                        0 if bool(self._node_for(node_id).instance.get("logical_stack")) else 1,
-                        self._node_for(node_id).name.lower(),
-                    ),
+            layer_height = self.CARD_H
+            for location_block in layer_layouts.get(layer, []):
+                location_left = column_lefts[layer] + location_block["x"]
+                location_top = location_block["y"]
+                switch_entries = [
+                    entry for entry in location_block["racks"]
+                    if bool(entry["is_switch_group"])
+                ]
+                location_bus_left = location_left + min(
+                    (entry["x"] + self.CARD_W / 2.0 for entry in switch_entries),
+                    default=0.0,
                 )
-                group_width, group_height, grid_rows, _grid_columns, grid_card_h = group_layout_size(layer, ordered)
-                group_left = column_lefts[layer] + max(0.0, (column_widths[layer] - group_width) / 2.0)
-                is_switch_group = layer == 5 and any((self._node_for(node_id) and self._node_for(node_id).asset_type == "network_switch") for node_id in ordered)
-                card_top = group_top + (bus_lane_h if is_switch_group else 0.0)
-                for index, node_id in enumerate(ordered):
-                    if layer == 4 and len(ordered) > 1:
-                        column = index // grid_rows
-                        row = index % grid_rows
-                        y_offset = row * (grid_card_h + distribution_row_gap)
-                        positions[node_id] = QPointF(group_left + column * (self.CARD_W + self.X_GAP), card_top + y_offset)
-                    else:
-                        positions[node_id] = QPointF(group_left + index * (self.CARD_W + self.X_GAP), card_top)
-                if is_switch_group:
-                    bus_y = group_top + 34.0
-                    failover_bus_y = group_top + 58.0
-                    bus_left = group_left + self.CARD_W / 2.0
-                    bus_right = group_left + group_width - self.CARD_W / 2.0
-                    for node_id in ordered:
-                        positions[node_id] = QPointF(positions[node_id].x(), card_top)
-                        drop_x = positions[node_id].x() + self.CARD_W / 2.0
-                        self._location_bus_by_node[node_id] = (QPointF(drop_x, bus_y), bus_left, bus_right)
-                        self._failover_bus_by_node[node_id] = (QPointF(drop_x, failover_bus_y), bus_left, bus_right)
-                group_top += group_height + (bus_lane_h if is_switch_group else 0.0) + group_gap_y
+                location_bus_right = location_left + max(
+                    (
+                        entry["x"] + entry["width"] - self.CARD_W / 2.0
+                        for entry in switch_entries
+                    ),
+                    default=0.0,
+                )
+                location_bus_y = location_top + 48.0
+                location_failover_bus_y = location_top + 84.0
+                for entry in location_block["racks"]:
+                    ordered = entry["ordered"]
+                    group_left = location_left + entry["x"]
+                    group_top = location_top + entry["y"]
+                    is_switch_group = bool(entry["is_switch_group"])
+                    card_top = group_top + (bus_lane_h if is_switch_group else 0.0)
+                    for index, node_id in enumerate(ordered):
+                        if layer == 4 and len(ordered) > 1:
+                            column = index // entry["grid_rows"]
+                            row = index % entry["grid_rows"]
+                            y_offset = row * (entry["grid_card_h"] + distribution_row_gap)
+                            positions[node_id] = QPointF(group_left + column * (self.CARD_W + self.X_GAP), card_top + y_offset)
+                        else:
+                            node_gap = 44.0 if layer == 5 else self.X_GAP
+                            positions[node_id] = QPointF(group_left + index * (self.CARD_W + node_gap), card_top)
+                    if is_switch_group:
+                        for node_id in ordered:
+                            positions[node_id] = QPointF(positions[node_id].x(), card_top)
+                            drop_x = positions[node_id].x() + self.CARD_W / 2.0
+                            self._location_bus_by_node[node_id] = (
+                                QPointF(drop_x, location_bus_y),
+                                location_bus_left,
+                                location_bus_right,
+                            )
+                            self._failover_bus_by_node[node_id] = (
+                                QPointF(drop_x, location_failover_bus_y),
+                                location_bus_left,
+                                location_bus_right,
+                            )
+                layer_height = max(layer_height, location_top + location_block["height"])
             self._layer_bounds[layer] = QRectF(
                 column_lefts[layer],
                 0.0,
                 column_widths[layer],
-                max(self.CARD_H, group_top - group_gap_y),
+                max(self.CARD_H, layer_height),
             )
 
         pseudo_by_layer: Dict[int, List[str]] = defaultdict(list)
@@ -5225,7 +5877,7 @@ class NetworkTopologyDialog(QDialog):
             left = column_lefts.get(layer, cursor_x)
             for index, node_id in enumerate(node_ids):
                 positions[node_id] = QPointF(
-                    left, index * (self.CARD_H + group_gap_y)
+                    left, index * (self.CARD_H + pseudo_gap_y)
                 )
 
     def _stack_same_rack_logical_stacks(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
@@ -5346,6 +5998,8 @@ class NetworkTopologyDialog(QDialog):
             if key not in seen_drawn_fibres:
                 seen_drawn_fibres.add(key)
                 self._visible_drawn_fibre_edges.append((parent_id, child_id, edge))
+                if self._edge_is_failover(edge) or self._edge_has_parallel_secondary(edge, child_id):
+                    self._visible_failover_bus_nodes.add(child_id)
         for edge in visible_cross_edges:
             if _text(edge.medium).lower() != "fibre":
                 continue
@@ -5438,22 +6092,67 @@ class NetworkTopologyDialog(QDialog):
             if node is not None and switch_id in positions:
                 self.visible_nodes[switch_id] = node
                 port_nodes = [self._switch_port_nodes_by_id[node_id] for node_id in visible_ids if node_id in self._switch_port_nodes_by_id]
-                units = max(1, self._node_rack_units(switch_id))
                 panel_width = 965.2
-                panel_height = max(88.9, units * 88.9)
-                item = (
-                    SplitterFrontPanelItem(node, port_nodes, panel_width, 88.9)
-                    if node.asset_type == "fibre_splitter"
-                    else SwitchFrontPanelItem(node, port_nodes, panel_width, panel_height)
-                )
-                item.setPos(positions[switch_id])
-                item.setZValue(1.0)
-                item.activated.connect(self._card_activated)
-                item.portActivated.connect(self._card_activated)
-                item.contextRequested.connect(self._node_context_menu)
-                item.portContextRequested.connect(self._port_context_menu)
-                self.scene.addItem(item)
-                self.node_items[switch_id] = item
+                stack_members = self._stack_member_count(node)
+
+                def add_panel(panel_node: TopologyNode, panel_ports: Sequence[TopologyNode], pos: QPointF, height: float):
+                    item = (
+                        SplitterFrontPanelItem(panel_node, panel_ports, panel_width, 88.9)
+                        if panel_node.asset_type == "fibre_splitter"
+                        else SwitchFrontPanelItem(panel_node, panel_ports, panel_width, height)
+                    )
+                    item.setPos(pos)
+                    item.setZValue(1.0)
+                    item.activated.connect(self._card_activated)
+                    item.portActivated.connect(self._card_activated)
+                    item.contextRequested.connect(self._node_context_menu)
+                    item.portContextRequested.connect(self._port_context_menu)
+                    self.scene.addItem(item)
+                    return item
+
+                if node.asset_type == "network_switch" and stack_members > 1:
+                    ports_by_member: Dict[int, List[TopologyNode]] = defaultdict(list)
+                    for port_node in port_nodes:
+                        member = min(stack_members, max(1, self._port_stack_member_number(port_node)))
+                        ports_by_member[member].append(port_node)
+                    member_units = max(
+                        1,
+                        _int(
+                            node.asset.get("switch_rack_unit_allowance"),
+                            _int(node.asset.get("rack_units"), 1),
+                        ),
+                    )
+                    panel_height = max(88.9, member_units * 88.9)
+                    panel_gap = 34.0
+                    base = positions[switch_id]
+                    first_item = None
+                    for member in range(1, stack_members + 1):
+                        member_ports = ports_by_member.get(member, [])
+                        member_instance = dict(node.instance)
+                        member_instance["logical_stack"] = False
+                        member_instance["stack_member_count"] = 1
+                        member_node = replace(
+                            node,
+                            name=f"{node.name} - Switch {member}",
+                            instance=member_instance,
+                            port_capacity=len(member_ports),
+                            ports_used=sum(1 for port in member_ports if bool(port.details.get("occupied"))),
+                        )
+                        item = add_panel(
+                            member_node,
+                            member_ports,
+                            QPointF(base.x(), base.y() + (member - 1) * (panel_height + panel_gap)),
+                            panel_height,
+                        )
+                        if first_item is None:
+                            first_item = item
+                    if first_item is not None:
+                        self.node_items[switch_id] = first_item
+                else:
+                    units = max(1, self._node_rack_units(switch_id))
+                    panel_height = max(88.9, units * 88.9)
+                    item = add_panel(node, port_nodes, positions[switch_id], panel_height)
+                    self.node_items[switch_id] = item
                 for port_node in port_nodes:
                     self.visible_nodes[port_node.node_id] = port_node
         else:
@@ -5913,6 +6612,18 @@ class NetworkTopologyDialog(QDialog):
             return (0, "", "")
         return (node.floor, location, rack)
 
+    def _room_group_key(self, node_id: str) -> Tuple[int, str]:
+        node = self._node_for(node_id)
+        if node is None or node.pseudo:
+            return (0, "")
+        location = node.location_name
+        rack = _text(node.instance.get("rack_name"))
+        if not location and not rack:
+            return (0, "")
+        if self._rack_names_for_location(node.floor, location):
+            return (node.floor, location)
+        return (0, "")
+
     def _switch_group_key(self, node_id: str) -> Tuple[int, str, str]:
         node = self._node_for(node_id)
         if node is None or not self._supports_port_view(node):
@@ -6015,25 +6726,33 @@ class NetworkTopologyDialog(QDialog):
         self.scene.addItem(room_title)
 
     def _add_location_groups(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
-        grouped: Dict[Tuple[int, str, str], List[str]] = defaultdict(list)
+        rack_groups: Dict[Tuple[int, str, str], List[str]] = defaultdict(list)
         for node_id in visible_ids:
             key = self._switch_group_key(node_id)
             if key != (0, "", ""):
-                grouped[key].append(node_id)
+                rack_groups[key].append(node_id)
 
-        for (_floor, location, rack), node_ids in grouped.items():
+        grouped: Dict[Tuple[int, str], Dict[Tuple[int, str, str], List[str]]] = defaultdict(dict)
+        for key, node_ids in rack_groups.items():
+            floor, location, _rack = key
+            grouped[(floor, location)][key] = node_ids
+
+        for (_floor, location), racks in grouped.items():
             rect: Optional[QRectF] = None
-            for node_id in node_ids:
-                if node_id not in positions:
-                    continue
-                card_rect = self._card_rect(node_id, positions)
-                rect = card_rect if rect is None else rect.united(card_rect)
+            bus_nodes: List[str] = []
+            for node_ids in racks.values():
+                for node_id in node_ids:
+                    if node_id not in positions:
+                        continue
+                    card_rect = self._card_rect(node_id, positions)
+                    rect = card_rect if rect is None else rect.united(card_rect)
+                    if node_id in getattr(self, "_location_bus_by_node", {}):
+                        bus_nodes.append(node_id)
             if rect is None:
                 continue
-            bus_nodes = [node_id for node_id in node_ids if node_id in getattr(self, "_location_bus_by_node", {})]
-            # Keep the location/rack enclosure close to the cards while still
+            # Keep the location enclosure close to the cards while still
             # leaving room for the primary and failover bus pair above them.
-            rect = rect.adjusted(-8.0, -70.0 if bus_nodes else -22.0, 8.0, 10.0)
+            rect = rect.adjusted(-18.0, -112.0 if bus_nodes else -28.0, 18.0, 18.0)
             path = QPainterPath()
             path.addRoundedRect(rect, 10.0, 10.0)
             item = QGraphicsPathItem(path)
@@ -6045,12 +6764,12 @@ class NetworkTopologyDialog(QDialog):
             item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(item)
 
-            label_text = rack or location
-            if rack and location:
-                label_text = f"{location} / {rack}"
-            key = (_floor, location, rack)
-            capacity = self._rack_capacity_for_key(key)
-            used = self._rack_used_for_key(key)
+            rack_names = sorted({_text(key[2]) for key in racks if _text(key[2])}, key=str.lower)
+            label_text = location or "Unassigned location"
+            if rack_names:
+                label_text = f"{label_text} - {len(rack_names)} rack{'s' if len(rack_names) != 1 else ''}"
+            capacity = sum(self._rack_capacity_for_key(key) for key in racks)
+            used = sum(self._rack_used_for_key(key) for key in racks)
             if capacity:
                 label_text = f"{label_text} · {used}/{capacity}U"
             label = QGraphicsSimpleTextItem(label_text)
@@ -6064,8 +6783,15 @@ class NetworkTopologyDialog(QDialog):
             self.scene.addItem(label)
 
             if bus_nodes:
-                bus_anchor, bus_left, bus_right = self._location_bus_by_node[bus_nodes[0]]
-                fail_anchor, fail_left, fail_right = self._failover_bus_by_node.get(bus_nodes[0], (bus_anchor, bus_left, bus_right))
+                failover_nodes = getattr(self, "_visible_failover_bus_nodes", set())
+                bus_rows = [
+                    self._location_bus_by_node[node_id]
+                    for node_id in bus_nodes
+                    if node_id in self._location_bus_by_node
+                ]
+                bus_anchor, _bus_left, _bus_right = bus_rows[0]
+                bus_left = min(row[1] for row in bus_rows)
+                bus_right = max(row[2] for row in bus_rows)
                 main_bus = QPainterPath(QPointF(bus_left, bus_anchor.y()))
                 main_bus.lineTo(QPointF(bus_right, bus_anchor.y()))
                 main_item = QGraphicsPathItem(main_bus)
@@ -6076,12 +6802,19 @@ class NetworkTopologyDialog(QDialog):
                 main_item.setCacheMode(QGraphicsItem.NoCache)
                 self.scene.addItem(main_item)
 
-                failover_nodes = getattr(self, "_visible_failover_bus_nodes", set())
                 if any(node_id in failover_nodes for node_id in bus_nodes):
+                    fail_rows = [
+                        self._failover_bus_by_node.get(node_id, self._location_bus_by_node[node_id])
+                        for node_id in bus_nodes
+                        if node_id in self._location_bus_by_node
+                    ]
+                    fail_anchor, _fail_left, _fail_right = fail_rows[0]
+                    fail_left = min(row[1] for row in fail_rows)
+                    fail_right = max(row[2] for row in fail_rows)
                     fail_bus = QPainterPath(QPointF(fail_left, fail_anchor.y()))
                     fail_bus.lineTo(QPointF(fail_right, fail_anchor.y()))
                     fail_item = QGraphicsPathItem(fail_bus)
-                    fail_pen = QPen(QColor("#d68f52"), 2.0, Qt.DashLine)
+                    fail_pen = QPen(self._secondary_link_colour(), 2.0, Qt.DashLine)
                     fail_item.setPen(fail_pen)
                     fail_item.setZValue(-0.86)
                     fail_item.setAcceptedMouseButtons(Qt.NoButton)
@@ -6100,6 +6833,10 @@ class NetworkTopologyDialog(QDialog):
         }.get(medium, QColor("#6f7b86"))
 
     @staticmethod
+    def _secondary_link_colour() -> QColor:
+        return QColor("#e84cff")
+
+    @staticmethod
     def _edge_is_failover(edge: Optional[TopologyEdge]) -> bool:
         if edge is None:
             return False
@@ -6110,6 +6847,28 @@ class NetworkTopologyDialog(QDialog):
             or _text(edge.connection.get("redundancy_role")).lower()
             in {"secondary", "standby", "failover"}
         )
+
+    def _edge_has_parallel_secondary(
+        self,
+        edge: Optional[TopologyEdge],
+        target_id: str = "",
+    ) -> bool:
+        if edge is None or _text(edge.medium).lower() != "fibre":
+            return False
+        target_node = self._node_for(target_id) if target_id else None
+        if target_node is not None and target_node.connection_count > 1:
+            return True
+        connection = edge.connection if isinstance(edge.connection, dict) else {}
+        member_count = max(
+            _int(connection.get("link_aggregation_member_count"), 0),
+            _int(connection.get("parallel_link_count"), 0),
+            _int(connection.get("uplink_count"), 0),
+        )
+        if member_count > 1:
+            return True
+        speed = max(0.0, _float(connection.get("link_speed_mbps")))
+        aggregate_speed = max(0.0, _float(connection.get("aggregate_link_speed_mbps")))
+        return bool(speed and aggregate_speed > speed * 1.1)
 
     @staticmethod
     def _edge_visual_group_id(edge: Optional[TopologyEdge]) -> str:
@@ -6220,7 +6979,7 @@ class NetworkTopologyDialog(QDialog):
             if edge.edge_id in self.trace_connection_ids or parent_id in self.trace_connection_ids:
                 return QColor("#ff8a24")
         if self._edge_is_failover(edge):
-            return QColor("#d68f52")
+            return self._secondary_link_colour()
         return self._link_colour(medium or (edge.medium if edge else ""))
 
     def _link_label_required_span(self, edge: Optional[TopologyEdge]) -> float:
@@ -6256,16 +7015,16 @@ class NetworkTopologyDialog(QDialog):
         """Return a dedicated lane for one visible failover connection."""
         primary_lane = self._primary_fibre_lane_x(bus_left, required_span)
         lane_index = self._failover_lane_index(edge, source_id, target_id)
-        lane_offset = lane_index * 72.0
+        lane_offset = lane_index * 96.0
         preferred = (
             self._failover_bus_column_x
             if self._failover_bus_column_x is not None
-            else primary_lane - 140.0
+            else primary_lane - 220.0
         ) - lane_offset
         return min(
             preferred,
-            primary_lane - 190.0 - lane_offset,
-            bus_left - required_span - 224.0 - lane_offset,
+            primary_lane - 260.0 - lane_offset,
+            bus_left - required_span - 304.0 - lane_offset,
         )
 
     def _add_link_label(self, text: str, colour: QColor, point: QPointF, edge: Optional[TopologyEdge] = None) -> None:
@@ -6274,9 +7033,6 @@ class NetworkTopologyDialog(QDialog):
         edge_id = edge.edge_id if edge is not None else ""
         label = LinkLabelItem(text, colour, edge_id=edge_id)
         label.contextRequested.connect(self._edge_context_menu)
-        # Keep failover labels clear of the primary fibre label and bus line.
-        if "failover" in text.lower() or "standby" in text.lower():
-            point = QPointF(point.x(), point.y() - 14.0)
         label.setPos(point)
         self.scene.addItem(label)
 
@@ -6328,12 +7084,15 @@ class NetworkTopologyDialog(QDialog):
             return
 
         source_node = self._node_for(source_id)
-        # OLT and distribution outputs represent separate physical PON/uplink
-        # ports. Draw one routed link per child rather than merging all outputs
-        # into a shared rail, which made multiple devices look like one feeder.
+        # Core, distribution and OLT outputs represent separate physical
+        # uplink/PON ports. Draw one routed link per child rather than merging
+        # them into a shared rail, which makes access uplinks look like they
+        # run across neighbouring access switches.
         if source_node is not None and (
             source_node.asset_type == "optical_line_terminal"
             or source_node.role.startswith("olt_")
+            or "core" in source_node.role
+            or "aggregation" in source_node.role
             or "distribution" in source_node.role
         ):
             for child_id in child_ids:
@@ -6420,7 +7179,7 @@ class NetworkTopologyDialog(QDialog):
                         edge=edge,
                     )
                     if edge and self.show_link_labels_check.isChecked():
-                        self._add_link_label(edge.label, colour, QPointF((entry_x + end.x()) / 2.0, end.y() - 14.0), edge)
+                        self._add_link_label(edge.label, colour, QPointF((entry_x + end.x()) / 2.0, end.y() + 10.0), edge)
                 continue
 
             rail_x = min(point.x() for _child_id, point, _edge in endpoints) - 52.0
@@ -6446,7 +7205,7 @@ class NetworkTopologyDialog(QDialog):
                 client_link = child_id.startswith("client::")
                 medium = edge.medium if edge else ("virtual" if client_link else "copper")
                 standby = self._edge_is_failover(edge)
-                colour = self._edge_colour(edge, medium) if edge else (QColor("#d68f52") if standby else self._link_colour(medium))
+                colour = self._edge_colour(edge, medium) if edge else (self._secondary_link_colour() if standby else self._link_colour(medium))
                 traced = bool(edge and (edge.edge_id in self.trace_connection_ids or _text(edge.connection.get("parent_logical_connection_id")) in self.trace_connection_ids))
                 pen = QPen(colour, 3.4 if traced else (2.0 if not client_link else 1.3))
                 if standby or client_link:
@@ -6496,7 +7255,7 @@ class NetworkTopologyDialog(QDialog):
             client_link = child_id.startswith("client::")
             medium = edge.medium if edge else ("virtual" if client_link else "copper")
             standby = cross_link or self._edge_is_failover(edge)
-            colour = self._edge_colour(edge, medium) if edge else (QColor("#d68f52") if standby else self._link_colour(medium))
+            colour = self._edge_colour(edge, medium) if edge else (self._secondary_link_colour() if standby else self._link_colour(medium))
             traced = bool(edge and (edge.edge_id in self.trace_connection_ids or _text(edge.connection.get("parent_logical_connection_id")) in self.trace_connection_ids))
             pen = QPen(colour, 3.4 if traced else (2.0 if not client_link else 1.3))
             if standby or client_link or cross_link:
@@ -6652,7 +7411,7 @@ class NetworkTopologyDialog(QDialog):
         if not valid:
             return
 
-        colour = QColor("#d68f52")
+        colour = self._secondary_link_colour()
         sources = sorted({source_id for source_id, _target_id, _edge in valid})
         target_rows: List[Tuple[str, QPointF, TopologyEdge]] = []
         for _source_id, target_id, edge in valid:
@@ -6728,11 +7487,11 @@ class NetworkTopologyDialog(QDialog):
                 branch = QPainterPath(QPointF(trunk_x, target_point.y()))
                 branch.lineTo(QPointF(label_lane_x, target_point.y()))
                 branch.lineTo(target_point)
-                label_point = QPointF((label_lane_x + branch_end_x) / 2.0, target_point.y() - 14.0)
+                label_point = QPointF((label_lane_x + branch_end_x) / 2.0, target_point.y() + 10.0)
             else:
                 branch = QPainterPath(QPointF(trunk_x, target_point.y()))
                 branch.lineTo(target_point)
-                label_point = QPointF((trunk_x + branch_end_x) / 2.0, target_point.y() - 14.0)
+                label_point = QPointF((trunk_x + branch_end_x) / 2.0, target_point.y() + 10.0)
             item = InteractiveLinkItem(branch, edge.edge_id, self._edge_context_menu)
             item.setPen(QPen(colour, 2.0, Qt.DashLine))
             item.setZValue(-0.82)
@@ -6801,13 +7560,13 @@ class NetworkTopologyDialog(QDialog):
                 representative_edge.edge_id if representative_edge is not None else "",
                 self._edge_context_menu,
             )
-            trunk_item.setPen(QPen(QColor("#d68f52"), 2.0, Qt.DashLine))
+            trunk_item.setPen(QPen(self._secondary_link_colour(), 2.0, Qt.DashLine))
             trunk_item.setZValue(-0.82)
             self.scene.addItem(trunk_item)
             for target_id, end, edge in endpoints:
-                self._add_bus_drop(target_id, positions, QColor("#d68f52"), failover=True, z_value=-0.8, edge=edge)
+                self._add_bus_drop(target_id, positions, self._secondary_link_colour(), failover=True, z_value=-0.8, edge=edge)
                 if self.show_link_labels_check.isChecked():
-                    self._add_link_label(edge.label, QColor("#d68f52"), QPointF((entry_x + end.x()) / 2.0, end.y() - 14.0), edge)
+                    self._add_link_label(edge.label, self._secondary_link_colour(), QPointF((entry_x + end.x()) / 2.0, end.y() + 10.0), edge)
             return
 
         average_target_x = sum(point.x() for _target_id, point, _edge in endpoints) / len(endpoints)
@@ -6819,7 +7578,7 @@ class NetworkTopologyDialog(QDialog):
             start = QPointF(source_pos.x() - 8.0, source_pos.y() + self._node_card_height(source_id) / 2.0)
             rail_x = source_pos.x() - 142.0
 
-        self._add_vertical_link_rail(start, endpoints, QColor("#a76a42"), z_value=-0.82, cross_link=True, rail_x=rail_x)
+        self._add_vertical_link_rail(start, endpoints, self._secondary_link_colour(), z_value=-0.82, cross_link=True, rail_x=rail_x)
 
 
     def _incoming_fibre_edges_for_node(
@@ -6942,6 +7701,10 @@ class NetworkTopologyDialog(QDialog):
         if edge is None or _text(edge.medium).lower() != "fibre":
             return centre_x
         incoming = self._incoming_fibre_edges_for_node(node_id, edge)
+        if self._edge_has_parallel_secondary(edge, node_id):
+            edge_margin = 36.0
+            x = centre_x + (32.0 if failover else -32.0)
+            return max(pos.x() + edge_margin, min(pos.x() + self.CARD_W - edge_margin, x))
         selected_index, count = self._incoming_fibre_slot_index(node_id, edge)
         if count <= 1:
             return centre_x
@@ -6952,7 +7715,7 @@ class NetworkTopologyDialog(QDialog):
         has_primary = any(not self._edge_is_failover(candidate) for candidate in incoming)
         has_failover = any(self._edge_is_failover(candidate) for candidate in incoming)
         if has_primary and has_failover:
-            x += 18.0 if failover else -18.0
+            x += 32.0 if failover else -32.0
         return x
 
     def _add_link(
@@ -7018,7 +7781,7 @@ class NetworkTopologyDialog(QDialog):
                 primary_right = bus_right + required_span + 34.0
                 lane_offset = (
                     120.0
-                    + self._failover_lane_index(edge, source_id, target_id) * 72.0
+                    + self._failover_lane_index(edge, source_id, target_id) * 96.0
                     if failover_style else 0.0
                 )
                 entry_x = primary_right + lane_offset
@@ -7042,13 +7805,51 @@ class NetworkTopologyDialog(QDialog):
                 target_id, positions, colour, failover=failover_style,
                 z_value=-0.95 if not failover_style else -0.8, edge=edge,
             )
+            if not failover_style and self._edge_has_parallel_secondary(edge, target_id):
+                secondary_bus = self._bus_for_node(target_id, failover=True)
+                if secondary_bus is not None:
+                    secondary_anchor, secondary_left, secondary_right = secondary_bus
+                    secondary_entry_x = (
+                        self._failover_fibre_lane_x(
+                            secondary_left, required_span, edge, source_id, target_id
+                        )
+                        if target_right_of_source
+                        else secondary_right + required_span + 154.0
+                    )
+                    secondary_bus_entry_x = secondary_left if target_right_of_source else secondary_right
+                    secondary_start = QPointF(
+                        source_pos.x() + self.CARD_W,
+                        self._outgoing_fibre_connection_y(
+                            source_id, positions, edge, failover=True
+                        ),
+                    )
+                    secondary_path = QPainterPath(secondary_start)
+                    secondary_path.lineTo(QPointF(secondary_entry_x, secondary_start.y()))
+                    secondary_path.lineTo(QPointF(secondary_entry_x, secondary_anchor.y()))
+                    secondary_path.lineTo(QPointF(secondary_bus_entry_x, secondary_anchor.y()))
+                    secondary_item = InteractiveLinkItem(
+                        secondary_path,
+                        edge.edge_id if edge else "",
+                        self._edge_context_menu,
+                    )
+                    secondary_item.setPen(QPen(self._secondary_link_colour(), 2.0, Qt.DashLine))
+                    secondary_item.setZValue(-0.8)
+                    self.scene.addItem(secondary_item)
+                    self._add_bus_drop(
+                        target_id,
+                        positions,
+                        self._secondary_link_colour(),
+                        failover=True,
+                        z_value=-0.8,
+                        edge=edge,
+                    )
             if edge and self.show_link_labels_check.isChecked():
-                self._add_link_label(edge.label, colour, QPointF((entry_x + bus_anchor.x()) / 2.0, bus_anchor.y() - (14.0 if failover_style else 12.0)), edge)
+                self._add_link_label(edge.label, colour, QPointF((entry_x + bus_anchor.x()) / 2.0, bus_anchor.y() + 10.0), edge)
             return
         path = QPainterPath(start)
         if failover_style or alternate_cross_link:
             lane_offset = (
-                self._failover_lane_index(edge, source_id, target_id) * 72.0
+                self._failover_lane_index(edge, source_id, target_id) * 96.0
                 if failover_style else 0.0
             )
             bend = max(60.0, abs(end.x() - start.x()) * 0.20) + lane_offset
@@ -7061,7 +7862,7 @@ class NetworkTopologyDialog(QDialog):
         path.lineTo(end)
 
         medium = edge.medium if edge else ("virtual" if client_link else "copper")
-        colour = self._edge_colour(edge, medium) if edge is not None else (QColor("#d68f52") if failover_style else self._link_colour(medium))
+        colour = self._edge_colour(edge, medium) if edge is not None else (self._secondary_link_colour() if failover_style else self._link_colour(medium))
         traced = bool(edge and (edge.edge_id in self.trace_connection_ids or _text(edge.connection.get("parent_logical_connection_id")) in self.trace_connection_ids))
         pen = QPen(colour, 3.4 if traced else (2.0 if not client_link else 1.3))
         if failover_style or client_link:
@@ -7184,6 +7985,24 @@ class NetworkTopologyDialog(QDialog):
         self.switch_port_focus = None
         self.rack_focus = key
         self.rebuild_scene(fit=True)
+
+    def _open_selected_room_view(self) -> None:
+        node_id = _text(self.room_view_button.property("node_id"))
+        key = self._room_group_key(node_id)
+        if key == (0, ""):
+            if self.rack_focus is not None:
+                floor, location, _rack = self.rack_focus
+                key = (floor, location)
+            else:
+                return
+        floor, location = key
+        dialog = CommsRoomIsometricDialog(self, floor, location, self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda _obj=None, dlg=dialog: self._room_view_dialogs.remove(dlg) if dlg in self._room_view_dialogs else None)
+        self._room_view_dialogs.append(dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _open_selected_switch_port_view(self) -> None:
         node_id = _text(self.port_view_button.property("node_id"))
