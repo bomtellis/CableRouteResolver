@@ -1763,6 +1763,297 @@ def _planner_working_copy(data: dict) -> dict:
     return result
 
 
+class PlanningResolutionDialog(QDialog):
+    """Show a failed planner constraint and apply a selected retry override."""
+
+    def __init__(self, parent, error: NetworkPlanningError, data: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Resolve automatic planning issue")
+        self.resize(760, 560)
+        self.error = error
+        self.data = data
+        self.details = dict(getattr(error, "details", {}) or {})
+        self.selected_action = ""
+
+        layout = QVBoxLayout(self)
+        heading = QLabel("The automatic planner could not satisfy a network constraint.")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        message = QLabel(str(error))
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        diagnostics = QTextEdit()
+        diagnostics.setReadOnly(True)
+        diagnostics.setMaximumHeight(190)
+        diagnostics.setPlainText(self._diagnostic_text())
+        layout.addWidget(diagnostics)
+
+        form = QFormLayout()
+        self.action_combo = QComboBox()
+        self._populate_actions()
+        self.action_combo.currentIndexChanged.connect(self._action_changed)
+        form.addRow("Resolution", self.action_combo)
+
+        self.asset_combo = QComboBox()
+        form.addRow("Selected asset", self.asset_combo)
+
+        self.minimum_switch_count_spin = QSpinBox()
+        self.minimum_switch_count_spin.setRange(1, 9999)
+        current_switches = max(
+            0, int(self.details.get("current_location_switch_count", 0) or 0)
+        )
+        suggested_switches = max(
+            0, int(self.details.get("suggested_device_count", 0) or 0)
+        )
+        self.minimum_switch_count_spin.setValue(
+            max(1, current_switches + 1, suggested_switches)
+        )
+        self.minimum_switch_count_spin.setToolTip(
+            "Minimum number of access switches the retry must install at the "
+            "affected location. Increase or reduce this value to override the "
+            "planner recommendation."
+        )
+        form.addRow("Minimum access switches", self.minimum_switch_count_spin)
+        layout.addLayout(form)
+
+        note = QLabel(
+            "The selected override is saved in Network Settings and the planner is "
+            "run again. It can be cleared later from the planner settings."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Cancel)
+        apply_button = buttons.button(QDialogButtonBox.Apply)
+        apply_button.setText("Apply and retry")
+        apply_button.clicked.connect(self._accept_resolution)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._action_changed()
+
+    def _diagnostic_text(self) -> str:
+        lines = []
+        required = float(self.details.get("required_bandwidth_mbps", 0.0) or 0.0)
+        maximum = float(
+            self.details.get("max_compatible_capacity_mbps", 0.0) or 0.0
+        )
+        shortfall = float(self.details.get("shortfall_mbps", 0.0) or 0.0)
+        if required > 0.0:
+            lines.append(f"Required traffic: {required:.3f} Mbps")
+        if maximum > 0.0:
+            lines.append(f"Best compatible port bundle: {maximum:.3f} Mbps")
+        if shortfall > 0.0:
+            lines.append(f"Capacity shortfall: {shortfall:.3f} Mbps")
+        if self.details.get("location_name"):
+            lines.append(f"Location: {self.details.get('location_name')}")
+        if self.details.get("from_name"):
+            lines.append(f"Downstream device: {self.details.get('from_name')}")
+        if self.details.get("to_name"):
+            lines.append(f"Upstream device: {self.details.get('to_name')}")
+
+        actual_ports = int(self.details.get("actual_port_count", 0) or 0)
+        required_ports = int(
+            self.details.get("required_port_count_with_spare", 0) or 0
+        )
+        available_ports = int(
+            self.details.get("available_port_count", 0) or 0
+        )
+        spare_percent = float(
+            self.details.get("spare_capacity_percent", 0.0) or 0.0
+        )
+        if actual_ports > 0:
+            lines.append(f"Current port demand: {actual_ports}")
+        if required_ports > 0:
+            lines.append(
+                f"Ports required with {spare_percent:.1f}% spare: {required_ports}"
+            )
+        if available_ports > 0:
+            lines.append(f"Installed port capacity: {available_ports}")
+        if self.details.get("switches_without_spare") is not None:
+            lines.append(
+                "Switches without spare: "
+                f"{int(self.details.get('switches_without_spare', 0) or 0)}"
+            )
+        if self.details.get("switches_with_spare") is not None:
+            lines.append(
+                "Switches with spare: "
+                f"{int(self.details.get('switches_with_spare', 0) or 0)}"
+            )
+        if self.details.get("stacks_without_spare") is not None:
+            lines.append(
+                "Logical stacks without spare: "
+                f"{int(self.details.get('stacks_without_spare', 0) or 0)}"
+            )
+        if self.details.get("stacks_with_spare") is not None:
+            lines.append(
+                "Logical stacks with spare: "
+                f"{int(self.details.get('stacks_with_spare', 0) or 0)}"
+            )
+        if self.details.get("max_stack_members") is not None:
+            lines.append(
+                "Maximum members per stack: "
+                f"{int(self.details.get('max_stack_members', 0) or 0)}"
+            )
+
+        capabilities = self.details.get("capabilities", []) or []
+        if capabilities:
+            lines.extend(["", "Compatible same-speed bundles currently available:"])
+            for row in capabilities:
+                speed = int(row.get("speed_mbps", 0) or 0)
+                members = int(row.get("max_members", 0) or 0)
+                capacity = float(row.get("capacity_mbps", 0.0) or 0.0)
+                lines.append(
+                    f"  {members} × {port_speed_label(speed)} = {capacity:.3f} Mbps"
+                )
+
+        access = self.details.get("access_alternatives", []) or []
+        upstream = self.details.get("upstream_alternatives", []) or []
+        if access:
+            lines.extend(["", "Access-switch alternatives:"])
+            for row in access[:12]:
+                status = "meets demand" if row.get("meets_required") else "insufficient alone"
+                lines.append(
+                    f"  {row.get('name')}: {float(row.get('capacity_mbps', 0)):.3f} Mbps ({status})"
+                )
+        if upstream:
+            lines.extend(["", "Upstream-switch alternatives:"])
+            for row in upstream[:12]:
+                status = "meets demand" if row.get("meets_required") else "insufficient alone"
+                lines.append(
+                    f"  {row.get('name')}: {float(row.get('capacity_mbps', 0)):.3f} Mbps ({status})"
+                )
+        if not lines:
+            lines.append(
+                "No structured capacity data was available. Review the asset library, "
+                "port definitions and planner settings."
+            )
+        return "\n".join(lines)
+
+    def _populate_actions(self) -> None:
+        location = _text(self.details.get("location_name"))
+        from_role = _text(self.details.get("from_role")).lower()
+        error_code = getattr(self.error, "code", "")
+        if error_code == "access_stack_spare_capacity" and location:
+            self.action_combo.addItem(
+                "Install another rack and create an overflow stack for spare capacity (recommended)",
+                "add_spare_capacity_rack",
+            )
+            self.action_combo.addItem(
+                "Defer spare access-port capacity at this location",
+                "defer_location_spare_capacity",
+            )
+        if location and error_code != "access_stack_spare_capacity" and (
+            from_role in {"access", "access_switch"}
+            or error_code == "access_uplink_capacity"
+        ):
+            self.action_combo.addItem(
+                "Add an access switch and redistribute traffic (recommended)",
+                "add_access_switch",
+            )
+        if self.details.get("access_alternatives"):
+            self.action_combo.addItem(
+                "Use a selected access-switch model at this location",
+                "select_access_asset",
+            )
+        if self.details.get("upstream_alternatives"):
+            self.action_combo.addItem(
+                "Use a selected upstream core/aggregation switch model",
+                "select_upstream_asset",
+            )
+        if getattr(self.error, "code", "") in {
+            "link_capacity",
+            "access_uplink_capacity",
+        }:
+            self.action_combo.addItem(
+                "Create the best available link and ignore the bandwidth shortfall",
+                "ignore_bandwidth",
+            )
+            self.action_combo.addItem(
+                "Retry without spare traffic capacity", "remove_spare_capacity"
+            )
+        self.action_combo.addItem(
+            "Open the asset library and review the design manually", "review_assets"
+        )
+
+    def _action_changed(self, *_args) -> None:
+        action = _text(self.action_combo.currentData())
+        self.asset_combo.clear()
+        alternatives = []
+        if action == "select_access_asset":
+            alternatives = self.details.get("access_alternatives", []) or []
+        elif action == "select_upstream_asset":
+            alternatives = self.details.get("upstream_alternatives", []) or []
+        for row in alternatives:
+            capacity = float(row.get("capacity_mbps", 0.0) or 0.0)
+            status = "meets demand" if row.get("meets_required") else "requires multiple devices"
+            self.asset_combo.addItem(
+                f"{row.get('name')} — {capacity:.3f} Mbps ({status})",
+                _text(row.get("asset_id")),
+            )
+        self.asset_combo.setEnabled(bool(alternatives))
+        self.minimum_switch_count_spin.setEnabled(action == "add_access_switch")
+
+    def _accept_resolution(self) -> None:
+        action = _text(self.action_combo.currentData())
+        settings = self.data.setdefault("network_settings", {})
+        overrides = settings.setdefault("auto_planner_resolution_overrides", {})
+        if not isinstance(overrides, dict):
+            overrides = {}
+            settings["auto_planner_resolution_overrides"] = overrides
+        access_assets = overrides.setdefault("access_asset_by_location", {})
+        upstream_assets = overrides.setdefault("upstream_asset_by_layer", {})
+        minimum_switches = overrides.setdefault(
+            "minimum_access_switches_by_location", {}
+        )
+        spare_modes = overrides.setdefault(
+            "spare_capacity_mode_by_location", {}
+        )
+
+        location = _text(self.details.get("location_name"))
+        if action == "add_spare_capacity_rack":
+            if not location:
+                return
+            spare_modes[location] = "new_rack"
+        elif action == "defer_location_spare_capacity":
+            if not location:
+                return
+            spare_modes[location] = "defer"
+        elif action == "add_access_switch":
+            requested = max(1, int(self.minimum_switch_count_spin.value()))
+            minimum_switches[location] = max(
+                int(minimum_switches.get(location, 0) or 0),
+                requested,
+            )
+            settings["auto_add_switches_for_bandwidth"] = True
+        elif action == "select_access_asset":
+            asset_id = _text(self.asset_combo.currentData())
+            if not asset_id or not location:
+                return
+            access_assets[location] = asset_id
+        elif action == "select_upstream_asset":
+            asset_id = _text(self.asset_combo.currentData())
+            if not asset_id:
+                return
+            to_role = _text(self.details.get("to_role")).lower()
+            layer = "aggregation" if "aggregation" in to_role else "core"
+            upstream_assets[layer] = asset_id
+        elif action == "ignore_bandwidth":
+            settings["ignore_link_bandwidth_errors"] = True
+        elif action == "remove_spare_capacity":
+            settings["spare_capacity_percent"] = 0.0
+        elif action == "review_assets":
+            self.selected_action = action
+            self.accept()
+            return
+        else:
+            return
+
+        self.selected_action = action
+        self.accept()
+
+
 class NetworkPlannerDialog(QDialog):
     def __init__(self, parent, data: dict, on_save: Callable[[dict], None]):
         super().__init__(parent)
@@ -1924,6 +2215,39 @@ class NetworkPlannerDialog(QDialog):
             "compatible free ports after a device is placed manually."
         )
 
+        self.auto_add_bandwidth_switches_check = QCheckBox(
+            "Automatically add access switches when uplink bandwidth is exceeded"
+        )
+        self.auto_add_bandwidth_switches_check.setChecked(
+            bool(settings.get("auto_add_switches_for_bandwidth", True))
+        )
+        self.auto_add_bandwidth_switches_check.setToolTip(
+            "Split endpoint traffic across additional access switches when one "
+            "switch cannot form a sufficiently large same-speed uplink bundle."
+        )
+
+        self.ignore_link_bandwidth_check = QCheckBox(
+            "Allow best-effort links that do not meet calculated bandwidth"
+        )
+        self.ignore_link_bandwidth_check.setChecked(
+            bool(settings.get("ignore_link_bandwidth_errors", False))
+        )
+        self.ignore_link_bandwidth_check.setToolTip(
+            "Use only as a manual override. The generated design records a warning "
+            "for every undersized link."
+        )
+
+        self.clear_planner_overrides_button = QPushButton(
+            "Clear automatic planner resolution overrides"
+        )
+        self.clear_planner_overrides_button.setToolTip(
+            "Remove manually selected switch models and minimum switch counts "
+            "created by the planning-resolution dialog."
+        )
+        self.clear_planner_overrides_button.clicked.connect(
+            self.clear_planner_resolution_overrides
+        )
+
         self.auto_design_button = QPushButton("Generate Minimum-Component Network")
         self.auto_design_button.clicked.connect(self.generate_automatic_design)
 
@@ -1976,6 +2300,9 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("", self.redundant_core_check)
         settings_layout.addRow("", self.olt_failover_check)
         settings_layout.addRow("", self.auto_connect_manual_check)
+        settings_layout.addRow("", self.auto_add_bandwidth_switches_check)
+        settings_layout.addRow("", self.ignore_link_bandwidth_check)
+        settings_layout.addRow("", self.clear_planner_overrides_button)
         settings_layout.addRow("", self.auto_design_button)
         settings_layout.addRow("", self.sync_physical_fibre_button)
         settings_layout.addRow("", self.generate_ip_plan_button)
@@ -2657,6 +2984,34 @@ class NetworkPlannerDialog(QDialog):
                 result[component] = {"preferred_manufacturers": names, "strict": bool(strict_check.isChecked()) if strict_check else False}
         return normalise_manufacturer_preferences(result)
 
+    def clear_planner_resolution_overrides(self) -> None:
+        settings = self.data.setdefault("network_settings", {})
+        overrides = settings.get("auto_planner_resolution_overrides", {})
+        has_overrides = isinstance(overrides, dict) and any(
+            bool(value) for value in overrides.values()
+        )
+        if not has_overrides:
+            QMessageBox.information(
+                self,
+                "Planner overrides",
+                "There are no manual automatic-planner overrides to clear.",
+            )
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Clear planner overrides",
+                "Clear selected switch models and minimum switch counts created "
+                "by planning issue resolutions?",
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        settings["auto_planner_resolution_overrides"] = {}
+        QMessageBox.information(
+            self, "Planner overrides", "Automatic-planner overrides were cleared."
+        )
+
     def _sync_planner_settings(self) -> None:
         settings = self.data.setdefault("network_settings", {})
         settings["technology"] = self.technology_combo.currentText().strip()
@@ -2677,6 +3032,12 @@ class NetworkPlannerDialog(QDialog):
         settings["manufacturer_preferences"] = self._manufacturer_preferences_from_table()
         settings["auto_connect_new_manual_devices"] = bool(
             self.auto_connect_manual_check.isChecked()
+        )
+        settings["auto_add_switches_for_bandwidth"] = bool(
+            self.auto_add_bandwidth_switches_check.isChecked()
+        )
+        settings["ignore_link_bandwidth_errors"] = bool(
+            self.ignore_link_bandwidth_check.isChecked()
         )
         settings["spare_capacity_percent"] = float(self.spare_capacity_spin.value())
         settings["default_expected_bandwidth_mbps"] = float(self.default_expected_bandwidth_spin.value())
@@ -2719,6 +3080,8 @@ class NetworkPlannerDialog(QDialog):
             f"Installed endpoint bandwidth capacity: {summary.get('installed_bandwidth_capacity_mbps', 0)} Mbps",
             f"Installed endpoint packet capacity: {summary.get('installed_packet_throughput_pps', 0)} pps",
             f"Spare capacity: {summary.get('spare_capacity_percent', 0)}%",
+            f"Auto-add switches for bandwidth: {'Yes' if summary.get('auto_add_switches_for_bandwidth', True) else 'No'}",
+            f"Bandwidth shortfall override: {'Enabled' if summary.get('ignore_link_bandwidth_errors', False) else 'Disabled'}",
             f"Estimated copper: {summary.get('estimated_copper_length_m', 0)} m",
             f"Estimated fibre: {summary.get('estimated_fibre_length_m', 0)} m",
             f"PoLAN ONTs per splitter limit: {summary.get('polan_max_onts_per_splitter', '')}",
@@ -2741,6 +3104,42 @@ class NetworkPlannerDialog(QDialog):
                     f"  {source} {arrow} {target}: {rule.get('links_per_target', 1)} link(s), "
                     f"minimum {rule.get('minimum_distinct_sources', 1)} distinct source(s)"
                 )
+        overrides = summary.get("planner_resolution_overrides", {}) or {}
+        if isinstance(overrides, dict) and any(bool(value) for value in overrides.values()):
+            lines.extend(["", "Manual planner overrides:"])
+            for location, asset_id in sorted(
+                (overrides.get("access_asset_by_location", {}) or {}).items()
+            ):
+                lines.append(f"  Access switch at {location}: {asset_id}")
+            for layer, asset_id in sorted(
+                (overrides.get("upstream_asset_by_layer", {}) or {}).items()
+            ):
+                lines.append(f"  {layer.title()} switch model: {asset_id}")
+            for location, count in sorted(
+                (overrides.get("minimum_access_switches_by_location", {}) or {}).items()
+            ):
+                lines.append(f"  Minimum access switches at {location}: {count}")
+            for location, mode in sorted(
+                (overrides.get("spare_capacity_mode_by_location", {}) or {}).items()
+            ):
+                description = (
+                    "defer access-port spare capacity"
+                    if mode == "defer"
+                    else "install a separate spare-capacity rack"
+                )
+                lines.append(f"  Spare capacity at {location}: {description}")
+        deferred_locations = summary.get(
+            "deferred_spare_capacity_locations", []
+        ) or []
+        if deferred_locations:
+            lines.extend(["", "Deferred access-port spare capacity:"])
+            lines.extend(f"  {location}" for location in deferred_locations)
+        extra_rack_locations = summary.get(
+            "additional_spare_capacity_rack_locations", []
+        ) or []
+        if extra_rack_locations:
+            lines.extend(["", "Additional spare-capacity racks:"])
+            lines.extend(f"  {location}" for location in extra_rack_locations)
         warnings = summary.get("warnings", []) or []
         if warnings:
             lines.extend(["", "Warnings:"])
@@ -2774,36 +3173,92 @@ class NetworkPlannerDialog(QDialog):
             != QMessageBox.Yes
         ):
             return
-        progress = QProgressDialog("Preparing automatic network plan...", "", 0, 100, self)
-        progress.setWindowTitle("Automatic network planning")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setCancelButton(None)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setValue(0)
-        progress.show()
 
-        def update_progress(value: int, message: str) -> None:
-            progress.setLabelText(message)
-            progress.setValue(max(0, min(100, int(value))))
-            QApplication.processEvents()
+        summary = None
+        for _attempt in range(12):
+            snapshot = self._save_payload()
+            progress = QProgressDialog(
+                "Preparing automatic network plan...", "", 0, 100, self
+            )
+            progress.setWindowTitle("Automatic network planning")
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setCancelButton(None)
+            progress.setMinimumDuration(0)
+            progress.setAutoClose(False)
+            progress.setAutoReset(False)
+            progress.setValue(0)
+            progress.show()
 
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            summary = generate_network_design(self.data, technology, progress_callback=update_progress)
-        except NetworkPlanningError as exc:
-            QMessageBox.critical(self, "Automatic network planning", str(exc))
-            return
-        except Exception as exc:
+            def update_progress(value: int, message: str) -> None:
+                progress.setLabelText(message)
+                progress.setValue(max(0, min(100, int(value))))
+                QApplication.processEvents()
+
+            planning_error = None
+            unexpected_error = None
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                summary = generate_network_design(
+                    self.data,
+                    technology,
+                    progress_callback=update_progress,
+                )
+            except NetworkPlanningError as exc:
+                planning_error = exc
+            except Exception as exc:
+                unexpected_error = exc
+            finally:
+                QApplication.restoreOverrideCursor()
+                progress.setValue(100)
+                progress.close()
+
+            if summary is not None:
+                break
+
+            # A failed pass may have removed the previous generated design before
+            # reaching the failing constraint. Restore the complete planner state
+            # before presenting choices or returning to manual editing.
+            for key in _PLANNER_MUTABLE_KEYS:
+                if key in snapshot:
+                    self.data[key] = snapshot[key]
+                else:
+                    self.data.pop(key, None)
+
+            if unexpected_error is not None:
+                QMessageBox.critical(
+                    self,
+                    "Automatic network planning",
+                    f"Unexpected planning error:\n{unexpected_error}",
+                )
+                return
+
+            resolution = PlanningResolutionDialog(self, planning_error, self.data)
+            if resolution.exec() != QDialog.Accepted:
+                return
+            if resolution.selected_action == "review_assets":
+                self.tabs.setCurrentWidget(self.assets_tab)
+                self.refresh_tables()
+                return
+
+            settings = self.data.setdefault("network_settings", {})
+            self.auto_add_bandwidth_switches_check.setChecked(
+                bool(settings.get("auto_add_switches_for_bandwidth", True))
+            )
+            self.ignore_link_bandwidth_check.setChecked(
+                bool(settings.get("ignore_link_bandwidth_errors", False))
+            )
+            self.spare_capacity_spin.setValue(
+                float(settings.get("spare_capacity_percent", 0.0) or 0.0)
+            )
+        else:
             QMessageBox.critical(
-                self, "Automatic network planning", f"Unexpected planning error:\n{exc}"
+                self,
+                "Automatic network planning",
+                "The planner could not resolve the design after 12 retry attempts. "
+                "Review the asset library and the saved planner overrides.",
             )
             return
-        finally:
-            QApplication.restoreOverrideCursor()
-            progress.setValue(100)
-            progress.close()
+
         self.refresh_tables()
         self.on_save(self._save_payload())
         self.tabs.setCurrentWidget(self.summary_text)

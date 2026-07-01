@@ -127,6 +127,9 @@ NETWORK_DEFAULTS = {
         "layer_connection_rules": [],
         "manufacturer_preferences": {},
         "auto_connect_new_manual_devices": True,
+        "auto_add_switches_for_bandwidth": True,
+        "ignore_link_bandwidth_errors": False,
+        "auto_planner_resolution_overrides": {},
         "spare_capacity_percent": 15.0,
         "traditional_max_copper_m": 90.0,
         "polan_max_ont_copper_m": 30.0,
@@ -558,6 +561,9 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("layer_connection_rules", [])
     settings.setdefault("manufacturer_preferences", {})
     settings.setdefault("auto_connect_new_manual_devices", True)
+    settings.setdefault("auto_add_switches_for_bandwidth", True)
+    settings.setdefault("ignore_link_bandwidth_errors", False)
+    settings.setdefault("auto_planner_resolution_overrides", {})
     settings.setdefault("spare_capacity_percent", 15.0)
     settings.setdefault("traditional_max_copper_m", 90.0)
     settings.setdefault("polan_max_ont_copper_m", 30.0)
@@ -607,6 +613,54 @@ def ensure_network_schema(data: dict) -> dict:
     settings["auto_connect_new_manual_devices"] = bool(
         settings.get("auto_connect_new_manual_devices", True)
     )
+    settings["auto_add_switches_for_bandwidth"] = bool(
+        settings.get("auto_add_switches_for_bandwidth", True)
+    )
+    settings["ignore_link_bandwidth_errors"] = bool(
+        settings.get("ignore_link_bandwidth_errors", False)
+    )
+    overrides = settings.get("auto_planner_resolution_overrides")
+    if not isinstance(overrides, dict):
+        overrides = {}
+
+    access_assets = overrides.get("access_asset_by_location")
+    access_assets = access_assets if isinstance(access_assets, dict) else {}
+    access_assets = {
+        _text(location): _text(asset_id)
+        for location, asset_id in access_assets.items()
+        if _text(location) and _text(asset_id)
+    }
+
+    upstream_assets = overrides.get("upstream_asset_by_layer")
+    upstream_assets = upstream_assets if isinstance(upstream_assets, dict) else {}
+    upstream_assets = {
+        _text(layer).lower(): _text(asset_id)
+        for layer, asset_id in upstream_assets.items()
+        if _text(layer).lower() in {"core", "aggregation"} and _text(asset_id)
+    }
+
+    minimum_switches = overrides.get("minimum_access_switches_by_location")
+    minimum_switches = minimum_switches if isinstance(minimum_switches, dict) else {}
+    minimum_switches = {
+        _text(location): max(1, _as_int(count, 1))
+        for location, count in minimum_switches.items()
+        if _text(location) and _as_int(count, 0) > 0
+    }
+
+    spare_modes = overrides.get("spare_capacity_mode_by_location")
+    spare_modes = spare_modes if isinstance(spare_modes, dict) else {}
+    spare_modes = {
+        _text(location): _text(mode).lower()
+        for location, mode in spare_modes.items()
+        if _text(location) and _text(mode).lower() in {"defer", "new_rack"}
+    }
+
+    settings["auto_planner_resolution_overrides"] = {
+        "access_asset_by_location": access_assets,
+        "upstream_asset_by_layer": upstream_assets,
+        "minimum_access_switches_by_location": minimum_switches,
+        "spare_capacity_mode_by_location": spare_modes,
+    }
     settings["spare_capacity_percent"] = max(
         0.0, _as_float(settings.get("spare_capacity_percent"), 15.0)
     )
