@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional
 from network_services import FIBRE_COLOURS, build_fibre_cores, fibre_layer_defaults, set_core_status_from_splices
 
 
-NETWORK_SCHEMA_VERSION = 9
+NETWORK_SCHEMA_VERSION = 10
 
 
 DEFAULT_FIBRE_CABLE_TYPES = [
@@ -126,6 +126,11 @@ NETWORK_DEFAULTS = {
         "independent_link_count": 2,
         "layer_connection_rules": [],
         "manufacturer_preferences": {},
+        "asset_model_preferences": {},
+        "rack_deployment_model": "end_of_row",
+        "aggregation_rack_mode": "dedicated",
+        "tor_keep_final_connections_in_cabinet": True,
+        "tor_allow_adjacent_cabinet_uplinks": True,
         "auto_connect_new_manual_devices": True,
         "auto_add_switches_for_bandwidth": True,
         "ignore_link_bandwidth_errors": False,
@@ -341,6 +346,14 @@ MANUFACTURER_PREFERENCE_COMPONENTS = {
     "cable_management": "Cable-management panels",
 }
 
+# Exact-model preferences use asset IDs rather than manufacturer names.  The
+# component keys deliberately mirror the manufacturer preference table so a
+# model can be pinned at any generated layer without adding planner-specific
+# fields to individual assets.
+ASSET_MODEL_PREFERENCE_COMPONENTS = dict(MANUFACTURER_PREFERENCE_COMPONENTS)
+RACK_DEPLOYMENT_MODELS = {"top_of_rack", "end_of_row"}
+AGGREGATION_RACK_MODES = {"dedicated", "shared_eor"}
+
 
 def default_layer_connection_rules(
     topology_model: str = "collapsed_core",
@@ -543,6 +556,34 @@ def normalise_manufacturer_preferences(value) -> Dict[str, dict]:
     return result
 
 
+def normalise_asset_model_preferences(value) -> Dict[str, dict]:
+    """Return ordered exact-model preferences keyed by planner component.
+
+    ``preferred_asset_ids`` contains network-asset IDs in priority order.  A
+    strict policy excludes all other models; a non-strict policy only ranks the
+    selected models ahead of automatic alternatives.
+    """
+
+    source = value if isinstance(value, dict) else {}
+    result: Dict[str, dict] = {}
+    for component in ASSET_MODEL_PREFERENCE_COMPONENTS:
+        raw = source.get(component, {})
+        strict = False
+        preferred: List[str] = []
+        if isinstance(raw, dict):
+            preferred = _normalise_string_list(
+                raw.get("preferred_asset_ids", raw.get("asset_ids", []))
+            )
+            strict = bool(raw.get("strict", False))
+        elif isinstance(raw, (list, tuple, str)):
+            preferred = _normalise_string_list(raw)
+        result[component] = {
+            "preferred_asset_ids": preferred,
+            "strict": strict,
+        }
+    return result
+
+
 def ensure_network_schema(data: dict) -> dict:
     """Ensure that *data* contains a complete, backwards-compatible network schema."""
 
@@ -560,6 +601,11 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("independent_link_count", 2)
     settings.setdefault("layer_connection_rules", [])
     settings.setdefault("manufacturer_preferences", {})
+    settings.setdefault("asset_model_preferences", {})
+    settings.setdefault("rack_deployment_model", "end_of_row")
+    settings.setdefault("aggregation_rack_mode", "dedicated")
+    settings.setdefault("tor_keep_final_connections_in_cabinet", True)
+    settings.setdefault("tor_allow_adjacent_cabinet_uplinks", True)
     settings.setdefault("auto_connect_new_manual_devices", True)
     settings.setdefault("auto_add_switches_for_bandwidth", True)
     settings.setdefault("ignore_link_bandwidth_errors", False)
@@ -609,6 +655,25 @@ def ensure_network_schema(data: dict) -> dict:
     )
     settings["manufacturer_preferences"] = normalise_manufacturer_preferences(
         settings.get("manufacturer_preferences")
+    )
+    settings["asset_model_preferences"] = normalise_asset_model_preferences(
+        settings.get("asset_model_preferences")
+    )
+    rack_model = _text(settings.get("rack_deployment_model")).lower()
+    settings["rack_deployment_model"] = (
+        rack_model if rack_model in RACK_DEPLOYMENT_MODELS else "end_of_row"
+    )
+    aggregation_mode = _text(settings.get("aggregation_rack_mode")).lower()
+    settings["aggregation_rack_mode"] = (
+        aggregation_mode
+        if aggregation_mode in AGGREGATION_RACK_MODES
+        else "dedicated"
+    )
+    settings["tor_keep_final_connections_in_cabinet"] = bool(
+        settings.get("tor_keep_final_connections_in_cabinet", True)
+    )
+    settings["tor_allow_adjacent_cabinet_uplinks"] = bool(
+        settings.get("tor_allow_adjacent_cabinet_uplinks", True)
     )
     settings["auto_connect_new_manual_devices"] = bool(
         settings.get("auto_connect_new_manual_devices", True)

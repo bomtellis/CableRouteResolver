@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QWizard,
+    QWizardPage,
 )
 
 NETWORK_ASSET_TYPES = [
@@ -76,12 +78,14 @@ from network_fibre_dialogs import (
     FibreSpliceEditorDialog, PatchLeadEditorDialog,
 )
 from network_schema import (
+    ASSET_MODEL_PREFERENCE_COMPONENTS,
     MANUFACTURER_PREFERENCE_COMPONENTS,
     NETWORK_PORT_SPEED_OPTIONS,
     PLUGGABLE_OPTIC_PORT_TYPES,
     compatible_port_speeds,
     default_layer_connection_rules,
     default_port_speeds,
+    normalise_asset_model_preferences,
     normalise_layer_connection_rules,
     normalise_manufacturer_preferences,
     normalise_port_speeds,
@@ -2054,6 +2058,430 @@ class PlanningResolutionDialog(QDialog):
         self.accept()
 
 
+
+class AutoPlannerSetupWizard(QWizard):
+    """Guided network hierarchy, cabinet and exact-model selection."""
+
+    def __init__(self, parent, data: dict):
+        super().__init__(parent)
+        self.data = data
+        self.settings = data.setdefault("network_settings", {})
+        self.setWindowTitle("Automatic Network Planner Setup")
+        self.resize(860, 650)
+        self.setWizardStyle(QWizard.ModernStyle)
+        self.setOption(QWizard.NoBackButtonOnStartPage, True)
+
+        design_page = QWizardPage()
+        design_page.setTitle("Choose the network architecture")
+        design_page.setSubTitle(
+            "Select the technology, hierarchy and resilience before choosing equipment models."
+        )
+        design_form = QFormLayout(design_page)
+
+        self.technology_combo = QComboBox()
+        self.technology_combo.addItems(NETWORK_TECHNOLOGIES)
+        _set_combo_text(
+            self.technology_combo,
+            _text(self.settings.get("technology")) or "Traditional",
+        )
+        design_form.addRow("Network technology", self.technology_combo)
+
+        self.topology_combo = QComboBox()
+        self.topology_combo.addItem("Collapsed core (core + access)", "collapsed_core")
+        self.topology_combo.addItem(
+            "Three layer (core + aggregation + access)", "three_tier"
+        )
+        topology_index = self.topology_combo.findData(
+            _text(self.settings.get("topology_model")) or "collapsed_core"
+        )
+        if topology_index >= 0:
+            self.topology_combo.setCurrentIndex(topology_index)
+        design_form.addRow("Traditional hierarchy", self.topology_combo)
+
+        self.redundant_check = QCheckBox("Generate independent redundant paths")
+        self.redundant_check.setChecked(
+            bool(self.settings.get("redundant_core", True))
+        )
+        design_form.addRow("", self.redundant_check)
+
+        self.link_count_spin = QSpinBox()
+        self.link_count_spin.setRange(1, 16)
+        self.link_count_spin.setValue(
+            max(1, int(self.settings.get("independent_link_count", 2) or 2))
+        )
+        self.link_count_spin.setToolTip(
+            "Number of separate uplinks to each downstream switch or stack."
+        )
+        design_form.addRow("Independent uplinks", self.link_count_spin)
+
+        self.spare_spin = QDoubleSpinBox()
+        self.spare_spin.setRange(0.0, 100.0)
+        self.spare_spin.setDecimals(1)
+        self.spare_spin.setSuffix(" %")
+        self.spare_spin.setValue(
+            float(self.settings.get("spare_capacity_percent", 15.0) or 0.0)
+        )
+        design_form.addRow("Spare port, PoE and traffic capacity", self.spare_spin)
+        self.addPage(design_page)
+
+        rack_page = QWizardPage()
+        rack_page.setTitle("Choose the cabinet deployment model")
+        rack_page.setSubTitle(
+            "Top of Rack keeps every final copper termination with its serving access stack. "
+            "End of Row consolidates switching and permits patch-panel pairs to use adjacent cabinets."
+        )
+        rack_form = QFormLayout(rack_page)
+        self.rack_model_combo = QComboBox()
+        self.rack_model_combo.addItem(
+            "Top of Rack — local access stack per cabinet", "top_of_rack"
+        )
+        self.rack_model_combo.addItem(
+            "End of Row — consolidated access switching", "end_of_row"
+        )
+        rack_index = self.rack_model_combo.findData(
+            _text(self.settings.get("rack_deployment_model")) or "end_of_row"
+        )
+        if rack_index >= 0:
+            self.rack_model_combo.setCurrentIndex(rack_index)
+        rack_form.addRow("Cabinet strategy", self.rack_model_combo)
+
+        self.aggregation_mode_combo = QComboBox()
+        self.aggregation_mode_combo.addItem(
+            "Dedicated aggregation cabinet", "dedicated"
+        )
+        self.aggregation_mode_combo.addItem(
+            "Share the End-of-Row cabinet", "shared_eor"
+        )
+        aggregation_index = self.aggregation_mode_combo.findData(
+            _text(self.settings.get("aggregation_rack_mode")) or "dedicated"
+        )
+        if aggregation_index >= 0:
+            self.aggregation_mode_combo.setCurrentIndex(aggregation_index)
+        self.aggregation_mode_combo.setToolTip(
+            "Used by three-layer Traditional designs. Dedicated mode isolates aggregation equipment; "
+            "shared mode places it in the End-of-Row cabinet where capacity permits."
+        )
+        rack_form.addRow("Aggregation placement", self.aggregation_mode_combo)
+
+        self.rack_size_spin = QSpinBox()
+        self.rack_size_spin.setRange(1, 200)
+        self.rack_size_spin.setSuffix("U")
+        self.rack_size_spin.setValue(
+            max(1, int(self.settings.get("default_rack_size_u", 42) or 42))
+        )
+        rack_form.addRow("Rack cabinet size", self.rack_size_spin)
+
+        tor_note = QLabel(
+            "With Top of Rack, the planner sizes each access stack together with its copper "
+            "patch panels, cable managers and UPS allowance. Final endpoint connections cannot "
+            "cross cabinets. Fibre uplinks and peer links may use the adjacent cabinet route."
+        )
+        tor_note.setWordWrap(True)
+        rack_form.addRow("", tor_note)
+        self.addPage(rack_page)
+
+        models_page = QWizardPage()
+        models_page.setTitle("Select preferred equipment models")
+        models_page.setSubTitle(
+            "Choose a model for any generated layer. Strict selections prohibit automatic fallback; "
+            "non-strict selections are preferred but may be replaced when capacity or port compatibility requires it."
+        )
+        models_layout = QVBoxLayout(models_page)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        models_form = QFormLayout(content)
+        scroll.setWidget(content)
+        models_layout.addWidget(scroll)
+
+        preferences = normalise_asset_model_preferences(
+            self.settings.get("asset_model_preferences")
+        )
+        self.model_controls: Dict[str, Tuple[QComboBox, QCheckBox]] = {}
+        for component, label in ASSET_MODEL_PREFERENCE_COMPONENTS.items():
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            combo = QComboBox()
+            combo.addItem("Automatic selection", "")
+            for asset in self._component_assets(component):
+                asset_id = _text(asset.get("id"))
+                combo.addItem(self._asset_label(asset), asset_id)
+            selected_ids = preferences.get(component, {}).get(
+                "preferred_asset_ids", []
+            )
+            if selected_ids:
+                selected_index = combo.findData(_text(selected_ids[0]))
+                if selected_index >= 0:
+                    combo.setCurrentIndex(selected_index)
+            strict = QCheckBox("Strict")
+            strict.setChecked(bool(preferences.get(component, {}).get("strict")))
+            strict.setToolTip(
+                "Do not use another model when this selected model cannot satisfy the design."
+            )
+            strict.setEnabled(bool(_text(combo.currentData())))
+            combo.currentIndexChanged.connect(
+                lambda _index, c=combo, check=strict: check.setEnabled(
+                    bool(_text(c.currentData()))
+                )
+            )
+            row_layout.addWidget(combo, 1)
+            row_layout.addWidget(strict)
+            models_form.addRow(label, row_widget)
+            self.model_controls[component] = (combo, strict)
+        self.addPage(models_page)
+
+        review_page = QWizardPage()
+        review_page.setTitle("Review and generate")
+        review_page.setSubTitle(
+            "The selected preferences are saved with the project and used for this and later planner runs."
+        )
+        review_layout = QVBoxLayout(review_page)
+        self.review_text = QLabel()
+        self.review_text.setTextFormat(Qt.PlainText)
+        self.review_text.setWordWrap(True)
+        self.review_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        review_layout.addWidget(self.review_text)
+        review_layout.addStretch(1)
+        self.addPage(review_page)
+
+        self.technology_combo.currentTextChanged.connect(self._update_availability)
+        self.topology_combo.currentIndexChanged.connect(self._update_availability)
+        self.rack_model_combo.currentIndexChanged.connect(self._update_availability)
+        self.currentIdChanged.connect(self._update_review)
+        self._update_availability()
+        self._update_review()
+
+    def _update_review(self, *_args) -> None:
+        technology = self.technology_combo.currentText().strip() or "Traditional"
+        lines = [f"Technology: {technology}"]
+        if technology.lower() == "traditional":
+            lines.extend(
+                [
+                    f"Hierarchy: {self.topology_combo.currentText()}",
+                    f"Resilience: {'Redundant' if self.redundant_check.isChecked() else 'Single path'}",
+                    f"Independent uplinks: {self.link_count_spin.value()}",
+                    f"Cabinet strategy: {self.rack_model_combo.currentText()}",
+                ]
+            )
+            if self.aggregation_mode_combo.isEnabled():
+                lines.append(
+                    f"Aggregation placement: {self.aggregation_mode_combo.currentText()}"
+                )
+        lines.extend(
+            [
+                f"Rack size: {self.rack_size_spin.value()}U",
+                f"Spare capacity: {self.spare_spin.value():.1f}%",
+                "",
+                "Preferred models:",
+            ]
+        )
+        selected_count = 0
+        for component, (combo, strict) in self.model_controls.items():
+            if not combo.isEnabled() or not _text(combo.currentData()):
+                continue
+            selected_count += 1
+            suffix = " (strict)" if strict.isChecked() else " (preferred)"
+            lines.append(
+                f"  {ASSET_MODEL_PREFERENCE_COMPONENTS.get(component, component)}: "
+                f"{combo.currentText()}{suffix}"
+            )
+        if selected_count == 0:
+            lines.append("  Automatic selection for every applicable component")
+        lines.extend(
+            [
+                "",
+                "Finish applies these settings and starts the capacity, port, rack and optical validation pass.",
+            ]
+        )
+        self.review_text.setText("\n".join(lines))
+
+    @staticmethod
+    def _asset_label(asset: dict) -> str:
+        parts = [
+            _text(asset.get("manufacturer")),
+            _text(asset.get("model")),
+        ]
+        product = " ".join(value for value in parts if value).strip()
+        name = _text(asset.get("name"))
+        asset_id = _text(asset.get("id"))
+        if product and name and name.casefold() not in product.casefold():
+            product = f"{product} — {name}"
+        return f"{product or name or asset_id} [{asset_id}]"
+
+    def _component_assets(self, component: str) -> List[dict]:
+        rows = [
+            row
+            for row in self.data.get("network_assets", [])
+            if isinstance(row, dict) and _text(row.get("id"))
+        ]
+
+        def asset_type(row: dict) -> str:
+            return _text(row.get("asset_type")).lower()
+
+        def layer(row: dict) -> str:
+            return _text(
+                row.get("network_layer") or row.get("design_layer")
+            ).lower()
+
+        def name(row: dict) -> str:
+            return _text(row.get("name")).lower()
+
+        if component == "access_switch":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) == "network_switch"
+                and (
+                    layer(row) == "access"
+                    or (
+                        _text(row.get("output_connection_type")).lower()
+                        == "copper"
+                        and not any(
+                            word in name(row)
+                            for word in ("core", "aggregation", "distribution")
+                        )
+                    )
+                )
+            ]
+        elif component == "aggregation_switch":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) == "network_switch"
+                and (
+                    layer(row) in {"aggregation", "distribution"}
+                    or any(word in name(row) for word in ("aggregation", "distribution"))
+                )
+            ]
+        elif component == "core_switch":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) == "network_switch"
+                and (layer(row) == "core" or "core" in name(row))
+            ]
+        elif component == "edge_router":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) in {"network_router", "firewall"}
+            ]
+        elif component == "wireless_access_point":
+            selected = [row for row in rows if asset_type(row) == "wireless_access_point"]
+        elif component == "optical_line_terminal":
+            selected = [row for row in rows if asset_type(row) == "optical_line_terminal"]
+        elif component == "optical_network_terminal":
+            selected = [row for row in rows if asset_type(row) == "optical_network_terminal"]
+        elif component == "fibre_splitter":
+            selected = [row for row in rows if asset_type(row) == "fibre_splitter"]
+        elif component == "copper_patch_panel":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) == "patch_panel"
+                and _text(row.get("patch_panel_type")).lower() == "copper"
+            ]
+        elif component == "fibre_patch_panel":
+            selected = [
+                row
+                for row in rows
+                if asset_type(row) == "patch_panel"
+                and _text(row.get("patch_panel_type")).lower() == "fibre"
+            ]
+        elif component == "rack_ups":
+            selected = [row for row in rows if asset_type(row) == "ups"]
+        elif component == "rack_pdu":
+            selected = [row for row in rows if asset_type(row) == "pdu"]
+        elif component == "cable_management":
+            selected = [row for row in rows if asset_type(row) == "cable_management"]
+        else:
+            selected = []
+        return sorted(
+            selected,
+            key=lambda row: (
+                _text(row.get("manufacturer")).casefold(),
+                _text(row.get("model")).casefold(),
+                _text(row.get("name")).casefold(),
+                _text(row.get("id")),
+            ),
+        )
+
+    def _update_availability(self, *_args) -> None:
+        traditional = self.technology_combo.currentText().strip().lower() == "traditional"
+        three_tier = _text(self.topology_combo.currentData()) == "three_tier"
+        self.topology_combo.setEnabled(traditional)
+        self.rack_model_combo.setEnabled(traditional)
+        self.redundant_check.setEnabled(traditional)
+        self.link_count_spin.setEnabled(traditional)
+        aggregation_available = (
+            traditional
+            and three_tier
+            and _text(self.rack_model_combo.currentData()) == "end_of_row"
+        )
+        self.aggregation_mode_combo.setEnabled(aggregation_available)
+        if not aggregation_available:
+            dedicated_index = self.aggregation_mode_combo.findData("dedicated")
+            if dedicated_index >= 0:
+                self.aggregation_mode_combo.setCurrentIndex(dedicated_index)
+        for component, (combo, strict) in self.model_controls.items():
+            relevant = True
+            if component in {
+                "access_switch",
+                "aggregation_switch",
+                "copper_patch_panel",
+            }:
+                relevant = traditional
+            elif component in {
+                "optical_line_terminal",
+                "optical_network_terminal",
+                "fibre_splitter",
+            }:
+                relevant = not traditional
+            if component == "aggregation_switch":
+                relevant = traditional and three_tier
+            combo.setEnabled(relevant)
+            strict.setEnabled(relevant and bool(_text(combo.currentData())))
+
+    def apply_settings(self) -> None:
+        settings = self.data.setdefault("network_settings", {})
+        technology = self.technology_combo.currentText().strip()
+        settings["technology"] = technology
+        settings["topology_model"] = (
+            _text(self.topology_combo.currentData()) or "collapsed_core"
+        )
+        settings["redundant_core"] = bool(self.redundant_check.isChecked())
+        settings["independent_link_count"] = int(self.link_count_spin.value())
+        settings["spare_capacity_percent"] = float(self.spare_spin.value())
+        settings["rack_deployment_model"] = (
+            _text(self.rack_model_combo.currentData()) or "end_of_row"
+        )
+        aggregation_mode = (
+            _text(self.aggregation_mode_combo.currentData()) or "dedicated"
+        )
+        if (
+            technology.lower() != "traditional"
+            or settings["topology_model"] != "three_tier"
+            or settings["rack_deployment_model"] != "end_of_row"
+        ):
+            aggregation_mode = "dedicated"
+        settings["aggregation_rack_mode"] = aggregation_mode
+        settings["default_rack_size_u"] = int(self.rack_size_spin.value())
+        settings["tor_keep_final_connections_in_cabinet"] = True
+        settings["tor_allow_adjacent_cabinet_uplinks"] = True
+
+        preferences: Dict[str, dict] = {}
+        for component, (combo, strict) in self.model_controls.items():
+            asset_id = _text(combo.currentData())
+            preferences[component] = {
+                "preferred_asset_ids": [asset_id] if asset_id else [],
+                "strict": bool(strict.isChecked() and asset_id),
+            }
+        settings["asset_model_preferences"] = normalise_asset_model_preferences(
+            preferences
+        )
+
+
 class NetworkPlannerDialog(QDialog):
     def __init__(self, parent, data: dict, on_save: Callable[[dict], None]):
         super().__init__(parent)
@@ -2094,6 +2522,36 @@ class NetworkPlannerDialog(QDialog):
         )
         if topology_index >= 0:
             self.topology_model_combo.setCurrentIndex(topology_index)
+
+        self.rack_deployment_combo = QComboBox()
+        self.rack_deployment_combo.addItem(
+            "Top of Rack — local access stack per cabinet", "top_of_rack"
+        )
+        self.rack_deployment_combo.addItem(
+            "End of Row — consolidated access switching", "end_of_row"
+        )
+        rack_index = self.rack_deployment_combo.findData(
+            _text(settings.get("rack_deployment_model")) or "end_of_row"
+        )
+        if rack_index >= 0:
+            self.rack_deployment_combo.setCurrentIndex(rack_index)
+        self.rack_deployment_combo.setToolTip(
+            "Top of Rack keeps final copper patching inside the access-switch cabinet. "
+            "End of Row permits consolidated switching across adjacent cabinets."
+        )
+
+        self.aggregation_rack_combo = QComboBox()
+        self.aggregation_rack_combo.addItem(
+            "Dedicated aggregation cabinet", "dedicated"
+        )
+        self.aggregation_rack_combo.addItem(
+            "Share End-of-Row cabinet", "shared_eor"
+        )
+        aggregation_index = self.aggregation_rack_combo.findData(
+            _text(settings.get("aggregation_rack_mode")) or "dedicated"
+        )
+        if aggregation_index >= 0:
+            self.aggregation_rack_combo.setCurrentIndex(aggregation_index)
 
         self.independent_link_count_spin = QSpinBox()
         self.independent_link_count_spin.setRange(1, 16)
@@ -2248,7 +2706,10 @@ class NetworkPlannerDialog(QDialog):
             self.clear_planner_resolution_overrides
         )
 
-        self.auto_design_button = QPushButton("Generate Minimum-Component Network")
+        self.auto_design_button = QPushButton("Launch Guided Automatic Planner")
+        self.auto_design_button.setToolTip(
+            "Open the guided architecture, rack strategy and model-selection wizard, then generate the network."
+        )
         self.auto_design_button.clicked.connect(self.generate_automatic_design)
 
         self.clear_installed_button = QPushButton(
@@ -2276,6 +2737,8 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("Network technology", self.technology_combo)
         settings_layout.addRow("Expected MER locations", self.expected_mer_spin)
         settings_layout.addRow("Traditional topology", self.topology_model_combo)
+        settings_layout.addRow("Rack deployment model", self.rack_deployment_combo)
+        settings_layout.addRow("Aggregation rack placement", self.aggregation_rack_combo)
         settings_layout.addRow(
             "Independent links per target", self.independent_link_count_spin
         )
@@ -2401,6 +2864,12 @@ class NetworkPlannerDialog(QDialog):
 
         self.topology_model_combo.currentIndexChanged.connect(
             self._load_layer_profile_defaults
+        )
+        self.topology_model_combo.currentIndexChanged.connect(
+            self._update_layer_rule_availability
+        )
+        self.rack_deployment_combo.currentIndexChanged.connect(
+            self._update_layer_rule_availability
         )
         self.redundant_core_check.toggled.connect(
             self._load_layer_profile_defaults
@@ -2959,9 +3428,12 @@ class NetworkPlannerDialog(QDialog):
             self.layer_rules_table.removeRow(row)
 
     def _update_layer_rule_availability(self, *_args) -> None:
-        enabled = self.technology_combo.currentText().strip().lower() == "traditional"
+        traditional = (
+            self.technology_combo.currentText().strip().lower() == "traditional"
+        )
         for widget in (
             self.topology_model_combo,
+            self.rack_deployment_combo,
             self.independent_link_count_spin,
             self.redundant_core_check,
             self.layer_rules_table,
@@ -2969,7 +3441,20 @@ class NetworkPlannerDialog(QDialog):
             self.add_layer_rule_button,
             self.remove_layer_rule_button,
         ):
-            widget.setEnabled(enabled)
+            widget.setEnabled(traditional)
+
+        three_tier = (
+            _text(self.topology_model_combo.currentData()) == "three_tier"
+        )
+        end_of_row = (
+            _text(self.rack_deployment_combo.currentData()) == "end_of_row"
+        )
+        aggregation_available = traditional and three_tier and end_of_row
+        self.aggregation_rack_combo.setEnabled(aggregation_available)
+        if not aggregation_available:
+            dedicated_index = self.aggregation_rack_combo.findData("dedicated")
+            if dedicated_index >= 0:
+                self.aggregation_rack_combo.setCurrentIndex(dedicated_index)
 
     def _manufacturer_preferences_from_table(self) -> Dict[str, dict]:
         result: Dict[str, dict] = {}
@@ -3020,6 +3505,21 @@ class NetworkPlannerDialog(QDialog):
         settings["topology_model"] = (
             _text(self.topology_model_combo.currentData()) or "collapsed_core"
         )
+        settings["rack_deployment_model"] = (
+            _text(self.rack_deployment_combo.currentData()) or "end_of_row"
+        )
+        aggregation_mode = (
+            _text(self.aggregation_rack_combo.currentData()) or "dedicated"
+        )
+        if (
+            settings["technology"].lower() != "traditional"
+            or settings["topology_model"] != "three_tier"
+            or settings["rack_deployment_model"] != "end_of_row"
+        ):
+            aggregation_mode = "dedicated"
+        settings["aggregation_rack_mode"] = aggregation_mode
+        settings["tor_keep_final_connections_in_cabinet"] = True
+        settings["tor_allow_adjacent_cabinet_uplinks"] = True
         settings["independent_link_count"] = int(
             self.independent_link_count_spin.value()
         )
@@ -3067,6 +3567,12 @@ class NetworkPlannerDialog(QDialog):
         lines = [
             f"Technology: {summary.get('technology', '')}",
             f"Topology: {summary.get('topology_model', '')}",
+            f"Rack deployment: {summary.get('rack_deployment_model', 'end_of_row')}",
+            f"Aggregation placement: {summary.get('aggregation_rack_mode', 'dedicated')}",
+            f"Planned cabinets: {summary.get('rack_count', 0)}",
+            f"Final cross-cabinet connections: {summary.get('final_cross_cabinet_connections', 0)}",
+            f"Adjacent cabinet uplinks: {summary.get('adjacent_cabinet_uplinks', 0)}",
+            f"Cabinet-row uplinks: {summary.get('cabinet_row_uplinks', 0)}",
             f"Independent links: {summary.get('independent_link_count', '')}",
             f"Objective: {summary.get('objective', '')}",
             "",
@@ -3103,6 +3609,32 @@ class NetworkPlannerDialog(QDialog):
                 lines.append(
                     f"  {source} {arrow} {target}: {rule.get('links_per_target', 1)} link(s), "
                     f"minimum {rule.get('minimum_distinct_sources', 1)} distinct source(s)"
+                )
+        model_preferences = normalise_asset_model_preferences(
+            summary.get("asset_model_preferences", {})
+        )
+        selected_models = [
+            (component, policy)
+            for component, policy in model_preferences.items()
+            if policy.get("preferred_asset_ids")
+        ]
+        if selected_models:
+            lines.extend(["", "Preferred equipment models:"])
+            asset_names = {
+                _text(asset.get("id")): (
+                    _text(asset.get("name")) or _text(asset.get("id"))
+                )
+                for asset in self.data.get("network_assets", [])
+                if isinstance(asset, dict)
+            }
+            for component, policy in selected_models:
+                ids = policy.get("preferred_asset_ids", [])
+                names = [asset_names.get(_text(value), _text(value)) for value in ids]
+                strict_text = " (strict)" if policy.get("strict") else ""
+                lines.append(
+                    f"  {ASSET_MODEL_PREFERENCE_COMPONENTS.get(component, component)}: "
+                    + ", ".join(names)
+                    + strict_text
                 )
         overrides = summary.get("planner_resolution_overrides", {}) or {}
         if isinstance(overrides, dict) and any(bool(value) for value in overrides.values()):
@@ -3155,6 +3687,54 @@ class NetworkPlannerDialog(QDialog):
         return pickle.loads(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
 
     def generate_automatic_design(self) -> None:
+        # Capture edits made on the main settings tab before opening the guided
+        # setup. The wizard then becomes the authoritative launch step.
+        self._sync_planner_settings()
+        wizard = AutoPlannerSetupWizard(self, self.data)
+        if wizard.exec() != QDialog.Accepted:
+            return
+        previous_topology = _text(
+            self.topology_model_combo.currentData()
+        ) or "collapsed_core"
+        wizard.apply_settings()
+        settings = self.data.setdefault("network_settings", {})
+
+        _set_combo_text(
+            self.technology_combo,
+            _text(settings.get("technology")) or "Traditional",
+        )
+        topology_index = self.topology_model_combo.findData(
+            _text(settings.get("topology_model")) or "collapsed_core"
+        )
+        if topology_index >= 0:
+            self.topology_model_combo.setCurrentIndex(topology_index)
+        rack_index = self.rack_deployment_combo.findData(
+            _text(settings.get("rack_deployment_model")) or "end_of_row"
+        )
+        if rack_index >= 0:
+            self.rack_deployment_combo.setCurrentIndex(rack_index)
+        aggregation_index = self.aggregation_rack_combo.findData(
+            _text(settings.get("aggregation_rack_mode")) or "dedicated"
+        )
+        if aggregation_index >= 0:
+            self.aggregation_rack_combo.setCurrentIndex(aggregation_index)
+        self.redundant_core_check.setChecked(
+            bool(settings.get("redundant_core", True))
+        )
+        self.independent_link_count_spin.setValue(
+            max(1, int(settings.get("independent_link_count", 2) or 2))
+        )
+        self.spare_capacity_spin.setValue(
+            float(settings.get("spare_capacity_percent", 15.0) or 0.0)
+        )
+        self.default_rack_size_spin.setValue(
+            max(1, int(settings.get("default_rack_size_u", 42) or 42))
+        )
+        current_topology = _text(
+            self.topology_model_combo.currentData()
+        ) or "collapsed_core"
+        if current_topology != previous_topology:
+            self._load_layer_profile_defaults()
         self._sync_planner_settings()
         technology = self.technology_combo.currentText().strip()
         existing_auto = any(
