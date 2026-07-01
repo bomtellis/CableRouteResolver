@@ -2433,8 +2433,17 @@ class RetainedGraphicsScene(QGraphicsScene):
 
     def addItem(self, item: QGraphicsItem) -> None:  # noqa: N802
         super().addItem(item)
+        self.retain_item(item)
+
+    def retain_item(self, item: QGraphicsItem) -> None:
         if item not in self._owned_items:
             self._owned_items.append(item)
+        for child in item.childItems():
+            self.retain_item(child)
+
+    def retain_current_items(self) -> None:
+        for item in self.items():
+            self.retain_item(item)
 
     def clear(self) -> None:
         super().clear()
@@ -5525,6 +5534,7 @@ class NetworkTopologyDialog(QDialog):
             self._add_rack_patch_connections()
 
         navigation_margin = getattr(self.view, "_navigation_margin", 5000.0)
+        self.scene.retain_current_items()
         scene_rect = self.scene.itemsBoundingRect().adjusted(
             -navigation_margin,
             -navigation_margin,

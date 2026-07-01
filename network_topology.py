@@ -2222,6 +2222,39 @@ class RackPduItem(QGraphicsObject):
         event.accept()
 
 
+class RetainedGraphicsScene(QGraphicsScene):
+    """Keep Python references for scene-owned items created as locals."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._owned_items: List[QGraphicsItem] = []
+
+    def addItem(self, item: QGraphicsItem) -> None:  # noqa: N802
+        super().addItem(item)
+        self.retain_item(item)
+
+    def retain_item(self, item: QGraphicsItem) -> None:
+        if item not in self._owned_items:
+            self._owned_items.append(item)
+        for child in item.childItems():
+            self.retain_item(child)
+
+    def retain_current_items(self) -> None:
+        for item in self.items():
+            self.retain_item(item)
+
+    def clear(self) -> None:
+        super().clear()
+        self._owned_items.clear()
+
+    def removeItem(self, item: QGraphicsItem) -> None:  # noqa: N802
+        super().removeItem(item)
+        try:
+            self._owned_items.remove(item)
+        except ValueError:
+            pass
+
+
 class TopologyGraphicsView(QGraphicsView):
     nodeSelected = Signal(str)
     branchToggleRequested = Signal(str)
@@ -3011,7 +3044,7 @@ class NetworkTopologyDialog(QDialog):
         root_layout.setSpacing(0)
 
         # self.view must exist before _build_header() is called.
-        self.scene = QGraphicsScene(self)
+        self.scene = RetainedGraphicsScene(self)
         self.view = TopologyGraphicsView(self)
         self.view.setScene(self.scene)
 
@@ -5254,6 +5287,7 @@ class NetworkTopologyDialog(QDialog):
             self._add_rack_patch_connections()
 
         navigation_margin = getattr(self.view, "_navigation_margin", 5000.0)
+        self.scene.retain_current_items()
         scene_rect = self.scene.itemsBoundingRect().adjusted(
             -navigation_margin,
             -navigation_margin,
