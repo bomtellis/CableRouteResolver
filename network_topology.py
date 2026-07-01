@@ -133,9 +133,10 @@ def _expanded_asset_ports(asset: dict) -> List[dict]:
     return result
 
 
-# Keep rack-view mouse interactions disabled while the disappearing-rack issue
-# is isolated. The view owns this gate so item-level handlers stay normal.
-RACK_VIEW_MOUSE_EVENTS_ENABLED = False
+# Rack-view interaction must remain enabled. Disabling the view between
+# PySide press/release events clears the scene mouse grabber and can leave
+# painter-rendered items absent from the next backing-store frame.
+RACK_VIEW_MOUSE_EVENTS_ENABLED = True
 
 
 def _canonical_port_name(asset: dict, observed_name: str, defined_ports: Sequence[dict]) -> str:
@@ -1115,6 +1116,7 @@ class TopologyCardItem(QGraphicsObject):
         return bool(self.has_children and self._branch_badge_rect().adjusted(-4.0, -4.0, 4.0, 4.0).contains(point))
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: ANN001
+        painter.save()
         painter.setRenderHint(QPainter.Antialiasing, True)
         rect = self.boundingRect()
         selected = self.isSelected()
@@ -1153,6 +1155,7 @@ class TopologyCardItem(QGraphicsObject):
             painter.setPen(Qt.NoPen)
             painter.setBrush(state_colour)
             painter.drawRect(QRectF(4.0, 4.0, 7.0, max(5.0, rect.height() - 8.0)))
+            painter.restore()
             return
 
         icon_rect = QRectF(12.0, 14.0, 46.0, 46.0)
@@ -1219,6 +1222,7 @@ class TopologyCardItem(QGraphicsObject):
         stack_members = self._stack_member_count()
         if stack_members > 1:
             self._paint_stack_members(painter, stack_members)
+            painter.restore()
             return
 
         stat_font = QFont("Arial", 8)
@@ -1253,6 +1257,7 @@ class TopologyCardItem(QGraphicsObject):
             painter.setPen(QColor("#dbe4eb"))
             badge = "−" if self.expanded else (f"+{self.hidden_descendants}" if self.hidden_descendants < 100 else "+")
             painter.drawText(badge_rect, Qt.AlignCenter, badge)
+        painter.restore()
 
     def _paint_stack_members(self, painter: QPainter, stack_members: int) -> None:
         visible_members = min(stack_members, 8)
@@ -1342,6 +1347,10 @@ def _make_passive_graphics_item(item: QGraphicsItem) -> QGraphicsItem:
     item.setAcceptedMouseButtons(Qt.NoButton)
     item.setAcceptHoverEvents(False)
     item.setFlag(QGraphicsItem.ItemIsSelectable, False)
+    # Never retain a device/scene-coordinate cache for painter-generated art.
+    # Mixed-DPI and accelerated Windows backing stores can otherwise reuse a
+    # cleared layer after a mouse event and make the item appear to disappear.
+    item.setCacheMode(QGraphicsItem.NoCache)
     return item
 
 
@@ -1418,6 +1427,7 @@ class RackEquipmentItem(QGraphicsObject):
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
         self.setAcceptHoverEvents(True)
+        self.setCacheMode(QGraphicsItem.NoCache)
         self._drag_origin = QPointF()
         self._drag_press_screen = QPoint()
         self._drag_active = False
@@ -1566,6 +1576,7 @@ class RackEquipmentItem(QGraphicsObject):
                 self._port_rects[port_node.node_id] = QRectF(x, y, pw, ph)
 
     def paint(self, painter: QPainter, option, widget=None) -> None:
+        painter.save()
         rect = self.boundingRect()
         painter.setRenderHint(QPainter.Antialiasing, True)
         selected = self.isSelected()
@@ -1636,6 +1647,7 @@ class RackEquipmentItem(QGraphicsObject):
         painter.setPen(QColor('#91a0aa'))
         painter.setFont(QFont('Arial', 5))
         painter.drawText(QRectF(ear_w+3.0, rect.bottom()-8.0, 28.0, 7.0), Qt.AlignLeft|Qt.AlignBottom, f'{self.units}U')
+        painter.restore()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -1718,6 +1730,7 @@ class SwitchFrontPanelItem(QGraphicsObject):
         self.search_match = False
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
+        self.setCacheMode(QGraphicsItem.NoCache)
         self._build_port_rects()
 
     def boundingRect(self) -> QRectF:
@@ -1808,6 +1821,7 @@ class SwitchFrontPanelItem(QGraphicsObject):
             self._port_rects[port_node.node_id] = QRectF(x, y, pw, ph)
 
     def paint(self, painter: QPainter, option, widget=None) -> None:
+        painter.save()
         rect = self.boundingRect()
         painter.setRenderHint(QPainter.Antialiasing, True)
         selected = self.isSelected()
@@ -1857,6 +1871,7 @@ class SwitchFrontPanelItem(QGraphicsObject):
                 painter.setFont(QFont('Arial', 5))
                 painter.setPen(QColor('#ffffff'))
                 painter.drawText(port_rect.adjusted(0, -10, 0, 0), Qt.AlignHCenter|Qt.AlignTop, _text(port_node.details.get('port_name')))
+        painter.restore()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -1913,6 +1928,7 @@ class SplitterFrontPanelItem(QGraphicsObject):
         self.setFlag(QGraphicsItem.ItemIsMovable, bool(movable))
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, bool(movable))
         self.setAcceptHoverEvents(True)
+        self.setCacheMode(QGraphicsItem.NoCache)
         self._drag_origin = QPointF()
         self._drag_press_screen = QPoint()
         self._drag_active = False
@@ -1970,6 +1986,7 @@ class SplitterFrontPanelItem(QGraphicsObject):
             self._port_rects[p.node_id] = QRectF(x, y, port_w, port_h)
 
     def paint(self, painter: QPainter, option, widget=None) -> None:
+        painter.save()
         rect = self.boundingRect()
         painter.setRenderHint(QPainter.Antialiasing, True)
         selected = self.isSelected()
@@ -2013,6 +2030,7 @@ class SplitterFrontPanelItem(QGraphicsObject):
             painter.setFont(QFont('Arial', 5))
             label = _text(port_node.details.get('port_name'))
             painter.drawText(QRectF(pr.left()-16, pr.bottom()+1, pr.width()+32, 9), Qt.AlignHCenter|Qt.AlignTop, label)
+        painter.restore()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -2129,6 +2147,7 @@ class LinkLabelItem(QGraphicsObject):
         return QRectF(-self._width / 2.0, -self._height / 2.0, self._width, self._height)
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: ANN001
+        painter.save()
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(QPen(QColor("#38434d"), 1.0))
         painter.setBrush(QColor("#182028"))
@@ -2136,6 +2155,7 @@ class LinkLabelItem(QGraphicsObject):
         painter.setFont(self.font)
         painter.setPen(self.colour.lighter(145))
         painter.drawText(self.boundingRect().adjusted(7.0, 0.0, -7.0, 0.0), Qt.AlignCenter, self.text)
+        painter.restore()
 
     def contextMenuEvent(self, event) -> None:  # noqa: ANN001
         if self.edge_id:
@@ -2157,6 +2177,7 @@ class RackPduItem(QGraphicsObject):
         self._width = max(18.0, float(width))
         self._height = max(80.0, float(height))
         self.setFlags(QGraphicsItem.ItemIsSelectable)
+        self.setCacheMode(QGraphicsItem.NoCache)
         outlets = max(0, _int(node.asset.get("power_outlet_count")))
         source = _text(node.instance.get("upstream_power_source_id")) or "Unassigned source"
         self.setToolTip(
@@ -2168,6 +2189,7 @@ class RackPduItem(QGraphicsObject):
         return QRectF(0.0, 0.0, self._width, self._height)
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: ANN001
+        painter.save()
         selected = self.isSelected()
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(QPen(QColor("#8fd2ff") if selected else QColor("#687986"), 2.0 if selected else 1.2))
@@ -2188,6 +2210,7 @@ class RackPduItem(QGraphicsObject):
         font.setBold(True)
         painter.setFont(font)
         painter.drawText(QRectF(-self._height / 2.0, -8.0, self._height, 16.0), Qt.AlignCenter, "PDU")
+        painter.restore()
         painter.restore()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
@@ -2264,6 +2287,7 @@ class TopologyGraphicsView(QGraphicsView):
         self._min_zoom = 0.005
         self._max_zoom = 8.0
         self._normal_render_hints = self.renderHints()
+        self._full_repaint_pending = False
 
     def _interactive_item_at(self, position: QPoint) -> Optional[QGraphicsItem]:
         """Return a selectable topology object beneath *position*.
@@ -2351,24 +2375,76 @@ class TopologyGraphicsView(QGraphicsView):
                 item = item.parentItem()
         return ""
 
+    def _dirty_scene_rect(self) -> QRectF:
+        scene = self.scene()
+        if scene is None:
+            return QRectF()
+        dirty = scene.sceneRect()
+        if dirty.isNull() or dirty.isEmpty():
+            dirty = scene.itemsBoundingRect()
+        return dirty
+
+    def _flush_full_repaint(self) -> None:
+        """Synchronously paint a complete frame after Qt finishes dispatch."""
+        self._full_repaint_pending = False
+        scene = self.scene()
+        dirty = self._dirty_scene_rect()
+        if scene is not None and not dirty.isEmpty():
+            scene.invalidate(dirty, QGraphicsScene.AllLayers)
+            scene.update(dirty)
+        viewport = self.viewport()
+        if viewport is not None and viewport.isVisible():
+            # repaint(), rather than another queued update(), prevents a stale
+            # backing-store layer surviving the mouse event on Windows/HiDPI.
+            viewport.repaint(viewport.rect())
+
     def _request_full_repaint(self) -> None:
+        """Invalidate every graphics layer and coalesce one post-event repaint."""
+        scene = self.scene()
+        dirty = self._dirty_scene_rect()
+        if scene is not None and not dirty.isEmpty():
+            scene.invalidate(dirty, QGraphicsScene.AllLayers)
+            scene.update(dirty)
         viewport = self.viewport()
         if viewport is not None:
-            viewport.update()
+            viewport.update(viewport.rect())
+        if not self._full_repaint_pending:
+            self._full_repaint_pending = True
+            QTimer.singleShot(0, self._flush_full_repaint)
+
+    def reset_interaction_state(self) -> None:
+        """Drop stale view and scene mouse state before deleting scene items."""
+        self._pending_pan = False
+        self._panning = False
+        self._rubber_band_selecting = False
+        self._pan_button = Qt.NoButton
+        self._right_press_edge_id = ""
+        self._swallowed_mouse_buttons.clear()
+        self._scene_interaction_suspended = False
+        self.setDragMode(QGraphicsView.NoDrag)
+        if not self.isInteractive():
+            self.setInteractive(True)
+        viewport = self.viewport()
+        if viewport is not None:
+            viewport.unsetCursor()
+        if self._pan_render_reduced:
+            self.setRenderHints(self._normal_render_hints)
+            self._pan_render_reduced = False
 
     def _swallow_mouse_button(self, button) -> None:  # noqa: ANN001
         if button != Qt.NoButton:
             self._swallowed_mouse_buttons.add(button)
 
     def _suspend_scene_interaction(self) -> None:
-        if not self._scene_interaction_suspended:
-            self.setInteractive(False)
-            self._scene_interaction_suspended = True
+        # Record that the view owns the gesture, but do not call
+        # setInteractive(False). Toggling it during press/release clears Qt's
+        # scene mouse grabber and can invalidate only part of the painted frame.
+        self._scene_interaction_suspended = True
 
     def _resume_scene_interaction(self) -> None:
-        if self._scene_interaction_suspended:
+        self._scene_interaction_suspended = False
+        if not self.isInteractive():
             self.setInteractive(True)
-            self._scene_interaction_suspended = False
 
     def _release_swallowed_mouse_button(self, event, repaint: bool = False) -> bool:  # noqa: ANN001
         button = event.button()
@@ -2377,13 +2453,7 @@ class TopologyGraphicsView(QGraphicsView):
         self._swallowed_mouse_buttons.discard(button)
         self._resume_scene_interaction()
         event.accept()
-        if repaint:
-            self._request_full_repaint()
-        else:
-            viewport = self.viewport()
-            if viewport is not None:
-                viewport.clearFocus()
-            self.clearFocus()
+        self._request_full_repaint()
         return True
 
     def contextMenuEvent(self, event) -> None:  # noqa: ANN001
@@ -2428,6 +2498,7 @@ class TopologyGraphicsView(QGraphicsView):
                 self._request_full_repaint()
                 return
         super().mouseDoubleClickEvent(event)
+        self._request_full_repaint()
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         if self._block_rack_mouse_event("press", event):
@@ -2648,6 +2719,7 @@ class TopologyGraphicsView(QGraphicsView):
         if self._panning:
             self._finish_pan()
         super().leaveEvent(event)
+        self._request_full_repaint()
 
     def wheelEvent(self, event) -> None:  # noqa: ANN001
         delta = event.angleDelta().y()
@@ -2687,6 +2759,7 @@ class TopologyGraphicsView(QGraphicsView):
         self._pan_viewport_by(-viewport_delta.x(), -viewport_delta.y())
 
         event.accept()
+        self._request_full_repaint()
 
     def keyPressEvent(self, event) -> None:  # noqa: ANN001
         # Optional keyboard navigation.
@@ -2695,21 +2768,25 @@ class TopologyGraphicsView(QGraphicsView):
         if event.key() == Qt.Key_Left:
             self._pan_viewport_by(step, 0)
             event.accept()
+            self._request_full_repaint()
             return
 
         if event.key() == Qt.Key_Right:
             self._pan_viewport_by(-step, 0)
             event.accept()
+            self._request_full_repaint()
             return
 
         if event.key() == Qt.Key_Up:
             self._pan_viewport_by(0, step)
             event.accept()
+            self._request_full_repaint()
             return
 
         if event.key() == Qt.Key_Down:
             self._pan_viewport_by(0, -step)
             event.accept()
+            self._request_full_repaint()
             return
 
         super().keyPressEvent(event)
@@ -4951,6 +5028,7 @@ class NetworkTopologyDialog(QDialog):
         ):
             selected_id = selected_items[0].node.node_id
 
+        self.view.reset_interaction_state()
         self.scene.clear()
         self.node_items.clear()
         self.visible_nodes.clear()
@@ -5192,6 +5270,7 @@ class NetworkTopologyDialog(QDialog):
             self._show_empty_details()
 
         self.status_label.setText(self._status_text())
+        self.view._request_full_repaint()
         if fit:
             if self.isVisible() and self.view.viewport().width() > 0 and self.view.viewport().height() > 0:
                 self._schedule_fit_topology()
