@@ -1532,6 +1532,9 @@ class RackEquipmentItem(QGraphicsObject):
         if self.node.asset_type == "patch_panel" and bool(self.node.asset.get("modular_patch_panel")):
             self._build_modular_patch_panel_port_rects()
             return
+        if self._is_copper_patch_panel():
+            self._build_copper_patch_panel_port_rects()
+            return
         if self.node.asset_type == "network_switch":
             self._build_network_switch_port_rects()
             return
@@ -1626,6 +1629,49 @@ class RackEquipmentItem(QGraphicsObject):
             y = y0 + row * (max_h + gap_y) + (max_h - ph) / 2.0
             if x + pw <= right + 0.5 and y + ph <= bottom + 0.5:
                 self._port_rects[port_node.node_id] = QRectF(x, y, pw, ph)
+
+    def _is_copper_patch_panel(self) -> bool:
+        if self.node.asset_type != "patch_panel":
+            return False
+        panel_type = _text(self.node.asset.get("patch_panel_type")).lower()
+        if panel_type and panel_type != "copper":
+            return False
+        return any(
+            self._port_kind(
+                port_node.details.get("port_type")
+                or port_node.details.get("port_name", "")
+            )
+            == "rj45"
+            for port_node in self.port_nodes
+        )
+
+    def _build_copper_patch_panel_port_rects(self) -> None:
+        scale = self._width / 482.6
+        ear_w = min(15.0, self._width * 0.045)
+        left = ear_w + max(4.0, 6.0 * scale)
+        right = self._width - ear_w - max(4.0, 6.0 * scale)
+        top = max(9.0, self._height * 0.22)
+        bottom = self._height - max(3.0, self._height * 0.10)
+        usable_w = max(8.0, right - left)
+        usable_h = max(6.0, bottom - top)
+        columns = 24
+        rows = max(1, self.units * 2, int(math.ceil(len(self.port_nodes) / columns)))
+        gap_x = max(0.55, min(1.25, 0.95 * scale))
+        gap_y = max(0.8, min(2.0, 1.4 * scale))
+        port_w = max(2.0, (usable_w - gap_x * (columns - 1)) / columns)
+        port_h = max(2.8, (usable_h - gap_y * max(0, rows - 1)) / rows)
+        block_h = rows * port_h + gap_y * max(0, rows - 1)
+        y0 = top + max(0.0, (usable_h - block_h) / 2.0)
+        for index, port_node in enumerate(self.port_nodes):
+            row, col = divmod(index, columns)
+            if row >= rows:
+                break
+            self._port_rects[port_node.node_id] = QRectF(
+                left + col * (port_w + gap_x),
+                y0 + row * (port_h + gap_y),
+                port_w,
+                port_h,
+            )
 
     def _build_stack_member_port_rects(self) -> None:
         member_rects = self._stack_member_rects()
@@ -2606,6 +2652,40 @@ class InteractiveLinkItem(QGraphicsPathItem):
         stroker = QPainterPathStroker()
         stroker.setWidth(max(12.0, self.pen().widthF() + 8.0))
         return stroker.createStroke(self.path())
+
+
+class LocationGroupItem(QGraphicsObject):
+    doubleClicked = Signal(int, str, str)
+
+    def __init__(self, rect: QRectF, rack_key: Tuple[int, str, str]):
+        super().__init__()
+        self._rect = QRectF(0.0, 0.0, rect.width(), rect.height())
+        self._rack_key = rack_key
+        self.setPos(rect.topLeft())
+        self.setAcceptedMouseButtons(Qt.LeftButton)
+        self.setAcceptHoverEvents(True)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        self.setCacheMode(QGraphicsItem.NoCache)
+        floor, location, rack = rack_key
+        label = location or f"Floor {floor}"
+        if rack:
+            label = f"{label} / {rack}"
+        self.setToolTip(f"Double-click to open rack view: {label}")
+
+    def boundingRect(self) -> QRectF:
+        return self._rect
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: ANN001
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        hovered = bool(option.state & QStyle.State_MouseOver)
+        painter.setBrush(QColor(29, 40, 50, 180 if hovered else 150))
+        painter.setPen(QPen(QColor("#566978") if hovered else QColor("#344653"), 1.0, Qt.DashLine))
+        painter.drawRoundedRect(self._rect, 10.0, 10.0)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
+        floor, location, rack = self._rack_key
+        self.doubleClicked.emit(int(floor), _text(location), _text(rack))
+        event.accept()
 
 
 class LinkLabelItem(QGraphicsObject):
@@ -5692,7 +5772,7 @@ class NetworkTopologyDialog(QDialog):
             if layer == 6:
                 return 480.0 + expansion_allowance
             return layer_gap + min(160.0, expansion_allowance)
-        bus_lane_h = 124.0
+        bus_lane_h = 156.0
         rack_group_gap_x = 44.0
         location_gap_x = 160.0
         location_gap_y = 72.0
@@ -5832,7 +5912,7 @@ class NetworkTopologyDialog(QDialog):
                     default=0.0,
                 )
                 location_bus_y = location_top + 48.0
-                location_failover_bus_y = location_top + 84.0
+                location_failover_bus_y = location_top + 92.0
                 for entry in location_block["racks"]:
                     ordered = entry["ordered"]
                     group_left = location_left + entry["x"]
@@ -6750,21 +6830,33 @@ class NetworkTopologyDialog(QDialog):
                         bus_nodes.append(node_id)
             if rect is None:
                 continue
-            # Keep the location enclosure close to the cards while still
-            # leaving room for the primary and failover bus pair above them.
-            rect = rect.adjusted(-18.0, -112.0 if bus_nodes else -28.0, 18.0, 18.0)
-            path = QPainterPath()
-            path.addRoundedRect(rect, 10.0, 10.0)
-            item = QGraphicsPathItem(path)
-            item.setBrush(QColor(29, 40, 50, 150))
-            item.setPen(QPen(QColor("#344653"), 1.0, Qt.DashLine))
+            if bus_nodes:
+                bus_rows = [
+                    self._location_bus_by_node[node_id]
+                    for node_id in bus_nodes
+                    if node_id in self._location_bus_by_node
+                ]
+                fail_rows = [
+                    self._failover_bus_by_node.get(node_id, self._location_bus_by_node[node_id])
+                    for node_id in bus_nodes
+                    if node_id in self._location_bus_by_node
+                ]
+                bus_top = min([row[0].y() for row in bus_rows + fail_rows] or [rect.top()])
+                rect = QRectF(
+                    rect.left() - 18.0,
+                    min(rect.top() - 28.0, bus_top - 28.0),
+                    rect.width() + 36.0,
+                    rect.bottom() + 18.0 - min(rect.top() - 28.0, bus_top - 28.0),
+                )
+            else:
+                rect = rect.adjusted(-18.0, -28.0, 18.0, 18.0)
+            rack_names = sorted({_text(key[2]) for key in racks if _text(key[2])}, key=str.lower)
+            selected_rack = rack_names[0] if rack_names else ""
+            item = LocationGroupItem(rect, (_floor, location, selected_rack))
+            item.doubleClicked.connect(self._open_location_group_rack_view)
             item.setZValue(-1.5)
-            item.setAcceptedMouseButtons(Qt.NoButton)
-            item.setFlag(QGraphicsItem.ItemIsSelectable, False)
-            item.setCacheMode(QGraphicsItem.NoCache)
             self.scene.addItem(item)
 
-            rack_names = sorted({_text(key[2]) for key in racks if _text(key[2])}, key=str.lower)
             label_text = location or "Unassigned location"
             if rack_names:
                 label_text = f"{label_text} - {len(rack_names)} rack{'s' if len(rack_names) != 1 else ''}"
@@ -6790,8 +6882,8 @@ class NetworkTopologyDialog(QDialog):
                     if node_id in self._location_bus_by_node
                 ]
                 bus_anchor, _bus_left, _bus_right = bus_rows[0]
-                bus_left = min(row[1] for row in bus_rows)
-                bus_right = max(row[2] for row in bus_rows)
+                bus_left = min(rect.left() + 10.0, min(row[1] for row in bus_rows))
+                bus_right = max(rect.right() - 10.0, max(row[2] for row in bus_rows))
                 main_bus = QPainterPath(QPointF(bus_left, bus_anchor.y()))
                 main_bus.lineTo(QPointF(bus_right, bus_anchor.y()))
                 main_item = QGraphicsPathItem(main_bus)
@@ -6809,8 +6901,8 @@ class NetworkTopologyDialog(QDialog):
                         if node_id in self._location_bus_by_node
                     ]
                     fail_anchor, _fail_left, _fail_right = fail_rows[0]
-                    fail_left = min(row[1] for row in fail_rows)
-                    fail_right = max(row[2] for row in fail_rows)
+                    fail_left = min(rect.left() + 10.0, min(row[1] for row in fail_rows))
+                    fail_right = max(rect.right() - 10.0, max(row[2] for row in fail_rows))
                     fail_bus = QPainterPath(QPointF(fail_left, fail_anchor.y()))
                     fail_bus.lineTo(QPointF(fail_right, fail_anchor.y()))
                     fail_item = QGraphicsPathItem(fail_bus)
@@ -7061,9 +7153,10 @@ class NetworkTopologyDialog(QDialog):
         self._drawn_bus_drops.add(drop_key)
 
         bus_anchor, _bus_left, _bus_right = bus
+        target_y = target_pos.y() + min(22.0, self._node_card_height(node_id) * 0.18)
         top = QPointF(
             self._incoming_fibre_connection_x(node_id, positions, edge, failover=failover),
-            target_pos.y(),
+            target_y,
         )
         # Start directly above the selected card connector.  The previous
         # centre-of-bus start created diagonal/common drops and stacked primary
@@ -7078,6 +7171,24 @@ class NetworkTopologyDialog(QDialog):
         item.setPen(pen)
         item.setZValue(z_value)
         self.scene.addItem(item)
+
+    def _bus_drop_label_point(
+        self,
+        node_id: str,
+        positions: Dict[str, QPointF],
+        edge: Optional[TopologyEdge],
+        failover: bool = False,
+    ) -> Optional[QPointF]:
+        bus = self._bus_for_node(node_id, failover=failover)
+        target_pos = positions.get(node_id)
+        if bus is None or target_pos is None:
+            return None
+        bus_anchor, _bus_left, _bus_right = bus
+        drop_x = self._incoming_fibre_connection_x(
+            node_id, positions, edge, failover=failover
+        )
+        target_y = target_pos.y() + min(22.0, self._node_card_height(node_id) * 0.18)
+        return QPointF(drop_x + 68.0, (bus_anchor.y() + target_y) / 2.0)
 
     def _add_link_rail(self, source_id: str, child_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         if source_id not in positions:
@@ -7179,7 +7290,10 @@ class NetworkTopologyDialog(QDialog):
                         edge=edge,
                     )
                     if edge and self.show_link_labels_check.isChecked():
-                        self._add_link_label(edge.label, colour, QPointF((entry_x + end.x()) / 2.0, end.y() + 10.0), edge)
+                        label_point = self._bus_drop_label_point(
+                            child_id, positions, edge, failover=failover
+                        )
+                        self._add_link_label(edge.label, colour, label_point or QPointF((entry_x + end.x()) / 2.0, end.y() + 10.0), edge)
                 continue
 
             rail_x = min(point.x() for _child_id, point, _edge in endpoints) - 52.0
@@ -7499,7 +7613,10 @@ class NetworkTopologyDialog(QDialog):
             if bus is not None:
                 self._add_bus_drop(target_id, positions, colour, failover=True, z_value=-0.8, edge=edge)
             if self.show_link_labels_check.isChecked():
-                self._add_link_label(edge.label, colour, label_point, edge)
+                drop_label_point = self._bus_drop_label_point(
+                    target_id, positions, edge, failover=True
+                )
+                self._add_link_label(edge.label, colour, drop_label_point or label_point, edge)
 
     def _add_cross_link_rail(
         self,
@@ -7844,7 +7961,10 @@ class NetworkTopologyDialog(QDialog):
                         edge=edge,
                     )
             if edge and self.show_link_labels_check.isChecked():
-                self._add_link_label(edge.label, colour, QPointF((entry_x + bus_anchor.x()) / 2.0, bus_anchor.y() + 10.0), edge)
+                label_point = self._bus_drop_label_point(
+                    target_id, positions, edge, failover=failover_style
+                )
+                self._add_link_label(edge.label, colour, label_point or QPointF((entry_x + bus_anchor.x()) / 2.0, bus_anchor.y() + 10.0), edge)
             return
         path = QPainterPath(start)
         if failover_style or alternate_cross_link:
@@ -7984,6 +8104,15 @@ class NetworkTopologyDialog(QDialog):
             return
         self.switch_port_focus = None
         self.rack_focus = key
+        self.rebuild_scene(fit=True)
+
+    def _open_location_group_rack_view(self, floor: int, location: str, rack: str) -> None:
+        rack_names = self._rack_names_for_location(int(floor), _text(location))
+        selected_rack = _text(rack) or (rack_names[0] if rack_names else "")
+        if not selected_rack:
+            return
+        self.switch_port_focus = None
+        self.rack_focus = (int(floor), _text(location), selected_rack)
         self.rebuild_scene(fit=True)
 
     def _open_selected_room_view(self) -> None:

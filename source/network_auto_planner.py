@@ -5307,9 +5307,15 @@ def _traditional_design(
                 else f"AUTO {room_name} Access Switch {switch_number}"
             )
             rack_u = max(1, _int(group.get("rack_units"), 1))
-            if rack_u > rack_size_u:
+            reserved_bundle_u = max(
+                rack_u,
+                _int(group.get("tor_reserved_bundle_u"), rack_u)
+                if rack_deployment_model == "top_of_rack"
+                else rack_u,
+            )
+            if reserved_bundle_u > rack_size_u:
                 raise NetworkPlanningError(
-                    f"{instance_name} requires {rack_u}U but the configured rack size is "
+                    f"{instance_name} requires {reserved_bundle_u}U but the configured rack size is "
                     f"only {rack_size_u}U. Reduce the stack size or increase default_rack_size_u."
                 )
 
@@ -5319,12 +5325,16 @@ def _traditional_design(
                 and group_index >= base_stack_count
             )
             if rack_deployment_model == "top_of_rack":
-                # One access stack and all of its final copper terminations are
-                # treated as one cabinet bundle.  Repacking later preserves this
-                # rack affinity and never spills a final connection elsewhere.
-                rack_index = group_index + 1
-                next_rack_u = 1
-                spare_rack_started = spare_rack_started or spare_overflow
+                # Each access stack and its final copper terminations remain a
+                # single cabinet-local bundle, but multiple bundles can share a
+                # cabinet when the reserved rack space allows it.
+                if spare_overflow and not spare_rack_started:
+                    rack_index += 1
+                    next_rack_u = 1
+                    spare_rack_started = True
+                elif next_rack_u + reserved_bundle_u - 1 > rack_size_u:
+                    rack_index += 1
+                    next_rack_u = 1
             elif spare_overflow and not spare_rack_started:
                 # The user selected a separate cabinet for the stack introduced
                 # solely by spare capacity. Keep it out of the otherwise usable
@@ -5419,8 +5429,7 @@ def _traditional_design(
                     )
             access_switches.append(instance)
             switch_number += member_count
-            if rack_deployment_model != "top_of_rack":
-                next_rack_u += rack_u
+            next_rack_u += reserved_bundle_u if rack_deployment_model == "top_of_rack" else rack_u
             if is_stack:
                 stack_number += 1
 
@@ -6740,12 +6749,22 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             rack_name,
         )
 
-    def panel_pool_key(instance: dict) -> Optional[Tuple[int, str]]:
-        """Pool modular panel capacity across all racks at one location."""
+    rack_model = _text(builder.settings.get("rack_deployment_model")).lower()
+    if rack_model not in {"top_of_rack", "end_of_row"}:
+        rack_model = "end_of_row"
+    keep_tor_final_local = bool(
+        builder.settings.get("tor_keep_final_connections_in_cabinet", True)
+    )
+    tor_local_fibre = rack_model == "top_of_rack" and keep_tor_final_local
+
+    def panel_pool_key(instance: dict) -> Optional[Tuple[int, str, str]]:
+        """Pool panels by strategy: location for EoR, cabinet for ToR."""
         key = rack_key(instance)
         if key is None:
             return None
-        return key[0], key[1]
+        if tor_local_fibre:
+            return key
+        return key[0], key[1], ""
 
     eligible: List[Tuple[dict, dict, dict]] = []
     for row in list(builder.connections):
@@ -6798,7 +6817,7 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
 
     default_cable_cores = max(2, _int(builder.settings.get("default_fibre_core_count"), 12))
     connection_plan: Dict[str, dict] = {}
-    required_positions_by_pool: Dict[Tuple[int, str], int] = defaultdict(int)
+    required_positions_by_pool: Dict[Tuple[int, str, str], int] = defaultdict(int)
     required_positions_by_rack: Dict[Tuple[int, str, str], int] = defaultdict(int)
     for logical, a, b in eligible:
         logical_id = _text(logical.get("id"))
@@ -6849,13 +6868,14 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         for row in builder.data.get("locations", [])
         if isinstance(row, dict) and _text(row.get("name"))
     }
-    panels_by_pool: Dict[Tuple[int, str], List[dict]] = defaultdict(list)
-    preferred_rack_by_pool: Dict[Tuple[int, str], str] = {}
+    panels_by_pool: Dict[Tuple[int, str, str], List[dict]] = defaultdict(list)
+    preferred_rack_by_pool: Dict[Tuple[int, str, str], str] = {}
     for (floor, location_name, rack_name), demand in sorted(
         required_positions_by_rack.items(),
         key=lambda item: (-item[1], item[0][2]),
     ):
-        preferred_rack_by_pool.setdefault((floor, location_name), rack_name)
+        pool = (floor, location_name, rack_name) if tor_local_fibre else (floor, location_name, "")
+        preferred_rack_by_pool.setdefault(pool, rack_name)
 
     def rack_sequence_number(rack_name: str) -> int:
         """Return the cabinet sequence implied by generated rack names."""
@@ -6892,10 +6912,11 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             for index in range(1, cassette_count + 1)
         ]
 
-    def add_panel(key: Tuple[int, str], preferred_rack: str = "") -> dict:
-        floor, location_name = key
+    def add_panel(key: Tuple[int, str, str], preferred_rack: str = "") -> dict:
+        floor, location_name, scoped_rack = key
         rack_name = (
             _text(preferred_rack)
+            or _text(scoped_rack)
             or preferred_rack_by_pool.get(key, "")
             or f"AUTO-RACK-{location_name}"
         )
@@ -6920,6 +6941,10 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             available_connector_count=capacity,
             cabinet_patch_panel=True,
             external_field_termination=True,
+            fibre_patch_scope="cabinet" if scoped_rack else "location",
+            fibre_patch_pool_floor=floor,
+            fibre_patch_pool_location=location_name,
+            fibre_patch_pool_rack=scoped_rack,
             fibre_cassettes=empty_cassettes(),
         )
         panels_by_pool[key].append(panel)
@@ -6970,8 +6995,7 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         remaining_fibres = max(1, min(int(cable_core_count), remaining * fibres_per_position))
         allocations: List[dict] = []
         panels = panels_by_pool[key]
-        rack_model = _text(builder.settings.get("rack_deployment_model")).lower()
-        prefer_nearby_panel = rack_model == "top_of_rack"
+        prefer_nearby_panel = tor_local_fibre
         max_preferred_distance = (
             1
             if bool(builder.settings.get("tor_allow_adjacent_cabinet_uplinks", True))
@@ -7880,9 +7904,22 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
                 # A panel was created for one pre-repack cabinet. Keep it with a
                 # real terminating device after repack instead of recreating the
                 # stale cabinet name as a new mostly-empty rack.
+                scoped_rack = _text(panel.get("fibre_patch_pool_rack"))
+                scoped_matches = [
+                    value
+                    for value in associated
+                    if scoped_rack
+                    and _text(
+                        equipment_by_id[value].get("target_rack_name")
+                        or equipment_by_id[value].get("rack_name")
+                    )
+                    == scoped_rack
+                ]
+                owner_candidates = scoped_matches or associated
                 owner_id = sorted(
-                    associated,
+                    owner_candidates,
                     key=lambda value: (
+                        0 if scoped_rack and value in scoped_matches else 1,
                         0 if _text(equipment_by_id[value].get("design_role")) in {"core_switch", "edge_router", "olt_primary", "olt_secondary"} else 1,
                         _text(equipment_by_id[value].get("name")),
                     ),
