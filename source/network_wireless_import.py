@@ -45,6 +45,12 @@ from network_schema import ensure_network_schema, next_network_id
 
 CREATE_ASSET_TOKEN = "__create_wireless_asset__"
 SKIP_FLOOR_TOKEN = "__skip_floor__"
+UNRESOLVED_DEPARTMENT_TOKEN = "__unresolved_department__"
+UNASSIGNED_DEPARTMENT_TOKEN = "__unassigned_department__"
+DEPARTMENT_AMBIGUITY_TOLERANCE_M = 0.5
+# Zero means there is no arbitrary distance cut-off: when same-floor
+# department assignments exist, the spatially nearest assignment is used.
+DEPARTMENT_INFERENCE_MAX_DISTANCE_M = 0.0
 
 
 def _text(value) -> str:
@@ -255,6 +261,253 @@ def nearest_corridor_node(
     return _text(node.get("name")), distance
 
 
+def _department_ids(payload: dict) -> List[str]:
+    values = payload.get("department_ids", [])
+    if isinstance(values, (list, tuple, set)):
+        result = [_text(value) for value in values if _text(value)]
+    else:
+        result = []
+    legacy = _text(payload.get("department_id"))
+    if legacy and legacy not in result:
+        result.append(legacy)
+    return result
+
+
+def _department_name_lookup(data: dict) -> Dict[str, str]:
+    return {
+        _text(row.get("id")): _text(row.get("name")) or _text(row.get("id"))
+        for row in data.get("departments", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+
+
+def _department_candidates_by_floor(data: dict) -> Tuple[Dict[int, List[dict]], Dict[int, List[dict]]]:
+    """Return assigned room/data-point candidates and department-marker fallbacks."""
+
+    assigned: Dict[int, List[dict]] = defaultdict(list)
+    markers: Dict[int, List[dict]] = defaultdict(list)
+
+    for collection_name, kind in (("locations", "location"), ("data_points", "data_point")):
+        for row in data.get(collection_name, []):
+            if not isinstance(row, dict):
+                continue
+            department_ids = _department_ids(row)
+            if not department_ids:
+                continue
+            try:
+                floor = int(row.get("floor", 0))
+                x = float(row.get("x", 0.0))
+                y = float(row.get("y", 0.0))
+            except (TypeError, ValueError):
+                continue
+            assigned[floor].append(
+                {
+                    "name": _text(row.get("name")) or f"{kind}@{x:.3f},{y:.3f}",
+                    "kind": kind,
+                    "floor": floor,
+                    "x": x,
+                    "y": y,
+                    "department_ids": department_ids,
+                }
+            )
+
+    for row in data.get("departments", []):
+        if not isinstance(row, dict) or not _text(row.get("id")):
+            continue
+        try:
+            floor = int(row.get("floor", 0))
+            x = float(row.get("x", 0.0))
+            y = float(row.get("y", 0.0))
+        except (TypeError, ValueError):
+            continue
+        markers[floor].append(
+            {
+                "name": _text(row.get("name")) or _text(row.get("id")),
+                "kind": "department_marker",
+                "floor": floor,
+                "x": x,
+                "y": y,
+                "department_ids": [_text(row.get("id"))],
+            }
+        )
+    return assigned, markers
+
+
+def build_department_inference_index(data: dict) -> dict:
+    assigned, markers = _department_candidates_by_floor(data)
+    return {
+        "department_names": _department_name_lookup(data),
+        "assigned": assigned,
+        "markers": markers,
+    }
+
+
+def infer_department_for_position(
+    data: dict,
+    floor: int,
+    x: float,
+    y: float,
+    *,
+    ambiguity_tolerance_m: float = DEPARTMENT_AMBIGUITY_TOLERANCE_M,
+    max_distance_m: float = DEPARTMENT_INFERENCE_MAX_DISTANCE_M,
+    inference_index: Optional[dict] = None,
+) -> dict:
+    """Infer a department from same-floor assigned markers.
+
+    Room/location and data-point assignments take priority. Department markers
+    are used only when the floor has no assigned room/data-point candidates.
+    A conflict is returned when the nearest marker is multi-department or when
+    differently assigned candidates are effectively tied spatially.
+    """
+
+    index = inference_index or build_department_inference_index(data)
+    department_names = dict(index.get("department_names") or {})
+    assigned = index.get("assigned") or {}
+    markers = index.get("markers") or {}
+    candidates = list(assigned.get(int(floor), []))
+    used_fallback = False
+    if not candidates:
+        candidates = list(markers.get(int(floor), []))
+        used_fallback = True
+    if not candidates:
+        return {
+            "status": "unassigned",
+            "department_id": "",
+            "department_name": "",
+            "candidate_department_ids": [],
+            "candidate_labels": [],
+            "source_name": "",
+            "source_kind": "",
+            "distance_m": 0.0,
+            "reason": "No same-floor department assignments are available.",
+        }
+
+    scored = []
+    for candidate in candidates:
+        distance = math.hypot(float(candidate["x"]) - x, float(candidate["y"]) - y)
+        scored.append((distance, candidate))
+    scored.sort(key=lambda item: (item[0], item[1].get("kind", ""), item[1].get("name", "")))
+    nearest_distance, nearest = scored[0]
+    if max_distance_m > 0.0 and nearest_distance > max_distance_m:
+        return {
+            "status": "unassigned",
+            "department_id": "",
+            "department_name": "",
+            "candidate_department_ids": [],
+            "candidate_labels": [],
+            "source_name": _text(nearest.get("name")),
+            "source_kind": _text(nearest.get("kind")),
+            "distance_m": round(nearest_distance, 3),
+            "reason": f"Nearest department assignment is {nearest_distance:.2f} m away, beyond the {max_distance_m:.2f} m inference limit.",
+        }
+
+    tolerance = max(0.0, float(ambiguity_tolerance_m))
+    plausible = [item for item in scored if item[0] <= nearest_distance + tolerance]
+    candidate_ids: List[str] = []
+    candidate_sources: Dict[str, List[str]] = defaultdict(list)
+    for distance, candidate in plausible:
+        for department_id in candidate.get("department_ids", []):
+            department_id = _text(department_id)
+            if not department_id:
+                continue
+            if department_id not in candidate_ids:
+                candidate_ids.append(department_id)
+            candidate_sources[department_id].append(
+                f"{_text(candidate.get('name'))} ({distance:.2f} m)"
+            )
+
+    labels = [
+        f"{department_id} - {department_names.get(department_id, department_id)}"
+        for department_id in candidate_ids
+    ]
+    if len(candidate_ids) == 1:
+        department_id = candidate_ids[0]
+        return {
+            "status": "inferred",
+            "department_id": department_id,
+            "department_name": department_names.get(department_id, department_id),
+            "candidate_department_ids": candidate_ids,
+            "candidate_labels": labels,
+            "source_name": _text(nearest.get("name")),
+            "source_kind": _text(nearest.get("kind")),
+            "distance_m": round(nearest_distance, 3),
+            "reason": (
+                "Inferred from the nearest department marker."
+                if used_fallback
+                else "Inferred from the nearest assigned room/location or data point."
+            ),
+        }
+
+    if candidate_ids:
+        source_details = []
+        for department_id in candidate_ids:
+            source_details.append(
+                f"{department_names.get(department_id, department_id)}: "
+                + ", ".join(candidate_sources.get(department_id, [])[:3])
+            )
+        return {
+            "status": "conflict",
+            "department_id": "",
+            "department_name": "",
+            "candidate_department_ids": candidate_ids,
+            "candidate_labels": labels,
+            "source_name": _text(nearest.get("name")),
+            "source_kind": _text(nearest.get("kind")),
+            "distance_m": round(nearest_distance, 3),
+            "reason": "Conflicting nearby department assignments: " + "; ".join(source_details),
+        }
+
+    return {
+        "status": "unassigned",
+        "department_id": "",
+        "department_name": "",
+        "candidate_department_ids": [],
+        "candidate_labels": [],
+        "source_name": _text(nearest.get("name")),
+        "source_kind": _text(nearest.get("kind")),
+        "distance_m": round(nearest_distance, 3),
+        "reason": "Nearest candidate does not contain a valid department assignment.",
+    }
+
+
+def _row_decision_key(row: dict, source_id: str, source_floor: str) -> str:
+    row_number = int(row.get("__csv_row_number__", 0) or 0)
+    return str(row_number) if row_number > 0 else _source_key(source_id, source_floor)
+
+
+def _transform_wireless_row(row: dict, columns: dict, floor_map: dict, config: dict) -> Optional[dict]:
+    source_id = _text(row.get(columns.get("name", "")))
+    source_floor = _text(row.get(columns.get("floor", "")))
+    target_floor = floor_map.get(source_floor)
+    if target_floor in (None, SKIP_FLOOR_TOKEN):
+        return None
+    try:
+        x = float(row.get(columns.get("x", ""), ""))
+        y = float(row.get(columns.get("y", ""), ""))
+        if _text(config.get("coordinate_mode")) == "insertion_plus_delta":
+            x += float(row.get(columns.get("insertion_x", ""), ""))
+            y += float(row.get(columns.get("insertion_y", ""), ""))
+    except (TypeError, ValueError):
+        return None
+    if bool(config.get("swap_axes", False)):
+        x, y = y, x
+    if bool(config.get("invert_x", False)):
+        x = -x
+    if bool(config.get("invert_y", False)):
+        y = -y
+    scale = float(config.get("coordinate_scale", 1.0) or 1.0)
+    x = x * scale + float(config.get("x_offset", 0.0) or 0.0)
+    y = y * scale + float(config.get("y_offset", 0.0) or 0.0)
+    return {
+        "source_id": source_id,
+        "source_floor": source_floor,
+        "floor": int(target_floor),
+        "x": x,
+        "y": y,
+        "decision_key": _row_decision_key(row, source_id, source_floor),
+    }
+
+
 def _source_key(source_id: str, source_floor: str) -> str:
     return f"{_text(source_floor)}::{_text(source_id)}".lower()
 
@@ -267,8 +520,12 @@ def import_wireless_devices(data: dict, config: dict) -> dict:
     columns = dict(config.get("columns") or {})
     floor_map = dict(config.get("floor_map") or {})
     asset_map = dict(config.get("asset_map") or {})
+    department_resolutions = dict(config.get("department_resolutions") or {})
     duplicate_mode = _text(config.get("duplicate_mode") or "update").lower()
-    attach_to_corridor = bool(config.get("attach_to_corridor", True))
+    # Imported wireless devices are always anchored to the nearest same-floor
+    # corridor node. This is deliberately scoped to this importer and does not
+    # change the behaviour of manually placed or planner-generated assets.
+    attach_to_corridor = True
     auto_connect = bool(config.get("auto_connect", False))
 
     result = {
@@ -278,6 +535,11 @@ def import_wireless_devices(data: dict, config: dict) -> dict:
         "unmapped_rows": 0,
         "invalid_rows": 0,
         "without_corridor": 0,
+        "graph_anchored": 0,
+        "department_inferred": 0,
+        "department_resolved": 0,
+        "department_unassigned": 0,
+        "department_conflicts": 0,
         "created_asset_ids": [],
         "auto_connect": {},
         "warnings": [],
@@ -333,14 +595,8 @@ def import_wireless_devices(data: dict, config: dict) -> dict:
         _text(row.get("id")) for row in instances if isinstance(row, dict) and _text(row.get("id"))
     }
     corridor_nodes = _corridor_nodes_by_floor(data)
+    department_inference_index = build_department_inference_index(data)
 
-    x_scale = float(config.get("coordinate_scale", 1.0) or 1.0)
-    x_offset = float(config.get("x_offset", 0.0) or 0.0)
-    y_offset = float(config.get("y_offset", 0.0) or 0.0)
-    swap_axes = bool(config.get("swap_axes", False))
-    invert_x = bool(config.get("invert_x", False))
-    invert_y = bool(config.get("invert_y", False))
-    absolute_mode = _text(config.get("coordinate_mode")) == "insertion_plus_delta"
     source_file = Path(_text(config.get("source_file"))).name
 
     imported_ids: List[str] = []
@@ -352,32 +608,24 @@ def import_wireless_devices(data: dict, config: dict) -> dict:
             if columns.get("profile")
             else "Imported wireless device"
         ) or "Imported wireless device"
-        target_floor = floor_map.get(source_floor)
-        if target_floor in (None, SKIP_FLOOR_TOKEN):
+        transformed = _transform_wireless_row(row, columns, floor_map, config)
+        if transformed is None:
+            if floor_map.get(source_floor) in (None, SKIP_FLOOR_TOKEN):
+                result["unmapped_rows"] += 1
+            else:
+                result["invalid_rows"] += 1
+            continue
+        target_floor = int(transformed["floor"])
+        x = float(transformed["x"])
+        y = float(transformed["y"])
+        decision_key = _text(transformed["decision_key"])
+        if floor_map.get(source_floor) in (None, SKIP_FLOOR_TOKEN):
             result["unmapped_rows"] += 1
             continue
         asset_id = profile_asset_ids.get(profile, "")
         if not source_id or not asset_id or asset_id not in known_assets:
             result["invalid_rows"] += 1
             continue
-        try:
-            x = float(row.get(columns.get("x", ""), ""))
-            y = float(row.get(columns.get("y", ""), ""))
-            if absolute_mode:
-                x += float(row.get(columns.get("insertion_x", ""), ""))
-                y += float(row.get(columns.get("insertion_y", ""), ""))
-        except (TypeError, ValueError):
-            result["invalid_rows"] += 1
-            continue
-        if swap_axes:
-            x, y = y, x
-        if invert_x:
-            x = -x
-        if invert_y:
-            y = -y
-        x = x * x_scale + x_offset
-        y = y * x_scale + y_offset
-        target_floor = int(target_floor)
 
         key = _source_key(source_id, source_floor)
         existing = existing_imports.get(key)
@@ -393,6 +641,43 @@ def import_wireless_devices(data: dict, config: dict) -> dict:
             )
             if not route_anchor:
                 result["without_corridor"] += 1
+            else:
+                result["graph_anchored"] += 1
+
+        department = infer_department_for_position(
+            data,
+            target_floor,
+            x,
+            y,
+            inference_index=department_inference_index,
+        )
+        department_id = _text(department.get("department_id"))
+        department_status = _text(department.get("status")) or "unassigned"
+        selected_resolution = _text(department_resolutions.get(decision_key))
+        if department_status == "conflict":
+            result["department_conflicts"] += 1
+            if selected_resolution == UNASSIGNED_DEPARTMENT_TOKEN:
+                department_id = ""
+                department_status = "resolved_unassigned"
+                result["department_resolved"] += 1
+                result["department_unassigned"] += 1
+            elif selected_resolution and selected_resolution != UNRESOLVED_DEPARTMENT_TOKEN:
+                department_id = selected_resolution
+                department_status = "resolved"
+                result["department_resolved"] += 1
+            else:
+                department_id = ""
+                department_status = "unresolved_conflict"
+                result["department_unassigned"] += 1
+                result["warnings"].append(
+                    f"{source_id}: department conflict was not resolved; the device was left unassigned."
+                )
+        elif department_status == "inferred" and department_id:
+            result["department_inferred"] += 1
+        else:
+            result["department_unassigned"] += 1
+        department_names = department_inference_index.get("department_names", {})
+        department_name = department_names.get(department_id, department_id) if department_id else ""
 
         payload = {
             "name": source_id,
@@ -406,6 +691,9 @@ def import_wireless_devices(data: dict, config: dict) -> dict:
             "rack_size_u": 0,
             "network_layer": "endpoint",
             "route_anchor": route_anchor,
+            "department_id": department_id,
+            "department_ids": [department_id] if department_id else [],
+            "department_name": department_name,
             "wireless_device_layer": True,
             "imported_wireless_device": True,
             "wireless_import_source_file": source_file,
@@ -414,6 +702,14 @@ def import_wireless_devices(data: dict, config: dict) -> dict:
             "wireless_import_profile": profile,
             "wireless_import_row_number": int(row.get("__csv_row_number__", 0) or 0),
             "wireless_import_corridor_distance_m": round(corridor_distance, 3),
+            "wireless_import_graph_connected": bool(route_anchor),
+            "wireless_import_pending_network_connection": True,
+            "wireless_import_department_status": department_status,
+            "wireless_import_department_source": _text(department.get("source_name")),
+            "wireless_import_department_source_kind": _text(department.get("source_kind")),
+            "wireless_import_department_distance_m": round(
+                max(0.0, _float(department.get("distance_m"))), 3
+            ),
             "auto_generated": False,
         }
         if existing is not None and duplicate_mode == "update":
@@ -436,6 +732,10 @@ def import_wireless_devices(data: dict, config: dict) -> dict:
         imported_ids.append(instance_id)
 
     ensure_network_schema(data)
+    if auto_connect and imported_ids:
+        result["auto_connect"] = auto_connect_manual_devices(data, imported_ids)
+        result["warnings"].extend(result["auto_connect"].get("warnings", []))
+
     if imported_ids:
         graph = RoutingGraph(data)
         instances_by_id = {
@@ -456,11 +756,19 @@ def import_wireless_devices(data: dict, config: dict) -> dict:
             source_anchor = _text(source.get("route_anchor")) or _text(source.get("location_name"))
             target_anchor = _text(target.get("route_anchor")) or _text(target.get("location_name"))
             length_m, route_path = graph.route(source_anchor, target_anchor)
+            source_spur = (
+                max(0.0, _float(source.get("wireless_import_corridor_distance_m")))
+                if bool(source.get("imported_wireless_device"))
+                else 0.0
+            )
+            target_spur = (
+                max(0.0, _float(target.get("wireless_import_corridor_distance_m")))
+                if bool(target.get("imported_wireless_device"))
+                else 0.0
+            )
             connection["route_path"] = route_path
-            connection["length_m"] = round(max(0.0, length_m), 3)
-    if auto_connect and imported_ids:
-        result["auto_connect"] = auto_connect_manual_devices(data, imported_ids)
-        result["warnings"].extend(result["auto_connect"].get("warnings", []))
+            connection["wireless_import_spur_length_m"] = round(source_spur + target_spur, 3)
+            connection["length_m"] = round(max(0.0, length_m) + source_spur + target_spur, 3)
     return result
 
 
@@ -474,6 +782,7 @@ class WirelessDeviceImportWizard(QWizard):
         self.headers: List[str] = []
         self.rows: List[dict] = []
         self._loaded_path = ""
+        self._department_analysis: Dict[str, dict] = {}
         self.setWindowTitle("Import Wireless Devices")
         self.setWizardStyle(QWizard.ModernStyle)
         self.setOption(QWizard.NoBackButtonOnStartPage, True)
@@ -482,6 +791,7 @@ class WirelessDeviceImportWizard(QWizard):
         self._build_file_page(initial_path)
         self._build_columns_page()
         self._build_floor_page()
+        self._build_department_page()
         self._build_asset_page()
         self._build_options_page()
         self.currentIdChanged.connect(self._page_changed)
@@ -598,6 +908,37 @@ class WirelessDeviceImportWizard(QWizard):
         self.floor_page = page
         self.addPage(page)
 
+    def _build_department_page(self) -> None:
+        page = QWizardPage()
+        page.setTitle("Infer device departments")
+        page.setSubTitle(
+            "Departments are inferred from the nearest same-floor room/location or data point carrying a department assignment. Resolve any spatial conflicts below."
+        )
+        layout = QVBoxLayout(page)
+        self.department_summary_label = QLabel()
+        self.department_summary_label.setWordWrap(True)
+        layout.addWidget(self.department_summary_label)
+        self.department_table = QTableWidget(0, 6)
+        self.department_table.setHorizontalHeaderLabels(
+            ["Device", "Floor", "X", "Y", "Conflict", "Department decision"]
+        )
+        self.department_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.department_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.department_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.department_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.department_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.department_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.department_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.department_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        layout.addWidget(self.department_table, 1)
+        note = QLabel(
+            "Only ambiguous devices are listed. Devices with one clear nearest department are assigned automatically. Devices with no suitable same-floor assignment remain unassigned."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.department_page = page
+        self.addPage(page)
+
     def _build_asset_page(self) -> None:
         page = QWizardPage()
         page.setTitle("Map wireless profiles to asset models")
@@ -628,9 +969,10 @@ class WirelessDeviceImportWizard(QWizard):
         page.setSubTitle("Review how the imported devices will be added to the project.")
         layout = QVBoxLayout(page)
         self.attach_corridor_check = QCheckBox(
-            "Assign each imported device to its nearest same-floor corridor node for routing"
+            "Assign each imported device to its nearest same-floor corridor node for routing (required)"
         )
         self.attach_corridor_check.setChecked(True)
+        self.attach_corridor_check.setEnabled(False)
         self.attach_corridor_check.setToolTip(
             "Stores a route anchor on imported wireless devices only. Their actual symbols remain at the surveyed coordinates."
         )
@@ -759,6 +1101,17 @@ class WirelessDeviceImportWizard(QWizard):
             "insertion_y": _text(self.insertion_y_column_combo.currentData()),
         }
 
+    def _coordinate_config(self) -> dict:
+        return {
+            "coordinate_mode": _text(self.coordinate_mode_combo.currentData()),
+            "coordinate_scale": float(self.scale_spin.value()),
+            "x_offset": float(self.x_offset_spin.value()),
+            "y_offset": float(self.y_offset_spin.value()),
+            "swap_axes": self.swap_axes_check.isChecked(),
+            "invert_x": self.invert_x_check.isChecked(),
+            "invert_y": self.invert_y_check.isChecked(),
+        }
+
     def _rebuild_mapping_pages(self) -> None:
         columns = self._columns()
         floor_counts = Counter(_text(row.get(columns["floor"])) for row in self.rows)
@@ -833,6 +1186,116 @@ class WirelessDeviceImportWizard(QWizard):
             self.asset_table.setItem(row_index, 1, count_item)
             self.asset_table.setCellWidget(row_index, 2, combo)
 
+    def _department_resolutions(self, allow_unresolved: bool = False) -> Optional[dict]:
+        result = {}
+        for row_index in range(self.department_table.rowCount()):
+            key_item = self.department_table.item(row_index, 0)
+            combo = self.department_table.cellWidget(row_index, 5)
+            key = _text(key_item.data(Qt.UserRole) if key_item else "")
+            if not key or not isinstance(combo, QComboBox):
+                continue
+            value = _text(combo.currentData())
+            if value == UNRESOLVED_DEPARTMENT_TOKEN and not allow_unresolved:
+                return None
+            result[key] = value
+        return result
+
+    def _rebuild_department_page(self) -> None:
+        previous = self._department_resolutions(allow_unresolved=True) or {}
+        columns = self._columns()
+        floor_map = self._floor_map() or {}
+        coordinate_config = self._coordinate_config()
+        department_inference_index = build_department_inference_index(self.data)
+        analysis: Dict[str, dict] = {}
+        conflict_rows: List[Tuple[dict, dict]] = []
+        inferred_count = 0
+        unassigned_count = 0
+        invalid_count = 0
+
+        for row in self.rows:
+            transformed = _transform_wireless_row(row, columns, floor_map, coordinate_config)
+            if transformed is None:
+                source_floor = _text(row.get(columns.get("floor", "")))
+                if floor_map.get(source_floor) != SKIP_FLOOR_TOKEN:
+                    invalid_count += 1
+                continue
+            department = infer_department_for_position(
+                self.data,
+                int(transformed["floor"]),
+                float(transformed["x"]),
+                float(transformed["y"]),
+                inference_index=department_inference_index,
+            )
+            key = _text(transformed["decision_key"])
+            analysis[key] = {**transformed, **department}
+            if department.get("status") == "conflict":
+                conflict_rows.append((transformed, department))
+            elif department.get("status") == "inferred":
+                inferred_count += 1
+            else:
+                unassigned_count += 1
+
+        self._department_analysis = analysis
+        self.department_table.setRowCount(len(conflict_rows))
+        department_names = _department_name_lookup(self.data)
+        for row_index, (transformed, department) in enumerate(conflict_rows):
+            key = _text(transformed["decision_key"])
+            device_item = QTableWidgetItem(_text(transformed.get("source_id")) or f"CSV row {key}")
+            device_item.setData(Qt.UserRole, key)
+            floor_item = QTableWidgetItem(str(int(transformed["floor"])))
+            floor_item.setTextAlignment(Qt.AlignCenter)
+            x_item = QTableWidgetItem(f"{float(transformed['x']):.3f}")
+            y_item = QTableWidgetItem(f"{float(transformed['y']):.3f}")
+            reason_item = QTableWidgetItem(_text(department.get("reason")))
+            reason_item.setToolTip(_text(department.get("reason")))
+            combo = QComboBox()
+            combo.addItem("Select a department…", UNRESOLVED_DEPARTMENT_TOKEN)
+            combo.addItem("Leave this device unassigned", UNASSIGNED_DEPARTMENT_TOKEN)
+            candidate_ids = [
+                _text(value)
+                for value in department.get("candidate_department_ids", [])
+                if _text(value)
+            ]
+            for department_id in candidate_ids:
+                department_id = _text(department_id)
+                combo.addItem(
+                    f"{department_id} - {department_names.get(department_id, department_id)}",
+                    department_id,
+                )
+            other_department_ids = [
+                department_id
+                for department_id in sorted(
+                    department_names,
+                    key=lambda value: (department_names.get(value, value).lower(), value.lower()),
+                )
+                if department_id not in candidate_ids
+            ]
+            if other_department_ids:
+                combo.insertSeparator(combo.count())
+                for department_id in other_department_ids:
+                    combo.addItem(
+                        f"{department_id} - {department_names.get(department_id, department_id)}",
+                        department_id,
+                    )
+            previous_value = _text(previous.get(key))
+            if previous_value:
+                previous_index = combo.findData(previous_value)
+                if previous_index >= 0:
+                    combo.setCurrentIndex(previous_index)
+            self.department_table.setItem(row_index, 0, device_item)
+            self.department_table.setItem(row_index, 1, floor_item)
+            self.department_table.setItem(row_index, 2, x_item)
+            self.department_table.setItem(row_index, 3, y_item)
+            self.department_table.setItem(row_index, 4, reason_item)
+            self.department_table.setCellWidget(row_index, 5, combo)
+
+        self.department_summary_label.setText(
+            f"Automatically inferred: {inferred_count:,} device(s). "
+            f"Conflicts requiring a decision: {len(conflict_rows):,}. "
+            f"No suitable department assignment: {unassigned_count:,}. "
+            f"Rows with invalid transformed coordinates: {invalid_count:,}."
+        )
+
     def _floor_map(self) -> Optional[dict]:
         result = {}
         for row_index in range(self.floor_table.rowCount()):
@@ -869,19 +1332,38 @@ class WirelessDeviceImportWizard(QWizard):
             return
         floor_map = self._floor_map() or {}
         asset_map = self._asset_map()
+        department_resolutions = self._department_resolutions(allow_unresolved=True) or {}
         mapped_rows = 0
         for row in self.rows:
             source_floor = _text(row.get(self._columns().get("floor", "")))
             if floor_map.get(source_floor) != SKIP_FLOOR_TOKEN:
                 mapped_rows += 1
         create_count = sum(1 for value in asset_map.values() if value == CREATE_ASSET_TOKEN)
+        inferred_count = sum(
+            1 for value in self._department_analysis.values() if value.get("status") == "inferred"
+        )
+        conflict_count = sum(
+            1 for value in self._department_analysis.values() if value.get("status") == "conflict"
+        )
+        resolved_count = sum(
+            1
+            for key, value in self._department_analysis.items()
+            if value.get("status") == "conflict"
+            and department_resolutions.get(key) not in (None, "", UNRESOLVED_DEPARTMENT_TOKEN)
+        )
+        unassigned_count = sum(
+            1 for value in self._department_analysis.values() if value.get("status") == "unassigned"
+        )
         lines = [
             f"Source file: {Path(self._loaded_path).name if self._loaded_path else ''}",
             f"CSV device rows: {len(self.rows):,}",
             f"Rows mapped to project floors: {mapped_rows:,}",
             f"Wireless profiles: {len(asset_map):,}",
             f"New wireless asset definitions: {create_count:,}",
-            f"Nearest-corridor route anchors: {'Yes' if self.attach_corridor_check.isChecked() else 'No'}",
+            f"Departments inferred automatically: {inferred_count:,}",
+            f"Department conflicts resolved: {resolved_count:,} of {conflict_count:,}",
+            f"Devices remaining unassigned by inference: {unassigned_count:,}",
+            "Nearest-corridor route anchors: Required for all imported devices",
             f"Create upstream network links: {'Yes' if self.auto_connect_check.isChecked() else 'No'}",
             "Drawing layer: Wireless devices",
         ]
@@ -918,6 +1400,15 @@ class WirelessDeviceImportWizard(QWizard):
                     "Every source floor must map to a numeric project floor or be marked Do not import.",
                 )
                 return False
+            self._rebuild_department_page()
+        if page is self.department_page:
+            if self._department_resolutions() is None:
+                QMessageBox.critical(
+                    self,
+                    "Wireless import",
+                    "Choose a department or Leave unassigned for every listed device conflict.",
+                )
+                return False
         return super().validateCurrentPage()
 
     def import_config(self) -> dict:
@@ -927,14 +1418,9 @@ class WirelessDeviceImportWizard(QWizard):
             "columns": self._columns(),
             "floor_map": self._floor_map() or {},
             "asset_map": self._asset_map(),
-            "coordinate_mode": _text(self.coordinate_mode_combo.currentData()),
-            "coordinate_scale": float(self.scale_spin.value()),
-            "x_offset": float(self.x_offset_spin.value()),
-            "y_offset": float(self.y_offset_spin.value()),
-            "swap_axes": self.swap_axes_check.isChecked(),
-            "invert_x": self.invert_x_check.isChecked(),
-            "invert_y": self.invert_y_check.isChecked(),
-            "attach_to_corridor": self.attach_corridor_check.isChecked(),
+            "department_resolutions": self._department_resolutions() or {},
+            **self._coordinate_config(),
+            "attach_to_corridor": True,
             "auto_connect": self.auto_connect_check.isChecked(),
             "duplicate_mode": _text(self.duplicate_combo.currentData()),
         }

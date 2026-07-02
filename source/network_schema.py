@@ -1290,6 +1290,28 @@ def ensure_network_schema(data: dict) -> dict:
         instance["wireless_import_corridor_distance_m"] = max(
             0.0, _as_float(instance.get("wireless_import_corridor_distance_m"))
         )
+        instance["wireless_import_graph_connected"] = bool(
+            instance.get("wireless_import_graph_connected", bool(instance.get("route_anchor")))
+        )
+        instance["department_id"] = _text(instance.get("department_id"))
+        instance["department_ids"] = _normalise_string_list(
+            instance.get("department_ids", [instance["department_id"]] if instance["department_id"] else [])
+        )
+        if instance["department_id"] and instance["department_id"] not in instance["department_ids"]:
+            instance["department_ids"].insert(0, instance["department_id"])
+        instance["department_name"] = _text(instance.get("department_name"))
+        instance["wireless_import_department_status"] = _text(
+            instance.get("wireless_import_department_status")
+        )
+        instance["wireless_import_department_source"] = _text(
+            instance.get("wireless_import_department_source")
+        )
+        instance["wireless_import_department_source_kind"] = _text(
+            instance.get("wireless_import_department_source_kind")
+        )
+        instance["wireless_import_department_distance_m"] = max(
+            0.0, _as_float(instance.get("wireless_import_department_distance_m"))
+        )
         instance.setdefault("management_ip", "")
         instance.setdefault("management_vlan", "")
         instance.setdefault("power_feed", "")
@@ -1478,6 +1500,9 @@ def ensure_network_schema(data: dict) -> dict:
         )
         assignment.setdefault("endpoint_asset_id", "")
         assignment.setdefault("endpoint_asset_name", "")
+        assignment.setdefault("endpoint_instance_id", "")
+        assignment.setdefault("endpoint_connection_id", "")
+        assignment.setdefault("endpoint_network_port", "")
         assignment.setdefault("department_id", "")
         assignment.setdefault("department_name", "")
         assignment.setdefault("room_type_id", "")

@@ -42,7 +42,10 @@ from network_dialogs import (
     NetworkPlannerDialog,
     rack_selection_records,
 )
-from network_auto_planner import auto_connect_manual_devices
+from network_auto_planner import (
+    auto_connect_manual_devices,
+    auto_connect_pending_imported_wireless_devices,
+)
 from network_reports import write_network_schedules
 from network_topology import NetworkTopologyDialog
 from network_physical_fibre import PhysicalFibreTopologyDialog
@@ -593,6 +596,10 @@ def _import_wireless_devices(editor) -> None:
         f"Skipped existing rows: {int(result.get('skipped_rows', 0)):,}",
         f"Rows not mapped to a floor: {int(result.get('unmapped_rows', 0)):,}",
         f"Invalid rows: {int(result.get('invalid_rows', 0)):,}",
+        f"Devices assigned an inferred department: {int(result.get('department_inferred', 0)):,}",
+        f"Department conflicts resolved in the wizard: {int(result.get('department_resolved', 0)):,}",
+        f"Devices left without a department: {int(result.get('department_unassigned', 0)):,}",
+        f"Devices anchored to the corridor graph: {int(result.get('graph_anchored', 0)):,}",
         f"Devices without a same-floor corridor node: {int(result.get('without_corridor', 0)):,}",
     ]
     if auto_result:
@@ -1017,11 +1024,24 @@ def _place_or_select_network_asset(editor, x: float, y: float) -> None:
         auto_result = auto_connect_manual_devices(
             editor.store.data, [_text(dialog.result.get("id"))]
         )
+    wireless_result = auto_connect_pending_imported_wireless_devices(
+        editor.store.data
+    )
     editor.selected_point_name = dialog.result["id"]
     editor.refresh_canvas()
     if hasattr(editor, "set_status"):
         created = len((auto_result or {}).get("created_connection_ids", []))
-        suffix = f" and auto-connected {created} link(s)" if created else ""
+        wireless_created = len(
+            (wireless_result or {}).get("created_connection_ids", [])
+        )
+        suffix_parts = []
+        if created:
+            suffix_parts.append(f"auto-connected {created} device link(s)")
+        if wireless_created:
+            suffix_parts.append(
+                f"connected {wireless_created} pending wireless device(s)"
+            )
+        suffix = f" and {', '.join(suffix_parts)}" if suffix_parts else ""
         editor.set_status(f"Placed network asset {dialog.result['id']}{suffix}")
 
 
@@ -1110,6 +1130,7 @@ def _edit_network_instance(editor, instance_id: str) -> None:
                 power_link["to_instance_id"] = new_id
     if dialog.auto_connect_requested:
         auto_connect_manual_devices(editor.store.data, [new_id])
+    auto_connect_pending_imported_wireless_devices(editor.store.data)
     editor.selected_point_name = new_id
     editor.refresh_canvas()
 

@@ -71,6 +71,7 @@ PORT_USE_OPTIONS = ["input", "output", "uplink", "downlink", "management", "cons
 from network_auto_planner import (
     NetworkPlanningError,
     auto_connect_manual_devices,
+    auto_connect_pending_imported_wireless_devices,
     generate_network_design,
 )
 from network_services import cable_core_statistics, ensure_physical_fibre_for_design, generate_ip_address_plan, set_core_status_from_splices
@@ -1336,7 +1337,8 @@ class NetworkInstanceEditorDialog(QDialog):
         if not asset_id:
             QMessageBox.critical(self, "Invalid instance", "Select a network asset.")
             return
-        self.result = {
+        self.result = deepcopy(self.instance)
+        self.result.update({
             "id": instance_id,
             "name": name,
             "asset_id": asset_id,
@@ -1353,7 +1355,7 @@ class NetworkInstanceEditorDialog(QDialog):
             "power_feed": self.power_feed_edit.text().strip(),
             "ups_source": self.ups_source_edit.text().strip(),
             "notes": self.notes_edit.toPlainText().strip(),
-        }
+        })
         self.auto_connect_requested = bool(self.auto_connect_check.isChecked())
         super().accept()
 
@@ -3172,6 +3174,8 @@ class NetworkPlannerDialog(QDialog):
                 "Asset",
                 "Location",
                 "Floor",
+                "Department",
+                "Route anchor",
                 "Rack",
                 "Start U",
                 "Rack U",
@@ -3471,7 +3475,9 @@ class NetworkPlannerDialog(QDialog):
         elif key == "instances":
             self.instances_tab.set_rows([
                 [item.get("id", ""), item.get("name", ""), item.get("asset_id", ""),
-                 item.get("location_name", ""), item.get("floor", 0), item.get("rack_name", ""),
+                 item.get("location_name", ""), item.get("floor", 0),
+                 item.get("department_name", "") or item.get("department_id", ""),
+                 item.get("route_anchor", ""), item.get("rack_name", ""),
                  item.get("rack_start_u", 0), item.get("rack_size_u", 0) or "",
                  item.get("management_ip", "")]
                 for item in self._items("network_asset_instances")
@@ -4360,6 +4366,8 @@ class NetworkPlannerDialog(QDialog):
                         "Auto connect",
                         "\n".join(result.get("warnings", [])),
                     )
+            auto_connect_pending_imported_wireless_devices(self.data)
+            self.refresh_tables()
 
     def edit_instance(self) -> None:
         index, item = self._selected(self.instances_tab, "network_asset_instances")
@@ -4386,6 +4394,8 @@ class NetworkPlannerDialog(QDialog):
                         "Auto connect",
                         "\n".join(result.get("warnings", [])),
                     )
+            auto_connect_pending_imported_wireless_devices(self.data)
+            self.refresh_tables()
 
     def delete_instance(self) -> None:
         rows = self.instances_tab.selected_rows()

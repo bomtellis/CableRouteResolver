@@ -989,6 +989,14 @@ class TopologyModel:
                 continue
             grouped: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
             for assignment in assignments:
+                endpoint_instance_id = _text(
+                    assignment.get("endpoint_instance_id")
+                )
+                if endpoint_instance_id and endpoint_instance_id in self.nodes:
+                    # The actual wireless device is already connected by the
+                    # planner-generated endpoint edge; do not also show it as an
+                    # anonymous department client group.
+                    continue
                 department_id = _text(assignment.get("department_id")) or "UNASSIGNED"
                 department_name = _text(assignment.get("department_name")) or department_id
                 grouped[(department_id, department_name)].append(assignment)

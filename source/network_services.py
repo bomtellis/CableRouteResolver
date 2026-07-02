@@ -1952,7 +1952,15 @@ def network_traffic_loads(data: dict) -> dict:
     for connection in data.get("network_connections", []):
         if not isinstance(connection, dict):
             continue
-        if bool(connection.get("topology_hidden")) or bool(connection.get("physical_connection")):
+        if (
+            bool(connection.get("topology_hidden"))
+            or bool(connection.get("physical_connection"))
+            or bool(connection.get("endpoint_assignment_connection"))
+        ):
+            # Planner-created wireless endpoint links are a topology/rendering
+            # representation of an endpoint assignment.  The assignment already
+            # originates the demand at the serving switch/ONT, so propagating the
+            # same demand through this visible edge would count it twice.
             continue
         source = _text(connection.get("from_instance_id"))
         target = _text(connection.get("to_instance_id"))

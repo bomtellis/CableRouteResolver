@@ -187,6 +187,7 @@ class PortDemand:
     expected_bandwidth_mbps: float
     expected_packet_rate_pps: float
     room_type_id: str
+    endpoint_instance_id: str = ""
     selected_network_port: str = ""
     selected_link_speed_mbps: int = 0
 
@@ -256,6 +257,17 @@ class RoutingGraph:
         for item in self.data.get("data_points", []):
             if isinstance(item, dict):
                 self._add_point(item.get("name"), item, "data_point")
+        # Imported wireless devices are real routed endpoints.  Adding their
+        # instance IDs to the graph lets the auto-planner size access equipment
+        # and route the final cable even when they were imported before any
+        # switches, ONTs or other networking equipment existed.
+        for item in self.data.get("network_asset_instances", []):
+            if (
+                isinstance(item, dict)
+                and bool(item.get("imported_wireless_device"))
+                and _text(item.get("id"))
+            ):
+                self._add_point(item.get("id"), item, "wireless_device")
         for item in self.data.get("corridors", {}).get("nodes", []):
             if isinstance(item, dict):
                 self._add_point(item.get("name"), item, "corridor_node")
@@ -327,6 +339,28 @@ class RoutingGraph:
             if not any(neighbour == b_name for neighbour, _weight in self.graph[a_name]):
                 self.graph[a_name].append((b_name, weight))
                 self.graph[b_name].append((a_name, weight))
+
+        # Preserve the importer-selected same-floor corridor attachment.  This
+        # edge represents the surveyed X/Y spur from the wireless symbol to its
+        # nearest corridor node; the remainder of the route then follows the
+        # established graph.
+        for item in self.data.get("network_asset_instances", []):
+            if not isinstance(item, dict) or not bool(item.get("imported_wireless_device")):
+                continue
+            instance_id = _text(item.get("id"))
+            route_anchor = _text(item.get("route_anchor"))
+            endpoint = self.points.get(instance_id)
+            anchor_point = self.points.get(route_anchor)
+            if not instance_id or not endpoint or not anchor_point or instance_id == route_anchor:
+                continue
+            if _int(endpoint.get("floor")) != _int(anchor_point.get("floor")):
+                continue
+            weight = max(0.0, _float(item.get("wireless_import_corridor_distance_m")))
+            if weight <= 0.0:
+                weight = _distance(endpoint, anchor_point, self.floor_height_m)
+            if not any(neighbour == route_anchor for neighbour, _weight in self.graph[instance_id]):
+                self.graph[instance_id].append((route_anchor, weight))
+                self.graph[route_anchor].append((instance_id, weight))
 
         # Locations and data points commonly sit beside, rather than directly
         # on, a corridor node.  Attach every unconnected endpoint to its nearest
@@ -623,6 +657,114 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
                 )
             )
         results.append(endpoint)
+
+    # Imported wireless devices may be loaded before any network equipment is
+    # present.  Treat every unserved imported device as one real endpoint demand
+    # so the automatic planner installs enough access/ONT ports, PoE and traffic
+    # capacity and then links the generated equipment back to the wireless asset.
+    network_assets = {
+        _text(item.get("id")): item
+        for item in data.get("network_assets", [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    network_instances = {
+        _text(item.get("id")): item
+        for item in data.get("network_asset_instances", [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    already_connected: Set[str] = set()
+    for connection in data.get("network_connections", []):
+        if (
+            not isinstance(connection, dict)
+            or bool(connection.get("topology_hidden"))
+            or bool(connection.get("physical_connection"))
+        ):
+            continue
+        source_id = _text(connection.get("from_instance_id"))
+        target_id = _text(connection.get("to_instance_id"))
+        if source_id in network_instances and target_id in network_instances:
+            already_connected.add(source_id)
+            already_connected.add(target_id)
+
+    existing_endpoint_names = {endpoint.name for endpoint in results}
+    for instance_id, instance in sorted(network_instances.items()):
+        if (
+            not bool(instance.get("imported_wireless_device"))
+            or instance_id in already_connected
+            or instance_id in existing_endpoint_names
+        ):
+            continue
+        asset_id = _text(instance.get("asset_id"))
+        asset = network_assets.get(asset_id, {})
+        if _asset_type(asset) not in {"wireless_access_point", "wireless_device"}:
+            continue
+        department_id = (
+            _text(instance.get("department_id"))
+            or next(
+                (_text(value) for value in instance.get("department_ids", []) if _text(value)),
+                "UNASSIGNED",
+            )
+        )
+        department_name = (
+            _text(instance.get("department_name"))
+            or departments.get(department_id, department_id)
+        )
+        bandwidth = max(
+            0.0,
+            _float(
+                instance.get(
+                    "expected_bandwidth_mbps",
+                    asset.get(
+                        "expected_bandwidth_mbps",
+                        settings.get("default_expected_bandwidth_mbps", 0.0),
+                    ),
+                )
+            ),
+        )
+        packets = max(
+            0.0,
+            _float(
+                instance.get(
+                    "expected_packet_rate_pps",
+                    asset.get(
+                        "expected_packet_rate_pps",
+                        settings.get("default_expected_packet_rate_pps", 0.0),
+                    ),
+                )
+            ),
+        )
+        endpoint = EndpointDemand(
+            name=instance_id,
+            floor=_int(instance.get("floor")),
+            x=_float(instance.get("x")),
+            y=_float(instance.get("y")),
+            department_id=department_id,
+            department_name=department_name,
+            room_type_id="",
+            extension_distance_m=0.0,
+            existing_comms_room="",
+        )
+        endpoint.ports.append(
+            PortDemand(
+                endpoint_name=instance_id,
+                endpoint_port=1,
+                endpoint_asset_id=asset_id,
+                endpoint_asset_name=_text(asset.get("name")) or instance_id,
+                department_id=department_id,
+                department_name=department_name,
+                floor=endpoint.floor,
+                x=endpoint.x,
+                y=endpoint.y,
+                extension_distance_m=0.0,
+                poe_power_w=_poe_power_for_asset(asset, settings),
+                expected_bandwidth_mbps=bandwidth,
+                expected_packet_rate_pps=packets,
+                room_type_id="",
+                endpoint_instance_id=instance_id,
+            )
+        )
+        results.append(endpoint)
+        existing_endpoint_names.add(instance_id)
 
     if missing_room_types:
         warnings.append(
@@ -1152,6 +1294,13 @@ def _next_identifier(existing: set[str], prefix: str) -> str:
 
 
 def _clear_previous_auto_design(data: dict) -> None:
+    removed_instance_ids = {
+        _text(item.get("id"))
+        for item in data.get("network_asset_instances", [])
+        if isinstance(item, dict)
+        and bool(item.get("auto_generated"))
+        and _text(item.get("id"))
+    }
     data["network_asset_instances"] = [
         item
         for item in data.get("network_asset_instances", [])
@@ -1161,6 +1310,8 @@ def _clear_previous_auto_design(data: dict) -> None:
         item
         for item in data.get("network_connections", [])
         if not bool(item.get("auto_generated"))
+        and _text(item.get("from_instance_id")) not in removed_instance_ids
+        and _text(item.get("to_instance_id")) not in removed_instance_ids
     ]
     data["network_power_connections"] = [
         item
@@ -1225,6 +1376,11 @@ class DesignBuilder:
             _text(item.get("id"))
             for item in data.get("network_asset_instances", [])
             if _text(item.get("id"))
+        }
+        self.existing_instances_by_id = {
+            _text(item.get("id")): item
+            for item in data.get("network_asset_instances", [])
+            if isinstance(item, dict) and _text(item.get("id"))
         }
         self.connection_ids = {
             _text(item.get("id"))
@@ -2468,6 +2624,7 @@ class DesignBuilder:
             "department_id": item.department_id,
             "department_name": item.department_name,
             "room_type_id": item.room_type_id,
+            "endpoint_instance_id": item.endpoint_instance_id,
             "floor": item.floor,
             "x": round(item.x, 3),
             "y": round(item.y, 3),
@@ -2485,7 +2642,108 @@ class DesignBuilder:
             **extra,
         }
         self.assignments.append(assignment)
-        self.add_patch_lead(assignment_id=assignment["id"], instance=instance, port=str(port_name), medium="copper", endpoint_name=item.endpoint_name, preferred_use="client")
+
+        endpoint_instance = self.existing_instances_by_id.get(
+            _text(item.endpoint_instance_id)
+        )
+        endpoint_port = ""
+        endpoint_connection_id = ""
+        if endpoint_instance is not None:
+            requested_speed = max(0, int(item.selected_link_speed_mbps or 0))
+            candidates = self._connection_port_candidates(
+                endpoint_instance, "Ethernet", "copper", "uplink"
+            )
+            compatible = [
+                row
+                for row in candidates
+                if not normalise_port_speeds(row.get("supported_speeds_mbps"))
+                or requested_speed <= 0
+                or requested_speed
+                in normalise_port_speeds(row.get("supported_speeds_mbps"))
+            ]
+            selected_endpoint_port = (compatible or candidates or [None])[0]
+            if selected_endpoint_port is not None:
+                endpoint_port = _text(selected_endpoint_port.get("name"))
+                endpoint_connection_id = _next_identifier(
+                    self.connection_ids, "AUTO-NC-"
+                )
+                source_layer = (
+                    "ont"
+                    if "ont" in _text(instance.get("design_role")).lower()
+                    else "access"
+                )
+                connection = {
+                    "id": endpoint_connection_id,
+                    "from_instance_id": _text(instance.get("id")),
+                    "from_port": str(port_name),
+                    "to_instance_id": _text(endpoint_instance.get("id")),
+                    "to_port": endpoint_port,
+                    "connection_role": "uplink",
+                    "medium": "copper",
+                    "link_speed_mbps": requested_speed,
+                    "cable_specification": "Category 6A",
+                    "fibre_count": 0,
+                    "vlan_ids": [],
+                    "route_profile": "",
+                    "route_path": list(route_path),
+                    "length_m": round(max(0.0, copper_length_m), 3),
+                    "expected_bandwidth_mbps": round(
+                        max(0.0, item.expected_bandwidth_mbps), 6
+                    ),
+                    "expected_packet_rate_pps": round(
+                        max(0.0, item.expected_packet_rate_pps), 3
+                    ),
+                    "source_layer": source_layer,
+                    "target_layer": "endpoint",
+                    "endpoint_assignment_id": assignment["id"],
+                    "endpoint_assignment_connection": True,
+                    "wireless_import_connection": True,
+                    "notes": (
+                        "Automatically linked a pre-imported wireless device to "
+                        "the network equipment allocated by the planner."
+                    ),
+                    "auto_generated": True,
+                    "auto_connected": True,
+                }
+                self.connections.append(connection)
+                self._reserved_ports[_text(instance.get("id"))].add(str(port_name))
+                self._reserved_ports[_text(endpoint_instance.get("id"))].add(
+                    endpoint_port
+                )
+                assignment["endpoint_connection_id"] = endpoint_connection_id
+                assignment["endpoint_network_port"] = endpoint_port
+                endpoint_instance["wireless_import_pending_network_connection"] = False
+                endpoint_instance["wireless_import_graph_connected"] = True
+            else:
+                endpoint_instance["wireless_import_pending_network_connection"] = True
+                self.warnings.append(
+                    f"{item.endpoint_instance_id}: no free copper port was available "
+                    "on the imported wireless device after planning."
+                )
+
+        self.add_patch_lead(
+            connection_id=endpoint_connection_id,
+            assignment_id=assignment["id"],
+            instance=instance,
+            port=str(port_name),
+            medium="copper",
+            peer_instance_id=_text(item.endpoint_instance_id),
+            peer_port=endpoint_port,
+            endpoint_name=item.endpoint_name,
+            preferred_use="client",
+        )
+        if endpoint_instance is not None and endpoint_port:
+            self.add_patch_lead(
+                connection_id=endpoint_connection_id,
+                assignment_id=assignment["id"],
+                instance=endpoint_instance,
+                port=endpoint_port,
+                medium="copper",
+                peer_instance_id=_text(instance.get("id")),
+                peer_port=str(port_name),
+                endpoint_name=item.endpoint_name,
+                preferred_use="uplink",
+            )
         self.total_copper_m += max(0.0, copper_length_m)
         return assignment
 
@@ -8647,6 +8905,17 @@ def auto_connect_manual_devices(
                 continue
             source_port, target_port, medium, link_speed = pair
             length_m, route_path = graph.route(anchor(instances[source_id]), anchor(instances[target_id]))
+            source_spur = (
+                max(0.0, _float(instances[source_id].get("wireless_import_corridor_distance_m")))
+                if bool(instances[source_id].get("imported_wireless_device"))
+                else 0.0
+            )
+            target_spur = (
+                max(0.0, _float(instances[target_id].get("wireless_import_corridor_distance_m")))
+                if bool(instances[target_id].get("imported_wireless_device"))
+                else 0.0
+            )
+            wireless_spur = source_spur + target_spur
             connection_id = _next_identifier(connection_ids, "NC")
             link_number = len(existing_candidates) + created_for_device + 1
             connection = {
@@ -8663,7 +8932,8 @@ def auto_connect_manual_devices(
                 "vlan_ids": [],
                 "route_profile": "fibre_optic" if medium == "fibre" and "fibre_optic" in data.get("route_profiles", {}) else "",
                 "route_path": route_path,
-                "length_m": round(max(0.0, length_m), 3),
+                "wireless_import_spur_length_m": round(wireless_spur, 3),
+                "length_m": round(max(0.0, length_m) + wireless_spur, 3),
                 "expected_bandwidth_mbps": round(max(0.0, _float(device.get("expected_bandwidth_mbps"), _float(assets.get(_text(device.get("asset_id")), {}).get("expected_bandwidth_mbps")))), 6),
                 "expected_packet_rate_pps": round(max(0.0, _float(device.get("expected_packet_rate_pps"), _float(assets.get(_text(device.get("asset_id")), {}).get("expected_packet_rate_pps")))), 3),
                 "source_layer": layers.get(source_id, ""),
@@ -8698,8 +8968,85 @@ def auto_connect_manual_devices(
 
     if result["created_connection_ids"]:
         ensure_physical_fibre_for_design(data, replace_auto=False)
+
+    connected_ids: Set[str] = set()
+    for connection in data.get("network_connections", []):
+        if (
+            not isinstance(connection, dict)
+            or bool(connection.get("topology_hidden"))
+            or bool(connection.get("physical_connection"))
+        ):
+            continue
+        connected_ids.add(_text(connection.get("from_instance_id")))
+        connected_ids.add(_text(connection.get("to_instance_id")))
+    for device in selected:
+        if not bool(device.get("imported_wireless_device")):
+            continue
+        device_id = _text(device.get("id"))
+        device["wireless_import_pending_network_connection"] = (
+            device_id not in connected_ids
+        )
+        if device_id in connected_ids:
+            device["wireless_import_graph_connected"] = True
+
     ensure_network_schema(data)
     return result
+
+
+def auto_connect_pending_imported_wireless_devices(data: dict) -> dict:
+    """Connect imported wireless devices after upstream equipment appears.
+
+    Wireless imports are allowed before switches, ONTs or other network assets
+    are installed.  This pass is intentionally limited to imported wireless
+    instances and can therefore run after manual placement or planner changes
+    without altering unrelated manually installed devices.
+    """
+
+    ensure_network_schema(data)
+    assets = {
+        _text(row.get("id")): row
+        for row in data.get("network_assets", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    imported_ids = [
+        _text(row.get("id"))
+        for row in data.get("network_asset_instances", [])
+        if isinstance(row, dict)
+        and bool(row.get("imported_wireless_device"))
+        and _text(row.get("route_anchor"))
+        and _asset_type(assets.get(_text(row.get("asset_id")), {}))
+        in {"wireless_access_point", "wireless_device"}
+        and _text(row.get("id"))
+    ]
+    result = auto_connect_manual_devices(data, imported_ids)
+    connected = set(result.get("connected_instance_ids", []))
+    instances = {
+        _text(row.get("id")): row
+        for row in data.get("network_asset_instances", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    logically_connected: Set[str] = set()
+    for connection in data.get("network_connections", []):
+        if (
+            not isinstance(connection, dict)
+            or bool(connection.get("topology_hidden"))
+            or bool(connection.get("physical_connection"))
+        ):
+            continue
+        source_id = _text(connection.get("from_instance_id"))
+        target_id = _text(connection.get("to_instance_id"))
+        if source_id in imported_ids:
+            logically_connected.add(source_id)
+        if target_id in imported_ids:
+            logically_connected.add(target_id)
+    for instance_id in imported_ids:
+        instance = instances.get(instance_id, {})
+        is_connected = instance_id in logically_connected or instance_id in connected
+        instance["wireless_import_pending_network_connection"] = not is_connected
+        if is_connected:
+            instance["wireless_import_graph_connected"] = True
+    return result
+
 
 def generate_network_design(
     data: dict,
@@ -8910,6 +9257,11 @@ def generate_network_design(
         ),
         "objective": "Minimum feasible component count after department-first, graph-branch-aware proximity clustering, subject to port, PoE, bandwidth, packet-throughput, spare-capacity, distance and configured layer-diversity constraints",
         "endpoint_locations": len(endpoints),
+        "imported_wireless_endpoints": sum(
+            1
+            for endpoint in endpoints
+            if any(_text(port.endpoint_instance_id) for port in endpoint.ports)
+        ),
         "required_ports": demand_ports,
         "required_poe_w": round(demand_poe, 3),
         "required_bandwidth_mbps": round(demand_bandwidth, 6),
