@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional
 from network_services import FIBRE_COLOURS, build_fibre_cores, fibre_layer_defaults, set_core_status_from_splices
 
 
-NETWORK_SCHEMA_VERSION = 10
+NETWORK_SCHEMA_VERSION = 11
 
 
 DEFAULT_FIBRE_CABLE_TYPES = [
@@ -184,6 +184,7 @@ NETWORK_ASSET_TYPES = {
     "network_router",
     "firewall",
     "wireless_access_point",
+    "wireless_device",
     "optical_line_terminal",
     "optical_network_terminal",
     "optical_transceiver",
@@ -868,6 +869,15 @@ def ensure_network_schema(data: dict) -> dict:
         asset["asset_type"] = (
             asset_type if asset_type in NETWORK_ASSET_TYPES else "other"
         )
+        wireless_category = _text(asset.get("wireless_device_category")).lower()
+        if asset["asset_type"] == "wireless_access_point" and not wireless_category:
+            wireless_category = "access_point"
+        if wireless_category not in {
+            "", "access_point", "iot_gateway", "radio_gateway",
+            "wireless_bridge", "wireless_sensor", "other",
+        }:
+            wireless_category = "other"
+        asset["wireless_device_category"] = wireless_category
         asset.setdefault("manufacturer", "")
         asset.setdefault("model", "")
         asset.setdefault("patch_panel_type", "")
@@ -1268,6 +1278,17 @@ def ensure_network_schema(data: dict) -> dict:
             layer
             if layer in {"", "edge", "core", "aggregation", "access", "endpoint", "olt", "splitter", "ont"}
             else ""
+        )
+        instance["route_anchor"] = _text(instance.get("route_anchor"))
+        instance["wireless_device_layer"] = bool(instance.get("wireless_device_layer", False))
+        instance["imported_wireless_device"] = bool(instance.get("imported_wireless_device", False))
+        instance["wireless_import_source_file"] = _text(instance.get("wireless_import_source_file"))
+        instance["wireless_import_source_id"] = _text(instance.get("wireless_import_source_id"))
+        instance["wireless_import_source_floor"] = _text(instance.get("wireless_import_source_floor"))
+        instance["wireless_import_profile"] = _text(instance.get("wireless_import_profile"))
+        instance["wireless_import_row_number"] = max(0, _as_int(instance.get("wireless_import_row_number")))
+        instance["wireless_import_corridor_distance_m"] = max(
+            0.0, _as_float(instance.get("wireless_import_corridor_distance_m"))
         )
         instance.setdefault("management_ip", "")
         instance.setdefault("management_vlan", "")
@@ -1964,9 +1985,9 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                 messages.append(
                     f"Fibre splitter {asset_id} has an unsupported split ratio {asset.get('split_ratio')!r}."
                 )
-        if asset_type == "wireless_access_point" and not asset.get("frequencies"):
+        if asset_type in {"wireless_access_point", "wireless_device"} and not asset.get("frequencies"):
             messages.append(
-                f"Wireless access point {asset_id} requires at least one frequency."
+                f"Wireless device {asset_id} requires at least one frequency."
             )
         if asset_id in fibre_connected_asset_ids:
             is_passive_optic = asset_type == "fibre_splitter" or (

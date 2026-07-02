@@ -1290,7 +1290,7 @@ def generate_ip_address_plan(data: dict, base_cidr: Optional[str] = None) -> dic
         if any(token in asset_names for token in ("phone", "telephone", "voice")):
             templates.append({"id": "VLAN30", "vlan_id": 30, "name": "Voice", "purpose": "IP telephony", "requested_hosts": max(64, endpoint_count // 4 + 32), "security_zone": "Voice", "notes": "Automatically generated voice VLAN."})
         assets = {_text(a.get("id")): a for a in data.get("network_assets", []) if isinstance(a, dict)}
-        if any(_text(assets.get(_text(i.get("asset_id")), {}).get("asset_type")) == "wireless_access_point" for i in data.get("network_asset_instances", []) if isinstance(i, dict)):
+        if any(_text(assets.get(_text(i.get("asset_id")), {}).get("asset_type")) in {"wireless_access_point", "wireless_device"} for i in data.get("network_asset_instances", []) if isinstance(i, dict)):
             templates.append({"id": "VLAN40", "vlan_id": 40, "name": "Wireless", "purpose": "Managed wireless clients", "requested_hosts": max(254, endpoint_count), "security_zone": "Wireless", "notes": "Automatically generated wireless VLAN."})
         if any(token in asset_names for token in ("sensor", "iot", "bms", "meter", "cctv", "access control")):
             templates.append({"id": "VLAN50", "vlan_id": 50, "name": "IoT", "purpose": "IoT and building systems", "requested_hosts": max(126, endpoint_count // 3 + 32), "security_zone": "IoT", "notes": "Automatically generated IoT VLAN."})
@@ -1882,7 +1882,7 @@ def network_traffic_loads(data: dict) -> dict:
             token in role for token in ("access", "splitter")
         ):
             return 5
-        if asset_type in {"optical_network_terminal", "wireless_access_point"} or role == "ont":
+        if asset_type in {"optical_network_terminal", "wireless_access_point", "wireless_device"} or role == "ont":
             return 6
         return 7
 

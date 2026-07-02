@@ -8246,7 +8246,7 @@ def _auto_connect_layer(instance: dict, asset: dict) -> str:
         if "aggregation" in name or "distribution" in name:
             return "aggregation"
         return "access"
-    if asset_type in {"wireless_access_point"}:
+    if asset_type in {"wireless_access_point", "wireless_device"}:
         return "endpoint"
     return ""
 

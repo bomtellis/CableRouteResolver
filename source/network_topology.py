@@ -253,7 +253,7 @@ def _role_rank(role: str, asset_type: str) -> int:
         return 5
     if asset_type == "optical_network_terminal" or role == "ont":
         return 6
-    if asset_type == "wireless_access_point":
+    if asset_type in {"wireless_access_point", "wireless_device"}:
         return 6
     if asset_type == "rack_cabinet":
         return 7
@@ -268,6 +268,7 @@ def _type_label(asset_type: str, role: str) -> str:
         "network_router": "Router",
         "firewall": "Firewall",
         "wireless_access_point": "Wireless access point",
+        "wireless_device": "Wireless device",
         "telco_pop": "Telecommunications PoP",
         "external_network": "External network",
         "optical_line_terminal": "Optical line terminal",
@@ -307,6 +308,7 @@ def _icon_text(asset_type: str, role: str) -> str:
         "optical_network_terminal": "ONT",
         "fibre_splitter": "SPL",
         "wireless_access_point": "AP",
+        "wireless_device": "RAD",
         "telco_pop": "PoP",
         "external_network": "EXT",
         "patch_panel": "PP",
@@ -839,8 +841,8 @@ class TopologyModel:
         if child_rank <= parent_rank:
             return False
 
-        parent_is_access = parent.role == "access_switch" or parent.asset_type == "wireless_access_point"
-        child_is_access = child.role == "access_switch" or child.asset_type == "wireless_access_point"
+        parent_is_access = parent.role == "access_switch" or parent.asset_type in {"wireless_access_point", "wireless_device"}
+        child_is_access = child.role == "access_switch" or child.asset_type in {"wireless_access_point", "wireless_device"}
         if parent_is_access and child_is_access:
             return False
 
@@ -1174,6 +1176,7 @@ class TopologyCardItem(QGraphicsObject):
             "optical_network_terminal": QColor("#2d806d"),
             "fibre_splitter": QColor("#6e5c97"),
             "wireless_access_point": QColor("#9c6a31"),
+            "wireless_device": QColor("#8f5db7"),
             "patch_panel": QColor("#53616d"),
             "telco_pop": QColor("#7b5d9d"),
             "external_network": QColor("#73528f"),
@@ -4364,7 +4367,7 @@ class NetworkTopologyDialog(QDialog):
 
         if asset_type in {
             "network_router", "firewall", "network_switch",
-            "wireless_access_point", "optical_line_terminal",
+            "wireless_access_point", "wireless_device", "optical_line_terminal",
             "optical_network_terminal", "telco_pop", "external_network",
         }:
             return True
@@ -4748,6 +4751,7 @@ class NetworkTopologyDialog(QDialog):
             "optical_line_terminal",
             "optical_network_terminal",
             "wireless_access_point",
+            "wireless_device",
             "patch_panel",
             "fibre_splitter",
             "telco_pop",
@@ -5725,7 +5729,7 @@ class NetworkTopologyDialog(QDialog):
             return 5
         if asset_type == "network_switch" or "access_switch" in role:
             return 5
-        if asset_type in {"optical_network_terminal", "wireless_access_point", "rack_cabinet"} or role == "ont":
+        if asset_type in {"optical_network_terminal", "wireless_access_point", "wireless_device", "rack_cabinet"} or role == "ont":
             return 6
         return min(7, max(1, self.model._hierarchy_rank(node_id) + 1))
 

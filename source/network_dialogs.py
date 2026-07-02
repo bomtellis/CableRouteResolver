@@ -42,6 +42,7 @@ NETWORK_ASSET_TYPES = [
     ("network_router", "Network router"),
     ("firewall", "Firewall"),
     ("wireless_access_point", "Wireless access point"),
+    ("wireless_device", "Wireless device"),
     ("optical_line_terminal", "Optical line terminal (OLT)"),
     ("optical_network_terminal", "Optical network terminal (ONT)"),
     ("optical_transceiver", "Pluggable optical transceiver"),
@@ -271,6 +272,29 @@ class NetworkAssetEditorDialog(QDialog):
         )
         self.manufacturer_edit = QLineEdit(_text(self.asset.get("manufacturer")))
         self.model_edit = QLineEdit(_text(self.asset.get("model")))
+        self.wireless_category_combo = QComboBox()
+        for label, value in (
+            ("Access point", "access_point"),
+            ("IoT gateway", "iot_gateway"),
+            ("Radio gateway", "radio_gateway"),
+            ("Wireless bridge", "wireless_bridge"),
+            ("Wireless sensor", "wireless_sensor"),
+            ("Other wireless device", "other"),
+        ):
+            self.wireless_category_combo.addItem(label, value)
+        current_wireless_category = _text(
+            self.asset.get("wireless_device_category")
+        ).lower() or (
+            "access_point"
+            if _text(self.asset.get("asset_type")).lower() == "wireless_access_point"
+            else "other"
+        )
+        wireless_category_index = self.wireless_category_combo.findData(
+            current_wireless_category
+        )
+        self.wireless_category_combo.setCurrentIndex(
+            wireless_category_index if wireless_category_index >= 0 else 0
+        )
 
         self.patch_panel_type_combo = QComboBox()
         self.patch_panel_type_combo.addItems(PATCH_PANEL_TYPES)
@@ -611,6 +635,7 @@ class NetworkAssetEditorDialog(QDialog):
         general_form.addRow("Asset type", self.asset_type_combo)
         general_form.addRow("Manufacturer", self.manufacturer_edit)
         general_form.addRow("Model", self.model_edit)
+        general_form.addRow("Wireless device category", self.wireless_category_combo)
         general_form.addRow("Patch panel medium", self.patch_panel_type_combo)
         general_form.addRow("Patch panel construction", self.patch_panel_format_combo)
         general_form.addRow("Modular cassette quantity", self.patch_panel_cassette_count_spin)
@@ -786,7 +811,8 @@ class NetworkAssetEditorDialog(QDialog):
         self.olt_max_split_ratio_combo.setEnabled(
             asset_type == "optical_line_terminal"
         )
-        enabled_frequencies = asset_type == "wireless_access_point"
+        enabled_frequencies = asset_type in {"wireless_access_point", "wireless_device"}
+        self.wireless_category_combo.setEnabled(enabled_frequencies)
         self.frequencies_list.setEnabled(enabled_frequencies)
         self.additional_frequencies_edit.setEnabled(enabled_frequencies)
         stacking_enabled = (
@@ -886,11 +912,11 @@ class NetworkAssetEditorDialog(QDialog):
             )
             return
         frequencies = self._frequencies()
-        if asset_type == "wireless_access_point" and not frequencies:
+        if asset_type in {"wireless_access_point", "wireless_device"} and not frequencies:
             QMessageBox.critical(
                 self,
                 "Invalid asset",
-                "A wireless access point requires at least one frequency.",
+                "A wireless device requires at least one frequency.",
             )
             return
 
@@ -964,7 +990,12 @@ class NetworkAssetEditorDialog(QDialog):
                 if asset_type == "optical_line_terminal"
                 else ""
             ),
-            "frequencies": frequencies if asset_type == "wireless_access_point" else [],
+            "wireless_device_category": (
+                _text(self.wireless_category_combo.currentData())
+                if asset_type in {"wireless_access_point", "wireless_device"}
+                else ""
+            ),
+            "frequencies": frequencies if asset_type in {"wireless_access_point", "wireless_device"} else [],
             "power_input_w": float(self.power_input_spin.value()),
             "power_capacity_w": float(self.power_capacity_spin.value()),
             "power_outlet_count": int(self.power_outlet_count_spin.value()) if asset_type == "pdu" else int(self.asset.get("power_outlet_count", 0) or 0),
@@ -1710,9 +1741,15 @@ class _CrudTab(QWidget):
         row.addStretch(1)
         self.edit_requested: Callable[[], None] = lambda: None
 
+    def selected_rows(self) -> List[int]:
+        selection_model = self.table.selectionModel()
+        if selection_model is None:
+            return []
+        return sorted({index.row() for index in selection_model.selectedRows()})
+
     def selected_row(self) -> int:
-        rows = self.table.selectionModel().selectedRows()
-        return rows[0].row() if rows else -1
+        rows = self.selected_rows()
+        return rows[0] if rows else -1
 
     def set_rows(self, rows: Sequence[Sequence[object]]) -> None:
         self.table.setRowCount(len(rows))
@@ -2589,7 +2626,10 @@ class AutoPlannerSetupWizard(QWizard):
                 if asset_type(row) in {"network_router", "firewall"}
             ]
         elif component == "wireless_access_point":
-            selected = [row for row in rows if asset_type(row) == "wireless_access_point"]
+            selected = [
+                row for row in rows
+                if asset_type(row) in {"wireless_access_point", "wireless_device"}
+            ]
         elif component == "optical_line_terminal":
             selected = [row for row in rows if asset_type(row) == "optical_line_terminal"]
         elif component == "optical_network_terminal":
@@ -3137,6 +3177,11 @@ class NetworkPlannerDialog(QDialog):
                 "Rack U",
                 "Management IP",
             ]
+        )
+        self.instances_tab.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.instances_tab.delete_button.setText("Delete selected")
+        self.instances_tab.delete_button.setToolTip(
+            "Delete every selected installed asset and its dependent network records."
         )
         self.connections_tab = _CrudTab(
             ["ID", "From", "Port", "To", "Port", "Role", "Medium", "Cable", "VLANs"]
@@ -4343,37 +4388,180 @@ class NetworkPlannerDialog(QDialog):
                     )
 
     def delete_instance(self) -> None:
-        index, item = self._selected(self.instances_tab, "network_asset_instances")
-        if item is None:
+        rows = self.instances_tab.selected_rows()
+        instances = self._items("network_asset_instances")
+        selected = [
+            instances[row]
+            for row in rows
+            if 0 <= row < len(instances)
+        ]
+        instance_ids = {
+            _text(item.get("id"))
+            for item in selected
+            if _text(item.get("id"))
+        }
+        if not instance_ids:
             return
-        instance_id = _text(item.get("id"))
+
+        ordered_ids = [
+            _text(item.get("id"))
+            for item in selected
+            if _text(item.get("id")) in instance_ids
+        ]
+        if len(ordered_ids) == 1:
+            prompt = (
+                f"Delete installed asset {ordered_ids[0]} and all of its dependent "
+                "network records?"
+            )
+        else:
+            preview = ", ".join(ordered_ids[:8])
+            if len(ordered_ids) > 8:
+                preview += f", and {len(ordered_ids) - 8} more"
+            prompt = (
+                f"Delete {len(ordered_ids)} selected installed assets and all of "
+                f"their dependent network records?\n\n{preview}"
+            )
+
         if (
             QMessageBox.question(
                 self,
-                "Delete installed asset",
-                f"Delete {instance_id} and all of its network connections?",
+                "Delete installed assets",
+                prompt,
             )
             != QMessageBox.Yes
         ):
             return
-        self._items("network_asset_instances").pop(index)
+
+        removed_connection_ids = {
+            connection_id
+            for connection in self._items("network_connections")
+            if (
+                _text(connection.get("from_instance_id")) in instance_ids
+                or _text(connection.get("to_instance_id")) in instance_ids
+            )
+            for connection_id in [_text(connection.get("id"))]
+            if connection_id
+        }
+        removed_assignment_ids = {
+            assignment_id
+            for assignment in self._items("network_endpoint_assignments")
+            if any(
+                _text(assignment.get(field)) in instance_ids
+                for field in (
+                    "network_instance_id",
+                    "physical_patch_panel_instance_id",
+                    "horizontal_cable_from_instance_id",
+                )
+            )
+            for assignment_id in [_text(assignment.get("id"))]
+            if assignment_id
+        }
+        removed_fibre_cable_ids = {
+            cable_id
+            for cable in self._items("network_fibre_cables")
+            if (
+                _text(cable.get("from_instance_id")) in instance_ids
+                or _text(cable.get("to_instance_id")) in instance_ids
+            )
+            for cable_id in [_text(cable.get("id"))]
+            if cable_id
+        }
+
+        self.data["network_asset_instances"] = [
+            item
+            for item in instances
+            if _text(item.get("id")) not in instance_ids
+        ]
         self.data["network_connections"] = [
             connection
             for connection in self._items("network_connections")
-            if _text(connection.get("from_instance_id")) != instance_id
-            and _text(connection.get("to_instance_id")) != instance_id
+            if _text(connection.get("from_instance_id")) not in instance_ids
+            and _text(connection.get("to_instance_id")) not in instance_ids
         ]
         self.data["network_power_connections"] = [
             link
             for link in self._items("network_power_connections")
-            if _text(link.get("from_instance_id")) != instance_id
-            and _text(link.get("to_instance_id")) != instance_id
+            if _text(link.get("from_instance_id")) not in instance_ids
+            and _text(link.get("to_instance_id")) not in instance_ids
         ]
         self.data["network_endpoint_assignments"] = [
             assignment
             for assignment in self._items("network_endpoint_assignments")
-            if _text(assignment.get("network_instance_id")) != instance_id
+            if not any(
+                _text(assignment.get(field)) in instance_ids
+                for field in (
+                    "network_instance_id",
+                    "physical_patch_panel_instance_id",
+                    "horizontal_cable_from_instance_id",
+                )
+            )
         ]
+        self.data["network_patch_leads"] = [
+            lead
+            for lead in self._items("network_patch_leads")
+            if _text(lead.get("instance_id")) not in instance_ids
+            and _text(lead.get("peer_instance_id")) not in instance_ids
+            and _text(lead.get("connection_id")) not in removed_connection_ids
+            and _text(lead.get("assignment_id")) not in removed_assignment_ids
+        ]
+        self.data["network_optic_modules"] = [
+            module
+            for module in self._items("network_optic_modules")
+            if _text(module.get("host_instance_id")) not in instance_ids
+            and _text(module.get("connection_id")) not in removed_connection_ids
+        ]
+        self.data["network_optical_paths"] = [
+            path
+            for path in self._items("network_optical_paths")
+            if _text(path.get("source_instance_id")) not in instance_ids
+            and _text(path.get("destination_instance_id")) not in instance_ids
+        ]
+        self.data["network_ip_allocations"] = [
+            allocation
+            for allocation in self._items("network_ip_allocations")
+            if _text(allocation.get("instance_id")) not in instance_ids
+        ]
+        self.data["network_redundancy_groups"] = [
+            group
+            for group in self._items("network_redundancy_groups")
+            if _text(group.get("protected_instance_id")) not in instance_ids
+            and _text(group.get("primary_olt_instance_id")) not in instance_ids
+            and _text(group.get("secondary_olt_instance_id")) not in instance_ids
+            and not instance_ids.intersection(
+                {_text(value) for value in group.get("source_instance_ids", [])}
+            )
+            and not instance_ids.intersection(
+                {_text(value) for value in group.get("source_core_instance_ids", [])}
+            )
+        ]
+        self.data["network_fibre_cables"] = [
+            cable
+            for cable in self._items("network_fibre_cables")
+            if _text(cable.get("from_instance_id")) not in instance_ids
+            and _text(cable.get("to_instance_id")) not in instance_ids
+        ]
+        self.data["network_fibre_splices"] = [
+            splice
+            for splice in self._items("network_fibre_splices")
+            if _text(splice.get("termination_instance_id")) not in instance_ids
+            and _text(splice.get("circuit_id")) not in removed_connection_ids
+            and _text(splice.get("incoming_cable_id")) not in removed_fibre_cable_ids
+            and _text(splice.get("outgoing_cable_id")) not in removed_fibre_cable_ids
+        ]
+
+        for node in self._items("network_fibre_nodes"):
+            if _text(node.get("linked_instance_id")) in instance_ids:
+                node["linked_instance_id"] = ""
+
+        for external in self._items("network_external_networks"):
+            if _text(external.get("demarcation_instance_id")) in instance_ids:
+                external["demarcation_instance_id"] = ""
+            external["peer_instance_ids"] = [
+                value
+                for value in external.get("peer_instance_ids", [])
+                if _text(value) not in instance_ids
+            ]
+
         self.refresh_tables()
 
     def add_connection(self) -> None:

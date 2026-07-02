@@ -412,6 +412,7 @@ class LayerVisibilityDialog(QDialog):
         ("Network", "Network planning", "show_network_check"),
         ("Network", "Network assets", "show_network_assets_check"),
         ("Network", "Network links", "show_network_connections_check"),
+        ("Network", "Wireless devices", "show_wireless_devices_check"),
         ("Network", "Physical fibre", "show_physical_fibre_check"),
     ]
 
