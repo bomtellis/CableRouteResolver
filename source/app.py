@@ -106,6 +106,9 @@ from dialogs import (
     RoomTypesEditorWindow,
     AssetsEditorWindow,
     AssetCategoriesEditorWindow,
+    ScenarioGroupManagerDialog,
+    RoomTypeAssetScenarioDialog,
+    AssetCapabilityOverlapDialog,
 )
 from advanced_dialogs import (
     ConnectionEditorWindow,
@@ -1599,6 +1602,18 @@ class CableRouteEditor(QMainWindow):
         room_counts_btn.clicked.connect(self.show_room_type_counts_dialog)
         sidebar_button_row.addWidget(room_counts_btn)
 
+        scenario_btn = QPushButton("Scenario Test")
+        scenario_btn.setToolTip(
+            "Preview and permanently apply grouped room/asset scenario sets"
+        )
+        scenario_btn.clicked.connect(self.show_room_type_asset_scenario_dialog)
+        sidebar_button_row.addWidget(scenario_btn)
+
+        capability_btn = QPushButton("Capability Matrix")
+        capability_btn.setToolTip("Show asset capability keyword overlap and deployed overlap locations")
+        capability_btn.clicked.connect(self.show_asset_capability_overlap_dialog)
+        sidebar_button_row.addWidget(capability_btn)
+
         self.search_dock.setWidget(container)
         self.addDockWidget(Qt.RightDockWidgetArea, self.search_dock)
 
@@ -1618,6 +1633,30 @@ class CableRouteEditor(QMainWindow):
 
         def visible(text):
             return not search_text or search_text in text.lower()
+
+        room_group_labels = {}
+        for group in self.store.data.get("room_type_scenario_groups", []) or []:
+            if not isinstance(group, dict):
+                continue
+            group_name = str(group.get("name", "") or "").strip()
+            if not group_name:
+                continue
+            for room_type_id in group.get("room_type_ids", []) or []:
+                room_type_id = str(room_type_id).strip()
+                if room_type_id:
+                    room_group_labels.setdefault(room_type_id, []).append(group_name)
+
+        asset_group_labels = {}
+        for group in self.store.data.get("asset_scenario_groups", []) or []:
+            if not isinstance(group, dict):
+                continue
+            group_name = str(group.get("name", "") or "").strip()
+            if not group_name:
+                continue
+            for asset_id in group.get("asset_ids", []) or []:
+                asset_id = str(asset_id).strip()
+                if asset_id:
+                    asset_group_labels.setdefault(asset_id, []).append(group_name)
 
         rows = {
             "Data Points": [
@@ -1645,11 +1684,25 @@ class CableRouteEditor(QMainWindow):
                 for item in self.store.data.get("connections", [])
             ],
             "Room Types": [
-                f"{item.get('id', '')} - {item.get('name', '')}"
+                (
+                    f"{item.get('id', '')} - {item.get('name', '')}"
+                    + (
+                        f" [{'; '.join(sorted(room_group_labels.get(str(item.get('id', '') or '').strip(), []), key=str.casefold))}]"
+                        if room_group_labels.get(str(item.get('id', '') or '').strip())
+                        else ""
+                    )
+                )
                 for item in self.store.data.get("room_types", [])
             ],
             "Assets": [
-                f"{item.get('id', '')} - {item.get('name', '')}"
+                (
+                    f"{item.get('id', '')} - {item.get('name', '')}"
+                    + (
+                        f" [{'; '.join(sorted(asset_group_labels.get(str(item.get('id', '') or '').strip(), []), key=str.casefold))}]"
+                        if asset_group_labels.get(str(item.get('id', '') or '').strip())
+                        else ""
+                    )
+                )
                 for item in self.store.data.get("assets", [])
             ],
         }
@@ -1929,6 +1982,18 @@ class CableRouteEditor(QMainWindow):
 
         room_type_counts_action = tools_menu.addAction("Room Type Counts")
         room_type_counts_action.triggered.connect(self.show_room_type_counts_dialog)
+
+        scenario_action = tools_menu.addAction("Room/Asset Scenario Test")
+        scenario_action.triggered.connect(self.show_room_type_asset_scenario_dialog)
+
+        room_groups_action = tools_menu.addAction("Room Scenario Groups")
+        room_groups_action.triggered.connect(self.manage_room_type_scenario_groups)
+
+        asset_groups_action = tools_menu.addAction("Asset Scenario Groups")
+        asset_groups_action.triggered.connect(self.manage_asset_scenario_groups)
+
+        capability_overlap_action = tools_menu.addAction("Asset Capability Overlap Matrix")
+        capability_overlap_action.triggered.connect(self.show_asset_capability_overlap_dialog)
 
         tools_menu.addSeparator()
 
@@ -2249,6 +2314,24 @@ class CableRouteEditor(QMainWindow):
                 ),
                 self._ribbon_icon_button(
                     "Rooms", "Room types", QStyle.SP_DirIcon, self.manage_room_types
+                ),
+                self._ribbon_icon_button(
+                    "Scenario",
+                    "Test adding assets to grouped room types",
+                    QStyle.SP_FileDialogDetailedView,
+                    self.show_room_type_asset_scenario_dialog,
+                ),
+                self._ribbon_icon_button(
+                    "Room Groups",
+                    "Manage reusable room scenario groups",
+                    QStyle.SP_DirLinkIcon,
+                    self.manage_room_type_scenario_groups,
+                ),
+                self._ribbon_icon_button(
+                    "Asset Groups",
+                    "Manage reusable asset scenario groups",
+                    QStyle.SP_FileLinkIcon,
+                    self.manage_asset_scenario_groups,
                 ),
                 self._ribbon_icon_button(
                     "Locations",
@@ -5405,14 +5488,81 @@ class CableRouteEditor(QMainWindow):
     def _save_room_types(self, items):
         self.push_undo_state("Save room types")
         self.store.data["room_types"] = items
+        valid_room_type_ids = {str(room_type.get("id", "") or "").strip() for room_type in items if str(room_type.get("id", "") or "").strip()}
+        for group in self.store.data.get("room_type_scenario_groups", []) or []:
+            if isinstance(group, dict):
+                group["room_type_ids"] = [
+                    str(room_type_id).strip()
+                    for room_type_id in group.get("room_type_ids", []) or []
+                    if str(room_type_id).strip() in valid_room_type_ids
+                ]
 
-        for point in self.store.data.get("data_points", []):
-            name = str(point.get("name", "")).strip()
-            if name:
-                self.store.sync_connection_qty_for_data_point(name)
+        self.store.sync_all_room_type_quantities()
 
         self.set_status("Room types updated and data point quantities recalculated")
         self.refresh_canvas()
+
+    def manage_room_type_scenario_groups(self):
+        room_options = [
+            (
+                str(room_type.get("id", "") or "").strip(),
+                str(room_type.get("name", room_type.get("id", "")) or "").strip(),
+            )
+            for room_type in self.store.data.get("room_types", []) or []
+            if str(room_type.get("id", "") or "").strip()
+        ]
+        if not room_options:
+            QMessageBox.information(
+                self,
+                "Room Scenario Groups",
+                "Create room types before defining room scenario groups.",
+            )
+            return
+
+        dialog = ScenarioGroupManagerDialog(
+            self,
+            "Room Scenario Groups",
+            self.store.data.get("room_type_scenario_groups", []),
+            room_options,
+            "room_type_ids",
+            "Room type",
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.result is not None:
+            self.push_undo_state("Save room scenario groups")
+            self.store.data["room_type_scenario_groups"] = dialog.result
+            self.set_status(f"Saved {len(dialog.result)} room scenario group(s)")
+            self.refresh_rhs_search_sidebar()
+
+    def manage_asset_scenario_groups(self):
+        asset_options = [
+            (
+                str(asset.get("id", "") or "").strip(),
+                str(asset.get("name", asset.get("id", "")) or "").strip(),
+            )
+            for asset in self.store.data.get("assets", []) or []
+            if str(asset.get("id", "") or "").strip()
+        ]
+        if not asset_options:
+            QMessageBox.information(
+                self,
+                "Asset Scenario Groups",
+                "Create endpoint assets before defining asset scenario groups.",
+            )
+            return
+
+        dialog = ScenarioGroupManagerDialog(
+            self,
+            "Asset Scenario Groups",
+            self.store.data.get("asset_scenario_groups", []),
+            asset_options,
+            "asset_ids",
+            "Asset",
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.result is not None:
+            self.push_undo_state("Save asset scenario groups")
+            self.store.data["asset_scenario_groups"] = dialog.result
+            self.set_status(f"Saved {len(dialog.result)} asset scenario group(s)")
+            self.refresh_rhs_search_sidebar()
 
     def manage_data_points(self):
         columns = [
@@ -9011,6 +9161,10 @@ class CableRouteEditor(QMainWindow):
             self.store.data.get("assets", []),
             self._save_assets,
             category_options=self.store.asset_category_options(),
+            deployment_summary=self.store.asset_deployment_summary(),
+            deployment_locations=self.store.asset_deployment_locations(),
+            on_navigate_to_room=self._centre_on_named_point,
+            on_show_capability_overlap=self.show_asset_capability_overlap_dialog,
         )
 
     def manage_asset_categories(self):
@@ -9028,14 +9182,328 @@ class CableRouteEditor(QMainWindow):
     def _save_assets(self, items):
         self.push_undo_state("Save assets")
         self.store.data["assets"] = items
+        valid_asset_ids = {str(asset.get("id", "") or "").strip() for asset in items if str(asset.get("id", "") or "").strip()}
+        for group in self.store.data.get("asset_scenario_groups", []) or []:
+            if isinstance(group, dict):
+                group["asset_ids"] = [
+                    str(asset_id).strip()
+                    for asset_id in group.get("asset_ids", []) or []
+                    if str(asset_id).strip() in valid_asset_ids
+                ]
 
-        for point in self.store.data.get("data_points", []):
-            name = str(point.get("name", "")).strip()
-            if name:
-                self.store.sync_connection_qty_for_data_point(name)
+        self.store.sync_all_room_type_quantities()
 
         self.set_status("Assets updated and room type quantities recalculated")
         self.refresh_canvas()
+
+    def show_asset_capability_overlap_dialog(self):
+        assets = list(self.store.data.get("assets", []) or [])
+        if not assets:
+            QMessageBox.information(
+                self,
+                "Asset Capability Overlap",
+                "Create endpoint assets before reviewing capability overlaps.",
+            )
+            return
+
+        rows = self.store.asset_capability_overlap_rows()
+        if not rows:
+            QMessageBox.information(
+                self,
+                "Asset Capability Overlap",
+                "No capability keywords have been entered on endpoint assets yet. Edit assets and populate the Capability / function keywords field first.",
+            )
+            return
+
+        dialog = AssetCapabilityOverlapDialog(self, rows, assets)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def show_room_type_asset_scenario_dialog(self):
+        assets_by_id = {
+            str(asset.get("id", "")).strip(): asset
+            for asset in self.store.data.get("assets", [])
+            if str(asset.get("id", "")).strip()
+        }
+        if not assets_by_id:
+            QMessageBox.information(
+                self,
+                "Room/Asset Scenario",
+                "Create endpoint assets before running a room/asset scenario.",
+            )
+            return
+
+        if not self.store.room_type_scenario_groups():
+            QMessageBox.information(
+                self,
+                "Room/Asset Scenario",
+                "No room scenario groups have been defined yet. Use Tools > Room Scenario Groups to create reusable room selections.",
+            )
+
+        if not self.store.asset_scenario_groups():
+            QMessageBox.information(
+                self,
+                "Room/Asset Scenario",
+                "No asset scenario groups have been defined yet. Use Tools > Asset Scenario Groups to create reusable asset selections.",
+            )
+
+        asset_categories_by_id = {
+            str(category.get("id", "")).strip(): str(
+                category.get("name", category.get("id", ""))
+            ).strip()
+            for category in self.store.data.get("asset_categories", [])
+            if str(category.get("id", "")).strip()
+        }
+
+        dialog = RoomTypeAssetScenarioDialog(
+            self,
+            self.store.data,
+            asset_options=self.store.asset_options(),
+            assets_by_id=assets_by_id,
+            asset_categories_by_id=asset_categories_by_id,
+            scenario_definitions=self.store.scenario_definitions(),
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            action = str(dialog.result.get("action", "") or "").strip().lower()
+            if action == "apply":
+                self.apply_room_type_asset_scenarios(dialog.result)
+            else:
+                self.save_room_type_asset_scenarios(dialog.result.get("scenarios", []))
+                summary = str(dialog.result.get("summary", "") or "").strip()
+                if summary:
+                    self.set_status(summary)
+
+    def save_room_type_asset_scenarios(self, scenarios):
+        self.push_undo_state("Save room/asset scenarios")
+        self.store.data["room_type_asset_scenarios"] = [dict(item) for item in scenarios]
+        self.set_status(f"Saved {len(scenarios)} room/asset scenario definition(s)")
+
+    def _asset_scenario_group_key(self, asset):
+        explicit = str(
+            asset.get("scenario_group", asset.get("asset_scenario_group", "")) or ""
+        ).strip()
+        if explicit:
+            return explicit
+        return str(asset.get("Group", asset.get("group", "")) or "").strip()
+
+    def _scenario_name_list(self, value):
+        if isinstance(value, (list, tuple, set)):
+            raw_values = list(value)
+        elif value in (None, ""):
+            raw_values = []
+        else:
+            text = str(value or "").strip()
+            raw_values = [part.strip() for part in text.split(";")] if ";" in text else [text]
+        names = []
+        seen = set()
+        for item in raw_values:
+            name = str(item or "").strip()
+            if name and name.casefold() not in seen:
+                names.append(name)
+                seen.add(name.casefold())
+        return names
+
+    def _scenario_group_label(self, names):
+        return "; ".join(self._scenario_name_list(names))
+
+    def _scenario_type(self, scenario):
+        value = str(
+            scenario.get("scenario_type", scenario.get("type", scenario.get("kind", "standard")))
+            if isinstance(scenario, dict)
+            else "standard"
+        ).strip().lower()
+        if value.startswith("rep") or value in {"replace_asset", "asset_replacement", "replacement"}:
+            return "replacement"
+        return "standard"
+
+    def _scenario_replacement_asset_groups(self, scenario):
+        replacement_groups = self._scenario_name_list(scenario.get("replacement_asset_groups"))
+        if not replacement_groups:
+            replacement_groups = self._scenario_name_list(
+                scenario.get(
+                    "replacement_asset_group",
+                    scenario.get("replacement_group", scenario.get("target_asset_group", "")),
+                )
+            )
+        return replacement_groups
+
+    def _scenario_matching_room_types(self, room_groups):
+        wanted = set()
+        for room_group in self._scenario_name_list(room_groups):
+            room_type_ids = self.store.room_type_ids_for_scenario_group(room_group)
+            wanted.update(str(room_type_id).strip() for room_type_id in room_type_ids if str(room_type_id).strip())
+        return [
+            room_type
+            for room_type in self.store.data.get("room_types", []) or []
+            if str(room_type.get("id", "") or "").strip() in wanted
+        ]
+
+    def _scenario_matching_asset_ids(self, asset_groups):
+        asset_ids = []
+        seen = set()
+        known_asset_ids = {
+            str(asset.get("id", "") or "").strip()
+            for asset in self.store.data.get("assets", []) or []
+            if str(asset.get("id", "") or "").strip()
+        }
+        for asset_group in self._scenario_name_list(asset_groups):
+            assets = self.store.asset_ids_for_scenario_group(asset_group)
+            if assets:
+                candidates = sorted(assets, key=str.casefold)
+            elif asset_group in known_asset_ids:
+                candidates = [asset_group]
+            else:
+                candidates = []
+            for asset_id in candidates:
+                if asset_id not in seen:
+                    asset_ids.append(asset_id)
+                    seen.add(asset_id)
+        return asset_ids
+
+    def _scenario_new_qty(self, current_qty, qty, mode):
+        current_qty = max(0, int(current_qty or 0))
+        qty = max(1, int(qty or 1))
+        mode = str(mode or "add").strip().lower()
+        if mode == "minimum":
+            return max(current_qty, qty)
+        if mode == "replace":
+            return qty
+        return current_qty + qty
+
+    def _normalise_room_asset_rows_for_save(self, rows_by_asset_id):
+        return [
+            {"asset_id": asset_id, "qty": max(1, int(qty or 1))}
+            for asset_id, qty in sorted(rows_by_asset_id.items(), key=lambda item: item[0].casefold())
+            if str(asset_id).strip() and int(qty or 0) > 0
+        ]
+
+    def apply_room_type_asset_scenarios(self, scenario_result):
+        scenarios = [dict(item) for item in scenario_result.get("scenarios", []) or []]
+        enabled_scenarios = [item for item in scenarios if item.get("enabled")]
+        if not enabled_scenarios:
+            return
+
+        self.push_undo_state("Apply room/asset scenarios")
+        self.store.data["room_type_asset_scenarios"] = scenarios
+
+        updated_room_type_ids = set()
+        added = 0
+        changed_existing = 0
+        removed = 0
+        skipped = []
+
+        for scenario in enabled_scenarios:
+            scenario_name = str(scenario.get("name", "Scenario") or "Scenario").strip()
+            scenario_type = self._scenario_type(scenario)
+            room_groups = self._scenario_name_list(scenario.get("room_groups"))
+            if not room_groups:
+                room_groups = self._scenario_name_list(scenario.get("room_group", ""))
+            asset_groups = self._scenario_name_list(scenario.get("asset_groups"))
+            if not asset_groups:
+                asset_groups = self._scenario_name_list(scenario.get("asset_group", ""))
+            replacement_asset_groups = self._scenario_replacement_asset_groups(scenario)
+            room_group_label = self._scenario_group_label(room_groups)
+            asset_group_label = self._scenario_group_label(asset_groups)
+            replacement_group_label = self._scenario_group_label(replacement_asset_groups)
+            qty = max(1, int(scenario.get("qty", 1) or 1))
+            mode = str(scenario.get("mode", "add") or "add").strip().lower()
+
+            room_types = self._scenario_matching_room_types(room_groups)
+            asset_ids = self._scenario_matching_asset_ids(asset_groups)
+            replacement_asset_ids = (
+                self._scenario_matching_asset_ids(replacement_asset_groups)
+                if scenario_type == "replacement"
+                else []
+            )
+            if not room_types:
+                skipped.append(f"{scenario_name}: no room types for '{room_group_label}'")
+                continue
+            if not asset_ids:
+                skipped.append(f"{scenario_name}: no assets for '{asset_group_label}'")
+                continue
+            if scenario_type == "replacement" and not replacement_asset_ids:
+                skipped.append(f"{scenario_name}: no replacement assets for '{replacement_group_label}'")
+                continue
+
+            for room_type in room_types:
+                room_type_id = str(room_type.get("id", "") or "").strip()
+                rows_by_asset_id = {
+                    str(row.get("asset_id", "") or "").strip(): int(row.get("qty", 1) or 1)
+                    for row in self.store.room_type_asset_rows(room_type)
+                    if str(row.get("asset_id", "") or "").strip()
+                }
+
+                if scenario_type == "replacement":
+                    for asset_id in asset_ids:
+                        current_qty = int(rows_by_asset_id.get(asset_id, 0) or 0)
+                        if current_qty > 0:
+                            rows_by_asset_id.pop(asset_id, None)
+                            removed += 1
+
+                    for replacement_asset_id in replacement_asset_ids:
+                        current_qty = int(rows_by_asset_id.get(replacement_asset_id, 0) or 0)
+                        new_qty = self._scenario_new_qty(current_qty, qty, mode)
+                        if current_qty <= 0:
+                            added += 1
+                        elif new_qty != current_qty:
+                            changed_existing += 1
+                        rows_by_asset_id[replacement_asset_id] = new_qty
+                else:
+                    for asset_id in asset_ids:
+                        current_qty = int(rows_by_asset_id.get(asset_id, 0) or 0)
+                        new_qty = self._scenario_new_qty(current_qty, qty, mode)
+                        if current_qty <= 0:
+                            added += 1
+                        elif new_qty != current_qty:
+                            changed_existing += 1
+                        rows_by_asset_id[asset_id] = new_qty
+
+                rows = self._normalise_room_asset_rows_for_save(rows_by_asset_id)
+                room_type["assets"] = rows
+                room_type["asset_ids"] = [row["asset_id"] for row in rows]
+                updated_room_type_ids.add(room_type_id)
+
+        self.store.sync_all_room_type_quantities()
+        self.refresh_canvas()
+        self.refresh_rhs_search_sidebar()
+
+        summary = (
+            f"Applied {len(enabled_scenarios)} enabled scenario(s) to "
+            f"{len(updated_room_type_ids)} room type(s). Added {added} asset assignment(s); "
+            f"updated {changed_existing} existing quantity value(s); removed {removed} replaced asset assignment(s)."
+        )
+        if skipped:
+            summary += f" Skipped {len(skipped)} empty scenario target(s)."
+
+        self.set_status(summary)
+        QMessageBox.information(self, "Scenarios applied", summary)
+
+    def apply_room_type_asset_scenario(self, scenario_result):
+        """Backward-compatible wrapper for older single-scenario dialog payloads."""
+        if "scenarios" in scenario_result:
+            self.apply_room_type_asset_scenarios(scenario_result)
+            return
+        group_name = str(scenario_result.get("group_name", "") or "").strip()
+        asset_id = str(scenario_result.get("asset_id", "") or "").strip()
+        qty = max(1, int(scenario_result.get("qty", 1) or 1))
+        mode = str(scenario_result.get("mode", "add") or "add").strip().lower()
+        if not group_name or not asset_id:
+            return
+        self.apply_room_type_asset_scenarios(
+            {
+                "scenarios": [
+                    {
+                        "name": f"{group_name} / {asset_id}",
+                        "enabled": True,
+                        "room_group": group_name,
+                        "asset_group": asset_id,
+                        "qty": qty,
+                        "mode": mode,
+                    }
+                ]
+            }
+        )
 
     def rotate_right_clicked_selection_90(self, picked):
         if not picked:
@@ -9123,6 +9591,40 @@ class CableRouteEditor(QMainWindow):
 
         return result
 
+    def _room_group_names_for_room_type(self, room_type_id):
+        room_type_id = str(room_type_id or "").strip()
+        if not room_type_id:
+            return []
+        groups = []
+        for group in self.store.data.get("room_type_scenario_groups", []) or []:
+            if not isinstance(group, dict):
+                continue
+            name = str(group.get("name", "") or "").strip()
+            members = {str(member_id).strip() for member_id in group.get("room_type_ids", []) or []}
+            if name and room_type_id in members:
+                groups.append(name)
+        return sorted(groups, key=str.casefold)
+
+    def _split_group_names_cell(self, value):
+        text = str(value or "").strip()
+        if not text:
+            return []
+        parts = []
+        for chunk in re.split(r"[;|]", text):
+            chunk = chunk.strip()
+            if chunk:
+                parts.append(chunk)
+        if len(parts) <= 1 and "," in text:
+            parts = [chunk.strip() for chunk in text.split(",") if chunk.strip()]
+        seen = set()
+        result = []
+        for name in parts:
+            key = name.casefold()
+            if key not in seen:
+                result.append(name)
+                seen.add(key)
+        return result
+
     def export_room_type_asset_matrix(self):
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -9155,7 +9657,7 @@ class CableRouteEditor(QMainWindow):
             if str(room_type.get("id", "")).strip()
         ]
 
-        headers = ["room_type_id", "room_type_name"] + [
+        headers = ["room_type_id", "room_type_name", "room_groups"] + [
             self._asset_matrix_header_label(asset) for asset in assets
         ]
 
@@ -9169,6 +9671,9 @@ class CableRouteEditor(QMainWindow):
                 row = {
                     "room_type_id": str(room_type.get("id", "")).strip(),
                     "room_type_name": str(room_type.get("name", "")).strip(),
+                    "room_groups": "; ".join(
+                        self._room_group_names_for_room_type(str(room_type.get("id", "") or "").strip())
+                    ),
                 }
 
                 for asset in assets:
@@ -9207,6 +9712,7 @@ class CableRouteEditor(QMainWindow):
         updated = 0
         created = 0
         ignored_assets = set()
+        imported_group_members = {}
 
         with open(path, "r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
@@ -9218,7 +9724,7 @@ class CableRouteEditor(QMainWindow):
             asset_columns = [
                 header
                 for header in reader.fieldnames
-                if header not in {"room_type_id", "room_type_name"}
+                if header not in {"room_type_id", "room_type_name", "room_groups", "scenario_group"}
             ]
 
             self.push_undo_state("Import room type asset matrix")
@@ -9226,6 +9732,9 @@ class CableRouteEditor(QMainWindow):
             for csv_row in reader:
                 room_type_id = str(csv_row.get("room_type_id", "")).strip()
                 room_type_name = str(csv_row.get("room_type_name", "")).strip()
+                room_group_names = self._split_group_names_cell(
+                    csv_row.get("room_groups", csv_row.get("scenario_group", ""))
+                )
 
                 if not room_type_id:
                     continue
@@ -9267,6 +9776,7 @@ class CableRouteEditor(QMainWindow):
                     room_type = {
                         "id": room_type_id,
                         "name": room_type_name or room_type_id,
+                        "scenario_group": room_group_names[0] if room_group_names else "",
                         "assets": [],
                         "asset_ids": [],
                     }
@@ -9278,14 +9788,43 @@ class CableRouteEditor(QMainWindow):
 
                 if room_type_name:
                     room_type["name"] = room_type_name
+                if room_group_names:
+                    room_type["scenario_group"] = room_group_names[0]
+                imported_group_members[room_type_id] = room_group_names
 
                 room_type["assets"] = asset_rows
                 room_type["asset_ids"] = [row["asset_id"] for row in asset_rows]
 
-        for point in self.store.data.get("data_points", []):
-            name = str(point.get("name", "")).strip()
-            if name:
-                self.store.sync_connection_qty_for_data_point(name)
+        if imported_group_members:
+            all_imported_room_ids = set(imported_group_members)
+            groups_by_key = {}
+            for group in self.store.data.get("room_type_scenario_groups", []) or []:
+                if not isinstance(group, dict):
+                    continue
+                name = str(group.get("name", "") or "").strip()
+                if not name:
+                    continue
+                key = name.casefold()
+                members = [
+                    str(member_id).strip()
+                    for member_id in group.get("room_type_ids", []) or []
+                    if str(member_id).strip() and str(member_id).strip() not in all_imported_room_ids
+                ]
+                groups_by_key[key] = {
+                    "name": name,
+                    "room_type_ids": members,
+                    "notes": str(group.get("notes", "") or "").strip(),
+                }
+            for room_type_id, group_names in imported_group_members.items():
+                for group_name in group_names:
+                    key = group_name.casefold()
+                    if key not in groups_by_key:
+                        groups_by_key[key] = {"name": group_name, "room_type_ids": [], "notes": ""}
+                    if room_type_id not in groups_by_key[key]["room_type_ids"]:
+                        groups_by_key[key]["room_type_ids"].append(room_type_id)
+            self.store.data["room_type_scenario_groups"] = list(groups_by_key.values())
+
+        self.store.sync_all_room_type_quantities()
 
         self.refresh_canvas()
 

@@ -23,6 +23,9 @@ DEFAULT_JSON = {
     },
     "departments": [],
     "room_types": [],
+    "room_type_scenario_groups": [],
+    "asset_scenario_groups": [],
+    "room_type_asset_scenarios": [],
     "asset_categories": [],
     "assets": [],
     "locations": [],
@@ -102,6 +105,9 @@ class JsonStore:
 
         self.data.setdefault("departments", [])
         self.data.setdefault("room_types", [])
+        self.data.setdefault("room_type_scenario_groups", [])
+        self.data.setdefault("asset_scenario_groups", [])
+        self.data.setdefault("room_type_asset_scenarios", [])
         self.data.setdefault("asset_categories", [])
         self.data.setdefault("assets", [])
         self.data.setdefault("locations", [])
@@ -137,10 +143,101 @@ class JsonStore:
             asset.setdefault("Group", asset.get("group", ""))
             asset["ADB_Code"] = str(asset.get("ADB_Code", "") or "").strip()
             asset["Group"] = str(asset.get("Group", "") or "").strip()
+            capability_keywords = self.parse_capability_keywords(
+                asset.get(
+                    "capability_keywords",
+                    asset.get("capabilities", asset.get("function_keywords", "")),
+                )
+            )
+            asset["capabilities"] = capability_keywords
+            asset["capability_keywords"] = "; ".join(capability_keywords)
+            legacy_asset_group = str(
+                asset.get(
+                    "scenario_group",
+                    asset.get("asset_scenario_group", asset.get("scenario_group_name", "")),
+                )
+                or ""
+            ).strip()
+            if legacy_asset_group:
+                asset["scenario_group"] = legacy_asset_group
+
+        def normalise_name_list(value):
+            if isinstance(value, (list, tuple, set)):
+                raw_values = list(value)
+            elif value in (None, ""):
+                raw_values = []
+            else:
+                text = str(value or "").strip()
+                raw_values = [part.strip() for part in text.split(";")] if ";" in text else [text]
+            names = []
+            seen = set()
+            for item in raw_values:
+                name = str(item or "").strip()
+                if name and name.casefold() not in seen:
+                    names.append(name)
+                    seen.add(name.casefold())
+            return names
+
+        normalised_scenarios = []
+        for idx, scenario in enumerate(self.data.get("room_type_asset_scenarios", []) or [], start=1):
+            if not isinstance(scenario, dict):
+                continue
+            name = str(scenario.get("name", scenario.get("id", f"Scenario {idx}")) or f"Scenario {idx}").strip()
+            room_groups = normalise_name_list(scenario.get("room_groups"))
+            if not room_groups:
+                room_groups = normalise_name_list(scenario.get("room_group", scenario.get("scenario_group", "")))
+            asset_groups = normalise_name_list(scenario.get("asset_groups"))
+            if not asset_groups:
+                asset_groups = normalise_name_list(scenario.get("asset_group", scenario.get("asset_scenario_group", "")))
+            replacement_asset_groups = normalise_name_list(scenario.get("replacement_asset_groups"))
+            if not replacement_asset_groups:
+                replacement_asset_groups = normalise_name_list(
+                    scenario.get(
+                        "replacement_asset_group",
+                        scenario.get("replacement_group", scenario.get("target_asset_group", "")),
+                    )
+                )
+            scenario_type = str(
+                scenario.get("scenario_type", scenario.get("type", scenario.get("kind", "standard"))) or "standard"
+            ).strip().lower()
+            if scenario_type.startswith("rep") or scenario_type in {"replace_asset", "asset_replacement"}:
+                scenario_type = "replacement"
+            else:
+                scenario_type = "standard"
+            mode = str(scenario.get("mode", "add") or "add").strip().lower()
+            if mode not in {"add", "minimum", "replace"}:
+                mode = "add"
+            qty = self._safe_int(scenario.get("qty", 1), 1)
+            normalised_scenarios.append(
+                {
+                    "name": name,
+                    "enabled": bool(scenario.get("enabled", True)),
+                    "scenario_type": scenario_type,
+                    "room_group": room_groups[0] if room_groups else "",
+                    "room_groups": room_groups,
+                    "asset_group": asset_groups[0] if asset_groups else "",
+                    "asset_groups": asset_groups,
+                    "replacement_asset_group": replacement_asset_groups[0] if replacement_asset_groups else "",
+                    "replacement_asset_groups": replacement_asset_groups,
+                    "qty": max(1, qty),
+                    "mode": mode,
+                    "notes": str(scenario.get("notes", "") or "").strip(),
+                }
+            )
+        self.data["room_type_asset_scenarios"] = normalised_scenarios
 
         for room_type in self.data.get("room_types", []):
             room_type.setdefault("id", "")
             room_type.setdefault("name", room_type.get("id", ""))
+            legacy_room_group = str(
+                room_type.get(
+                    "scenario_group",
+                    room_type.get("deployment_group", room_type.get("room_type_group", "")),
+                )
+                or ""
+            ).strip()
+            if legacy_room_group:
+                room_type["scenario_group"] = legacy_room_group
             if "assets" not in room_type:
                 room_type["assets"] = [
                     {
@@ -203,6 +300,103 @@ class JsonStore:
                 for x in point.get("department_ids", [])
                 if str(x).strip()
             ]
+
+        self._normalise_scenario_group_definitions()
+
+    def _normalise_group_collection(self, collection_key: str, member_key: str, valid_member_ids, legacy_members_by_group=None) -> None:
+        valid_ids = {str(member_id).strip() for member_id in valid_member_ids if str(member_id).strip()}
+        legacy_members_by_group = legacy_members_by_group or {}
+        groups_by_name = {}
+        display_order = []
+
+        def normalise_members(value):
+            if isinstance(value, (list, tuple, set)):
+                raw_members = value
+            elif value in (None, ""):
+                raw_members = []
+            else:
+                raw_members = [value]
+            members = []
+            seen = set()
+            for member_id in raw_members:
+                member_id = str(member_id).strip()
+                if not member_id or member_id in seen:
+                    continue
+                if valid_ids and member_id not in valid_ids:
+                    continue
+                seen.add(member_id)
+                members.append(member_id)
+            return members
+
+        def add_group(name, members=None, notes=""):
+            name = str(name or "").strip()
+            if not name:
+                return
+            key = name.casefold()
+            if key not in groups_by_name:
+                groups_by_name[key] = {"name": name, member_key: [], "notes": str(notes or "").strip()}
+                display_order.append(key)
+            elif notes and not groups_by_name[key].get("notes"):
+                groups_by_name[key]["notes"] = str(notes or "").strip()
+            existing = set(groups_by_name[key].get(member_key, []) or [])
+            for member_id in normalise_members(members):
+                if member_id not in existing:
+                    groups_by_name[key].setdefault(member_key, []).append(member_id)
+                    existing.add(member_id)
+
+        for raw_group in self.data.get(collection_key, []) or []:
+            if isinstance(raw_group, dict):
+                name = raw_group.get("name", raw_group.get("id", raw_group.get("group", raw_group.get("group_name", ""))))
+                members = raw_group.get(member_key)
+                if members is None:
+                    members = raw_group.get("member_ids", raw_group.get("members", raw_group.get("ids", [])))
+                add_group(name, members, raw_group.get("notes", raw_group.get("description", "")))
+            else:
+                add_group(raw_group, [])
+
+        for group_name, member_ids in legacy_members_by_group.items():
+            add_group(group_name, member_ids)
+
+        self.data[collection_key] = [groups_by_name[key] for key in display_order]
+
+    def _normalise_scenario_group_definitions(self) -> None:
+        room_ids = [
+            str(room_type.get("id", "") or "").strip()
+            for room_type in self.data.get("room_types", []) or []
+            if str(room_type.get("id", "") or "").strip()
+        ]
+        asset_ids = [
+            str(asset.get("id", "") or "").strip()
+            for asset in self.data.get("assets", []) or []
+            if str(asset.get("id", "") or "").strip()
+        ]
+
+        legacy_room_groups = {}
+        for room_type in self.data.get("room_types", []) or []:
+            room_type_id = str(room_type.get("id", "") or "").strip()
+            group = str(room_type.get("scenario_group", room_type.get("deployment_group", room_type.get("room_type_group", ""))) or "").strip()
+            if room_type_id and group:
+                legacy_room_groups.setdefault(group, []).append(room_type_id)
+
+        legacy_asset_groups = {}
+        for asset in self.data.get("assets", []) or []:
+            asset_id = str(asset.get("id", "") or "").strip()
+            group = str(asset.get("scenario_group", asset.get("asset_scenario_group", "")) or "").strip()
+            if asset_id and group:
+                legacy_asset_groups.setdefault(group, []).append(asset_id)
+
+        self._normalise_group_collection(
+            "room_type_scenario_groups",
+            "room_type_ids",
+            room_ids,
+            legacy_room_groups,
+        )
+        self._normalise_group_collection(
+            "asset_scenario_groups",
+            "asset_ids",
+            asset_ids,
+            legacy_asset_groups,
+        )
 
     @classmethod
     def from_file(cls, path: str) -> "JsonStore":
@@ -1187,6 +1381,426 @@ class JsonStore:
             "skipped": skipped,
         }
 
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return int(default)
+
+    def room_type_asset_rows(self, room_type: dict) -> List[dict]:
+        """Return normalised asset/quantity rows for a room type.
+
+        Older projects stored room-type assets as an ``asset_ids`` list.  Newer
+        projects store ``assets`` rows so that each room type can hold multiple
+        units of the same endpoint asset.
+        """
+        rows: List[dict] = []
+        seen = set()
+
+        for row in room_type.get("assets", []) or []:
+            if not isinstance(row, dict):
+                continue
+            asset_id = str(row.get("asset_id", row.get("id", ""))).strip()
+            if not asset_id:
+                continue
+            qty = max(1, self._safe_int(row.get("qty", 1), 1))
+            rows.append({"asset_id": asset_id, "qty": qty})
+            seen.add(asset_id)
+
+        for asset_id in room_type.get("asset_ids", []) or []:
+            asset_id = str(asset_id).strip()
+            if asset_id and asset_id not in seen:
+                rows.append({"asset_id": asset_id, "qty": 1})
+                seen.add(asset_id)
+
+        return rows
+
+    def room_type_lookup(self) -> Dict[str, dict]:
+        return {
+            str(item.get("id", "")).strip(): item
+            for item in self.data.get("room_types", [])
+            if str(item.get("id", "")).strip()
+        }
+
+    @staticmethod
+    def parse_capability_keywords(value) -> List[str]:
+        """Normalise asset capability/function keywords for replacement testing.
+
+        Keywords can be entered as a comma, semicolon, pipe, slash or newline
+        separated text field, or loaded from a legacy list value.  Matching is
+        case-insensitive, while the stored display value is title-neutral lower
+        case so equivalent entries collapse into one capability.
+        """
+        if isinstance(value, (list, tuple, set)):
+            raw_values = list(value)
+        elif value in (None, ""):
+            raw_values = []
+        else:
+            text = str(value or "")
+            for sep in ["\r", "\n", ",", "|", "/"]:
+                text = text.replace(sep, ";")
+            raw_values = text.split(";")
+
+        keywords: List[str] = []
+        seen = set()
+        for item in raw_values:
+            keyword = str(item or "").strip()
+            if not keyword:
+                continue
+            keyword = re.sub(r"\s+", " ", keyword).strip().lower()
+            if keyword and keyword not in seen:
+                keywords.append(keyword)
+                seen.add(keyword)
+        return keywords
+
+    def asset_capability_keywords(self, asset) -> List[str]:
+        if not isinstance(asset, dict):
+            return []
+        return self.parse_capability_keywords(
+            asset.get(
+                "capability_keywords",
+                asset.get("capabilities", asset.get("function_keywords", "")),
+            )
+        )
+
+    def _scenario_group_lookup(self, collection_key: str, member_key: str) -> Dict[str, List[str]]:
+        lookup: Dict[str, List[str]] = {}
+        for group in self.data.get(collection_key, []) or []:
+            if not isinstance(group, dict):
+                continue
+            name = str(group.get("name", "") or "").strip()
+            if not name:
+                continue
+            members: List[str] = []
+            seen = set()
+            for member_id in group.get(member_key, []) or []:
+                member_id = str(member_id).strip()
+                if member_id and member_id not in seen:
+                    members.append(member_id)
+                    seen.add(member_id)
+            lookup[name] = members
+        return lookup
+
+    def room_type_scenario_groups(self) -> List[str]:
+        groups = {
+            str(item.get("name", "") or "").strip()
+            for item in self.data.get("room_type_scenario_groups", []) or []
+            if isinstance(item, dict)
+        }
+        # Backwards compatibility for projects edited before group definitions.
+        groups.update(
+            str(item.get("scenario_group", "") or "").strip()
+            for item in self.data.get("room_types", []) or []
+            if str(item.get("scenario_group", "") or "").strip()
+        )
+        return sorted((group for group in groups if group), key=str.casefold)
+
+    def asset_scenario_groups(self) -> List[str]:
+        groups = {
+            str(item.get("name", "") or "").strip()
+            for item in self.data.get("asset_scenario_groups", []) or []
+            if isinstance(item, dict)
+        }
+        # Backwards compatibility for projects edited before group definitions.
+        groups.update(
+            str(item.get("scenario_group", "") or "").strip()
+            for item in self.data.get("assets", []) or []
+            if str(item.get("scenario_group", "") or "").strip()
+        )
+        return sorted((group for group in groups if group), key=str.casefold)
+
+    def room_type_ids_for_scenario_group(self, group_name: str) -> List[str]:
+        group_name = str(group_name or "").strip()
+        if not group_name:
+            return []
+        lookup = self._scenario_group_lookup("room_type_scenario_groups", "room_type_ids")
+        for name, member_ids in lookup.items():
+            if name.casefold() == group_name.casefold():
+                return list(member_ids)
+        return [
+            str(room_type.get("id", "") or "").strip()
+            for room_type in self.data.get("room_types", []) or []
+            if str(room_type.get("id", "") or "").strip()
+            and str(room_type.get("scenario_group", "") or "").strip().casefold() == group_name.casefold()
+        ]
+
+    def asset_ids_for_scenario_group(self, group_name: str) -> List[str]:
+        group_name = str(group_name or "").strip()
+        if not group_name:
+            return []
+        lookup = self._scenario_group_lookup("asset_scenario_groups", "asset_ids")
+        for name, member_ids in lookup.items():
+            if name.casefold() == group_name.casefold():
+                return list(member_ids)
+        return [
+            str(asset.get("id", "") or "").strip()
+            for asset in self.data.get("assets", []) or []
+            if str(asset.get("id", "") or "").strip()
+            and str(asset.get("scenario_group", "") or "").strip().casefold() == group_name.casefold()
+        ]
+
+    def scenario_definitions(self) -> List[dict]:
+        return [dict(item) for item in self.data.get("room_type_asset_scenarios", []) or []]
+
+    def placed_room_type_counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for point in self.data.get("data_points", []) or []:
+            room_type_id = str(point.get("room_type_id", "") or "").strip()
+            if room_type_id:
+                counts[room_type_id] = counts.get(room_type_id, 0) + 1
+        return counts
+
+    def asset_deployment_summary(self) -> Dict[str, dict]:
+        """Count deployed endpoint assets from placed room-type assignments.
+
+        ``deployed_items`` counts physical asset units.  ``deployed_data_points``
+        multiplies those units by the asset's data-points-per-item value.
+        """
+        assets_by_id = {
+            str(asset.get("id", "")).strip(): asset
+            for asset in self.data.get("assets", [])
+            if str(asset.get("id", "")).strip()
+        }
+        room_types_by_id = self.room_type_lookup()
+        placed_counts = self.placed_room_type_counts()
+        summary: Dict[str, dict] = {
+            asset_id: {
+                "deployed_rooms": 0,
+                "deployed_items": 0,
+                "deployed_data_points": 0,
+                "room_type_ids": set(),
+            }
+            for asset_id in assets_by_id
+        }
+
+        for room_type_id, placed_rooms in placed_counts.items():
+            room_type = room_types_by_id.get(room_type_id)
+            if not room_type or placed_rooms <= 0:
+                continue
+
+            for row in self.room_type_asset_rows(room_type):
+                asset_id = str(row.get("asset_id", "") or "").strip()
+                if not asset_id:
+                    continue
+                asset = assets_by_id.get(asset_id, {})
+                data_points_each = max(
+                    0,
+                    self._safe_int(
+                        asset.get(
+                            "data_points",
+                            asset.get("data_points_each", asset.get("cables", 1)),
+                        ),
+                        1,
+                    ),
+                )
+                qty_per_room = max(1, self._safe_int(row.get("qty", 1), 1))
+                deployed_items = placed_rooms * qty_per_room
+                record = summary.setdefault(
+                    asset_id,
+                    {
+                        "deployed_rooms": 0,
+                        "deployed_items": 0,
+                        "deployed_data_points": 0,
+                        "room_type_ids": set(),
+                    },
+                )
+                record["deployed_rooms"] += placed_rooms
+                record["deployed_items"] += deployed_items
+                record["deployed_data_points"] += deployed_items * data_points_each
+                record["room_type_ids"].add(room_type_id)
+
+        for record in summary.values():
+            room_type_ids = record.get("room_type_ids", set())
+            if isinstance(room_type_ids, set):
+                record["room_type_ids"] = sorted(room_type_ids, key=str.casefold)
+
+        return summary
+
+    def asset_deployment_locations(self) -> Dict[str, List[dict]]:
+        """Return placed rooms/data-points where each endpoint asset is deployed.
+
+        Deployment is derived from the standard room-type asset assignments and
+        the placed data points that reference those room types.  Each row is a
+        room/data-point instance, so it can be shown directly in the asset
+        viewer and navigated to on the canvas.
+        """
+        assets_by_id = {
+            str(asset.get("id", "")).strip(): asset
+            for asset in self.data.get("assets", [])
+            if str(asset.get("id", "")).strip()
+        }
+        room_types_by_id = self.room_type_lookup()
+        locations: Dict[str, List[dict]] = {asset_id: [] for asset_id in assets_by_id}
+
+        for point in self.data.get("data_points", []) or []:
+            if not isinstance(point, dict):
+                continue
+
+            room_type_id = str(point.get("room_type_id", "") or "").strip()
+            if not room_type_id:
+                continue
+
+            room_type = room_types_by_id.get(room_type_id)
+            if not room_type:
+                continue
+
+            room_type_name = str(room_type.get("name", room_type_id) or room_type_id).strip()
+            room_name = str(point.get("name", "") or "").strip()
+            if not room_name:
+                continue
+
+            for asset_row in self.room_type_asset_rows(room_type):
+                asset_id = str(asset_row.get("asset_id", "") or "").strip()
+                if not asset_id:
+                    continue
+
+                asset = assets_by_id.get(asset_id, {})
+                data_points_each = max(
+                    0,
+                    self._safe_int(
+                        asset.get(
+                            "data_points",
+                            asset.get("data_points_each", asset.get("cables", 1)),
+                        ),
+                        1,
+                    ),
+                )
+                qty_per_room = max(1, self._safe_int(asset_row.get("qty", 1), 1))
+
+                try:
+                    floor = int(point.get("floor", 0))
+                except (TypeError, ValueError):
+                    floor = 0
+
+                locations.setdefault(asset_id, []).append(
+                    {
+                        "asset_id": asset_id,
+                        "asset_name": str(asset.get("name", asset_id) or asset_id).strip(),
+                        "room_name": room_name,
+                        "floor": floor,
+                        "x": point.get("x", ""),
+                        "y": point.get("y", ""),
+                        "room_type_id": room_type_id,
+                        "room_type_name": room_type_name,
+                        "qty_per_room": qty_per_room,
+                        "deployed_items": qty_per_room,
+                        "deployed_data_points": qty_per_room * data_points_each,
+                        "data_points_each": data_points_each,
+                        "department_ids": [
+                            str(department_id).strip()
+                            for department_id in point.get("department_ids", []) or []
+                            if str(department_id).strip()
+                        ],
+                    }
+                )
+
+        for rows in locations.values():
+            rows.sort(
+                key=lambda row: (
+                    int(row.get("floor", 0) or 0),
+                    str(row.get("room_name", "") or "").casefold(),
+                    str(row.get("room_type_name", "") or "").casefold(),
+                )
+            )
+
+        return locations
+
+    def asset_capability_overlap_rows(self) -> List[dict]:
+        """Build a capability matrix showing where asset functions overlap.
+
+        A capability overlaps when two or more assets share the same capability
+        keyword.  A deployed overlap is more specific: two or more assets with
+        the same keyword are assigned to the same room type, and placed rooms
+        exist for that room type.
+        """
+        assets_by_id = {
+            str(asset.get("id", "") or "").strip(): asset
+            for asset in self.data.get("assets", []) or []
+            if str(asset.get("id", "") or "").strip()
+        }
+        capability_assets: Dict[str, List[str]] = {}
+        for asset_id, asset in assets_by_id.items():
+            for keyword in self.asset_capability_keywords(asset):
+                capability_assets.setdefault(keyword, []).append(asset_id)
+
+        room_types_by_id = self.room_type_lookup()
+        locations_by_asset = self.asset_deployment_locations()
+
+        overlap_room_types: Dict[str, dict] = {}
+        for room_type_id, room_type in room_types_by_id.items():
+            assigned_asset_ids = [
+                str(row.get("asset_id", "") or "").strip()
+                for row in self.room_type_asset_rows(room_type)
+                if str(row.get("asset_id", "") or "").strip() in assets_by_id
+            ]
+            if not assigned_asset_ids:
+                continue
+            assigned_set = set(assigned_asset_ids)
+            for capability, asset_ids in capability_assets.items():
+                matching_ids = [asset_id for asset_id in asset_ids if asset_id in assigned_set]
+                if len(matching_ids) < 2:
+                    continue
+                room_type_name = str(room_type.get("name", room_type_id) or room_type_id).strip()
+                label = f"{room_type_id} - {room_type_name}" if room_type_id != room_type_name else room_type_id
+                entry = overlap_room_types.setdefault(capability, {"room_types": [], "rooms": [], "room_type_ids": set()})
+                if room_type_id not in entry["room_type_ids"]:
+                    entry["room_type_ids"].add(room_type_id)
+                    entry["room_types"].append(label)
+                for point in self.data.get("data_points", []) or []:
+                    if str(point.get("room_type_id", "") or "").strip() != room_type_id:
+                        continue
+                    room_name = str(point.get("name", "") or "").strip()
+                    if room_name:
+                        try:
+                            floor = int(point.get("floor", 0))
+                        except (TypeError, ValueError):
+                            floor = 0
+                        room_label = f"F{floor}: {room_name}"
+                        if room_label not in entry["rooms"]:
+                            entry["rooms"].append(room_label)
+
+        rows: List[dict] = []
+        for capability, asset_ids in sorted(capability_assets.items(), key=lambda item: item[0].casefold()):
+            unique_asset_ids = []
+            seen = set()
+            for asset_id in asset_ids:
+                if asset_id in seen:
+                    continue
+                unique_asset_ids.append(asset_id)
+                seen.add(asset_id)
+            asset_labels = []
+            deployed_asset_ids = []
+            for asset_id in unique_asset_ids:
+                asset = assets_by_id.get(asset_id, {})
+                asset_name = str(asset.get("name", asset_id) or asset_id).strip()
+                asset_labels.append(f"{asset_id} - {asset_name}" if asset_name != asset_id else asset_id)
+                if locations_by_asset.get(asset_id):
+                    deployed_asset_ids.append(asset_id)
+            overlap = overlap_room_types.get(capability, {"room_types": [], "rooms": []})
+            rows.append(
+                {
+                    "capability": capability,
+                    "asset_ids": unique_asset_ids,
+                    "asset_labels": asset_labels,
+                    "asset_count": len(unique_asset_ids),
+                    "deployed_asset_ids": deployed_asset_ids,
+                    "deployed_asset_count": len(deployed_asset_ids),
+                    "overlap_room_types": sorted(overlap.get("room_types", []) or [], key=str.casefold),
+                    "overlap_rooms": sorted(overlap.get("rooms", []) or [], key=str.casefold),
+                }
+            )
+        return rows
+
+    def sync_all_room_type_quantities(self) -> None:
+        for point in self.data.get("data_points", []) or []:
+            name = str(point.get("name", "")).strip()
+            if name:
+                self.sync_connection_qty_for_data_point(name)
+
     def room_type_options(self) -> List[Tuple[str, str]]:
         return [
             (
@@ -1219,31 +1833,8 @@ class JsonStore:
             if str(asset.get("id", "")).strip()
         }
 
-        room_asset_rows = []
-        for row in room_type.get("assets", []) or []:
-            if not isinstance(row, dict):
-                continue
-            asset_id = str(row.get("asset_id", row.get("id", ""))).strip()
-            if asset_id:
-                room_asset_rows.append(
-                    {
-                        "asset_id": asset_id,
-                        "qty": int(row.get("qty", 1) or 1),
-                    }
-                )
-
-        if not room_asset_rows:
-            room_asset_rows = [
-                {
-                    "asset_id": str(asset_id).strip(),
-                    "qty": 1,
-                }
-                for asset_id in room_type.get("asset_ids", []) or []
-                if str(asset_id).strip()
-            ]
-
         total = 0
-        for row in room_asset_rows:
+        for row in self.room_type_asset_rows(room_type):
             asset = assets_by_id.get(row["asset_id"])
             if not asset:
                 continue
