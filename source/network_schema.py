@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional
 from network_services import FIBRE_COLOURS, build_fibre_cores, fibre_layer_defaults, set_core_status_from_splices
 
 
-NETWORK_SCHEMA_VERSION = 10
+NETWORK_SCHEMA_VERSION = 12
 
 
 DEFAULT_FIBRE_CABLE_TYPES = [
@@ -100,6 +100,82 @@ DEFAULT_FIBRE_CABLE_TYPES = [
 ]
 
 
+DEFAULT_NETWORK_USAGE_PROFILES = [
+    {
+        "id": "light_iot_sensor",
+        "name": "Light IoT sensor",
+        "description": "Low-rate telemetry, status and control traffic.",
+        "north_south_bandwidth_mbps": 0.25,
+        "east_west_bandwidth_mbps": 0.25,
+        "expected_packet_rate_pps": 100.0,
+        "poe_power_w": 5.0,
+    },
+    {
+        "id": "iot_radio_gateway",
+        "name": "IoT radio gateway",
+        "description": "Aggregated local radio traffic with cloud and building-system integration.",
+        "north_south_bandwidth_mbps": 5.0,
+        "east_west_bandwidth_mbps": 10.0,
+        "expected_packet_rate_pps": 2500.0,
+        "poe_power_w": 15.0,
+    },
+    {
+        "id": "office_workstation",
+        "name": "Office workstation",
+        "description": "Typical productivity, collaboration and internal application use.",
+        "north_south_bandwidth_mbps": 20.0,
+        "east_west_bandwidth_mbps": 10.0,
+        "expected_packet_rate_pps": 5000.0,
+        "poe_power_w": 0.0,
+    },
+    {
+        "id": "clinical_workstation",
+        "name": "Clinical workstation",
+        "description": "Clinical systems, imaging retrieval and internal application traffic.",
+        "north_south_bandwidth_mbps": 25.0,
+        "east_west_bandwidth_mbps": 35.0,
+        "expected_packet_rate_pps": 10000.0,
+        "poe_power_w": 0.0,
+    },
+    {
+        "id": "wireless_access_point",
+        "name": "Wireless access point",
+        "description": "Busy enterprise access point carrying client internet and internal traffic.",
+        "north_south_bandwidth_mbps": 150.0,
+        "east_west_bandwidth_mbps": 100.0,
+        "expected_packet_rate_pps": 40000.0,
+        "poe_power_w": 25.0,
+    },
+    {
+        "id": "hd_ip_camera",
+        "name": "HD IP camera",
+        "description": "Continuous local video stream to an NVR with limited external traffic.",
+        "north_south_bandwidth_mbps": 0.5,
+        "east_west_bandwidth_mbps": 8.0,
+        "expected_packet_rate_pps": 3000.0,
+        "poe_power_w": 12.0,
+    },
+    {
+        "id": "voip_phone",
+        "name": "VoIP telephone",
+        "description": "Concurrent voice signalling and media allowance.",
+        "north_south_bandwidth_mbps": 0.15,
+        "east_west_bandwidth_mbps": 0.15,
+        "expected_packet_rate_pps": 200.0,
+        "poe_power_w": 7.0,
+    },
+    {
+        "id": "application_server",
+        "name": "Application server",
+        "description": "Server workload with substantial internal east-west traffic.",
+        "north_south_bandwidth_mbps": 250.0,
+        "east_west_bandwidth_mbps": 1000.0,
+        "expected_packet_rate_pps": 250000.0,
+        "poe_power_w": 0.0,
+    },
+]
+
+
 def default_physical_fibre_planning() -> dict:
     return {
         "routing_mode": "direct",
@@ -145,6 +221,8 @@ NETWORK_DEFAULTS = {
         "external_network_link_count": 2,
         "default_poe_power_w": 0.0,
         "default_expected_bandwidth_mbps": 0.0,
+        "default_north_south_bandwidth_mbps": 0.0,
+        "default_east_west_bandwidth_mbps": 0.0,
         "default_expected_packet_rate_pps": 0.0,
         "poe_power_defaults": {},
         "default_rack_size_u": 42,
@@ -168,6 +246,7 @@ NETWORK_DEFAULTS = {
     "network_routes": [],
     "network_ip_allocations": [],
     "network_external_networks": [],
+    "network_usage_profiles": deepcopy(DEFAULT_NETWORK_USAGE_PROFILES),
     "network_optic_modules": [],
     "network_optical_paths": [],
     "network_fibre_cable_types": deepcopy(DEFAULT_FIBRE_CABLE_TYPES),
@@ -184,6 +263,7 @@ NETWORK_ASSET_TYPES = {
     "network_router",
     "firewall",
     "wireless_access_point",
+    "wireless_device",
     "optical_line_terminal",
     "optical_network_terminal",
     "optical_transceiver",
@@ -624,6 +704,11 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("external_network_link_count", 2)
     settings.setdefault("default_poe_power_w", 0.0)
     settings.setdefault("default_expected_bandwidth_mbps", 0.0)
+    settings.setdefault(
+        "default_north_south_bandwidth_mbps",
+        settings.get("default_expected_bandwidth_mbps", 0.0),
+    )
+    settings.setdefault("default_east_west_bandwidth_mbps", 0.0)
     settings.setdefault("default_expected_packet_rate_pps", 0.0)
     settings.setdefault("poe_power_defaults", {})
     settings.setdefault("default_rack_size_u", 42)
@@ -747,8 +832,20 @@ def ensure_network_schema(data: dict) -> dict:
     settings["default_poe_power_w"] = max(
         0.0, _as_float(settings.get("default_poe_power_w"), 0.0)
     )
-    settings["default_expected_bandwidth_mbps"] = max(
-        0.0, _as_float(settings.get("default_expected_bandwidth_mbps"), 0.0)
+    settings["default_north_south_bandwidth_mbps"] = max(
+        0.0,
+        _as_float(
+            settings.get("default_north_south_bandwidth_mbps"),
+            settings.get("default_expected_bandwidth_mbps", 0.0),
+        ),
+    )
+    settings["default_east_west_bandwidth_mbps"] = max(
+        0.0, _as_float(settings.get("default_east_west_bandwidth_mbps"), 0.0)
+    )
+    settings["default_expected_bandwidth_mbps"] = round(
+        settings["default_north_south_bandwidth_mbps"]
+        + settings["default_east_west_bandwidth_mbps"],
+        6,
     )
     settings["default_expected_packet_rate_pps"] = max(
         0.0, _as_float(settings.get("default_expected_packet_rate_pps"), 0.0)
@@ -828,6 +925,7 @@ def ensure_network_schema(data: dict) -> dict:
         "network_routes",
         "network_ip_allocations",
         "network_external_networks",
+        "network_usage_profiles",
         "network_optic_modules",
         "network_optical_paths",
         "network_fibre_cable_types",
@@ -842,17 +940,73 @@ def ensure_network_schema(data: dict) -> dict:
         data["network_design_summary"] = {}
 
     # General project assets are the traffic-producing endpoints consumed by
-    # the auto-planner. Store expected load on the existing asset records so
-    # room-type quantities automatically contribute to switch/router demand.
+    # the auto-planner. Directional fields distinguish WAN/internet
+    # north-south demand from internal east-west demand. Legacy projects that
+    # only contain expected_bandwidth_mbps are migrated conservatively as
+    # north-south traffic so their previous sizing is never reduced silently.
     for endpoint_asset in data.get("assets", []):
         if not isinstance(endpoint_asset, dict):
             continue
-        endpoint_asset["expected_bandwidth_mbps"] = max(
+        legacy_bandwidth = max(
             0.0, _as_float(endpoint_asset.get("expected_bandwidth_mbps"))
+        )
+        has_directional = (
+            "expected_north_south_bandwidth_mbps" in endpoint_asset
+            or "expected_east_west_bandwidth_mbps" in endpoint_asset
+        )
+        north_south = max(
+            0.0,
+            _as_float(
+                endpoint_asset.get("expected_north_south_bandwidth_mbps"),
+                legacy_bandwidth if not has_directional else 0.0,
+            ),
+        )
+        east_west = max(
+            0.0,
+            _as_float(endpoint_asset.get("expected_east_west_bandwidth_mbps"), 0.0),
+        )
+        endpoint_asset["usage_profile_id"] = _text(
+            endpoint_asset.get("usage_profile_id")
+        )
+        endpoint_asset["expected_north_south_bandwidth_mbps"] = north_south
+        endpoint_asset["expected_east_west_bandwidth_mbps"] = east_west
+        endpoint_asset["expected_bandwidth_mbps"] = round(
+            north_south + east_west, 6
         )
         endpoint_asset["expected_packet_rate_pps"] = max(
             0.0, _as_float(endpoint_asset.get("expected_packet_rate_pps"))
         )
+
+    usage_profile_ids: set[str] = set()
+    normalised_profiles: List[dict] = []
+    for source_profile in list(data.get("network_usage_profiles", [])):
+        if not isinstance(source_profile, dict):
+            continue
+        profile = source_profile
+        profile_id = _text(profile.get("id"))
+        if not profile_id or profile_id in usage_profile_ids:
+            continue
+        usage_profile_ids.add(profile_id)
+        profile["id"] = profile_id
+        profile["name"] = _text(profile.get("name")) or profile_id
+        profile["description"] = _text(profile.get("description"))
+        profile["north_south_bandwidth_mbps"] = max(
+            0.0, _as_float(profile.get("north_south_bandwidth_mbps"))
+        )
+        profile["east_west_bandwidth_mbps"] = max(
+            0.0, _as_float(profile.get("east_west_bandwidth_mbps"))
+        )
+        profile["expected_packet_rate_pps"] = max(
+            0.0, _as_float(profile.get("expected_packet_rate_pps"))
+        )
+        profile["poe_power_w"] = max(
+            0.0, _as_float(profile.get("poe_power_w"))
+        )
+        normalised_profiles.append(profile)
+    for default_profile in DEFAULT_NETWORK_USAGE_PROFILES:
+        if _text(default_profile.get("id")) not in usage_profile_ids:
+            normalised_profiles.append(deepcopy(default_profile))
+    data["network_usage_profiles"] = normalised_profiles
 
     for asset in data["network_assets"]:
         if not isinstance(asset, dict):
@@ -868,6 +1022,15 @@ def ensure_network_schema(data: dict) -> dict:
         asset["asset_type"] = (
             asset_type if asset_type in NETWORK_ASSET_TYPES else "other"
         )
+        wireless_category = _text(asset.get("wireless_device_category")).lower()
+        if asset["asset_type"] == "wireless_access_point" and not wireless_category:
+            wireless_category = "access_point"
+        if wireless_category not in {
+            "", "access_point", "iot_gateway", "radio_gateway",
+            "wireless_bridge", "wireless_sensor", "other",
+        }:
+            wireless_category = "other"
+        asset["wireless_device_category"] = wireless_category
         asset.setdefault("manufacturer", "")
         asset.setdefault("model", "")
         asset.setdefault("patch_panel_type", "")
@@ -999,8 +1162,28 @@ def ensure_network_schema(data: dict) -> dict:
                 )
             ),
         )
-        asset["expected_bandwidth_mbps"] = max(
+        legacy_bandwidth = max(
             0.0, _as_float(asset.get("expected_bandwidth_mbps"))
+        )
+        has_directional = (
+            "expected_north_south_bandwidth_mbps" in asset
+            or "expected_east_west_bandwidth_mbps" in asset
+        )
+        asset["usage_profile_id"] = _text(asset.get("usage_profile_id"))
+        asset["expected_north_south_bandwidth_mbps"] = max(
+            0.0,
+            _as_float(
+                asset.get("expected_north_south_bandwidth_mbps"),
+                legacy_bandwidth if not has_directional else 0.0,
+            ),
+        )
+        asset["expected_east_west_bandwidth_mbps"] = max(
+            0.0, _as_float(asset.get("expected_east_west_bandwidth_mbps"), 0.0)
+        )
+        asset["expected_bandwidth_mbps"] = round(
+            asset["expected_north_south_bandwidth_mbps"]
+            + asset["expected_east_west_bandwidth_mbps"],
+            6,
         )
         asset["expected_packet_rate_pps"] = max(
             0.0, _as_float(asset.get("expected_packet_rate_pps"))
@@ -1269,6 +1452,61 @@ def ensure_network_schema(data: dict) -> dict:
             if layer in {"", "edge", "core", "aggregation", "access", "endpoint", "olt", "splitter", "ont"}
             else ""
         )
+        instance["route_anchor"] = _text(instance.get("route_anchor"))
+        instance["wireless_device_layer"] = bool(instance.get("wireless_device_layer", False))
+        instance["imported_wireless_device"] = bool(instance.get("imported_wireless_device", False))
+        instance["wireless_import_source_file"] = _text(instance.get("wireless_import_source_file"))
+        instance["wireless_import_source_id"] = _text(instance.get("wireless_import_source_id"))
+        instance["wireless_import_source_floor"] = _text(instance.get("wireless_import_source_floor"))
+        instance["wireless_import_profile"] = _text(instance.get("wireless_import_profile"))
+        instance_legacy_bandwidth = max(
+            0.0, _as_float(instance.get("expected_bandwidth_mbps"))
+        )
+        instance_has_directional = (
+            "expected_north_south_bandwidth_mbps" in instance
+            or "expected_east_west_bandwidth_mbps" in instance
+        )
+        instance["expected_north_south_bandwidth_mbps"] = max(
+            0.0,
+            _as_float(
+                instance.get("expected_north_south_bandwidth_mbps"),
+                instance_legacy_bandwidth if not instance_has_directional else 0.0,
+            ),
+        )
+        instance["expected_east_west_bandwidth_mbps"] = max(
+            0.0, _as_float(instance.get("expected_east_west_bandwidth_mbps"), 0.0)
+        )
+        instance["expected_bandwidth_mbps"] = round(
+            instance["expected_north_south_bandwidth_mbps"]
+            + instance["expected_east_west_bandwidth_mbps"],
+            6,
+        )
+        instance["wireless_import_row_number"] = max(0, _as_int(instance.get("wireless_import_row_number")))
+        instance["wireless_import_corridor_distance_m"] = max(
+            0.0, _as_float(instance.get("wireless_import_corridor_distance_m"))
+        )
+        instance["wireless_import_graph_connected"] = bool(
+            instance.get("wireless_import_graph_connected", bool(instance.get("route_anchor")))
+        )
+        instance["department_id"] = _text(instance.get("department_id"))
+        instance["department_ids"] = _normalise_string_list(
+            instance.get("department_ids", [instance["department_id"]] if instance["department_id"] else [])
+        )
+        if instance["department_id"] and instance["department_id"] not in instance["department_ids"]:
+            instance["department_ids"].insert(0, instance["department_id"])
+        instance["department_name"] = _text(instance.get("department_name"))
+        instance["wireless_import_department_status"] = _text(
+            instance.get("wireless_import_department_status")
+        )
+        instance["wireless_import_department_source"] = _text(
+            instance.get("wireless_import_department_source")
+        )
+        instance["wireless_import_department_source_kind"] = _text(
+            instance.get("wireless_import_department_source_kind")
+        )
+        instance["wireless_import_department_distance_m"] = max(
+            0.0, _as_float(instance.get("wireless_import_department_distance_m"))
+        )
         instance.setdefault("management_ip", "")
         instance.setdefault("management_vlan", "")
         instance.setdefault("power_feed", "")
@@ -1421,8 +1659,39 @@ def ensure_network_schema(data: dict) -> dict:
         connection["aggregate_link_speed_mbps"] = max(
             0, _as_int(connection.get("aggregate_link_speed_mbps"))
         )
+        connection_legacy_bandwidth = max(
+            0.0, _as_float(connection.get("expected_bandwidth_mbps"))
+        )
+        connection_has_directional = (
+            "expected_north_south_bandwidth_mbps" in connection
+            or "expected_east_west_bandwidth_mbps" in connection
+        )
+        connection["expected_north_south_bandwidth_mbps"] = max(
+            0.0,
+            _as_float(
+                connection.get("expected_north_south_bandwidth_mbps"),
+                connection_legacy_bandwidth if not connection_has_directional else 0.0,
+            ),
+        )
+        connection["expected_east_west_bandwidth_mbps"] = max(
+            0.0, _as_float(connection.get("expected_east_west_bandwidth_mbps"), 0.0)
+        )
+        connection["expected_bandwidth_mbps"] = round(
+            connection["expected_north_south_bandwidth_mbps"]
+            + connection["expected_east_west_bandwidth_mbps"],
+            6,
+        )
+        connection["aggregate_expected_north_south_bandwidth_mbps"] = max(
+            connection["expected_north_south_bandwidth_mbps"],
+            _as_float(connection.get("aggregate_expected_north_south_bandwidth_mbps")),
+        )
+        connection["aggregate_expected_east_west_bandwidth_mbps"] = max(
+            connection["expected_east_west_bandwidth_mbps"],
+            _as_float(connection.get("aggregate_expected_east_west_bandwidth_mbps")),
+        )
         connection["aggregate_expected_bandwidth_mbps"] = max(
-            0.0, _as_float(connection.get("aggregate_expected_bandwidth_mbps"))
+            connection["expected_bandwidth_mbps"],
+            _as_float(connection.get("aggregate_expected_bandwidth_mbps")),
         )
         connection["aggregate_expected_packet_rate_pps"] = max(
             0.0, _as_float(connection.get("aggregate_expected_packet_rate_pps"))
@@ -1457,6 +1726,9 @@ def ensure_network_schema(data: dict) -> dict:
         )
         assignment.setdefault("endpoint_asset_id", "")
         assignment.setdefault("endpoint_asset_name", "")
+        assignment.setdefault("endpoint_instance_id", "")
+        assignment.setdefault("endpoint_connection_id", "")
+        assignment.setdefault("endpoint_network_port", "")
         assignment.setdefault("department_id", "")
         assignment.setdefault("department_name", "")
         assignment.setdefault("room_type_id", "")
@@ -1473,8 +1745,27 @@ def ensure_network_schema(data: dict) -> dict:
         assignment.setdefault("horizontal_cable_to_port", assignment.get("endpoint_port", ""))
         assignment.setdefault("physical_termination_type", "")
         assignment["poe_power_w"] = max(0.0, _as_float(assignment.get("poe_power_w")))
-        assignment["expected_bandwidth_mbps"] = max(
+        assignment_legacy_bandwidth = max(
             0.0, _as_float(assignment.get("expected_bandwidth_mbps"))
+        )
+        assignment_has_directional = (
+            "expected_north_south_bandwidth_mbps" in assignment
+            or "expected_east_west_bandwidth_mbps" in assignment
+        )
+        assignment["expected_north_south_bandwidth_mbps"] = max(
+            0.0,
+            _as_float(
+                assignment.get("expected_north_south_bandwidth_mbps"),
+                assignment_legacy_bandwidth if not assignment_has_directional else 0.0,
+            ),
+        )
+        assignment["expected_east_west_bandwidth_mbps"] = max(
+            0.0, _as_float(assignment.get("expected_east_west_bandwidth_mbps"), 0.0)
+        )
+        assignment["expected_bandwidth_mbps"] = round(
+            assignment["expected_north_south_bandwidth_mbps"]
+            + assignment["expected_east_west_bandwidth_mbps"],
+            6,
         )
         assignment["expected_packet_rate_pps"] = max(
             0.0, _as_float(assignment.get("expected_packet_rate_pps"))
@@ -1606,6 +1897,8 @@ def ensure_network_schema(data: dict) -> dict:
         external["medium"] = _text(external.get("medium")).lower() or "fibre"
         if external["medium"] not in {"fibre", "copper", "wireless"}:
             external["medium"] = "fibre"
+        external["planner_enabled"] = bool(external.get("planner_enabled", True))
+        external["router_asset_id"] = _text(external.get("router_asset_id"))
         external["bandwidth_mbps"] = max(0.0, _as_float(external.get("bandwidth_mbps")))
 
     for node in data["network_fibre_nodes"]:
@@ -1964,9 +2257,9 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
                 messages.append(
                     f"Fibre splitter {asset_id} has an unsupported split ratio {asset.get('split_ratio')!r}."
                 )
-        if asset_type == "wireless_access_point" and not asset.get("frequencies"):
+        if asset_type in {"wireless_access_point", "wireless_device"} and not asset.get("frequencies"):
             messages.append(
-                f"Wireless access point {asset_id} requires at least one frequency."
+                f"Wireless device {asset_id} requires at least one frequency."
             )
         if asset_id in fibre_connected_asset_ids:
             is_passive_optic = asset_type == "fibre_splitter" or (

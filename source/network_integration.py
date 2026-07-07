@@ -42,11 +42,15 @@ from network_dialogs import (
     NetworkPlannerDialog,
     rack_selection_records,
 )
-from network_auto_planner import auto_connect_manual_devices
+from network_auto_planner import (
+    auto_connect_manual_devices,
+    auto_connect_pending_imported_wireless_devices,
+)
 from network_reports import write_network_schedules
 from network_topology import NetworkTopologyDialog
 from network_physical_fibre import PhysicalFibreTopologyDialog
 from network_fibre_dialogs import FibreNodeEditorDialog
+from network_wireless_import import WirelessDeviceImportWizard, import_wireless_devices
 from network_services import circuit_trace, ensure_physical_fibre_for_design, generate_ip_address_plan
 from network_schema import (
     NETWORK_SCHEMA_VERSION,
@@ -169,7 +173,7 @@ def _is_active_main_graph_asset(asset: dict, instance: Optional[dict] = None) ->
         return False
     if asset_type in {
         "network_router", "firewall", "network_switch",
-        "wireless_access_point", "optical_line_terminal",
+        "wireless_access_point", "wireless_device", "optical_line_terminal",
         "optical_network_terminal", "telco_pop", "external_network",
     }:
         return True
@@ -560,6 +564,60 @@ def _synchronise_physical_fibre(editor) -> None:
     )
 
 
+def _import_wireless_devices(editor) -> None:
+    ensure_network_schema(editor.store.data)
+    wizard = WirelessDeviceImportWizard(editor, editor.store.data)
+    if wizard.exec() != QDialog.Accepted:
+        return
+    _safe_push_undo(editor, "Import wireless devices")
+    try:
+        result = import_wireless_devices(editor.store.data, wizard.import_config())
+    except Exception as exc:
+        QMessageBox.critical(editor, "Wireless device import", str(exc))
+        return
+
+    imported_ids = list(result.get("created_instance_ids", [])) + list(
+        result.get("updated_instance_ids", [])
+    )
+    if imported_ids:
+        editor.selected_point_name = imported_ids[0]
+        first = network_instances_by_id(editor.store.data).get(imported_ids[0], {})
+        try:
+            editor.floor_spin.setValue(int(first.get("floor", editor.floor_spin.value())))
+        except (TypeError, ValueError):
+            pass
+    editor.refresh_canvas()
+
+    auto_result = result.get("auto_connect", {}) or {}
+    lines = [
+        f"Created devices: {len(result.get('created_instance_ids', [])):,}",
+        f"Updated devices: {len(result.get('updated_instance_ids', [])):,}",
+        f"Created wireless asset models: {len(result.get('created_asset_ids', [])):,}",
+        f"Skipped existing rows: {int(result.get('skipped_rows', 0)):,}",
+        f"Rows not mapped to a floor: {int(result.get('unmapped_rows', 0)):,}",
+        f"Invalid rows: {int(result.get('invalid_rows', 0)):,}",
+        f"Devices assigned an inferred department: {int(result.get('department_inferred', 0)):,}",
+        f"Department conflicts resolved in the wizard: {int(result.get('department_resolved', 0)):,}",
+        f"Devices left without a department: {int(result.get('department_unassigned', 0)):,}",
+        f"Devices anchored to the corridor graph: {int(result.get('graph_anchored', 0)):,}",
+        f"Devices without a same-floor corridor node: {int(result.get('without_corridor', 0)):,}",
+    ]
+    if auto_result:
+        lines.append(
+            f"Created upstream network links: {len(auto_result.get('created_connection_ids', [])):,}"
+        )
+    warnings = list(result.get("warnings", []))
+    if warnings:
+        lines.extend(["", "Warnings:"] + [f"• {value}" for value in warnings[:12]])
+        if len(warnings) > 12:
+            lines.append(f"• …and {len(warnings) - 12:,} more")
+    QMessageBox.information(editor, "Wireless device import", "\n".join(lines))
+    if hasattr(editor, "set_status"):
+        editor.set_status(
+            f"Imported {len(imported_ids):,} wireless devices onto the Wireless devices layer"
+        )
+
+
 def _export_network_schedules(editor) -> None:
     ensure_network_schema(editor.store.data)
     output_directory = QFileDialog.getExistingDirectory(
@@ -660,6 +718,12 @@ def _add_network_layer_action(editor) -> None:
                 ),
             ),
             (
+                "Wireless Devices",
+                getattr(
+                    editor, "show_wireless_devices_check", editor.show_network_check
+                ),
+            ),
+            (
                 "Physical Fibre",
                 getattr(editor, "show_physical_fibre_check", editor.show_network_check),
             ),
@@ -700,6 +764,9 @@ def _augment_network_ui(editor) -> None:
     editor.show_network_connections_check = QCheckBox("Network links")
     editor.show_network_connections_check.setChecked(True)
     editor.show_network_connections_check.toggled.connect(editor.refresh_canvas)
+    editor.show_wireless_devices_check = QCheckBox("Wireless devices")
+    editor.show_wireless_devices_check.setChecked(True)
+    editor.show_wireless_devices_check.toggled.connect(editor.refresh_canvas)
     editor.show_physical_fibre_check = QCheckBox("Physical fibre layer")
     editor.show_physical_fibre_check.setChecked(
         bool(editor.store.data.get("network_settings", {}).get("physical_fibre_layer", {}).get("visible", True))
@@ -731,6 +798,7 @@ def _augment_network_ui(editor) -> None:
         technology_layout.addWidget(editor.show_network_check)
         technology_layout.addWidget(editor.show_network_assets_check)
         technology_layout.addWidget(editor.show_network_connections_check)
+        technology_layout.addWidget(editor.show_wireless_devices_check)
         technology_layout.addWidget(editor.show_physical_fibre_check)
         layout.addWidget(technology_box)
 
@@ -760,6 +828,13 @@ def _augment_network_ui(editor) -> None:
         )
         management_layout.addWidget(
             button("Network Planner", lambda: _open_network_planner(editor))
+        )
+        management_layout.addWidget(
+            button(
+                "Import Wireless CSV",
+                lambda: _import_wireless_devices(editor),
+                "Import wireless access points, IoT radio gateways and similar devices with floor and asset mapping",
+            )
         )
         management_layout.addWidget(
             button("Validate Network", lambda: _validate_network(editor))
@@ -823,6 +898,7 @@ def _augment_network_ui(editor) -> None:
             for text, handler in (
                 ("Topology", lambda: _open_network_topology(editor)),
                 ("Network Planner", lambda: _open_network_planner(editor)),
+                ("Import Wireless CSV", lambda: _import_wireless_devices(editor)),
                 ("Network Mode", lambda: _set_network_mode(editor, "network_select")),
                 (
                     "Place Network Asset",
@@ -948,11 +1024,24 @@ def _place_or_select_network_asset(editor, x: float, y: float) -> None:
         auto_result = auto_connect_manual_devices(
             editor.store.data, [_text(dialog.result.get("id"))]
         )
+    wireless_result = auto_connect_pending_imported_wireless_devices(
+        editor.store.data
+    )
     editor.selected_point_name = dialog.result["id"]
     editor.refresh_canvas()
     if hasattr(editor, "set_status"):
         created = len((auto_result or {}).get("created_connection_ids", []))
-        suffix = f" and auto-connected {created} link(s)" if created else ""
+        wireless_created = len(
+            (wireless_result or {}).get("created_connection_ids", [])
+        )
+        suffix_parts = []
+        if created:
+            suffix_parts.append(f"auto-connected {created} device link(s)")
+        if wireless_created:
+            suffix_parts.append(
+                f"connected {wireless_created} pending wireless device(s)"
+            )
+        suffix = f" and {', '.join(suffix_parts)}" if suffix_parts else ""
         editor.set_status(f"Placed network asset {dialog.result['id']}{suffix}")
 
 
@@ -1041,6 +1130,7 @@ def _edit_network_instance(editor, instance_id: str) -> None:
                 power_link["to_instance_id"] = new_id
     if dialog.auto_connect_requested:
         auto_connect_manual_devices(editor.store.data, [new_id])
+    auto_connect_pending_imported_wireless_devices(editor.store.data)
     editor.selected_point_name = new_id
     editor.refresh_canvas()
 
@@ -1441,8 +1531,10 @@ def install_network_planning(editor_class) -> None:
             try:
                 assets_control = getattr(self, "show_network_assets_check", None)
                 links_control = getattr(self, "show_network_connections_check", None)
+                wireless_control = getattr(self, "show_wireless_devices_check", None)
                 show_network_assets = show_network
                 show_network_connections = show_network
+                show_wireless_devices = show_network
                 if assets_control is not None:
                     try:
                         show_network_assets = show_network and bool(
@@ -1457,6 +1549,13 @@ def install_network_planning(editor_class) -> None:
                         )
                     except RuntimeError:
                         show_network_connections = show_network
+                if wireless_control is not None:
+                    try:
+                        show_wireless_devices = show_network and bool(
+                            wireless_control.isChecked()
+                        )
+                    except RuntimeError:
+                        show_wireless_devices = show_network
                 fibre_control = getattr(self, "show_physical_fibre_check", None)
                 show_physical_fibre = bool(
                     fibre_control.isChecked() if fibre_control is not None else
@@ -1466,6 +1565,7 @@ def install_network_planning(editor_class) -> None:
                     show_network=show_network,
                     show_network_assets=show_network_assets,
                     show_network_connections=show_network_connections,
+                    show_wireless_devices=show_wireless_devices,
                     show_physical_fibre=show_physical_fibre,
                 )
             except TypeError:
@@ -1676,6 +1776,7 @@ def install_network_planning(editor_class) -> None:
     editor_class.open_network_topology = _open_network_topology
     editor_class.open_physical_fibre_topology = _open_physical_fibre_topology
     editor_class.open_network_planner = _open_network_planner
+    editor_class.import_wireless_devices = _import_wireless_devices
     editor_class.export_network_schedules = _export_network_schedules
     editor_class.validate_network_plan = _validate_network
     editor_class._network_planning_installed = True

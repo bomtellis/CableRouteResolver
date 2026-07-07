@@ -350,6 +350,7 @@ class GpuDxfGraphView(_ViewBase):
         self.show_network_links = True
         self.show_network_connections = True
         self.show_network_assets = True
+        self.show_wireless_devices = True
         self.show_physical_fibre = True
 
         self.selected_point_name: Optional[str] = None
@@ -993,6 +994,7 @@ class GpuDxfGraphView(_ViewBase):
         show_network_links: Optional[bool] = None,
         show_network_connections: Optional[bool] = None,
         show_network_assets: Optional[bool] = None,
+        show_wireless_devices: Optional[bool] = None,
         show_physical_fibre: Optional[bool] = None,
         **_future_layers: Any,
     ) -> None:
@@ -1024,6 +1026,7 @@ class GpuDxfGraphView(_ViewBase):
         assign("show_network_links", link_value, DirtyLayer.EDGES)
         self.show_network_connections = self.show_network_links
         assign("show_network_assets", show_network_assets, DirtyLayer.OBJECTS)
+        assign("show_wireless_devices", show_wireless_devices, DirtyLayer.OBJECTS)
         assign("show_physical_fibre", show_physical_fibre, DirtyLayer.EDGES | DirtyLayer.OBJECTS)
         if changes:
             self.request_redraw(changes)
@@ -1409,6 +1412,8 @@ class GpuDxfGraphView(_ViewBase):
                 self._draw_points(painter)
                 if self.show_network and self.show_network_assets:
                     self._draw_network_assets(painter)
+                if self.show_network and self.show_wireless_devices:
+                    self._draw_wireless_devices(painter)
             painter.restore()
             return
         if layer_mask == DirtyLayer.OVERLAY:
@@ -1761,7 +1766,7 @@ class GpuDxfGraphView(_ViewBase):
             return False
         if any(token in asset_name or token in role for token in passive_or_power_tokens):
             return False
-        if asset_type in {"network_router", "firewall", "network_switch", "wireless_access_point", "optical_line_terminal", "optical_network_terminal"}:
+        if asset_type in {"network_router", "firewall", "network_switch", "wireless_access_point", "wireless_device", "optical_line_terminal", "optical_network_terminal"}:
             return True
         return any(token in role for token in ("core", "distribution", "aggregation", "access", "gateway", "router", "firewall", "olt", "ont", "wireless", "client"))
 
@@ -1826,6 +1831,14 @@ class GpuDxfGraphView(_ViewBase):
             painter.drawPath(failover_path)
         painter.restore()
 
+    @staticmethod
+    def _is_wireless_layer_instance(instance: dict, asset: dict) -> bool:
+        return bool(
+            str(asset.get("asset_type", "")).strip().lower() in {"wireless_device", "wireless_access_point"}
+            or instance.get("wireless_device_layer", False)
+            or instance.get("imported_wireless_device", False)
+        )
+
     def _draw_network_assets(self, painter: QPainter) -> None:
         snapshot = self._ensure_frame_snapshot()
         bounds = self.visible_world_bounds(60.0)
@@ -1837,6 +1850,8 @@ class GpuDxfGraphView(_ViewBase):
                 continue
             asset = snapshot.network_assets.get(str(instance.get("asset_id", "")).strip(), {})
             asset_type = str(asset.get("asset_type", "") or "").strip().lower()
+            if self._is_wireless_layer_instance(instance, asset):
+                continue
             if asset_type == "network_switch" or not self._is_active_graph_device(instance, snapshot.network_assets):
                 continue
             pos = self.world_to_scene(float(instance.get("x", 0.0)), float(instance.get("y", 0.0)))
@@ -1860,6 +1875,48 @@ class GpuDxfGraphView(_ViewBase):
                 labels.append((self.world_to_scene(float(instance.get("x", 0.0)), float(instance.get("y", 0.0))), str(instance.get("name") or instance_id), QColor("#cce7ff")))
         painter.restore()
         self._draw_label_batch(painter, labels)
+
+
+    def _draw_wireless_devices(self, painter: QPainter) -> None:
+        snapshot = self._ensure_frame_snapshot()
+        bounds = self.visible_world_bounds(60.0)
+        labels: List[Tuple[QPointF, str, QColor]] = []
+        painter.save()
+        self._apply_world_transform(painter)
+        for instance_id, instance in snapshot.network_instances.items():
+            if not self._inside_bounds(instance, bounds, 2.0):
+                continue
+            asset = snapshot.network_assets.get(str(instance.get("asset_id", "")).strip(), {})
+            if not self._is_wireless_layer_instance(instance, asset):
+                continue
+            pos = self.world_to_scene(float(instance.get("x", 0.0)), float(instance.get("y", 0.0)))
+            selected = str(instance_id) == str(self.selected_point_name)
+            category = str(asset.get("wireless_device_category", "") or "").strip().lower()
+            fill = QColor("#bc7a24") if category == "access_point" else QColor("#8f5db7")
+            outline = QColor("#ffffff") if selected else QColor("#ffe1a8")
+            self._draw_wireless_symbol(painter, pos, fill, outline)
+            if self.show_labels:
+                labels.append((
+                    self.world_to_scene(float(instance.get("x", 0.0)), float(instance.get("y", 0.0))),
+                    str(instance.get("name") or instance_id),
+                    QColor("#ffe1a8"),
+                ))
+        painter.restore()
+        self._draw_label_batch(painter, labels)
+
+    @staticmethod
+    def _draw_wireless_symbol(
+        painter: QPainter, pos: QPointF, fill: QColor, outline: QColor
+    ) -> None:
+        """Draw a dedicated radio-beacon symbol for the wireless layer."""
+        painter.setPen(QPen(outline, 0.08))
+        painter.setBrush(QBrush(fill))
+        painter.drawEllipse(QRectF(pos.x() - 0.14, pos.y() - 0.14, 0.28, 0.28))
+        painter.drawLine(QPointF(pos.x(), pos.y() + 0.14), QPointF(pos.x(), pos.y() + 0.58))
+        painter.setBrush(Qt.NoBrush)
+        for radius in (0.38, 0.62):
+            rect = QRectF(pos.x() - radius, pos.y() - radius, radius * 2.0, radius * 2.0)
+            painter.drawArc(rect, 28 * 16, 124 * 16)
 
     @staticmethod
     def _draw_splitter_symbol(painter: QPainter, pos: QPointF, fill: QColor, outline: QColor) -> None:
