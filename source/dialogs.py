@@ -1,3 +1,4 @@
+import csv
 import json
 import re
 from typing import Any
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QMenu,
     QCompleter,
+    QFileDialog,
 )
 
 
@@ -3836,13 +3838,16 @@ class RoomTypeAssetScenarioDialog(QDialog):
 
         button_row = QHBoxLayout()
         layout.addLayout(button_row)
+        export_btn = QPushButton("Export enabled scenario CSV")
         save_btn = QPushButton("Save scenario definitions")
         apply_btn = QPushButton("Permanently apply enabled scenarios")
         close_btn = QPushButton("Close")
+        export_btn.clicked.connect(self.export_enabled_scenario_csv)
         save_btn.clicked.connect(self.save_scenarios)
         apply_btn.clicked.connect(self.apply_enabled_scenarios)
         close_btn.clicked.connect(self.reject)
         button_row.addStretch(1)
+        button_row.addWidget(export_btn)
         button_row.addWidget(save_btn)
         button_row.addWidget(apply_btn)
         button_row.addWidget(close_btn)
@@ -4462,13 +4467,24 @@ class RoomTypeAssetScenarioDialog(QDialog):
                                 "scenario_type": scenario_type_label,
                                 "room_group": room_group_label,
                                 "room_type": f"{room_type_id} - {room_type_name}",
+                                "room_type_id": room_type_id,
+                                "room_type_name": room_type_name,
                                 "placed_rooms": placed_rooms,
                                 "asset_group": asset_group_label,
                                 "asset": f"{asset_id} - {asset_name}",
+                                "asset_id": asset_id,
+                                "asset_name": asset_name,
                                 "replacement_group": replacement_group_label,
                                 "replacement_asset": "",
+                                "replacement_asset_id": "",
+                                "replacement_asset_name": "",
+                                "change_asset_id": asset_id,
+                                "change_asset_name": asset_name,
+                                "change_direction": "remove",
+                                "ports_per_asset": self._asset_data_points_each(asset_id),
                                 "current_qty": current_qty,
                                 "scenario_qty": 0,
+                                "delta_qty_per_location": -current_qty,
                                 "delta_items": -current_qty * placed_rooms,
                                 "delta_data_points": -current_qty * placed_rooms * self._asset_data_points_each(asset_id),
                             }
@@ -4487,13 +4503,24 @@ class RoomTypeAssetScenarioDialog(QDialog):
                                 "scenario_type": scenario_type_label,
                                 "room_group": room_group_label,
                                 "room_type": f"{room_type_id} - {room_type_name}",
+                                "room_type_id": room_type_id,
+                                "room_type_name": room_type_name,
                                 "placed_rooms": placed_rooms,
                                 "asset_group": asset_group_label,
                                 "asset": "",
+                                "asset_id": "",
+                                "asset_name": "",
                                 "replacement_group": replacement_group_label,
                                 "replacement_asset": f"{replacement_asset_id} - {replacement_asset_name}",
+                                "replacement_asset_id": replacement_asset_id,
+                                "replacement_asset_name": replacement_asset_name,
+                                "change_asset_id": replacement_asset_id,
+                                "change_asset_name": replacement_asset_name,
+                                "change_direction": "add/update replacement",
+                                "ports_per_asset": self._asset_data_points_each(replacement_asset_id),
                                 "current_qty": current_qty,
                                 "scenario_qty": scenario_qty,
+                                "delta_qty_per_location": delta_qty_per_room,
                                 "delta_items": delta_qty_per_room * placed_rooms,
                                 "delta_data_points": delta_qty_per_room * placed_rooms * self._asset_data_points_each(replacement_asset_id),
                             }
@@ -4513,13 +4540,24 @@ class RoomTypeAssetScenarioDialog(QDialog):
                             "scenario_type": scenario_type_label,
                             "room_group": room_group_label,
                             "room_type": f"{room_type_id} - {room_type_name}",
+                            "room_type_id": room_type_id,
+                            "room_type_name": room_type_name,
                             "placed_rooms": placed_rooms,
                             "asset_group": asset_group_label,
                             "asset": f"{asset_id} - {asset_name}",
+                            "asset_id": asset_id,
+                            "asset_name": asset_name,
                             "replacement_group": "",
                             "replacement_asset": "",
+                            "replacement_asset_id": "",
+                            "replacement_asset_name": "",
+                            "change_asset_id": asset_id,
+                            "change_asset_name": asset_name,
+                            "change_direction": "add/update",
+                            "ports_per_asset": self._asset_data_points_each(asset_id),
                             "current_qty": current_qty,
                             "scenario_qty": scenario_qty,
+                            "delta_qty_per_location": delta_qty_per_room,
                             "delta_items": delta_qty_per_room * placed_rooms,
                             "delta_data_points": delta_qty_per_room * placed_rooms * self._asset_data_points_each(asset_id),
                         }
@@ -4581,6 +4619,182 @@ class RoomTypeAssetScenarioDialog(QDialog):
             f"{message_text}"
         )
         self.preview_table.resizeColumnsToContents()
+
+
+    def _normalise_id_list(self, value):
+        if isinstance(value, (list, tuple, set)):
+            raw_values = list(value)
+        elif value in (None, ""):
+            raw_values = []
+        else:
+            text = self._text(value)
+            for sep in [";", "|", ",", "\n", "\r"]:
+                text = text.replace(sep, ";")
+            raw_values = [part.strip() for part in text.split(";")]
+        ids = []
+        seen = set()
+        for item in raw_values:
+            item = self._text(item)
+            if item and item.casefold() not in seen:
+                ids.append(item)
+                seen.add(item.casefold())
+        return ids
+
+    def _department_label_lookup(self):
+        return {
+            self._text(department.get("id")): self._text(department.get("name", department.get("id", "")))
+            for department in self.data.get("departments", []) or []
+            if isinstance(department, dict) and self._text(department.get("id"))
+        }
+
+    def _data_points_by_room_type(self):
+        grouped = {}
+        for point in self.data.get("data_points", []) or []:
+            if not isinstance(point, dict):
+                continue
+            room_type_id = self._text(point.get("room_type_id"))
+            if room_type_id:
+                grouped.setdefault(room_type_id, []).append(point)
+        for points in grouped.values():
+            points.sort(
+                key=lambda point: (
+                    self._safe_int(point.get("floor", 0), 0),
+                    self._text(point.get("name")).casefold(),
+                    self._text(point.get("x")),
+                    self._text(point.get("y")),
+                )
+            )
+        return grouped
+
+    def _scenario_delta_location_rows(self, preview_rows):
+        points_by_room_type = self._data_points_by_room_type()
+        departments_by_id = self._department_label_lookup()
+        export_rows = []
+        for row_data in preview_rows:
+            room_type_id = self._text(row_data.get("room_type_id"))
+            points = points_by_room_type.get(room_type_id, [])
+            if not points:
+                continue
+            delta_assets = self._safe_int(row_data.get("delta_qty_per_location", 0), 0)
+            ports_per_asset = self._safe_int(row_data.get("ports_per_asset", 0), 0)
+            delta_ports = delta_assets * ports_per_asset
+            total_delta_assets = self._safe_int(row_data.get("delta_items", 0), 0)
+            total_delta_ports = self._safe_int(row_data.get("delta_data_points", 0), 0)
+            for point in points:
+                department_ids = self._normalise_id_list(
+                    point.get("department_ids", point.get("department_id", point.get("departments", [])))
+                )
+                department_names = [departments_by_id.get(department_id, department_id) for department_id in department_ids]
+                export_rows.append(
+                    {
+                        "scenario": row_data.get("scenario", ""),
+                        "scenario_type": row_data.get("scenario_type", ""),
+                        "room_group": row_data.get("room_group", ""),
+                        "asset_group": row_data.get("asset_group", ""),
+                        "replacement_group": row_data.get("replacement_group", ""),
+                        "change_direction": row_data.get("change_direction", ""),
+                        "floor": point.get("floor", ""),
+                        "location": point.get("name", ""),
+                        "x": point.get("x", ""),
+                        "y": point.get("y", ""),
+                        "room_type_id": room_type_id,
+                        "room_type_name": row_data.get("room_type_name", ""),
+                        "department_ids": "; ".join(department_ids),
+                        "departments": "; ".join(department_names),
+                        "asset_id": row_data.get("change_asset_id", ""),
+                        "asset_name": row_data.get("change_asset_name", ""),
+                        "current_qty_per_location": row_data.get("current_qty", 0),
+                        "scenario_qty_per_location": row_data.get("scenario_qty", 0),
+                        "delta_assets_per_location": delta_assets,
+                        "ports_per_asset": ports_per_asset,
+                        "delta_ports_per_location": delta_ports,
+                        "placed_locations_for_room_type": row_data.get("placed_rooms", 0),
+                        "room_type_total_delta_assets": total_delta_assets,
+                        "room_type_total_delta_ports": total_delta_ports,
+                    }
+                )
+        return export_rows
+
+    def export_enabled_scenario_csv(self):
+        rows, _, messages = self._preview_rows()
+        blocking_messages = [
+            message
+            for message in messages
+            if "Row " in message or "required" in message or "quantity must" in message
+        ]
+        if blocking_messages and not rows:
+            QMessageBox.critical(self, "Scenario export error", "\n".join(blocking_messages))
+            return
+        if not rows:
+            QMessageBox.information(
+                self,
+                "No scenario delta to export",
+                "Refresh the preview and tick one or more scenarios that change deployed assets before exporting.",
+            )
+            return
+
+        export_rows = self._scenario_delta_location_rows(rows)
+        if not export_rows:
+            QMessageBox.information(
+                self,
+                "No placed locations to export",
+                "The enabled scenarios affect room types that do not currently have placed rooms/data points.",
+            )
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export enabled scenario delta CSV",
+            "scenario_asset_port_delta_by_location.csv",
+            "CSV files (*.csv);;All files (*.*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+
+        fieldnames = [
+            "scenario",
+            "scenario_type",
+            "room_group",
+            "asset_group",
+            "replacement_group",
+            "change_direction",
+            "floor",
+            "location",
+            "x",
+            "y",
+            "room_type_id",
+            "room_type_name",
+            "department_ids",
+            "departments",
+            "asset_id",
+            "asset_name",
+            "current_qty_per_location",
+            "scenario_qty_per_location",
+            "delta_assets_per_location",
+            "ports_per_asset",
+            "delta_ports_per_location",
+            "placed_locations_for_room_type",
+            "room_type_total_delta_assets",
+            "room_type_total_delta_ports",
+        ]
+
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                for export_row in export_rows:
+                    writer.writerow({field: export_row.get(field, "") for field in fieldnames})
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", f"Could not write CSV file:\n{exc}")
+            return
+
+        QMessageBox.information(
+            self,
+            "Scenario delta exported",
+            f"Exported {len(export_rows)} location-level scenario delta row(s) to:\n{path}",
+        )
 
     def save_scenarios(self):
         scenarios, errors = self._scenarios_from_table()

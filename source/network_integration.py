@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -33,6 +33,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QInputDialog,
+    QSizePolicy,
+    QStyle,
 )
 
 from network_dialogs import (
@@ -752,27 +754,133 @@ def _add_network_search_tab(editor) -> None:
     search_lists["Network Assets"] = widget
 
 
+
+def _network_ribbon_icon(editor, icon_enum):
+    try:
+        return editor.style().standardIcon(icon_enum)
+    except Exception:
+        return editor.style().standardIcon(QStyle.SP_FileIcon)
+
+
+def _configure_network_ribbon_control(editor, button: QToolButton) -> QToolButton:
+    button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+    button.setIconSize(QSize(16, 16))
+    button.setMinimumSize(88, 28)
+    button.setMaximumSize(128, 32)
+    button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+    button.setAutoRaise(False)
+    configure = getattr(editor, "_configure_ribbon_button", None)
+    if callable(configure):
+        configure(button)
+    return button
+
+
+def _network_ribbon_button(editor, text: str, handler, icon_enum, tooltip: str = "") -> QToolButton:
+    button = QToolButton()
+    button.setText(text)
+    button.setToolTip(tooltip or text)
+    button.setIcon(_network_ribbon_icon(editor, icon_enum))
+    _configure_network_ribbon_control(editor, button)
+    button.clicked.connect(handler)
+    return button
+
+
+def _network_ribbon_toggle(editor, text: str, icon_enum, checked: bool = True, tooltip: str = "") -> QToolButton:
+    button = QToolButton()
+    button.setText(text)
+    button.setToolTip(tooltip or text)
+    button.setCheckable(True)
+    button.setChecked(bool(checked))
+    button.setIcon(_network_ribbon_icon(editor, icon_enum))
+    _configure_network_ribbon_control(editor, button)
+    return button
+
+
+def _add_network_ribbon_group(editor, parent_layout, title: str, widgets, columns: int = 3) -> None:
+    add_group = getattr(editor, "_add_ribbon_group", None)
+    if callable(add_group):
+        add_group(parent_layout, title, widgets, columns=columns)
+        return
+
+    panel = QWidget()
+    panel_layout = QVBoxLayout(panel)
+    panel_layout.setContentsMargins(4, 4, 4, 4)
+    if widgets and all(isinstance(row, list) for row in widgets):
+        for row in widgets:
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(4)
+            for widget in row:
+                row_layout.addWidget(widget)
+            panel_layout.addWidget(row_widget)
+    else:
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+        for widget in widgets:
+            row_layout.addWidget(widget)
+        panel_layout.addWidget(row_widget)
+    label = QLabel(title)
+    label.setAlignment(Qt.AlignCenter)
+    panel_layout.addWidget(label)
+    parent_layout.addWidget(panel)
+
 def _augment_network_ui(editor) -> None:
     ensure_network_schema(editor.store.data)
 
-    editor.show_network_check = QCheckBox("Network layer")
-    editor.show_network_check.setChecked(True)
+    editor.show_network_check = _network_ribbon_toggle(
+        editor,
+        "Planning",
+        QStyle.SP_ComputerIcon,
+        True,
+        "Show network planning layer",
+    )
     editor.show_network_check.toggled.connect(editor.refresh_canvas)
-    editor.show_network_assets_check = QCheckBox("Network assets")
-    editor.show_network_assets_check.setChecked(True)
+
+    editor.show_network_assets_check = _network_ribbon_toggle(
+        editor,
+        "Assets",
+        QStyle.SP_DriveNetIcon,
+        True,
+        "Show installed network assets",
+    )
     editor.show_network_assets_check.toggled.connect(editor.refresh_canvas)
-    editor.show_network_connections_check = QCheckBox("Network links")
-    editor.show_network_connections_check.setChecked(True)
+
+    editor.show_network_connections_check = _network_ribbon_toggle(
+        editor,
+        "Links",
+        QStyle.SP_ArrowRight,
+        True,
+        "Show network links and connections",
+    )
     editor.show_network_connections_check.toggled.connect(editor.refresh_canvas)
-    editor.show_wireless_devices_check = QCheckBox("Wireless devices")
-    editor.show_wireless_devices_check.setChecked(True)
+
+    editor.show_wireless_devices_check = _network_ribbon_toggle(
+        editor,
+        "Wireless",
+        QStyle.SP_DriveNetIcon,
+        True,
+        "Show imported wireless devices",
+    )
     editor.show_wireless_devices_check.toggled.connect(editor.refresh_canvas)
-    editor.show_physical_fibre_check = QCheckBox("Physical fibre layer")
-    editor.show_physical_fibre_check.setChecked(
-        bool(editor.store.data.get("network_settings", {}).get("physical_fibre_layer", {}).get("visible", True))
+
+    editor.show_physical_fibre_check = _network_ribbon_toggle(
+        editor,
+        "Fibre",
+        QStyle.SP_DirLinkIcon,
+        bool(
+            editor.store.data.get("network_settings", {})
+            .get("physical_fibre_layer", {})
+            .get("visible", True)
+        ),
+        "Show physical fibre layer",
     )
     editor.show_physical_fibre_check.toggled.connect(
-        lambda checked: editor.store.data.setdefault("network_settings", {}).setdefault("physical_fibre_layer", {}).__setitem__("visible", bool(checked))
+        lambda checked: editor.store.data.setdefault("network_settings", {})
+        .setdefault("physical_fibre_layer", {})
+        .__setitem__("visible", bool(checked))
     )
     editor.show_physical_fibre_check.toggled.connect(editor.refresh_canvas)
 
@@ -781,11 +889,9 @@ def _augment_network_ui(editor) -> None:
         tab = QWidget()
         layout = QHBoxLayout(tab)
         layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        layout.setContentsMargins(10, 1, 10, 1)
+        layout.setSpacing(10)
 
-        technology_box = QWidget()
-        technology_layout = QVBoxLayout(technology_box)
-        technology_layout.setContentsMargins(4, 4, 4, 4)
-        technology_layout.addWidget(QLabel("Network technology"))
         editor.network_technology_combo = QComboBox()
         editor.network_technology_combo.addItems(NETWORK_TECHNOLOGIES)
         editor.network_technology_combo.setCurrentText(
@@ -794,104 +900,142 @@ def _augment_network_ui(editor) -> None:
         editor.network_technology_combo.currentTextChanged.connect(
             lambda value: _technology_changed(editor, value)
         )
-        technology_layout.addWidget(editor.network_technology_combo)
-        technology_layout.addWidget(editor.show_network_check)
-        technology_layout.addWidget(editor.show_network_assets_check)
-        technology_layout.addWidget(editor.show_network_connections_check)
-        technology_layout.addWidget(editor.show_wireless_devices_check)
-        technology_layout.addWidget(editor.show_physical_fibre_check)
-        layout.addWidget(technology_box)
+        editor.network_technology_combo.setMinimumWidth(126)
+        editor.network_technology_combo.setMaximumWidth(150)
 
-        def button(text: str, handler, tooltip: str = "") -> QPushButton:
-            result = QPushButton(text)
-            result.setMinimumSize(118, 30)
-            result.setToolTip(tooltip or text)
-            result.clicked.connect(handler)
-            return result
+        _add_network_ribbon_group(
+            editor,
+            layout,
+            "Layers",
+            [
+                [QLabel("Technology"), editor.network_technology_combo],
+                [editor.show_network_check, editor.show_network_assets_check, editor.show_network_connections_check],
+                [editor.show_wireless_devices_check, editor.show_physical_fibre_check],
+            ],
+            columns=3,
+        )
 
-        management = QWidget()
-        management_layout = QVBoxLayout(management)
-        management_layout.setContentsMargins(4, 4, 4, 4)
-        management_layout.addWidget(
-            button(
-                "Logical Topology",
-                lambda: _open_network_topology(editor),
-                "Edit the logical network hierarchy, racks, devices and patching",
-            )
+        _add_network_ribbon_group(
+            editor,
+            layout,
+            "Design",
+            [
+                _network_ribbon_button(
+                    editor,
+                    "Topology",
+                    lambda: _open_network_topology(editor),
+                    QStyle.SP_FileDialogDetailedView,
+                    "Edit the logical network hierarchy, racks, devices and patching",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "Fibre View",
+                    lambda: _open_physical_fibre_topology(editor),
+                    QStyle.SP_DirLinkIcon,
+                    "Edit routed fibre cables, enclosures, cassettes, joints and core splices",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "Planner",
+                    lambda: _open_network_planner(editor),
+                    QStyle.SP_ComputerIcon,
+                    "Open the automatic network planner",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "Wireless CSV",
+                    lambda: _import_wireless_devices(editor),
+                    QStyle.SP_DialogOpenButton,
+                    "Import wireless access points, IoT radio gateways and similar devices",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "Validate",
+                    lambda: _validate_network(editor),
+                    QStyle.SP_DialogApplyButton,
+                    "Validate network planning data",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "Sync Fibre",
+                    lambda: _synchronise_physical_fibre(editor),
+                    QStyle.SP_BrowserReload,
+                    "Synchronise logical network links to physical fibre routes",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "IP Plan",
+                    lambda: _generate_network_ip_plan(editor),
+                    QStyle.SP_FileDialogContentsView,
+                    "Generate an IP address plan",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "Schedules",
+                    lambda: _export_network_schedules(editor),
+                    QStyle.SP_DriveHDIcon,
+                    "Export network schedules",
+                ),
+            ],
+            columns=4,
         )
-        management_layout.addWidget(
-            button(
-                "Physical Fibre",
-                lambda: _open_physical_fibre_topology(editor),
-                "Edit floor-routed fibre cables, enclosures, cassettes, joints and core splices",
-            )
-        )
-        management_layout.addWidget(
-            button("Network Planner", lambda: _open_network_planner(editor))
-        )
-        management_layout.addWidget(
-            button(
-                "Import Wireless CSV",
-                lambda: _import_wireless_devices(editor),
-                "Import wireless access points, IoT radio gateways and similar devices with floor and asset mapping",
-            )
-        )
-        management_layout.addWidget(
-            button("Validate Network", lambda: _validate_network(editor))
-        )
-        management_layout.addWidget(
-            button("Sync Fibre Routes", lambda: _synchronise_physical_fibre(editor))
-        )
-        management_layout.addWidget(
-            button("Generate IP Plan", lambda: _generate_network_ip_plan(editor))
-        )
-        management_layout.addWidget(
-            button("Export Schedules", lambda: _export_network_schedules(editor))
-        )
-        layout.addWidget(management)
 
-        placement = QWidget()
-        placement_layout = QVBoxLayout(placement)
-        placement_layout.setContentsMargins(4, 4, 4, 4)
-        placement_layout.addWidget(
-            button(
-                "Network Mode",
-                lambda: _set_network_mode(editor, "network_select"),
-                "Select, move, edit or delete network items",
-            )
+        _add_network_ribbon_group(
+            editor,
+            layout,
+            "Placement",
+            [
+                _network_ribbon_button(
+                    editor,
+                    "Select",
+                    lambda: _set_network_mode(editor, "network_select"),
+                    QStyle.SP_ArrowUp,
+                    "Select, move, edit or delete network items",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "Asset",
+                    lambda: _set_network_mode(editor, "network_asset"),
+                    QStyle.SP_DriveNetIcon,
+                    "Place a network asset instance",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "Connect",
+                    lambda: _set_network_mode(editor, "network_connection"),
+                    QStyle.SP_ArrowRight,
+                    "Connect network assets",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "Fibre Node",
+                    lambda: _set_network_mode(editor, "fibre_node"),
+                    QStyle.SP_DirLinkIcon,
+                    "Place a physical fibre node",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "MER",
+                    lambda: _set_network_mode(editor, "mer_location"),
+                    QStyle.SP_DirHomeIcon,
+                    "Place a main equipment room",
+                ),
+                _network_ribbon_button(
+                    editor,
+                    "PoLAN",
+                    lambda: _set_network_mode(editor, "polan_location"),
+                    QStyle.SP_DirIcon,
+                    "Place a PoLAN location",
+                ),
+            ],
+            columns=3,
         )
-        placement_layout.addWidget(
-            button("Place Asset", lambda: _set_network_mode(editor, "network_asset"))
-        )
-        placement_layout.addWidget(
-            button(
-                "Connect Assets",
-                lambda: _set_network_mode(editor, "network_connection"),
-            )
-        )
-        placement_layout.addWidget(
-            button(
-                "Place Fibre Node",
-                lambda: _set_network_mode(editor, "fibre_node"),
-                "Place a splice enclosure, cassette, joint, handhole, chamber or termination on the physical fibre layer",
-            )
-        )
-        location_row = QHBoxLayout()
-        location_row.addWidget(
-            button("Place MER", lambda: _set_network_mode(editor, "mer_location"))
-        )
-        location_row.addWidget(
-            button("Place PoLAN", lambda: _set_network_mode(editor, "polan_location"))
-        )
-        placement_layout.addLayout(location_row)
-        layout.addWidget(placement)
+
         layout.addStretch(1)
-        ribbon.addTab(tab, "Network")
+        ribbon.addTab(tab, _network_ribbon_icon(editor, QStyle.SP_DriveNetIcon), "Network")
     else:
         # Compatibility fallback for older sidebar-based layouts.
-        dock_parent = (
-            editor.centralWidget().layout() if editor.centralWidget() else None
-        )
+        dock_parent = editor.centralWidget().layout() if editor.centralWidget() else None
         if dock_parent is not None:
             panel = QWidget()
             panel_layout = QHBoxLayout(panel)
@@ -900,14 +1044,8 @@ def _augment_network_ui(editor) -> None:
                 ("Network Planner", lambda: _open_network_planner(editor)),
                 ("Import Wireless CSV", lambda: _import_wireless_devices(editor)),
                 ("Network Mode", lambda: _set_network_mode(editor, "network_select")),
-                (
-                    "Place Network Asset",
-                    lambda: _set_network_mode(editor, "network_asset"),
-                ),
-                (
-                    "Connect Network Assets",
-                    lambda: _set_network_mode(editor, "network_connection"),
-                ),
+                ("Place Network Asset", lambda: _set_network_mode(editor, "network_asset")),
+                ("Connect Network Assets", lambda: _set_network_mode(editor, "network_connection")),
                 ("Export Network Schedules", lambda: _export_network_schedules(editor)),
             ):
                 control = QPushButton(text)
@@ -917,7 +1055,6 @@ def _augment_network_ui(editor) -> None:
 
     _add_network_layer_action(editor)
     _add_network_search_tab(editor)
-
 
 def _add_network_location(editor, kind: str, x: float, y: float) -> None:
     floor = int(editor.floor_spin.value())
