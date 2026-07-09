@@ -64,6 +64,7 @@ from network_schema import (
     next_network_id,
     validate_network_data,
 )
+from ui_theme import bootstrap_icon_for
 
 
 def _text(value) -> str:
@@ -757,16 +758,16 @@ def _add_network_search_tab(editor) -> None:
 
 def _network_ribbon_icon(editor, icon_enum):
     try:
-        return editor.style().standardIcon(icon_enum)
+        return bootstrap_icon_for(icon_enum)
     except Exception:
         return editor.style().standardIcon(QStyle.SP_FileIcon)
 
 
 def _configure_network_ribbon_control(editor, button: QToolButton) -> QToolButton:
     button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-    button.setIconSize(QSize(16, 16))
-    button.setMinimumSize(88, 28)
-    button.setMaximumSize(128, 32)
+    button.setIconSize(QSize(18, 18))
+    button.setMinimumSize(96, 30)
+    button.setMaximumSize(142, 34)
     button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
     button.setAutoRaise(False)
     configure = getattr(editor, "_configure_ribbon_button", None)
@@ -908,8 +909,7 @@ def _augment_network_ui(editor) -> None:
             layout,
             "Layers",
             [
-                [QLabel("Technology"), editor.network_technology_combo],
-                [editor.show_network_check, editor.show_network_assets_check, editor.show_network_connections_check],
+                [QLabel("Technology"), editor.network_technology_combo, editor.show_network_check, editor.show_network_assets_check, editor.show_network_connections_check],
                 [editor.show_wireless_devices_check, editor.show_physical_fibre_check],
             ],
             columns=3,
