@@ -171,6 +171,63 @@ def _asset_type(asset: dict) -> str:
     return value
 
 
+def _traffic_components(record: dict, settings: Optional[dict] = None) -> Tuple[float, float, float]:
+    """Return north-south, east-west and combined expected bandwidth.
+
+    Legacy records with only expected_bandwidth_mbps remain conservative by
+    treating that value as north-south demand.  Directional records are summed
+    for switching and internal-uplink capacity, while edge-router and external
+    links can use the north-south component alone.
+    """
+
+    record = record if isinstance(record, dict) else {}
+    settings = settings if isinstance(settings, dict) else {}
+    has_directional = (
+        "expected_north_south_bandwidth_mbps" in record
+        or "expected_east_west_bandwidth_mbps" in record
+    )
+    legacy = max(
+        0.0,
+        _float(
+            record.get(
+                "expected_bandwidth_mbps",
+                settings.get("default_expected_bandwidth_mbps", 0.0),
+            )
+        ),
+    )
+    north_south = max(
+        0.0,
+        _float(
+            record.get(
+                "expected_north_south_bandwidth_mbps",
+                legacy
+                if not has_directional
+                else settings.get("default_north_south_bandwidth_mbps", 0.0),
+            )
+        ),
+    )
+    east_west = max(
+        0.0,
+        _float(
+            record.get(
+                "expected_east_west_bandwidth_mbps",
+                0.0
+                if has_directional
+                else settings.get("default_east_west_bandwidth_mbps", 0.0),
+            )
+        ),
+    )
+    return north_south, east_west, north_south + east_west
+
+
+def _set_directional_traffic(record: dict, north_south: float, east_west: float) -> None:
+    north_south = max(0.0, float(north_south or 0.0))
+    east_west = max(0.0, float(east_west or 0.0))
+    record["expected_north_south_bandwidth_mbps"] = round(north_south, 6)
+    record["expected_east_west_bandwidth_mbps"] = round(east_west, 6)
+    record["expected_bandwidth_mbps"] = round(north_south + east_west, 6)
+
+
 @dataclass
 class PortDemand:
     endpoint_name: str
@@ -184,6 +241,8 @@ class PortDemand:
     y: float
     extension_distance_m: float
     poe_power_w: float
+    expected_north_south_bandwidth_mbps: float
+    expected_east_west_bandwidth_mbps: float
     expected_bandwidth_mbps: float
     expected_packet_rate_pps: float
     room_type_id: str
@@ -214,8 +273,19 @@ class EndpointDemand:
         return sum(item.poe_power_w for item in self.ports)
 
     @property
+    def expected_north_south_bandwidth_mbps(self) -> float:
+        return sum(item.expected_north_south_bandwidth_mbps for item in self.ports)
+
+    @property
+    def expected_east_west_bandwidth_mbps(self) -> float:
+        return sum(item.expected_east_west_bandwidth_mbps for item in self.ports)
+
+    @property
     def expected_bandwidth_mbps(self) -> float:
-        return sum(item.expected_bandwidth_mbps for item in self.ports)
+        return (
+            self.expected_north_south_bandwidth_mbps
+            + self.expected_east_west_bandwidth_mbps
+        )
 
     @property
     def expected_packet_rate_pps(self) -> float:
@@ -554,7 +624,7 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
         room_type_id = _text(point.get("room_type_id"))
         room_type = room_types.get(room_type_id, {})
         requested_ports = max(0, _int(point.get("qty"), 1))
-        templates: List[Tuple[str, str, float, float, float]] = []
+        templates: List[Tuple[str, str, float, float, float, float, float]] = []
 
         if room_type:
             for room_asset in room_type.get("assets", []):
@@ -567,15 +637,12 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
                 data_points_per_asset = max(0, _int(asset.get("data_points"), 1))
                 power = _poe_power_for_asset(asset, settings)
                 divisor = max(1, data_points_per_asset)
-                bandwidth_per_port = max(
-                    0.0,
-                    _float(
-                        asset.get(
-                            "expected_bandwidth_mbps",
-                            settings.get("default_expected_bandwidth_mbps", 0.0),
-                        )
-                    ),
-                ) / divisor
+                north_south, east_west, combined_bandwidth = _traffic_components(
+                    asset, settings
+                )
+                north_south_per_port = north_south / divisor
+                east_west_per_port = east_west / divisor
+                bandwidth_per_port = combined_bandwidth / divisor
                 packets_per_port = max(
                     0.0,
                     _float(
@@ -591,6 +658,8 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
                             asset_id,
                             asset_name,
                             power,
+                            north_south_per_port,
+                            east_west_per_port,
                             bandwidth_per_port,
                             packets_per_port,
                         )
@@ -607,6 +676,14 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
                     "",
                     "Generic network port",
                     0.0,
+                    max(
+                        0.0,
+                        _float(settings.get("default_north_south_bandwidth_mbps")),
+                    ),
+                    max(
+                        0.0,
+                        _float(settings.get("default_east_west_bandwidth_mbps")),
+                    ),
                     max(
                         0.0,
                         _float(settings.get("default_expected_bandwidth_mbps")),
@@ -633,6 +710,8 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
             asset_id,
             asset_name,
             poe_w,
+            north_south_mbps,
+            east_west_mbps,
             bandwidth_mbps,
             packet_rate_pps,
         ) in enumerate(
@@ -651,6 +730,8 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
                     y=endpoint.y,
                     extension_distance_m=endpoint.extension_distance_m,
                     poe_power_w=poe_w,
+                    expected_north_south_bandwidth_mbps=north_south_mbps,
+                    expected_east_west_bandwidth_mbps=east_west_mbps,
                     expected_bandwidth_mbps=bandwidth_mbps,
                     expected_packet_rate_pps=packet_rate_pps,
                     room_type_id=room_type_id,
@@ -709,17 +790,16 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
             _text(instance.get("department_name"))
             or departments.get(department_id, department_id)
         )
-        bandwidth = max(
-            0.0,
-            _float(
-                instance.get(
-                    "expected_bandwidth_mbps",
-                    asset.get(
-                        "expected_bandwidth_mbps",
-                        settings.get("default_expected_bandwidth_mbps", 0.0),
-                    ),
-                )
-            ),
+        source_traffic = dict(asset)
+        for field_name in (
+            "expected_bandwidth_mbps",
+            "expected_north_south_bandwidth_mbps",
+            "expected_east_west_bandwidth_mbps",
+        ):
+            if field_name in instance:
+                source_traffic[field_name] = instance.get(field_name)
+        north_south, east_west, bandwidth = _traffic_components(
+            source_traffic, settings
         )
         packets = max(
             0.0,
@@ -757,6 +837,8 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
                 y=endpoint.y,
                 extension_distance_m=0.0,
                 poe_power_w=_poe_power_for_asset(asset, settings),
+                expected_north_south_bandwidth_mbps=north_south,
+                expected_east_west_bandwidth_mbps=east_west,
                 expected_bandwidth_mbps=bandwidth,
                 expected_packet_rate_pps=packets,
                 room_type_id="",
@@ -2447,12 +2529,33 @@ class DesignBuilder:
         physical_connection = bool(extra.get("physical_connection"))
         parent_logical_id = _text(extra.get("parent_logical_connection_id"))
         explicit_bandwidth = extra.get("expected_bandwidth_mbps", None)
+        explicit_north_south = extra.pop(
+            "expected_north_south_bandwidth_mbps", None
+        )
+        explicit_east_west = extra.pop(
+            "expected_east_west_bandwidth_mbps", None
+        )
         explicit_packets = extra.get("expected_packet_rate_pps", None)
+        from_north_south, from_east_west, _from_total = _traffic_components(
+            from_instance
+        )
+        to_north_south, to_east_west, _to_total = _traffic_components(to_instance)
+        required_north_south = (
+            max(0.0, _float(explicit_north_south))
+            if explicit_north_south is not None and _text(explicit_north_south) != ""
+            else max(from_north_south, to_north_south)
+        )
+        required_east_west = (
+            max(0.0, _float(explicit_east_west))
+            if explicit_east_west is not None and _text(explicit_east_west) != ""
+            else max(from_east_west, to_east_west)
+        )
+        directional_total = required_north_south + required_east_west
         required_bandwidth = (
-            max(0.0, _float(explicit_bandwidth))
+            max(0.0, _float(explicit_bandwidth), directional_total)
             if explicit_bandwidth is not None and _text(explicit_bandwidth) != ""
             else max(
-                0.0,
+                directional_total,
                 _float(from_instance.get("expected_bandwidth_mbps")),
                 _float(to_instance.get("expected_bandwidth_mbps")),
             )
@@ -2507,6 +2610,15 @@ class DesignBuilder:
                 "medium": medium, "link_speed_mbps": link_speed, "cable_specification": cable_specification,
                 "fibre_count": 2 if medium == "fibre" else 0, "vlan_ids": [], "route_profile": "",
                 "route_path": route_path, "length_m": round(length_m, 3),
+                "expected_north_south_bandwidth_mbps": round(
+                    required_north_south / member_count, 6
+                ),
+                "expected_east_west_bandwidth_mbps": round(
+                    required_east_west / member_count, 6
+                ),
+                "expected_bandwidth_mbps": round(
+                    required_bandwidth / member_count, 6
+                ),
                 "notes": "Automatically generated network topology connection.", "auto_generated": True, **extra,
             }
             if lag_id:
@@ -2517,6 +2629,12 @@ class DesignBuilder:
                         "link_aggregation_member_index": member_index,
                         "link_aggregation_member_count": member_count,
                         "aggregate_link_speed_mbps": aggregate_capacity,
+                        "aggregate_expected_north_south_bandwidth_mbps": round(
+                            required_north_south, 6
+                        ),
+                        "aggregate_expected_east_west_bandwidth_mbps": round(
+                            required_east_west, 6
+                        ),
                         "aggregate_expected_bandwidth_mbps": round(required_bandwidth, 6),
                         "aggregate_expected_packet_rate_pps": round(required_packets, 3),
                         "expected_bandwidth_mbps": round(
@@ -2631,6 +2749,12 @@ class DesignBuilder:
             "network_instance_id": _text(instance.get("id")),
             "network_port": str(port_name),
             "poe_power_w": round(item.poe_power_w, 3),
+            "expected_north_south_bandwidth_mbps": round(
+                item.expected_north_south_bandwidth_mbps, 6
+            ),
+            "expected_east_west_bandwidth_mbps": round(
+                item.expected_east_west_bandwidth_mbps, 6
+            ),
             "expected_bandwidth_mbps": round(item.expected_bandwidth_mbps, 6),
             "expected_packet_rate_pps": round(item.expected_packet_rate_pps, 3),
             "link_speed_mbps": max(0, int(item.selected_link_speed_mbps)),
@@ -2687,6 +2811,12 @@ class DesignBuilder:
                     "route_profile": "",
                     "route_path": list(route_path),
                     "length_m": round(max(0.0, copper_length_m), 3),
+                    "expected_north_south_bandwidth_mbps": round(
+                        max(0.0, item.expected_north_south_bandwidth_mbps), 6
+                    ),
+                    "expected_east_west_bandwidth_mbps": round(
+                        max(0.0, item.expected_east_west_bandwidth_mbps), 6
+                    ),
                     "expected_bandwidth_mbps": round(
                         max(0.0, item.expected_bandwidth_mbps), 6
                     ),
@@ -3964,9 +4094,9 @@ def _connect_layer_targets(
                 independent_link_index=link_index,
                 source_core_instance_id=core_id,
                 fibre_count=2,
-                expected_bandwidth_mbps=max(
-                    0.0, _float(target.get("expected_bandwidth_mbps"))
-                ),
+                expected_north_south_bandwidth_mbps=_traffic_components(target)[0],
+                expected_east_west_bandwidth_mbps=_traffic_components(target)[1],
+                expected_bandwidth_mbps=_traffic_components(target)[2],
                 expected_packet_rate_pps=max(
                     0.0, _float(target.get("expected_packet_rate_pps"))
                 ),
@@ -4021,6 +4151,11 @@ def _connect_peer_ring(
     if rule is None or len(instances) < 2:
         return
     links = max(1, _int(rule.get("links_per_target"), 1))
+    peer_east_west_mbps = sum(
+        _traffic_components(instance)[1]
+        for instance in instances
+        if isinstance(instance, dict)
+    )
     if len(instances) == 2:
         pairs = [(instances[0], instances[1])]
     else:
@@ -4054,6 +4189,9 @@ def _connect_peer_ring(
                 target_layer=layer,
                 independent_link_index=link_index,
                 fibre_count=2,
+                expected_north_south_bandwidth_mbps=0.0,
+                expected_east_west_bandwidth_mbps=peer_east_west_mbps,
+                expected_bandwidth_mbps=peer_east_west_mbps,
             )
 
 
@@ -4083,10 +4221,13 @@ def _build_traditional_layer_topology(
         bool(settings.get("redundant_core", True)),
         _int(settings.get("independent_link_count"), 2),
     )
-    total_bandwidth_mbps = sum(
-        max(0.0, _float(item.get("expected_bandwidth_mbps")))
-        for item in access_switches
+    total_north_south_mbps = sum(
+        _traffic_components(item)[0] for item in access_switches
     )
+    total_east_west_mbps = sum(
+        _traffic_components(item)[1] for item in access_switches
+    )
+    total_bandwidth_mbps = total_north_south_mbps + total_east_west_mbps
     total_packet_rate_pps = sum(
         max(0.0, _float(item.get("expected_packet_rate_pps")))
         for item in access_switches
@@ -4134,6 +4275,19 @@ def _build_traditional_layer_topology(
             bundle_port_demands=core_access_bundles,
         )
         cores = _build_layer_instances(builder, core_mix, roots, "core")
+        for core in cores:
+            core["expected_north_south_bandwidth_mbps"] = round(
+                total_north_south_mbps / max(1, len(cores)), 6
+            )
+            core["expected_east_west_bandwidth_mbps"] = round(
+                total_east_west_mbps / max(1, len(cores)), 6
+            )
+            core["expected_bandwidth_mbps"] = round(
+                _traffic_components(core)[0] + _traffic_components(core)[1], 6
+            )
+            core["expected_packet_rate_pps"] = round(
+                total_packet_rate_pps / max(1, len(cores)), 3
+            )
         _connect_peer_ring(builder, cores, core_peer, "core")
         _connect_layer_targets(
             builder,
@@ -4194,11 +4348,23 @@ def _build_traditional_layer_topology(
     aggregations = _build_layer_instances(
         builder, aggregation_mix, roots, "aggregation"
     )
+    per_aggregation_north_south = (
+        total_north_south_mbps / max(1, len(aggregations))
+    )
+    per_aggregation_east_west = (
+        total_east_west_mbps / max(1, len(aggregations))
+    )
     per_aggregation_bandwidth = (
         total_bandwidth_mbps / max(1, len(aggregations))
     )
     per_aggregation_packets = total_packet_rate_pps / max(1, len(aggregations))
     for aggregation in aggregations:
+        aggregation["expected_north_south_bandwidth_mbps"] = round(
+            per_aggregation_north_south, 6
+        )
+        aggregation["expected_east_west_bandwidth_mbps"] = round(
+            per_aggregation_east_west, 6
+        )
         aggregation["expected_bandwidth_mbps"] = round(
             per_aggregation_bandwidth, 6
         )
@@ -4239,6 +4405,19 @@ def _build_traditional_layer_topology(
         bundle_port_demands=core_aggregation_bundles,
     )
     cores = _build_layer_instances(builder, core_mix, roots, "core")
+    for core in cores:
+        core["expected_north_south_bandwidth_mbps"] = round(
+            total_north_south_mbps / max(1, len(cores)), 6
+        )
+        core["expected_east_west_bandwidth_mbps"] = round(
+            total_east_west_mbps / max(1, len(cores)), 6
+        )
+        core["expected_bandwidth_mbps"] = round(
+            _traffic_components(core)[0] + _traffic_components(core)[1], 6
+        )
+        core["expected_packet_rate_pps"] = round(
+            total_packet_rate_pps / max(1, len(cores)), 3
+        )
 
     _connect_peer_ring(builder, cores, core_peer, "core")
     _connect_layer_targets(
@@ -4778,11 +4957,17 @@ def _build_core_layer(
 
     root_count = len(active_root_names)
     total_leaves = sum(len(leaves_by_root.get(name, [])) for name in active_root_names)
-    total_bandwidth_mbps = sum(
-        max(0.0, _float(leaf.get("expected_bandwidth_mbps")))
+    total_north_south_mbps = sum(
+        _traffic_components(leaf)[0]
         for name in active_root_names
         for leaf in leaves_by_root.get(name, [])
     )
+    total_east_west_mbps = sum(
+        _traffic_components(leaf)[1]
+        for name in active_root_names
+        for leaf in leaves_by_root.get(name, [])
+    )
+    total_bandwidth_mbps = total_north_south_mbps + total_east_west_mbps
     total_packet_rate_pps = sum(
         max(0.0, _float(leaf.get("expected_packet_rate_pps")))
         for name in active_root_names
@@ -4825,14 +5010,19 @@ def _build_core_layer(
             required_ports = local_count + remote_share
             # Either MER must be capable of carrying the complete service load
             # after failure of the other protected path.
-            protected_bandwidth = total_bandwidth_mbps
+            protected_north_south = total_north_south_mbps
+            protected_east_west = total_east_west_mbps
+            protected_bandwidth = protected_north_south + protected_east_west
             protected_packets = total_packet_rate_pps
         else:
             required_ports = local_count * desired_links
-            protected_bandwidth = sum(
-                max(0.0, _float(item.get("expected_bandwidth_mbps")))
-                for item in leaves
+            protected_north_south = sum(
+                _traffic_components(item)[0] for item in leaves
             )
+            protected_east_west = sum(
+                _traffic_components(item)[1] for item in leaves
+            )
+            protected_bandwidth = protected_north_south + protected_east_west
             protected_packets = sum(
                 max(0.0, _float(item.get("expected_packet_rate_pps")))
                 for item in leaves
@@ -5024,6 +5214,8 @@ def _build_core_layer(
                 rack_size_u=rack_size_u,
                 route_anchor=root_name,
                 network_layer="core",
+                expected_north_south_bandwidth_mbps=round(protected_north_south, 6),
+                expected_east_west_bandwidth_mbps=round(protected_east_west, 6),
                 expected_bandwidth_mbps=round(protected_bandwidth, 6),
                 expected_packet_rate_pps=round(protected_packets, 3),
             )
@@ -5150,9 +5342,9 @@ def _build_core_layer(
                         protection_group if len(selected) > 1 else ""
                     ),
                     standby=link_index > 1,
-                    expected_bandwidth_mbps=max(
-                        0.0, _float(leaf.get("expected_bandwidth_mbps"))
-                    ),
+                    expected_north_south_bandwidth_mbps=_traffic_components(leaf)[0],
+                    expected_east_west_bandwidth_mbps=_traffic_components(leaf)[1],
+                    expected_bandwidth_mbps=_traffic_components(leaf)[2],
                     expected_packet_rate_pps=max(
                         0.0, _float(leaf.get("expected_packet_rate_pps"))
                     ),
@@ -5645,6 +5837,22 @@ def _traditional_design(
                 spare_capacity_deferred=spare_mode == "defer",
                 spare_capacity_overflow_stack=spare_overflow,
                 dedicated_spare_capacity_rack=spare_overflow,
+                expected_north_south_bandwidth_mbps=round(
+                    sum(
+                        item.expected_north_south_bandwidth_mbps
+                        for assigned in group_assignments
+                        for item in assigned
+                    ),
+                    6,
+                ),
+                expected_east_west_bandwidth_mbps=round(
+                    sum(
+                        item.expected_east_west_bandwidth_mbps
+                        for assigned in group_assignments
+                        for item in assigned
+                    ),
+                    6,
+                ),
                 expected_bandwidth_mbps=round(
                     sum(
                         item.expected_bandwidth_mbps
@@ -5975,9 +6183,13 @@ def _protected_splitter_asset(builder: DesignBuilder, base_asset: dict) -> dict:
 def _polan_design(
     builder: DesignBuilder, endpoints: Sequence[EndpointDemand], spare_fraction: float
 ) -> None:
-    total_bandwidth_mbps = sum(
-        endpoint.expected_bandwidth_mbps for endpoint in endpoints
+    total_north_south_mbps = sum(
+        endpoint.expected_north_south_bandwidth_mbps for endpoint in endpoints
     )
+    total_east_west_mbps = sum(
+        endpoint.expected_east_west_bandwidth_mbps for endpoint in endpoints
+    )
+    total_bandwidth_mbps = total_north_south_mbps + total_east_west_mbps
     total_packet_rate_pps = sum(
         endpoint.expected_packet_rate_pps for endpoint in endpoints
     )
@@ -6021,6 +6233,12 @@ def _polan_design(
             route_anchor=medoid.name,
             department_id=medoid.department_id,
             department_name=medoid.department_name,
+            expected_north_south_bandwidth_mbps=round(
+                sum(item.expected_north_south_bandwidth_mbps for item in port_items), 6
+            ),
+            expected_east_west_bandwidth_mbps=round(
+                sum(item.expected_east_west_bandwidth_mbps for item in port_items), 6
+            ),
             expected_bandwidth_mbps=round(
                 sum(item.expected_bandwidth_mbps for item in port_items), 6
             ),
@@ -6328,9 +6546,14 @@ def _polan_design(
                 polan_distribution_locations.append(location)
                 location_by_anchor[anchor] = location
 
-            splitter_bandwidth_mbps = sum(
-                max(0.0, _float(row["instance"].get("expected_bandwidth_mbps")))
-                for row in group
+            splitter_north_south_mbps = sum(
+                _traffic_components(row["instance"])[0] for row in group
+            )
+            splitter_east_west_mbps = sum(
+                _traffic_components(row["instance"])[1] for row in group
+            )
+            splitter_bandwidth_mbps = (
+                splitter_north_south_mbps + splitter_east_west_mbps
             )
             splitter_packet_rate_pps = sum(
                 max(0.0, _float(row["instance"].get("expected_packet_rate_pps")))
@@ -6343,6 +6566,8 @@ def _polan_design(
                 "protected_splitter" if failover else "splitter",
                 route_anchor=anchor,
                 protected=failover,
+                expected_north_south_bandwidth_mbps=round(splitter_north_south_mbps, 6),
+                expected_east_west_bandwidth_mbps=round(splitter_east_west_mbps, 6),
                 expected_bandwidth_mbps=round(splitter_bandwidth_mbps, 6),
                 expected_packet_rate_pps=round(splitter_packet_rate_pps, 3),
             )
@@ -6357,10 +6582,9 @@ def _polan_design(
                     anchor,
                     ont_record["anchor"],
                     connection_role="output",
-                    expected_bandwidth_mbps=max(
-                        0.0,
-                        _float(ont_record["instance"].get("expected_bandwidth_mbps")),
-                    ),
+                    expected_north_south_bandwidth_mbps=_traffic_components(ont_record["instance"])[0],
+                    expected_east_west_bandwidth_mbps=_traffic_components(ont_record["instance"])[1],
+                    expected_bandwidth_mbps=_traffic_components(ont_record["instance"])[2],
                     expected_packet_rate_pps=max(
                         0.0,
                         _float(ont_record["instance"].get("expected_packet_rate_pps")),
@@ -6374,6 +6598,8 @@ def _polan_design(
                     "anchor": anchor,
                     "output_count": len(group),
                     "split_capacity": _split_ratio_outputs(base_asset),
+                    "expected_north_south_bandwidth_mbps": round(splitter_north_south_mbps, 6),
+                    "expected_east_west_bandwidth_mbps": round(splitter_east_west_mbps, 6),
                     "expected_bandwidth_mbps": round(splitter_bandwidth_mbps, 6),
                     "expected_packet_rate_pps": round(splitter_packet_rate_pps, 3),
                 }
@@ -6515,6 +6741,8 @@ def _polan_design(
                 route_anchor=_text(root.get("name")),
                 olt_side=side.lower(),
                 core_redundancy_role=side.lower(),
+                expected_north_south_bandwidth_mbps=0.0,
+                expected_east_west_bandwidth_mbps=0.0,
                 expected_bandwidth_mbps=0.0,
                 expected_packet_rate_pps=0.0,
             )
@@ -6581,6 +6809,8 @@ def _polan_design(
                         route_anchor=_text(root.get("name")),
                         olt_side=side.lower(),
                         core_redundancy_role=side.lower(),
+                        expected_north_south_bandwidth_mbps=0.0,
+                        expected_east_west_bandwidth_mbps=0.0,
                         expected_bandwidth_mbps=0.0,
                         expected_packet_rate_pps=0.0,
                     )
@@ -6628,6 +6858,12 @@ def _polan_design(
                 redundancy_role=side.lower(),
                 protection_group=protection_group,
                 standby=side != "Primary",
+                expected_north_south_bandwidth_mbps=max(
+                    0.0, _float(splitter_record.get("expected_north_south_bandwidth_mbps"))
+                ),
+                expected_east_west_bandwidth_mbps=max(
+                    0.0, _float(splitter_record.get("expected_east_west_bandwidth_mbps"))
+                ),
                 expected_bandwidth_mbps=max(
                     0.0, _float(splitter_record.get("expected_bandwidth_mbps"))
                 ),
@@ -6636,9 +6872,19 @@ def _polan_design(
                 ),
                 fibre_count=1,
             )
+            instances[instance_index]["expected_north_south_bandwidth_mbps"] = round(
+                _traffic_components(instances[instance_index])[0]
+                + max(0.0, _float(splitter_record.get("expected_north_south_bandwidth_mbps"))),
+                6,
+            )
+            instances[instance_index]["expected_east_west_bandwidth_mbps"] = round(
+                _traffic_components(instances[instance_index])[1]
+                + max(0.0, _float(splitter_record.get("expected_east_west_bandwidth_mbps"))),
+                6,
+            )
             instances[instance_index]["expected_bandwidth_mbps"] = round(
-                max(0.0, _float(instances[instance_index].get("expected_bandwidth_mbps")))
-                + max(0.0, _float(splitter_record.get("expected_bandwidth_mbps"))),
+                max(0.0, _float(instances[instance_index].get("expected_north_south_bandwidth_mbps")))
+                + max(0.0, _float(instances[instance_index].get("expected_east_west_bandwidth_mbps"))),
                 6,
             )
             instances[instance_index]["expected_packet_rate_pps"] = round(
@@ -6727,27 +6973,87 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
     """Install edge routers and independent carrier/internet connections."""
     external_records = [
         row for row in builder.data.get("network_external_networks", [])
-        if isinstance(row, dict) and _text(row.get("id"))
+        if (
+            isinstance(row, dict)
+            and _text(row.get("id"))
+            and bool(row.get("planner_enabled", True))
+        )
     ]
     if not external_records:
         return
+    access_instances = [
+        row
+        for row in builder.instances
+        if _text(row.get("design_role")) in {"access_switch", "ont"}
+    ]
+    north_south_demand = sum(
+        _traffic_components(row)[0] for row in access_instances
+    )
+    edge_packet_rate = sum(
+        max(0.0, _float(row.get("expected_packet_rate_pps")))
+        for row in access_instances
+    )
+    required_edge_bandwidth = north_south_demand * (1.0 + spare_fraction)
+    required_edge_packets = edge_packet_rate * (1.0 + spare_fraction)
+    required_edge_ports = max(2, 1 + len(external_records))
+    declared_service_capacities = [
+        max(0.0, _float(record.get("bandwidth_mbps")))
+        for record in external_records
+    ]
+    all_service_capacities_declared = all(
+        capacity > 0.0 for capacity in declared_service_capacities
+    )
+    total_service_capacity = sum(declared_service_capacities)
+    if (
+        all_service_capacities_declared
+        and total_service_capacity + 1e-9 < required_edge_bandwidth
+    ):
+        raise NetworkPlanningError(
+            "The enabled external services provide "
+            f"{total_service_capacity:.3f} Mbps but "
+            f"{required_edge_bandwidth:.3f} Mbps of north-south capacity is "
+            "required including spare capacity. Increase service capacity, "
+            "reduce the spare allowance or revise endpoint usage profiles."
+        )
+
+    def suitable_edge_asset(asset: dict) -> bool:
+        ports = max(
+            _int(asset.get("number_of_ports")),
+            _int(asset.get("uplink_ports")),
+            _int(asset.get("connections_in")) + _int(asset.get("connections_out")),
+        )
+        bandwidth_capacity = max(
+            0.0, _float(asset.get("bandwidth_capacity_gbps")) * 1000.0
+        )
+        packet_capacity = max(
+            0.0, _float(asset.get("packet_throughput_mpps")) * 1_000_000.0
+        )
+        return (
+            ports >= required_edge_ports
+            and (
+                bandwidth_capacity <= 0.0
+                or bandwidth_capacity + 1e-9 >= required_edge_bandwidth
+            )
+            and (
+                packet_capacity <= 0.0
+                or packet_capacity + 1e-9 >= required_edge_packets
+            )
+        )
+
     router_candidates = _candidate_assets(
-        builder.data,
-        "network_router",
-        lambda asset: max(_int(asset.get("number_of_ports")), _int(asset.get("uplink_ports")), _int(asset.get("connections_in")) + _int(asset.get("connections_out"))) >= 2,
+        builder.data, "network_router", suitable_edge_asset
     )
     router_candidates.extend(
-        _candidate_assets(
-            builder.data,
-            "firewall",
-            lambda asset: max(_int(asset.get("number_of_ports")), _int(asset.get("uplink_ports")), _int(asset.get("connections_in")) + _int(asset.get("connections_out"))) >= 2,
-        )
+        _candidate_assets(builder.data, "firewall", suitable_edge_asset)
     )
     if not router_candidates:
-        builder.warnings.append(
-            "External networks are configured but no router/firewall asset with at least two ports is available."
+        raise NetworkPlanningError(
+            "External networks are configured but no router/firewall asset has "
+            f"at least {required_edge_ports} usable ports and enough declared "
+            f"capacity for {required_edge_bandwidth:.3f} Mbps north-south "
+            "traffic. Add suitable edge hardware or change the model selected "
+            "in the automatic-planner wizard."
         )
-        return
     router_candidates = _apply_manufacturer_preference(
         builder.data, router_candidates, "edge_router", "edge router"
     )
@@ -6788,6 +7094,12 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
             rack_size_u=max(1, _int(builder.settings.get("default_rack_size_u"), 42)),
             route_anchor=_text(root.get("name")),
             network_layer="edge",
+            expected_north_south_bandwidth_mbps=round(
+                north_south_demand, 6
+            ),
+            expected_east_west_bandwidth_mbps=0.0,
+            expected_bandwidth_mbps=round(north_south_demand, 6),
+            expected_packet_rate_pps=round(edge_packet_rate, 3),
         )
         routers.append(router)
 
@@ -6812,6 +7124,10 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
                 protection_group=group_id if len(routers) > 1 else "",
                 standby=index > 0,
                 fibre_count=2,
+                expected_north_south_bandwidth_mbps=north_south_demand,
+                expected_east_west_bandwidth_mbps=0.0,
+                expected_bandwidth_mbps=north_south_demand,
+                expected_packet_rate_pps=edge_packet_rate,
             )
     else:
         builder.warnings.append("Edge routers were generated without a core connection because no generated core switch exists.")
@@ -6827,7 +7143,18 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
         for row in builder.data.get("locations", [])
         if isinstance(row, dict) and _text(row.get("name"))
     }
+    service_count = max(1, len(external_records))
+    if all_service_capacities_declared and total_service_capacity > 0.0:
+        service_weights = [
+            capacity / total_service_capacity
+            for capacity in declared_service_capacities
+        ]
+    else:
+        service_weights = [1.0 / service_count] * service_count
     for record_index, record in enumerate(external_records, start=1):
+        service_weight = service_weights[record_index - 1]
+        service_traffic_share = north_south_demand * service_weight
+        service_packet_share = edge_packet_rate * service_weight
         desired_links = max(
             1,
             _int(record.get("required_links"), default_links if bool(record.get("redundant", True)) else 1),
@@ -6845,6 +7172,18 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
                 route_anchor=_text(location.get("name")),
                 network_layer="external",
                 external_network_id=_text(record.get("id")),
+                expected_north_south_bandwidth_mbps=min(
+                    service_traffic_share,
+                    max(0.0, _float(record.get("bandwidth_mbps")))
+                    or service_traffic_share,
+                ),
+                expected_east_west_bandwidth_mbps=0.0,
+                expected_bandwidth_mbps=min(
+                    service_traffic_share,
+                    max(0.0, _float(record.get("bandwidth_mbps")))
+                    or service_traffic_share,
+                ),
+                expected_packet_rate_pps=service_packet_share,
             )
             record["demarcation_instance_id"] = _text(demarcation.get("id"))
             existing_instances[_text(demarcation.get("id"))] = demarcation
@@ -6868,6 +7207,10 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
                 standby=link_index > 1,
                 fibre_count=2 if medium == "fibre" else 0,
                 external_network_id=_text(record.get("id")),
+                expected_north_south_bandwidth_mbps=service_traffic_share,
+                expected_east_west_bandwidth_mbps=0.0,
+                expected_bandwidth_mbps=service_traffic_share,
+                expected_packet_rate_pps=service_packet_share,
             )
             peer_ids.append(_text(router.get("id")))
             connection_ids.append(_text(connection.get("id")))
@@ -9079,6 +9422,11 @@ def generate_network_design(
     settings.setdefault("polan_max_ont_copper_m", 30.0)
     settings.setdefault("polan_olt_failover", True)
     settings.setdefault("default_expected_bandwidth_mbps", 0.0)
+    settings.setdefault(
+        "default_north_south_bandwidth_mbps",
+        settings.get("default_expected_bandwidth_mbps", 0.0),
+    )
+    settings.setdefault("default_east_west_bandwidth_mbps", 0.0)
     settings.setdefault("default_expected_packet_rate_pps", 0.0)
     settings.setdefault("topology_model", "collapsed_core")
     settings.setdefault("independent_link_count", 2)
@@ -9192,7 +9540,13 @@ def generate_network_design(
     )
     demand_ports = sum(endpoint.port_count for endpoint in endpoints)
     demand_poe = sum(endpoint.poe_power_w for endpoint in endpoints)
-    demand_bandwidth = sum(endpoint.expected_bandwidth_mbps for endpoint in endpoints)
+    demand_north_south = sum(
+        endpoint.expected_north_south_bandwidth_mbps for endpoint in endpoints
+    )
+    demand_east_west = sum(
+        endpoint.expected_east_west_bandwidth_mbps for endpoint in endpoints
+    )
+    demand_bandwidth = demand_north_south + demand_east_west
     demand_packets = sum(endpoint.expected_packet_rate_pps for endpoint in endpoints)
     installed_bandwidth = sum(
         max(
@@ -9255,7 +9609,7 @@ def generate_network_design(
             if technology_value == "Traditional"
             else []
         ),
-        "objective": "Minimum feasible component count after department-first, graph-branch-aware proximity clustering, subject to port, PoE, bandwidth, packet-throughput, spare-capacity, distance and configured layer-diversity constraints",
+        "objective": "Minimum feasible component count after department-first, graph-branch-aware proximity clustering, subject to port, PoE, directional north-south/east-west bandwidth, packet-throughput, spare-capacity, distance and configured layer-diversity constraints",
         "endpoint_locations": len(endpoints),
         "imported_wireless_endpoints": sum(
             1
@@ -9264,6 +9618,10 @@ def generate_network_design(
         ),
         "required_ports": demand_ports,
         "required_poe_w": round(demand_poe, 3),
+        "required_north_south_bandwidth_mbps": round(
+            demand_north_south, 6
+        ),
+        "required_east_west_bandwidth_mbps": round(demand_east_west, 6),
         "required_bandwidth_mbps": round(demand_bandwidth, 6),
         "required_packet_rate_pps": round(demand_packets, 3),
         "installed_endpoint_ports": installed_ports,
