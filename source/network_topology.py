@@ -2868,9 +2868,9 @@ class TopologyGraphicsView(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        self.setBackgroundBrush(QColor("#111820"))
+        self.setBackgroundBrush(QColor("#f8f9fa"))
         self.setFrameShape(QFrame.NoFrame)
-        self.setStyleSheet("QGraphicsView {" "border: 0;" "background: #111820;" "}")
+        self.setStyleSheet("QGraphicsView { border: 0; background: #f8f9fa; }")
 
         self.viewport().setMouseTracking(True)
         self.viewport().setFocusPolicy(Qt.StrongFocus)
@@ -3461,7 +3461,7 @@ class CommsRoomIsometricDialog(QDialog):
         self.scene = RetainedGraphicsScene(self)
         self.view = QGraphicsView(self.scene)
         self.view.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
-        self.view.setBackgroundBrush(QColor("#111820"))
+        self.view.setBackgroundBrush(QColor("#f8f9fa"))
         self.view.setFrameShape(QFrame.NoFrame)
         self.view.setDragMode(QGraphicsView.ScrollHandDrag)
         layout.addWidget(self.view, 1)
@@ -3774,14 +3774,15 @@ class NetworkTopologyDialog(QDialog):
         self.resize(target_width, target_height)
         self.setModal(False)
         self.setStyleSheet(
-            "QDialog { background: #111820; color: #e9eef2; }"
-            "QLabel { color: #dbe3e9; }"
-            "QLineEdit, QComboBox { background: #202832; color: #eef3f6; border: 1px solid #3a4652; "
+            "QDialog { background: #f8f9fa; color: #212529; }"
+            "QLabel { color: #212529; }"
+            "QLineEdit, QComboBox { background: #ffffff; color: #212529; border: 1px solid #ced4da; "
             "border-radius: 6px; padding: 6px; }"
-            "QPushButton, QToolButton { background: #25303b; color: #e7edf1; border: 1px solid #3b4854; "
-            "border-radius: 6px; padding: 6px 10px; }"
-            "QPushButton:hover, QToolButton:hover { background: #303d49; }"
-            "QCheckBox { color: #dbe3e9; spacing: 6px; }"
+            "QLineEdit:focus, QComboBox:focus { border: 1px solid #86b7fe; }"
+            "QPushButton, QToolButton { background: #ffffff; color: #212529; border: 1px solid #cfd4da; "
+            "border-radius: 6px; padding: 6px 10px; font-weight: 600; }"
+            "QPushButton:hover, QToolButton:hover { background: #f1f5ff; border-color: #9ec5fe; color: #084298; }"
+            "QCheckBox { color: #212529; spacing: 6px; }"
         )
 
         root_layout = QVBoxLayout(self)
@@ -3807,7 +3808,7 @@ class NetworkTopologyDialog(QDialog):
 
         self.status_label = QLabel()
         self.status_label.setStyleSheet(
-            "padding: 7px 12px; background: #182028; color: #9eabb5;"
+            "padding: 7px 12px; background: #ffffff; color: #6c757d; border-top: 1px solid #dee2e6;"
         )
         root_layout.addWidget(self.status_label)
 
@@ -3834,7 +3835,7 @@ class NetworkTopologyDialog(QDialog):
 
     def _build_header(self) -> QWidget:
         header = QWidget()
-        header.setStyleSheet("background: #182028; border-bottom: 1px solid #2d3944;")
+        header.setStyleSheet("background: #ffffff; border-bottom: 1px solid #dee2e6;")
         layout = QHBoxLayout(header)
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(8)
@@ -3843,7 +3844,7 @@ class NetworkTopologyDialog(QDialog):
         title_font = QFont("Arial", 13)
         title_font.setBold(True)
         title.setFont(title_font)
-        title.setStyleSheet("color: #f3f6f8; margin-right: 10px;")
+        title.setStyleSheet("color: #212529; margin-right: 10px;")
         layout.addWidget(title)
 
         self.breadcrumb_button = QPushButton("Topology")
@@ -3862,7 +3863,7 @@ class NetworkTopologyDialog(QDialog):
             f"{_human_number(required_ports)} ports",
         ):
             chip = QLabel(text)
-            chip.setStyleSheet("background: #26323d; color: #bfcbd4; border-radius: 8px; padding: 4px 8px;")
+            chip.setStyleSheet("background: #e9f2ff; color: #084298; border-radius: 8px; padding: 4px 8px; font-weight: 600;")
             layout.addWidget(chip)
 
         layout.addStretch(1)
@@ -3989,7 +3990,7 @@ class NetworkTopologyDialog(QDialog):
     def _build_details_panel(self) -> QWidget:
         panel = QWidget()
         panel.setMinimumWidth(260)
-        panel.setStyleSheet("background: #182028; border-left: 1px solid #2d3944;")
+        panel.setStyleSheet("background: #ffffff; border-left: 1px solid #dee2e6;")
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(14, 14, 14, 14)
         panel_layout.setSpacing(10)
@@ -4050,7 +4051,7 @@ class NetworkTopologyDialog(QDialog):
         self._clear_details()
         message = QLabel("Select a device to inspect its model, location, ports, PoE load and connections.\n\nDouble-click a card to expand or collapse that branch.")
         message.setWordWrap(True)
-        message.setStyleSheet("color: #94a2ad; line-height: 1.4;")
+        message.setStyleSheet("color: #6c757d; line-height: 1.4;")
         self.details_layout.addWidget(message)
         self.details_layout.addStretch(1)
         self.branch_button.setEnabled(False)
@@ -4063,15 +4064,15 @@ class NetworkTopologyDialog(QDialog):
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 3, 0, 3)
         key = QLabel(label)
-        key.setStyleSheet("color: #8f9daa;")
+        key.setStyleSheet("color: #6c757d;")
         key.setMinimumWidth(98)
         val = QLabel(value or "—")
         val.setWordWrap(True)
         val.setTextInteractionFlags(Qt.TextSelectableByMouse)
         if emphasise:
-            val.setStyleSheet("color: #f0f4f7; font-weight: 600;")
+            val.setStyleSheet("color: #212529; font-weight: 600;")
         else:
-            val.setStyleSheet("color: #d6dee5;")
+            val.setStyleSheet("color: #343a40;")
         layout.addWidget(key, 0)
         layout.addWidget(val, 1)
         self.details_layout.addWidget(row)
@@ -4088,7 +4089,7 @@ class NetworkTopologyDialog(QDialog):
         name_font.setBold(True)
         name.setFont(name_font)
         name.setWordWrap(True)
-        name.setStyleSheet("color: #f1f5f7;")
+        name.setStyleSheet("color: #212529;")
         self.details_layout.addWidget(name)
 
         state = QLabel(node.state.title())
@@ -4261,19 +4262,19 @@ class NetworkTopologyDialog(QDialog):
         if connected:
             separator = QFrame()
             separator.setFrameShape(QFrame.HLine)
-            separator.setStyleSheet("color: #2d3944;")
+            separator.setStyleSheet("color: #dee2e6;")
             self.details_layout.addWidget(separator)
             links_title = QLabel("Connected devices")
-            links_title.setStyleSheet("font-weight: 600; color: #e3e9ed;")
+            links_title.setStyleSheet("font-weight: 600; color: #212529;")
             self.details_layout.addWidget(links_title)
             for text in connected[:30]:
                 item = QLabel(f"• {text}")
                 item.setWordWrap(True)
-                item.setStyleSheet("color: #aeb9c2;")
+                item.setStyleSheet("color: #495057;")
                 self.details_layout.addWidget(item)
             if len(connected) > 30:
                 item = QLabel(f"… and {len(connected) - 30} more")
-                item.setStyleSheet("color: #84929d;")
+                item.setStyleSheet("color: #6c757d;")
                 self.details_layout.addWidget(item)
 
         self.details_layout.addStretch(1)

@@ -90,6 +90,14 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from dxf_scene import DXFScene
 from dxf_gpu_renderer import GpuDxfGraphView
+from ui_theme import (
+    BOOTSTRAP_GREEN,
+    BOOTSTRAP_RIBBON_STYLESHEET,
+    apply_bootstrap_theme,
+    bootstrap_icon,
+    bootstrap_icon_for,
+    set_action_icon,
+)
 
 from dialogs import (
     BulkDataPointPlacementDialog,
@@ -1291,6 +1299,20 @@ class CableRouteEditor(QMainWindow):
         ]
 
     def _make_mode_icon(self, icon_key, size=22):
+        bootstrap_modes = {
+            "select": "cursor",
+            "corridor_node": "plus-square",
+            "location": "geo-alt",
+            "department": "building",
+            "data_point": "hdd-network",
+            "transition_node": "arrow-up",
+            "edge": "diagram-3",
+            "pan": "arrows-fullscreen",
+            "delete": "trash3",
+        }
+        if icon_key in bootstrap_modes:
+            return bootstrap_icon(bootstrap_modes[icon_key], size=size)
+
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.transparent)
 
@@ -1448,8 +1470,8 @@ class CableRouteEditor(QMainWindow):
             self.search_dock.hide()
 
     def _configure_ribbon_button(self, button):
-        button.setMinimumSize(86, 28)
-        button.setMaximumSize(125, 32)
+        button.setMinimumSize(96, 30)
+        button.setMaximumSize(144, 34)
         button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self._ribbon_buttons.append(button)
         return button
@@ -1477,20 +1499,21 @@ class CableRouteEditor(QMainWindow):
             return
         self._responsive_compact = compact
 
-        minimum_width = 78 if compact else 86
-        maximum_width = 108 if compact else 125
-        button_height = 28 if compact else 30
+        minimum_width = 96 if compact else 104
+        maximum_width = 142 if compact else 154
+        button_height = 30 if compact else 32
         for button in self._ribbon_buttons:
             try:
                 button.setMinimumSize(minimum_width, button_height)
                 button.setMaximumSize(maximum_width, button_height + 2)
+                button.setIconSize(QSize(17 if compact else 18, 17 if compact else 18))
             except RuntimeError:
                 continue
 
         ribbon = getattr(self, "ribbon", None)
         if ribbon is not None:
             ribbon.setMinimumHeight(142 if compact else 150)
-            ribbon.setMaximumHeight(178 if compact else 195)
+            ribbon.setMaximumHeight(158 if compact else 168)
 
         dock = getattr(self, "search_dock", None)
         if dock is not None:
@@ -1509,11 +1532,13 @@ class CableRouteEditor(QMainWindow):
             timer.start()
 
     def _build_ui(self):
+        self.setObjectName("CableRouteEditor")
         central = QWidget(self)
         self.setCentralWidget(central)
 
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout.setContentsMargins(10, 8, 10, 8)
+        main_layout.setSpacing(8)
 
         self._build_ribbon(main_layout)
         self._build_menu_bar()
@@ -1541,13 +1566,22 @@ class CableRouteEditor(QMainWindow):
         self.canvas.mouseDragged.connect(self.on_drag)
 
         status_row = QHBoxLayout()
-        status_row.addWidget(QLabel("Current file:"))
+        status_row.setContentsMargins(2, 0, 2, 0)
+        status_row.setSpacing(8)
+
+        file_caption = QLabel("Current file")
+        file_caption.setObjectName("StatusCaption")
+        status_row.addWidget(file_caption)
         self.file_label = QLabel("New file")
+        self.file_label.setObjectName("StatusValue")
         self.file_label.setWordWrap(True)
         status_row.addWidget(self.file_label, 1)
 
-        status_row.addWidget(QLabel("Status:"))
+        status_caption = QLabel("Status")
+        status_caption.setObjectName("StatusCaption")
+        status_row.addWidget(status_caption)
         self.status_label = QLabel("Ready")
+        self.status_label.setObjectName("StatusValue")
         self.status_label.setWordWrap(True)
         status_row.addWidget(self.status_label, 2)
 
@@ -1560,6 +1594,8 @@ class CableRouteEditor(QMainWindow):
 
         container = QWidget()
         layout = QVBoxLayout(container)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         self.sidebar_search_edit = QLineEdit()
         self.sidebar_search_edit.setPlaceholderText("Search current module...")
@@ -1567,52 +1603,67 @@ class CableRouteEditor(QMainWindow):
         layout.addWidget(self.sidebar_search_edit)
 
         self.search_tabs = QTabWidget()
+        self.search_tabs.setDocumentMode(True)
+        self.search_tabs.tabBar().setUsesScrollButtons(True)
+        self.search_tabs.tabBar().setElideMode(Qt.ElideRight)
+        self.search_tabs.tabBar().setExpanding(False)
         self.search_tabs.currentChanged.connect(self.refresh_rhs_search_sidebar)
         layout.addWidget(self.search_tabs, 1)
 
         self.search_lists = {}
 
-        for module_name in [
-            "Data Points",
-            "Departments",
-            "Locations",
-            "Corridor Nodes",
-            "Transitions",
-            "Connections",
-            "Room Types",
-            "Assets",
-        ]:
+        sidebar_tabs = [
+            ("Data Points", "Data"),
+            ("Departments", "Depts"),
+            ("Locations", "Rooms"),
+            ("Corridor Nodes", "Nodes"),
+            ("Transitions", "Trans"),
+            ("Connections", "Links"),
+            ("Room Types", "Types"),
+            ("Assets", "Assets"),
+        ]
+        for module_name, tab_label in sidebar_tabs:
             list_widget = QListWidget()
             list_widget.itemDoubleClicked.connect(self._rhs_search_item_activated)
-            self.search_tabs.addTab(list_widget, module_name)
+            self.search_tabs.addTab(list_widget, tab_label)
+            self.search_tabs.setTabToolTip(self.search_tabs.count() - 1, module_name)
             self.search_lists[module_name] = list_widget
 
-        sidebar_button_row = QHBoxLayout()
+        sidebar_button_row = QGridLayout()
+        sidebar_button_row.setHorizontalSpacing(6)
+        sidebar_button_row.setVerticalSpacing(6)
         layout.addLayout(sidebar_button_row)
 
         refresh_btn = QPushButton("Refresh")
+        refresh_btn.setIcon(bootstrap_icon("arrow-clockwise"))
         refresh_btn.clicked.connect(self.refresh_rhs_search_sidebar)
-        layout.addWidget(refresh_btn)
-        sidebar_button_row.addWidget(refresh_btn)
+        sidebar_button_row.addWidget(refresh_btn, 0, 0)
 
-        room_counts_btn = QPushButton("Room Type Counts")
+        room_counts_btn = QPushButton("Room Counts")
+        room_counts_btn.setIcon(bootstrap_icon("list-task"))
         room_counts_btn.setToolTip(
             "Show the number of placed rooms assigned to each room type"
         )
         room_counts_btn.clicked.connect(self.show_room_type_counts_dialog)
-        sidebar_button_row.addWidget(room_counts_btn)
+        sidebar_button_row.addWidget(room_counts_btn, 0, 1)
 
-        scenario_btn = QPushButton("Scenario Test")
+        scenario_btn = QPushButton("Scenarios")
+        scenario_btn.setIcon(bootstrap_icon("diagram-3"))
         scenario_btn.setToolTip(
             "Preview and permanently apply grouped room/asset scenario sets"
         )
         scenario_btn.clicked.connect(self.show_room_type_asset_scenario_dialog)
-        sidebar_button_row.addWidget(scenario_btn)
+        sidebar_button_row.addWidget(scenario_btn, 1, 0)
 
-        capability_btn = QPushButton("Capability Matrix")
+        capability_btn = QPushButton("Capabilities")
+        capability_btn.setIcon(bootstrap_icon("boxes"))
         capability_btn.setToolTip("Show asset capability keyword overlap and deployed overlap locations")
         capability_btn.clicked.connect(self.show_asset_capability_overlap_dialog)
-        sidebar_button_row.addWidget(capability_btn)
+        sidebar_button_row.addWidget(capability_btn, 1, 1)
+
+        for button in (refresh_btn, room_counts_btn, scenario_btn, capability_btn):
+            button.setMinimumHeight(32)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.search_dock.setWidget(container)
         self.addDockWidget(Qt.RightDockWidgetArea, self.search_dock)
@@ -1943,26 +1994,29 @@ class CableRouteEditor(QMainWindow):
     def _build_menu_bar(self):
         file_menu = self.menuBar().addMenu("File")
 
-        for text, handler in [
-            ("Open Project", self.open_json),
-            ("Import Legacy JSON", self.import_json),
-            ("Save Project", self.save_json),
-            ("Save Project As", self.save_json_as),
-            ("Export Project JSON", self.export_json),
-            ("Map DXF to Floor", self.load_dxf),
-            ("Clear Floor DXF", self.clear_floor_dxf),
-            ("Export Floor DXFs", self.export_floor_dxfs),
+        for text, icon_name, handler in [
+            ("Open Project", "folder2-open", self.open_json),
+            ("Import Legacy JSON", "box-arrow-right", self.import_json),
+            ("Save Project", "database", self.save_json),
+            ("Save Project As", "file-earmark-plus", self.save_json_as),
+            ("Export Project JSON", "box-arrow-right", self.export_json),
+            ("Map DXF to Floor", "geo-alt", self.load_dxf),
+            ("Clear Floor DXF", "trash3", self.clear_floor_dxf),
+            ("Export Floor DXFs", "database", self.export_floor_dxfs),
         ]:
             action = file_menu.addAction(text)
+            set_action_icon(action, icon_name)
             action.triggered.connect(handler)
 
         edit_menu = self.menuBar().addMenu("Edit")
 
         undo_action = edit_menu.addAction("Undo")
+        set_action_icon(undo_action, "arrow-clockwise")
         undo_action.setShortcut(QKeySequence("Ctrl+Z"))
         undo_action.triggered.connect(self.undo)
 
         redo_action = edit_menu.addAction("Redo")
+        set_action_icon(redo_action, "arrow-right")
         redo_action.setShortcut(QKeySequence("Ctrl+Y"))
         redo_action.triggered.connect(self.redo)
 
@@ -1970,45 +2024,57 @@ class CableRouteEditor(QMainWindow):
         self._view_menu = view_menu
 
         fit_action = view_menu.addAction("Fit View")
+        set_action_icon(fit_action, "arrows-fullscreen")
         fit_action.triggered.connect(self.fit_view)
 
         layers_action = view_menu.addAction("Drawing Layers...")
+        set_action_icon(layers_action, "list-task")
         layers_action.triggered.connect(self.show_layer_visibility_dialog)
 
         performance_action = view_menu.addAction("Viewer Performance...")
+        set_action_icon(performance_action, "pc-display")
         performance_action.triggered.connect(self.show_renderer_performance_dialog)
 
         tools_menu = self.menuBar().addMenu("Tools")
 
         room_type_counts_action = tools_menu.addAction("Room Type Counts")
+        set_action_icon(room_type_counts_action, "list-task")
         room_type_counts_action.triggered.connect(self.show_room_type_counts_dialog)
 
         scenario_action = tools_menu.addAction("Room/Asset Scenario Test")
+        set_action_icon(scenario_action, "diagram-3")
         scenario_action.triggered.connect(self.show_room_type_asset_scenario_dialog)
 
         room_groups_action = tools_menu.addAction("Room Scenario Groups")
+        set_action_icon(room_groups_action, "collection")
         room_groups_action.triggered.connect(self.manage_room_type_scenario_groups)
 
         asset_groups_action = tools_menu.addAction("Asset Scenario Groups")
+        set_action_icon(asset_groups_action, "boxes")
         asset_groups_action.triggered.connect(self.manage_asset_scenario_groups)
 
         capability_overlap_action = tools_menu.addAction("Asset Capability Overlap Matrix")
+        set_action_icon(capability_overlap_action, "tags")
         capability_overlap_action.triggered.connect(self.show_asset_capability_overlap_dialog)
 
         tools_menu.addSeparator()
 
         export_room_type_matrix_action = tools_menu.addAction("Export Room Type Asset Matrix")
+        set_action_icon(export_room_type_matrix_action, "database")
         export_room_type_matrix_action.triggered.connect(self.export_room_type_asset_matrix)
 
         import_room_type_matrix_action = tools_menu.addAction("Import Room Type Asset Matrix")
+        set_action_icon(import_room_type_matrix_action, "box-arrow-right")
         import_room_type_matrix_action.triggered.connect(self.import_room_type_asset_matrix)
 
         validate_action = tools_menu.addAction("Validate")
+        set_action_icon(validate_action, "check-circle", BOOTSTRAP_GREEN)
         validate_action.triggered.connect(self.validate_json)
 
     def _ribbon_button(self, text, handler):
         btn = QPushButton(text)
-        btn.setMinimumSize(120, 34)
+        btn.setIcon(bootstrap_icon("arrow-right"))
+        btn.setMinimumSize(124, 34)
         btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         btn.clicked.connect(handler)
         return btn
@@ -2023,8 +2089,8 @@ class CableRouteEditor(QMainWindow):
         btn = QToolButton()
         btn.setText("Layers")
         btn.setToolTip("Open the batch drawing-layer visibility dialog")
-        btn.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
-        btn.setIconSize(QSize(16, 16))
+        btn.setIcon(bootstrap_icon("list-task"))
+        btn.setIconSize(QSize(18, 18))
         btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._configure_ribbon_button(btn)
         btn.clicked.connect(self.show_layer_visibility_dialog)
@@ -2037,7 +2103,7 @@ class CableRouteEditor(QMainWindow):
         frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Minimum)
 
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(5, 3, 5, 3)
+        layout.setContentsMargins(6, 5, 6, 4)
         layout.setSpacing(2)
 
         grid = QGridLayout()
@@ -2057,7 +2123,7 @@ class CableRouteEditor(QMainWindow):
 
                 row_layout = QHBoxLayout(row_container)
 
-                row_layout.setContentsMargins(4, 2, 4, 2)
+                row_layout.setContentsMargins(2, 1, 2, 1)
                 row_layout.setSpacing(6)
                 row_layout.setAlignment(Qt.AlignLeft)
 
@@ -2069,9 +2135,9 @@ class CableRouteEditor(QMainWindow):
             layout.addLayout(rows_layout)
         else:
             grid = QGridLayout()
-            grid.setContentsMargins(4, 4, 4, 4)
-            grid.setHorizontalSpacing(8)
-            grid.setVerticalSpacing(6)
+            grid.setContentsMargins(2, 2, 2, 2)
+            grid.setHorizontalSpacing(6)
+            grid.setVerticalSpacing(5)
 
             for index, widget in enumerate(widgets):
                 row = index // columns
@@ -2091,8 +2157,8 @@ class CableRouteEditor(QMainWindow):
     def _ribbon_icon_button(self, text, tooltip, icon_enum, handler):
         btn = QToolButton()
         btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        btn.setIcon(self.style().standardIcon(icon_enum))
-        btn.setIconSize(QSize(16, 16))
+        btn.setIcon(bootstrap_icon_for(icon_enum))
+        btn.setIconSize(QSize(18, 18))
         btn.setText(text)
         btn.setToolTip(tooltip)
 
@@ -2106,8 +2172,8 @@ class CableRouteEditor(QMainWindow):
         btn.setCheckable(True)
         btn.setChecked(checked)
         btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        btn.setIcon(self.style().standardIcon(icon_enum))
-        btn.setIconSize(QSize(16, 16))
+        btn.setIcon(bootstrap_icon_for(icon_enum))
+        btn.setIconSize(QSize(18, 18))
         btn.setText(text)
         btn.setToolTip(text)
 
@@ -2131,8 +2197,8 @@ class CableRouteEditor(QMainWindow):
 
         floor_row = QWidget()
         floor_layout = QHBoxLayout(floor_row)
-        floor_layout.setContentsMargins(8,5,8,5)
-        floor_layout.setSpacing(10)
+        floor_layout.setContentsMargins(0, 0, 0, 0)
+        floor_layout.setSpacing(6)
         floor_layout.addWidget(self.floor_spin)
         floor_layout.addWidget(go_btn)
 
@@ -2247,8 +2313,12 @@ class CableRouteEditor(QMainWindow):
         ribbon = QTabWidget()
         self.ribbon = ribbon
         ribbon.setObjectName("AeroRibbon")
+        ribbon.setDocumentMode(True)
+        ribbon.tabBar().setUsesScrollButtons(True)
+        ribbon.tabBar().setElideMode(Qt.ElideRight)
+        ribbon.tabBar().setExpanding(False)
         ribbon.setMinimumHeight(150)
-        ribbon.setMaximumHeight(195)
+        ribbon.setMaximumHeight(168)
         main_layout.addWidget(ribbon)
 
         # ---------------- Home tab ----------------
@@ -2276,8 +2346,6 @@ class CableRouteEditor(QMainWindow):
                 [
                     QLabel("Floor"),
                     floor_row,
-                ],
-                [
                     self.snap_check,
                     self.bidirectional_check,
                     self.chain_edges_check,
@@ -2562,79 +2630,7 @@ class CableRouteEditor(QMainWindow):
 
         self._add_scrollable_ribbon_tab(ribbon, output_tab, "Output")
 
-        ribbon.setStyleSheet("""
-        QTabWidget::pane {
-            border: 1px solid palette(mid);
-            background: palette(window);
-        }
-
-        QTabBar::tab {
-            background: palette(button);
-            color: palette(button-text);
-            border: 1px solid palette(mid);
-            border-bottom: none;
-            padding: 6px 18px;
-            margin-right: 2px;
-            border-top-left-radius: 5px;
-            border-top-right-radius: 5px;
-        }
-
-        QTabBar::tab:selected {
-            background: palette(window);
-            font-weight: bold;
-        }
-
-        QFrame#RibbonGroup {
-            background: palette(base);
-            border: 1px solid palette(mid);
-            border-radius: 7px;
-        }
-
-        QLabel#RibbonGroupTitle {
-            color: palette(text);
-            font-size: 12px;
-        }
-
-        QToolButton {
-            background: palette(button);
-            color: palette(button-text);
-            border: 1px solid palette(mid);
-            border-radius: 6px;
-            padding: 4px;
-        }
-
-        QToolButton:hover {
-            background: palette(highlight);
-            color: palette(highlighted-text);
-        }
-
-        QToolButton:pressed {
-            background: palette(dark);
-        }
-
-        QToolButton:checked {
-            background: palette(highlight);
-            color: palette(highlighted-text);
-            border: 1px solid palette(highlight);
-        }
-
-        QPushButton {
-            background: palette(button);
-            color: palette(button-text);
-            border: 1px solid palette(mid);
-            border-radius: 6px;
-            padding: 4px 8px;
-        }
-
-        QPushButton:hover {
-            background: palette(highlight);
-            color: palette(highlighted-text);
-        }
-
-        QLabel {
-            color: palette(text);
-        }
-        """)
+        ribbon.setStyleSheet(BOOTSTRAP_RIBBON_STYLESHEET)
 
     def delete_right_clicked_items(self, picked):
         if not picked:
@@ -4019,6 +4015,9 @@ class CableRouteEditor(QMainWindow):
         dialog.exec()
 
     def draw_overlay_panels(self, painter, viewport_rect):
+        # The canvas legend was visually competing with the drawing area.
+        # Keep the overlay hook in place, but do not paint the legend panel.
+        return
         floor = self.floor_spin.value()
         mapped_path = self.get_floor_dxf_path(floor)
         dxf_name = Path(mapped_path).name if mapped_path else "None"
@@ -9845,6 +9844,7 @@ install_network_planning(CableRouteEditor)
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
+    apply_bootstrap_theme(app)
     window = CableRouteEditor()
     window.show()
     return app.exec()

@@ -376,7 +376,12 @@ class PhysicalFibreTopologyDialog(QDialog):
         )
         self.setMinimumSize(min(620, target_width), min(440, target_height))
         self.resize(target_width, target_height)
-        self.setStyleSheet("QDialog{background:#10161c;color:#e8edf1} QPushButton,QComboBox{background:#25303b;color:#e8edf1;border:1px solid #46535e;padding:5px;border-radius:4px} QLabel{color:#d8e0e6}")
+        self.setStyleSheet(
+            "QDialog{background:#f8f9fa;color:#212529}"
+            "QPushButton,QComboBox{background:#ffffff;color:#212529;border:1px solid #ced4da;padding:6px 10px;border-radius:6px;font-weight:600}"
+            "QPushButton:hover{background:#f1f5ff;border-color:#9ec5fe;color:#084298}"
+            "QLabel{color:#212529}"
+        )
         layout = QVBoxLayout(self)
 
         toolbar_widget = QWidget()
@@ -413,7 +418,7 @@ class PhysicalFibreTopologyDialog(QDialog):
         toolbar_scroll.setMinimumHeight(max(58, toolbar_widget.sizeHint().height() + 18))
         toolbar_scroll.setMaximumHeight(max(76, toolbar_widget.sizeHint().height() + 24))
         self.scene = QGraphicsScene(self); self.scene.setItemIndexMethod(QGraphicsScene.NoIndex); self.view = FibreMapView(self); self.view.setScene(self.scene); layout.addWidget(self.view, 1)
-        self.status = QLabel("Loading physical fibre…"); self.status.setStyleSheet("padding:7px;background:#182028;color:#aeb9c2"); layout.addWidget(self.status)
+        self.status = QLabel("Loading physical fibre…"); self.status.setStyleSheet("padding:7px;background:#ffffff;color:#6c757d;border:1px solid #dee2e6;border-radius:6px"); layout.addWidget(self.status)
         self.floor_combo.currentIndexChanged.connect(self.rebuild)
         self._populate_floors()
         # Let the dialog become visible before the first potentially large
