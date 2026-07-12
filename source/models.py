@@ -23,6 +23,7 @@ DEFAULT_JSON = {
     },
     "departments": [],
     "room_types": [],
+    "room_type_asset_review": {},
     "room_type_scenario_groups": [],
     "asset_scenario_groups": [],
     "room_type_asset_scenarios": [],
@@ -105,6 +106,9 @@ class JsonStore:
 
         self.data.setdefault("departments", [])
         self.data.setdefault("room_types", [])
+        if not isinstance(self.data.get("room_type_asset_review"), dict):
+            self.data["room_type_asset_review"] = {}
+        self.data.setdefault("room_type_asset_review", {})
         self.data.setdefault("room_type_scenario_groups", [])
         self.data.setdefault("asset_scenario_groups", [])
         self.data.setdefault("room_type_asset_scenarios", [])
@@ -453,6 +457,11 @@ class JsonStore:
         if self.storage_format != "sqlite" or not self.storage_path:
             return {}
         return SQLiteProjectFile(self.storage_path).statistics()
+
+    def revision_history(self, limit: Optional[int] = None) -> List[dict]:
+        if self.storage_format != "sqlite" or not self.storage_path:
+            return []
+        return SQLiteProjectFile(self.storage_path).revision_history(limit=limit)
 
     def database_space_usage(self) -> dict:
         if self.storage_format != "sqlite" or not self.storage_path:

@@ -76,6 +76,16 @@ def _capability_keywords_text(value):
     return "; ".join(_normalise_capability_keywords(value))
 
 
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return int(default)
+
+
 class PointEditorDialog(QDialog):
     def __init__(self, parent, title, point_name, point):
         super().__init__(parent)
@@ -2630,7 +2640,7 @@ class RoomTypesEditorWindow(QMainWindow):
             if not asset:
                 continue
             room_qty = int(row.get("qty", 1) or 1)
-            dp = int(asset.get("data_points", 1) or 1)
+            dp = max(0, _safe_int(asset.get("data_points", 1), 0))
             total += room_qty * dp
         return total
 
@@ -2837,6 +2847,540 @@ class RoomTypesEditorWindow(QMainWindow):
             self._refresh_table()
             self.table.selectRow(len(self.items) - 1)
 
+
+class RoomTypeAssetReviewWizard(QDialog):
+    """Step through room types and mark their assigned assets as reviewed."""
+
+    def __init__(
+        self,
+        parent,
+        room_types,
+        assets_by_id=None,
+        asset_categories_by_id=None,
+        review_state=None,
+        on_state_changed=None,
+        on_assignments_changed=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Room Type Asset Review")
+        self.resize(1160, 680)
+        self.room_types = [dict(item) for item in room_types if isinstance(item, dict)]
+        self.assets_by_id = dict(assets_by_id or {})
+        self.asset_categories_by_id = dict(asset_categories_by_id or {})
+        self.review_state = deepcopy(review_state or {})
+        self.on_state_changed = on_state_changed
+        self.on_assignments_changed = on_assignments_changed
+        self.current_index = 0
+        self._asset_row_widgets = []
+        self._dirty = False
+
+        layout = QVBoxLayout(self)
+
+        header = QLabel("Review each room type and confirm the assigned assets are correct.")
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        body = QHBoxLayout()
+        layout.addLayout(body, 1)
+
+        sidebar_layout = QVBoxLayout()
+        body.addLayout(sidebar_layout, 0)
+        sidebar_layout.addWidget(QLabel("Room types"))
+        self.room_list = QListWidget()
+        self.room_list.setMinimumWidth(280)
+        self.room_list.currentRowChanged.connect(self._select_room)
+        sidebar_layout.addWidget(self.room_list, 1)
+
+        detail_layout = QVBoxLayout()
+        body.addLayout(detail_layout, 1)
+
+        self.title_label = QLabel()
+        self.title_label.setStyleSheet("font-weight: 700; font-size: 16px;")
+        detail_layout.addWidget(self.title_label)
+
+        self.status_label = QLabel()
+        detail_layout.addWidget(self.status_label)
+
+        self.asset_table = QTableWidget(0, 8)
+        self.asset_table.setHorizontalHeaderLabels(
+            [
+                "Asset ID",
+                "Description",
+                "Category",
+                "Group",
+                "ADB_Code",
+                "Qty",
+                "Data points each",
+                "Total",
+            ]
+        )
+        self.asset_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.asset_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.asset_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.asset_table.setColumnWidth(0, 110)
+        self.asset_table.setColumnWidth(1, 260)
+        self.asset_table.setColumnWidth(2, 150)
+        self.asset_table.setColumnWidth(3, 130)
+        self.asset_table.setColumnWidth(4, 120)
+        self.asset_table.setColumnWidth(5, 70)
+        self.asset_table.setColumnWidth(6, 115)
+        self.asset_table.setColumnWidth(7, 80)
+        detail_layout.addWidget(self.asset_table, 1)
+
+        self.summary_label = QLabel()
+        detail_layout.addWidget(self.summary_label)
+
+        button_row = QHBoxLayout()
+        layout.addLayout(button_row)
+        self.mark_button = QPushButton("Mark Complete")
+        self.clear_button = QPushButton("Clear Tick")
+        self.apply_button = QPushButton("Apply Changes")
+        self.copy_button = QPushButton("Copy Assets...")
+        self.prev_button = QPushButton("Previous")
+        self.next_button = QPushButton("Next Uncomplete")
+        self.close_button = QPushButton("Close")
+        self.mark_button.clicked.connect(self._mark_complete)
+        self.clear_button.clicked.connect(self._clear_complete)
+        self.apply_button.clicked.connect(self._apply_changes)
+        self.copy_button.clicked.connect(self._copy_assets_between_room_types)
+        self.prev_button.clicked.connect(self._previous_room)
+        self.next_button.clicked.connect(self._next_uncomplete)
+        self.close_button.clicked.connect(self.close)
+        button_row.addWidget(self.mark_button)
+        button_row.addWidget(self.clear_button)
+        button_row.addWidget(self.apply_button)
+        button_row.addWidget(self.copy_button)
+        button_row.addStretch(1)
+        button_row.addWidget(self.prev_button)
+        button_row.addWidget(self.next_button)
+        button_row.addWidget(self.close_button)
+
+        self._populate_sidebar()
+        if self.room_types:
+            first_uncomplete = self._find_next_uncomplete(-1, wrap=True)
+            self.room_list.setCurrentRow(first_uncomplete if first_uncomplete is not None else 0)
+        else:
+            self._refresh_detail()
+
+    def closeEvent(self, event):
+        if self._dirty:
+            self._apply_changes()
+        super().closeEvent(event)
+
+    def _text(self, value):
+        return str(value if value is not None else "").strip()
+
+    def _natural_key(self, value):
+        return tuple(
+            int(part) if part.isdigit() else part
+            for part in re.split(r"(\d+)", self._text(value).casefold())
+        )
+
+    def _room_id(self, room_type):
+        return self._text(room_type.get("id"))
+
+    def _review_record(self, room_type_id):
+        value = self.review_state.get(room_type_id, {})
+        return value if isinstance(value, dict) else {}
+
+    def _is_complete(self, room_type_id):
+        return bool(self._review_record(room_type_id).get("complete", False))
+
+    def _room_asset_rows(self, room_type):
+        rows = []
+        for row in room_type.get("assets", []) or []:
+            if not isinstance(row, dict):
+                continue
+            asset_id = self._text(row.get("asset_id", row.get("id", "")))
+            if asset_id:
+                rows.append({"asset_id": asset_id, "qty": max(1, int(row.get("qty", 1) or 1))})
+        if rows:
+            return sorted(rows, key=lambda row: self._natural_key(row["asset_id"]))
+        return sorted(
+            [
+                {"asset_id": self._text(asset_id), "qty": 1}
+                for asset_id in room_type.get("asset_ids", []) or []
+                if self._text(asset_id)
+            ],
+            key=lambda row: self._natural_key(row["asset_id"]),
+        )
+
+    def _asset_signature(self, room_type):
+        return [
+            [
+                row["asset_id"],
+                row["qty"],
+                max(0, _safe_int(self.assets_by_id.get(row["asset_id"], {}).get("data_points", 1), 0)),
+            ]
+            for row in self._room_asset_rows(room_type)
+        ]
+
+    def _set_dirty(self, dirty=True):
+        self._dirty = bool(dirty)
+        if hasattr(self, "apply_button"):
+            self.apply_button.setEnabled(self._dirty)
+
+    def _spinbox(self, value, minimum=0):
+        spinbox = QSpinBox()
+        spinbox.setRange(minimum, 100000)
+        spinbox.setValue(max(minimum, int(value or 0)))
+        spinbox.valueChanged.connect(self._asset_values_changed)
+        return spinbox
+
+    def _populate_sidebar(self):
+        self.room_list.blockSignals(True)
+        try:
+            self.room_list.clear()
+            indexed = list(enumerate(self.room_types))
+            indexed.sort(
+                key=lambda item: (
+                    self._natural_key(item[1].get("name")),
+                    self._natural_key(item[1].get("id")),
+                )
+            )
+            self._display_order = [index for index, _room_type in indexed]
+            for original_index, room_type in indexed:
+                room_type_id = self._room_id(room_type)
+                name = self._text(room_type.get("name")) or room_type_id or "Room type"
+                prefix = "✓ " if self._is_complete(room_type_id) else "  "
+                label = f"{prefix}{room_type_id} - {name}" if room_type_id else f"{prefix}{name}"
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, original_index)
+                self.room_list.addItem(item)
+        finally:
+            self.room_list.blockSignals(False)
+
+    def _select_room(self, row):
+        item = self.room_list.item(row)
+        if item is None:
+            return
+        target_index = int(item.data(Qt.UserRole))
+        if self._dirty:
+            self._apply_changes()
+        self.current_index = target_index
+        self._refresh_detail()
+
+    def _current_room_type(self):
+        if 0 <= self.current_index < len(self.room_types):
+            return self.room_types[self.current_index]
+        return None
+
+    def _refresh_detail(self):
+        room_type = self._current_room_type()
+        self.asset_table.setRowCount(0)
+        self._asset_row_widgets = []
+        self._set_dirty(False)
+        if not room_type:
+            self.title_label.setText("No room types available")
+            self.status_label.setText("Create room types before running this review.")
+            self.summary_label.setText("")
+            self.mark_button.setEnabled(False)
+            self.clear_button.setEnabled(False)
+            self.apply_button.setEnabled(False)
+            self.prev_button.setEnabled(False)
+            self.next_button.setEnabled(False)
+            return
+
+        room_type_id = self._room_id(room_type)
+        name = self._text(room_type.get("name")) or room_type_id
+        rows = self._room_asset_rows(room_type)
+        completed = self._is_complete(room_type_id)
+        record = self._review_record(room_type_id)
+        completed_at = self._text(record.get("completed_at"))
+
+        self.title_label.setText(f"{room_type_id} - {name}" if room_type_id else name)
+        self.status_label.setText(
+            f"Reviewed {completed_at}" if completed and completed_at else ("Reviewed" if completed else "Not reviewed")
+        )
+
+        total_assets = 0
+        total_points = 0
+        for asset_row in rows:
+            asset_id = asset_row["asset_id"]
+            qty = max(1, int(asset_row.get("qty", 1) or 1))
+            asset = self.assets_by_id.get(asset_id, {})
+            data_points = max(0, _safe_int(asset.get("data_points", 1), 0))
+            total = qty * data_points
+            total_assets += qty
+            total_points += total
+            category_id = self._text(asset.get("category_id", asset.get("category", "")))
+            category = self.asset_categories_by_id.get(category_id, category_id)
+            values = [
+                asset_id,
+                self._text(asset.get("name")) or "(missing asset)",
+                category or "-",
+                self._text(asset.get("Group", asset.get("group", ""))) or "-",
+                self._text(asset.get("ADB_Code", asset.get("adb_code", ""))) or "-",
+                qty,
+                data_points,
+                total,
+            ]
+            row = self.asset_table.rowCount()
+            self.asset_table.insertRow(row)
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column in {7}:
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.asset_table.setItem(row, column, item)
+            qty_spin = self._spinbox(qty, 1)
+            ports_spin = self._spinbox(data_points, 0)
+            self.asset_table.setCellWidget(row, 5, qty_spin)
+            self.asset_table.setCellWidget(row, 6, ports_spin)
+            self._asset_row_widgets.append(
+                {
+                    "row": row,
+                    "asset_id": asset_id,
+                    "qty_spin": qty_spin,
+                    "ports_spin": ports_spin,
+                }
+            )
+
+        if not rows:
+            self.asset_table.insertRow(0)
+            self.asset_table.setItem(0, 0, QTableWidgetItem("No assets assigned"))
+            self.asset_table.setSpan(0, 0, 1, 8)
+
+        self.summary_label.setText(
+            f"{len(rows)} asset line(s) | {total_assets} asset instance(s) per room type | {total_points} data point(s) per room type"
+        )
+        self.mark_button.setEnabled(not completed)
+        self.clear_button.setEnabled(completed)
+        self.apply_button.setEnabled(False)
+        self.prev_button.setEnabled(len(self.room_types) > 1)
+        self.next_button.setEnabled(len(self.room_types) > 1)
+
+    def _asset_values_changed(self, *_):
+        total_assets = 0
+        total_points = 0
+        for metadata in self._asset_row_widgets:
+            qty = int(metadata["qty_spin"].value())
+            ports = int(metadata["ports_spin"].value())
+            total = qty * ports
+            total_assets += qty
+            total_points += total
+            total_item = self.asset_table.item(int(metadata["row"]), 7)
+            if total_item is None:
+                total_item = QTableWidgetItem("0")
+                total_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.asset_table.setItem(int(metadata["row"]), 7, total_item)
+            total_item.setText(str(total))
+        self.summary_label.setText(
+            f"{len(self._asset_row_widgets)} asset line(s) | {total_assets} asset instance(s) per room type | {total_points} data point(s) per room type"
+        )
+        self._set_dirty(True)
+
+    def _current_assignment_values(self):
+        asset_rows = []
+        data_ports_by_asset_id = {}
+        for metadata in self._asset_row_widgets:
+            asset_id = self._text(metadata["asset_id"])
+            if not asset_id:
+                continue
+            qty = max(1, int(metadata["qty_spin"].value()))
+            ports = max(0, int(metadata["ports_spin"].value()))
+            asset_rows.append({"asset_id": asset_id, "qty": qty})
+            data_ports_by_asset_id[asset_id] = ports
+        return asset_rows, data_ports_by_asset_id
+
+    def _room_option_label(self, room_type):
+        room_type_id = self._room_id(room_type)
+        name = self._text(room_type.get("name")) or room_type_id or "Room type"
+        return f"{room_type_id} - {name}" if room_type_id else name
+
+    def _copy_assets_between_room_types(self):
+        if self._dirty:
+            self._apply_changes()
+        if len(self.room_types) < 2:
+            QMessageBox.information(
+                self,
+                "Copy Room Type Assets",
+                "At least two room types are required before assets can be copied.",
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Copy Room Type Assets")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        source_combo = QComboBox()
+        target_combo = QComboBox()
+        for index, room_type in enumerate(self.room_types):
+            label = self._room_option_label(room_type)
+            source_combo.addItem(label, index)
+            target_combo.addItem(label, index)
+
+        current_source_row = source_combo.findData(self.current_index)
+        if current_source_row >= 0:
+            source_combo.setCurrentIndex(current_source_row)
+        if target_combo.count() > 1:
+            target_combo.setCurrentIndex(1 if target_combo.currentData() == self.current_index else 0)
+
+        form.addRow("Copy from", source_combo)
+        form.addRow("Copy to", target_combo)
+
+        note = QLabel("This replaces the target room type's assigned assets and quantities.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        source_index = int(source_combo.currentData())
+        target_index = int(target_combo.currentData())
+        if source_index == target_index:
+            QMessageBox.information(
+                self,
+                "Copy Room Type Assets",
+                "Choose two different room types.",
+            )
+            return
+        if not (0 <= source_index < len(self.room_types) and 0 <= target_index < len(self.room_types)):
+            return
+
+        copied_count = self._copy_asset_assignments(source_index, target_index)
+        target = self.room_types[target_index]
+        QMessageBox.information(
+            self,
+            "Copy Room Type Assets",
+            f"Copied {copied_count} asset assignment(s) to {self._room_option_label(target)}.",
+        )
+
+    def _copy_asset_assignments(self, source_index, target_index):
+        if not (0 <= source_index < len(self.room_types) and 0 <= target_index < len(self.room_types)):
+            return 0
+        source = self.room_types[source_index]
+        target = self.room_types[target_index]
+        target_id = self._room_id(target)
+        copied_rows = [dict(row) for row in self._room_asset_rows(source)]
+        target["assets"] = copied_rows
+        target["asset_ids"] = [row["asset_id"] for row in copied_rows]
+        if target_id in self.review_state:
+            self.review_state.pop(target_id, None)
+            self._emit_state_changed()
+        if self.on_assignments_changed:
+            self.on_assignments_changed(target_id, copied_rows, {})
+
+        self.current_index = target_index
+        self._sync_sidebar_current()
+        return len(copied_rows)
+
+    def _apply_changes(self):
+        room_type = self._current_room_type()
+        if not room_type or not self._dirty:
+            return
+        room_type_id = self._room_id(room_type)
+        asset_rows, data_ports_by_asset_id = self._current_assignment_values()
+        room_type["assets"] = [dict(row) for row in asset_rows]
+        room_type["asset_ids"] = [row["asset_id"] for row in asset_rows]
+        for asset_id, ports in data_ports_by_asset_id.items():
+            asset = self.assets_by_id.get(asset_id)
+            if isinstance(asset, dict):
+                asset["data_points"] = ports
+        if room_type_id in self.review_state:
+            self.review_state.pop(room_type_id, None)
+        if self.on_assignments_changed:
+            self.on_assignments_changed(room_type_id, asset_rows, data_ports_by_asset_id)
+        self._set_dirty(False)
+        self._sync_sidebar_current()
+
+    def _emit_state_changed(self):
+        if self.on_state_changed:
+            self.on_state_changed(deepcopy(self.review_state))
+
+    def _sync_sidebar_current(self):
+        current_original = self.current_index
+        self._populate_sidebar()
+        for row in range(self.room_list.count()):
+            item = self.room_list.item(row)
+            if item and int(item.data(Qt.UserRole)) == current_original:
+                self.room_list.setCurrentRow(row)
+                break
+        self._refresh_detail()
+
+    def _mark_complete(self):
+        if self._dirty:
+            self._apply_changes()
+        room_type = self._current_room_type()
+        if not room_type:
+            return
+        room_type_id = self._room_id(room_type)
+        if not room_type_id:
+            return
+        self.review_state[room_type_id] = {
+            "complete": True,
+            "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "asset_signature": self._asset_signature(room_type),
+        }
+        self._emit_state_changed()
+        self._sync_sidebar_current()
+
+    def _clear_complete(self):
+        room_type = self._current_room_type()
+        if not room_type:
+            return
+        room_type_id = self._room_id(room_type)
+        if room_type_id in self.review_state:
+            self.review_state.pop(room_type_id, None)
+            self._emit_state_changed()
+        self._sync_sidebar_current()
+
+    def _display_row_for_original_index(self, original_index):
+        for row in range(self.room_list.count()):
+            item = self.room_list.item(row)
+            if item and int(item.data(Qt.UserRole)) == original_index:
+                return row
+        return -1
+
+    def _previous_room(self):
+        if self.room_list.count() <= 0:
+            return
+        if self._dirty:
+            self._apply_changes()
+        row = self.room_list.currentRow()
+        self.room_list.setCurrentRow((row - 1) % self.room_list.count())
+
+    def _find_next_uncomplete(self, start_original_index, wrap=True):
+        if not self.room_types:
+            return None
+        display_indices = [
+            int(self.room_list.item(row).data(Qt.UserRole))
+            for row in range(self.room_list.count())
+        ]
+        if not display_indices:
+            return None
+        try:
+            start_display = display_indices.index(start_original_index)
+        except ValueError:
+            start_display = -1
+        candidates = list(range(start_display + 1, len(display_indices)))
+        if wrap:
+            candidates.extend(range(0, start_display + 1))
+        for display_row in candidates:
+            original_index = display_indices[display_row]
+            room_type_id = self._room_id(self.room_types[original_index])
+            if not self._is_complete(room_type_id):
+                return display_row
+        return None
+
+    def _next_uncomplete(self):
+        if self._dirty:
+            self._apply_changes()
+        next_row = self._find_next_uncomplete(self.current_index, wrap=True)
+        if next_row is None:
+            QMessageBox.information(
+                self,
+                "Room Type Asset Review",
+                "All room types have been marked complete.",
+            )
+            return
+        self.room_list.setCurrentRow(next_row)
 
 
 class ScenarioGroupManagerDialog(QDialog):

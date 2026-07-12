@@ -7527,6 +7527,12 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             "x": 0.0,
             "y": 0.0,
         }
+        rack_size_u = max(1, _int(builder.settings.get("default_rack_size_u"), 42))
+        if (
+            _text(location.get("kind")).lower() == "polan"
+            or _text(location_name).startswith("AUTO-POLAN-")
+        ) and _text(rack_name).startswith("AUTO-RACK-"):
+            rack_size_u = 1
         panel_index = len(panels_by_pool[key]) + 1
         panel = builder.add_instance(
             panel_asset,
@@ -7536,7 +7542,7 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             rack_name=rack_name,
             target_rack_name=rack_name,
             rack_start_u=0,
-            rack_size_u=max(1, _int(builder.settings.get("default_rack_size_u"), 42)),
+            rack_size_u=rack_size_u,
             route_anchor=location_name,
             termination_count=0,
             available_connector_count=capacity,

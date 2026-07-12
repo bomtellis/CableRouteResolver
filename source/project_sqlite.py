@@ -215,6 +215,16 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             ON project_record_index(parent_id);
         CREATE INDEX IF NOT EXISTS idx_project_record_xy
             ON project_record_index(section_key, floor, x, y);
+
+        CREATE TABLE IF NOT EXISTS project_revisions (
+            revision_number INTEGER PRIMARY KEY,
+            created_utc TEXT NOT NULL,
+            notes TEXT NOT NULL,
+            changed_chunks INTEGER NOT NULL DEFAULT 0,
+            unchanged_chunks INTEGER NOT NULL DEFAULT 0,
+            deleted_chunks INTEGER NOT NULL DEFAULT 0,
+            indexed_records INTEGER NOT NULL DEFAULT 0
+        );
         """
     )
 
@@ -244,6 +254,9 @@ class CompactionStatistics:
 @dataclass(frozen=True)
 class SaveStatistics:
     path: str
+    revision_number: int
+    revision_notes: str
+    revision_created: bool
     changed_chunks: int
     unchanged_chunks: int
     deleted_chunks: int
@@ -262,6 +275,68 @@ class SQLiteProjectFile:
     def __init__(self, path: str | Path, chunk_size: int = DEFAULT_CHUNK_SIZE):
         self.path = Path(path)
         self.chunk_size = max(32, int(chunk_size or DEFAULT_CHUNK_SIZE))
+
+    @staticmethod
+    def _section_label(section_key: str) -> str:
+        labels = {
+            "project": "project details",
+            "building": "building settings",
+            "departments": "departments",
+            "room_types": "room types",
+            "room_type_scenario_groups": "room type scenario groups",
+            "asset_scenario_groups": "asset scenario groups",
+            "room_type_asset_scenarios": "room type asset scenarios",
+            "asset_categories": "asset categories",
+            "assets": "assets",
+            "locations": "locations",
+            "data_points": "data points",
+            "corridors": "corridor settings",
+            "corridors.nodes": "corridor nodes",
+            "corridors.edges": "corridor edges",
+            "transitions": "transitions",
+            "floor_dxf_files": "floor DXF mapping",
+            "connections": "connections",
+            "route_profiles": "route profiles",
+        }
+        if section_key in labels:
+            return labels[section_key]
+        return section_key.replace("_", " ").replace(".", " ")
+
+    @classmethod
+    def _revision_notes(
+        cls,
+        *,
+        had_existing_project: bool,
+        changed_sections: Iterable[str],
+        deleted_sections: Iterable[str],
+        changed_chunks: int,
+        deleted_chunks: int,
+    ) -> str:
+        changed = sorted({cls._section_label(section) for section in changed_sections})
+        deleted = sorted({cls._section_label(section) for section in deleted_sections})
+        if not had_existing_project:
+            if changed:
+                shown = ", ".join(changed[:8])
+                if len(changed) > 8:
+                    shown += f", and {len(changed) - 8} more section(s)"
+                return f"Initial project save with {changed_chunks} section chunk(s): {shown}."
+            return "Initial project save."
+
+        parts = []
+        if changed:
+            shown = ", ".join(changed[:8])
+            if len(changed) > 8:
+                shown += f", and {len(changed) - 8} more section(s)"
+            parts.append(f"Updated {shown}")
+        if deleted:
+            shown = ", ".join(deleted[:6])
+            if len(deleted) > 6:
+                shown += f", and {len(deleted) - 6} more removed section(s)"
+            parts.append(f"Removed {shown}")
+        chunk_text = f"{changed_chunks} changed chunk(s)"
+        if deleted_chunks:
+            chunk_text += f", {deleted_chunks} deleted chunk(s)"
+        return "; ".join(parts) + f". {chunk_text}."
 
     def load(self) -> dict:
         if not self.path.exists():
@@ -427,6 +502,11 @@ class SQLiteProjectFile:
         unchanged_chunks = 0
         indexed_records = 0
         deleted_chunks = 0
+        changed_sections: set[str] = set()
+        deleted_sections: set[str] = set()
+        revision_number = 0
+        revision_notes = ""
+        revision_created = False
         try:
             _configure_connection(connection, writable=True)
             _create_schema(connection)
@@ -519,6 +599,7 @@ class SQLiteProjectFile:
                         )
                         indexed_records += len(index_rows)
                     changed_chunks += 1
+                    changed_sections.add(section_key)
 
                 stale = [identity for identity in existing_hashes if identity not in seen]
                 if stale:
@@ -527,27 +608,65 @@ class SQLiteProjectFile:
                         stale,
                     )
                     deleted_chunks = len(stale)
+                    deleted_sections.update(section_key for section_key, _chunk_index in stale)
 
                 existing_meta = dict(
                     connection.execute("SELECT key, value FROM project_meta")
                 )
                 created_utc = existing_meta.get("created_utc") or _utc_now()
+                modified_utc = _utc_now()
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(revision_number), 0) FROM project_revisions"
+                ).fetchone()
+                revision_number = int(row[0] or 0)
+                has_project_data_changes = bool(
+                    changed_chunks or deleted_chunks or not existing_hashes
+                )
                 meta_rows = {
                     "format_name": FORMAT_NAME,
                     "schema_version": str(SCHEMA_VERSION),
                     "created_utc": created_utc,
-                    "modified_utc": _utc_now(),
+                    "modified_utc": modified_utc,
                     "chunk_size": str(self.chunk_size),
                     "source_path": _text(source_path),
                     "application": "CableRouteResolver",
                 }
-                connection.executemany(
-                    """
-                    INSERT INTO project_meta(key, value) VALUES(?, ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                    """,
-                    list(meta_rows.items()),
-                )
+
+                if has_project_data_changes:
+                    connection.executemany(
+                        """
+                        INSERT INTO project_meta(key, value) VALUES(?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        list(meta_rows.items()),
+                    )
+
+                    revision_number += 1
+                    revision_created = True
+                    revision_notes = self._revision_notes(
+                        had_existing_project=bool(existing_hashes),
+                        changed_sections=changed_sections,
+                        deleted_sections=deleted_sections,
+                        changed_chunks=changed_chunks,
+                        deleted_chunks=deleted_chunks,
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO project_revisions(
+                            revision_number, created_utc, notes,
+                            changed_chunks, unchanged_chunks, deleted_chunks, indexed_records
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            revision_number,
+                            meta_rows["modified_utc"],
+                            revision_notes,
+                            changed_chunks,
+                            unchanged_chunks,
+                            deleted_chunks,
+                            indexed_records,
+                        ),
+                    )
 
             connection.execute("PRAGMA optimize")
         finally:
@@ -576,6 +695,9 @@ class SQLiteProjectFile:
 
         return SaveStatistics(
             path=str(self.path),
+            revision_number=revision_number,
+            revision_notes=revision_notes,
+            revision_created=revision_created,
             changed_chunks=changed_chunks,
             unchanged_chunks=unchanged_chunks,
             deleted_chunks=deleted_chunks,
@@ -607,6 +729,13 @@ class SQLiteProjectFile:
                 "SELECT 1 FROM project_sections LIMIT 1"
             ).fetchone():
                 errors.append("Project contains no stored sections.")
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_revisions'"
+            ).fetchone():
+                try:
+                    connection.execute("SELECT 1 FROM project_revisions LIMIT 1").fetchone()
+                except sqlite3.DatabaseError as exc:
+                    errors.append(f"Revision history is not readable: {exc}")
         except sqlite3.DatabaseError as exc:
             errors.append(str(exc))
         finally:
@@ -721,6 +850,48 @@ class SQLiteProjectFile:
                 "reclaimable_bytes": reclaimable,
                 "free_ratio": (free_pages / page_count) if page_count else 0.0,
             }
+        finally:
+            connection.close()
+
+    def revision_history(self, limit: Optional[int] = None) -> List[dict]:
+        connection = sqlite3.connect(str(self.path))
+        try:
+            _configure_connection(connection, writable=False)
+            sql = """
+                SELECT revision_number, created_utc, notes,
+                       changed_chunks, unchanged_chunks, deleted_chunks, indexed_records
+                FROM project_revisions
+                ORDER BY revision_number DESC
+            """
+            parameters: Tuple[object, ...] = ()
+            if limit is not None:
+                sql += " LIMIT ?"
+                parameters = (max(1, int(limit)),)
+            rows = connection.execute(sql, parameters).fetchall()
+            return [
+                {
+                    "revision_number": int(revision_number or 0),
+                    "created_utc": created_utc or "",
+                    "notes": notes or "",
+                    "changed_chunks": int(changed_chunks or 0),
+                    "unchanged_chunks": int(unchanged_chunks or 0),
+                    "deleted_chunks": int(deleted_chunks or 0),
+                    "indexed_records": int(indexed_records or 0),
+                }
+                for (
+                    revision_number,
+                    created_utc,
+                    notes,
+                    changed_chunks,
+                    unchanged_chunks,
+                    deleted_chunks,
+                    indexed_records,
+                ) in rows
+            ]
+        except sqlite3.OperationalError as exc:
+            if "project_revisions" in str(exc):
+                return []
+            raise
         finally:
             connection.close()
 

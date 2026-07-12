@@ -112,6 +112,7 @@ from dialogs import (
     SuggestCommsRoomDialog,
     CommsRoomOptimisationProgressDialog,
     RoomTypesEditorWindow,
+    RoomTypeAssetReviewWizard,
     AssetsEditorWindow,
     AssetCategoriesEditorWindow,
     ScenarioGroupManagerDialog,
@@ -995,6 +996,200 @@ class RoomTypeCountsDialog(QDialog):
         self.navigateRequested.emit(room_type_id)
 
 
+class RevisionHistoryDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Revision History")
+        self.setModal(False)
+        self.resize(980, 520)
+
+        layout = QVBoxLayout(self)
+
+        self.summary_label = QLabel()
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(
+            ["Revision", "Saved", "Notes", "Changed", "Deleted", "Indexed records"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        layout.addWidget(self.table, 1)
+
+        button_row = QHBoxLayout()
+        layout.addLayout(button_row)
+        refresh_btn = QPushButton("Refresh")
+        export_btn = QPushButton("Export PDF")
+        close_btn = QPushButton("Close")
+        refresh_btn.clicked.connect(self.refresh_from_parent)
+        export_btn.clicked.connect(self._export_pdf)
+        close_btn.clicked.connect(self.close)
+        button_row.addWidget(refresh_btn)
+        button_row.addWidget(export_btn)
+        button_row.addStretch(1)
+        button_row.addWidget(close_btn)
+
+    def refresh_from_parent(self):
+        parent = self.parent()
+        revisions = []
+        if parent is not None and hasattr(parent, "store"):
+            try:
+                revisions = parent.store.revision_history()
+            except Exception as exc:
+                QMessageBox.critical(self, "Revision history failed", str(exc))
+                return
+        self.set_revisions(revisions)
+
+    def set_revisions(self, revisions):
+        revisions = list(revisions or [])
+        self.summary_label.setText(
+            f"{len(revisions)} saved revision{'s' if len(revisions) != 1 else ''}"
+        )
+        self.table.setRowCount(len(revisions))
+        for row, revision in enumerate(revisions):
+            values = [
+                revision.get("revision_number", ""),
+                revision.get("created_utc", ""),
+                revision.get("notes", ""),
+                revision.get("changed_chunks", 0),
+                revision.get("deleted_chunks", 0),
+                revision.get("indexed_records", 0),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column in {0, 3, 4, 5}:
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(row, column, item)
+        self.table.resizeRowsToContents()
+
+    def _export_pdf(self):
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "export_revision_history_pdf"):
+            parent.export_revision_history_pdf()
+            self.refresh_from_parent()
+
+
+class ProjectSummaryPdfOptionsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Project Summary PDF Sections")
+        self.resize(560, 480)
+        self._checks = {}
+
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+        default_name = "Cable Routing Project"
+        if parent is not None and hasattr(parent, "store"):
+            default_name = str(
+                parent.store.data.get("project", {}).get("name", default_name)
+                or default_name
+            ).strip()
+        self.project_name_edit = QLineEdit(default_name)
+        form.addRow("Project name", self.project_name_edit)
+
+        self.paper_size_combo = QComboBox()
+        self.orientation_combo = QComboBox()
+        try:
+            from project_summary_report import (
+                PROJECT_SUMMARY_PAPER_SIZES,
+                PROJECT_SUMMARY_SECTIONS,
+            )
+            paper_sizes = list(PROJECT_SUMMARY_PAPER_SIZES.keys())
+        except Exception:
+            PROJECT_SUMMARY_SECTIONS = [
+                ("overall_summary", "Overall summary"),
+                ("room_summary", "Room type summary"),
+                ("room_details", "Room asset details"),
+                ("use_cases", "Use cases"),
+                ("network_summary", "Network summary, topology and layers"),
+                ("network_equipment", "Network equipment required"),
+                ("power_draw", "Power draw and theoretical kWh"),
+                ("rack_power_fibre", "Rack, power and fibre requirements"),
+            ]
+            paper_sizes = ["A4", "A3", "Letter", "Legal"]
+        self.paper_size_combo.addItems(paper_sizes)
+        if "A4" in paper_sizes:
+            self.paper_size_combo.setCurrentText("A4")
+        self.orientation_combo.addItems(["Landscape", "Portrait"])
+        self.orientation_combo.setCurrentText("Landscape")
+        form.addRow("Paper size", self.paper_size_combo)
+        form.addRow("Orientation", self.orientation_combo)
+
+        label = QLabel("Select the sections to include.")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        for section_id, section_label in PROJECT_SUMMARY_SECTIONS:
+            check = QCheckBox(section_label)
+            check.setChecked(True)
+            check.stateChanged.connect(self._update_buttons)
+            layout.addWidget(check)
+            self._checks[section_id] = check
+
+        button_row = QHBoxLayout()
+        layout.addLayout(button_row)
+        all_btn = QPushButton("Select All")
+        none_btn = QPushButton("Clear")
+        all_btn.clicked.connect(self._select_all)
+        none_btn.clicked.connect(self._clear_all)
+        button_row.addWidget(all_btn)
+        button_row.addWidget(none_btn)
+        button_row.addStretch(1)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self._update_buttons()
+
+    def selected_sections(self):
+        return [
+            section_id
+            for section_id, check in self._checks.items()
+            if check.isChecked()
+        ]
+
+    def report_options(self):
+        options = {
+            "project_name": self.project_name_edit.text().strip(),
+            "paper_size": self.paper_size_combo.currentText(),
+            "orientation": self.orientation_combo.currentText(),
+        }
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "latest_project_revision_number"):
+            revision_number = parent.latest_project_revision_number()
+            if revision_number:
+                options["revision_number"] = revision_number
+        return options
+
+    def _select_all(self):
+        for check in self._checks.values():
+            check.setChecked(True)
+        self._update_buttons()
+
+    def _clear_all(self):
+        for check in self._checks.values():
+            check.setChecked(False)
+        self._update_buttons()
+
+    def _update_buttons(self):
+        ok_button = self.buttons.button(QDialogButtonBox.Ok)
+        if ok_button is not None:
+            ok_button.setEnabled(bool(self.selected_sections()))
 
 
 _NETWORK_UNDO_KEYS = (
@@ -1084,6 +1279,7 @@ class CableRouteEditor(QMainWindow):
         self._find_dp_matches = []
         self._find_dp_index = -1
         self._room_type_counts_dialog = None
+        self._room_type_asset_review_dialog = None
 
         self._viewport_refresh_timer = QTimer(self)
         self._viewport_refresh_timer.setSingleShot(True)
@@ -1911,6 +2107,113 @@ class CableRouteEditor(QMainWindow):
         self._room_type_counts_dialog.raise_()
         self._room_type_counts_dialog.activateWindow()
 
+    def show_room_type_asset_review_wizard(self):
+        room_types = self.store.data.get("room_types", []) or []
+        if not room_types:
+            QMessageBox.information(
+                self,
+                "Room Type Asset Review",
+                "Create room types before reviewing their asset assignments.",
+            )
+            return
+
+        assets_by_id = {
+            str(asset.get("id", "") or "").strip(): asset
+            for asset in self.store.data.get("assets", []) or []
+            if str(asset.get("id", "") or "").strip()
+        }
+        asset_categories_by_id = {
+            str(category.get("id", "") or "").strip(): str(
+                category.get("name", category.get("id", "")) or ""
+            ).strip()
+            for category in self.store.data.get("asset_categories", []) or []
+            if str(category.get("id", "") or "").strip()
+        }
+
+        self._room_type_asset_review_dialog = RoomTypeAssetReviewWizard(
+            self,
+            room_types,
+            assets_by_id=assets_by_id,
+            asset_categories_by_id=asset_categories_by_id,
+            review_state=self.store.data.get("room_type_asset_review", {}),
+            on_state_changed=self._save_room_type_asset_review_state,
+            on_assignments_changed=self._save_room_type_asset_review_assignments,
+        )
+        self._room_type_asset_review_dialog.show()
+        self._room_type_asset_review_dialog.raise_()
+        self._room_type_asset_review_dialog.activateWindow()
+
+    def _save_room_type_asset_review_state(self, review_state):
+        self.push_undo_state("Update room type asset review")
+        valid_ids = {
+            str(room_type.get("id", "") or "").strip()
+            for room_type in self.store.data.get("room_types", []) or []
+            if str(room_type.get("id", "") or "").strip()
+        }
+        self.store.data["room_type_asset_review"] = {
+            str(room_type_id).strip(): dict(record)
+            for room_type_id, record in (review_state or {}).items()
+            if str(room_type_id).strip() in valid_ids and isinstance(record, dict)
+        }
+        completed = sum(
+            1
+            for record in self.store.data["room_type_asset_review"].values()
+            if isinstance(record, dict) and bool(record.get("complete", False))
+        )
+        self.set_status(f"Reviewed {completed} of {len(valid_ids)} room type asset assignment(s)")
+
+    def _save_room_type_asset_review_assignments(self, room_type_id, asset_rows, data_ports_by_asset_id):
+        room_type_id = str(room_type_id or "").strip()
+        if not room_type_id:
+            return
+        self.push_undo_state("Update room type asset assignments")
+        room_type = next(
+            (
+                item
+                for item in self.store.data.get("room_types", []) or []
+                if str(item.get("id", "") or "").strip() == room_type_id
+            ),
+            None,
+        )
+        if isinstance(room_type, dict):
+            cleaned_rows = []
+            for row in asset_rows or []:
+                if not isinstance(row, dict):
+                    continue
+                asset_id = str(row.get("asset_id", "") or "").strip()
+                if not asset_id:
+                    continue
+                try:
+                    qty = int(row.get("qty", 1) or 1)
+                except (TypeError, ValueError):
+                    qty = 1
+                cleaned_rows.append({"asset_id": asset_id, "qty": max(1, qty)})
+            room_type["assets"] = cleaned_rows
+            room_type["asset_ids"] = [row["asset_id"] for row in cleaned_rows]
+
+        ports_by_asset = {
+            str(asset_id or "").strip(): ports
+            for asset_id, ports in (data_ports_by_asset_id or {}).items()
+            if str(asset_id or "").strip()
+        }
+        for asset in self.store.data.get("assets", []) or []:
+            if not isinstance(asset, dict):
+                continue
+            asset_id = str(asset.get("id", "") or "").strip()
+            if asset_id not in ports_by_asset:
+                continue
+            try:
+                ports = int(ports_by_asset[asset_id] or 0)
+            except (TypeError, ValueError):
+                ports = 0
+            asset["data_points"] = max(0, ports)
+
+        review_state = self.store.data.get("room_type_asset_review", {})
+        if isinstance(review_state, dict):
+            review_state.pop(room_type_id, None)
+        self.store.sync_all_room_type_quantities()
+        self.set_status(f"Updated asset quantities and data ports for room type {room_type_id}")
+
     def _centre_on_named_point(self, name):
         point = self.store.all_points().get(name)
         if not point:
@@ -1999,6 +2302,9 @@ class CableRouteEditor(QMainWindow):
             ("Import Legacy JSON", "box-arrow-right", self.import_json),
             ("Save Project", "database", self.save_json),
             ("Save Project As", "file-earmark-plus", self.save_json_as),
+            ("Revision History...", "clock-history", self.show_revision_history),
+            ("Export Revision History PDF", "filetype-pdf", self.export_revision_history_pdf),
+            ("Export Project Summary PDF", "filetype-pdf", self.export_project_summary_pdf),
             ("Export Project JSON", "box-arrow-right", self.export_json),
             ("Map DXF to Floor", "geo-alt", self.load_dxf),
             ("Clear Floor DXF", "trash3", self.clear_floor_dxf),
@@ -2040,6 +2346,10 @@ class CableRouteEditor(QMainWindow):
         room_type_counts_action = tools_menu.addAction("Room Type Counts")
         set_action_icon(room_type_counts_action, "list-task")
         room_type_counts_action.triggered.connect(self.show_room_type_counts_dialog)
+
+        room_type_review_action = tools_menu.addAction("Room Type Asset Review Wizard")
+        set_action_icon(room_type_review_action, "check-circle", BOOTSTRAP_GREEN)
+        room_type_review_action.triggered.connect(self.show_room_type_asset_review_wizard)
 
         scenario_action = tools_menu.addAction("Room/Asset Scenario Test")
         set_action_icon(scenario_action, "diagram-3")
@@ -2384,6 +2694,12 @@ class CableRouteEditor(QMainWindow):
                     "Rooms", "Room types", QStyle.SP_DirIcon, self.manage_room_types
                 ),
                 self._ribbon_icon_button(
+                    "Review",
+                    "Review room type asset assignments",
+                    QStyle.SP_DialogApplyButton,
+                    self.show_room_type_asset_review_wizard,
+                ),
+                self._ribbon_icon_button(
                     "Scenario",
                     "Test adding assets to grouped room types",
                     QStyle.SP_FileDialogDetailedView,
@@ -2619,6 +2935,12 @@ class CableRouteEditor(QMainWindow):
                     "Generate cable length CSV",
                     QStyle.SP_FileDialogDetailedView,
                     self.generate_cable_report,
+                ),
+                self._ribbon_icon_button(
+                    "Project PDF",
+                    "Export room, use-case and network summary PDF",
+                    QStyle.SP_FileIcon,
+                    self.export_project_summary_pdf,
                 ),
             ],
             columns=2,
@@ -5253,17 +5575,184 @@ class CableRouteEditor(QMainWindow):
         statistics = getattr(self.store, "last_save_statistics", None)
         detail = ""
         if statistics is not None:
-            detail = (
-                f" · {statistics.changed_chunks} changed chunk(s), "
-                f"{statistics.unchanged_chunks} unchanged"
-            )
+            if getattr(statistics, "revision_created", True):
+                detail = (
+                    f" - revision {statistics.revision_number} - "
+                    f"{statistics.changed_chunks} changed chunk(s), "
+                    f"{statistics.unchanged_chunks} unchanged"
+                )
+            else:
+                detail = " - no project data changes"
+                if getattr(statistics, "revision_number", 0):
+                    detail += f" - latest revision {statistics.revision_number}"
             if getattr(statistics, "compacted", False):
                 reclaimed_mb = getattr(statistics, "reclaimed_bytes", 0) / (1024 * 1024)
-                detail += f" · compacted ({reclaimed_mb:.1f} MiB reclaimed)"
+                detail += f" - compacted ({reclaimed_mb:.1f} MiB reclaimed)"
             elif getattr(statistics, "compaction_error", ""):
-                detail += " · compaction skipped"
+                detail += " - compaction skipped"
         self.set_status(f"{status_prefix} {Path(self.current_json_path).name}{detail}")
         self.refresh_canvas()
+
+    def show_revision_history(self):
+        if getattr(self.store, "storage_format", "") != "sqlite" or not getattr(
+            self.store, "storage_path", ""
+        ):
+            QMessageBox.information(
+                self,
+                "Revision History",
+                "Save this project as a .crsdb database before viewing revision history.",
+            )
+            return
+        dialog = getattr(self, "_revision_history_dialog", None)
+        if dialog is None or not dialog.isVisible():
+            dialog = RevisionHistoryDialog(self)
+            self._revision_history_dialog = dialog
+        dialog.refresh_from_parent()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def export_revision_history_pdf(self):
+        if getattr(self.store, "storage_format", "") != "sqlite" or not getattr(
+            self.store, "storage_path", ""
+        ):
+            QMessageBox.information(
+                self,
+                "Revision PDF",
+                "Save this project as a .crsdb database before exporting revision history.",
+            )
+            return
+
+        revisions = self.store.revision_history()
+        if not revisions:
+            QMessageBox.information(
+                self,
+                "Revision PDF",
+                "No saved revision history is available to export.",
+            )
+            return
+
+        initial = str(Path(self.store.storage_path).with_suffix(""))
+        initial = str(Path(initial).with_name(Path(initial).name + "_revision_history.pdf"))
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Revision History PDF",
+            initial,
+            "PDF files (*.pdf)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            from revision_report import export_revision_history_pdf
+
+            output_path = export_revision_history_pdf(
+                revisions,
+                path,
+                project_data=self.store.data,
+                source_path=self.store.storage_path or self.current_json_path or "",
+            )
+        except ImportError as exc:
+            QMessageBox.critical(
+                self,
+                "Revision PDF failed",
+                f"PDF export requires reportlab. Install project requirements and try again.\n\n{exc}",
+            )
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Revision PDF failed", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.set_status(f"Exported revision history PDF: {Path(output_path).name}")
+        QMessageBox.information(
+            self,
+            "Revision PDF complete",
+            f"Revision history PDF written to:\n\n{output_path}",
+        )
+
+    def latest_project_revision_number(self):
+        try:
+            revisions = self.store.revision_history(limit=1)
+        except Exception:
+            return 0
+        if not revisions:
+            return 0
+        try:
+            return int(revisions[0].get("revision_number", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def export_project_summary_pdf(self):
+        options = ProjectSummaryPdfOptionsDialog(self)
+        if options.exec() != QDialog.Accepted:
+            return
+        selected_sections = options.selected_sections()
+        if not selected_sections:
+            return
+        report_options = options.report_options()
+
+        project_name = str(
+            report_options.get(
+                "project_name",
+                self.store.data.get("project", {}).get("name", "cable_routing_project"),
+            )
+            or "cable_routing_project"
+        ).strip()
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", project_name).strip("_")
+        if not safe_name:
+            safe_name = "cable_routing_project"
+        if self.current_json_path:
+            initial = str(Path(self.current_json_path).with_suffix(""))
+            initial = str(Path(initial).with_name(Path(initial).name + "_project_summary.pdf"))
+        else:
+            initial = f"{safe_name}_project_summary.pdf"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Project Summary PDF",
+            initial,
+            "PDF files (*.pdf)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            from project_summary_report import export_project_summary_pdf
+
+            output_path = export_project_summary_pdf(
+                self.store.data,
+                path,
+                source_path=self.current_json_path or getattr(self.store, "storage_path", "") or "",
+                sections=selected_sections,
+                report_options=report_options,
+            )
+        except ImportError as exc:
+            QMessageBox.critical(
+                self,
+                "Project PDF failed",
+                f"PDF export requires reportlab. Install project requirements and try again.\n\n{exc}",
+            )
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Project PDF failed", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.set_status(f"Exported project summary PDF: {Path(output_path).name}")
+        QMessageBox.information(
+            self,
+            "Project PDF complete",
+            f"Project summary PDF written to:\n\n{output_path}",
+        )
 
     def save_json(self):
         path = self.current_json_path
@@ -5488,6 +5977,14 @@ class CableRouteEditor(QMainWindow):
         self.push_undo_state("Save room types")
         self.store.data["room_types"] = items
         valid_room_type_ids = {str(room_type.get("id", "") or "").strip() for room_type in items if str(room_type.get("id", "") or "").strip()}
+        review_state = self.store.data.get("room_type_asset_review", {})
+        if isinstance(review_state, dict):
+            self.store.data["room_type_asset_review"] = {
+                str(room_type_id).strip(): dict(record)
+                for room_type_id, record in review_state.items()
+                if str(room_type_id).strip() in valid_room_type_ids
+                and isinstance(record, dict)
+            }
         for group in self.store.data.get("room_type_scenario_groups", []) or []:
             if isinstance(group, dict):
                 group["room_type_ids"] = [
@@ -7065,8 +7562,19 @@ class CableRouteEditor(QMainWindow):
                         self.store.save_sqlite(storage_path, auto_compact=False)
                         compaction = self.store.compact_database(force=True)
                         reclaimed = getattr(compaction, "reclaimed_bytes", 0) / (1024 * 1024) if compaction else 0.0
+                        statistics = getattr(self.store, "last_save_statistics", None)
+                        revision_detail = ""
+                        if statistics is not None:
+                            if getattr(statistics, "revision_created", True):
+                                revision_detail = f" - revision {statistics.revision_number}"
+                            elif getattr(statistics, "revision_number", 0):
+                                revision_detail = (
+                                    f" - no project data changes - latest revision {statistics.revision_number}"
+                                )
+                            else:
+                                revision_detail = " - no project data changes"
                         self.set_status(
-                            f"Saved and compacted {Path(storage_path).name} · {reclaimed:.1f} MiB reclaimed"
+                            f"Saved and compacted {Path(storage_path).name}{revision_detail} - {reclaimed:.1f} MiB reclaimed"
                         )
                     except Exception as exc:
                         QMessageBox.critical(
