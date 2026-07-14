@@ -1423,6 +1423,14 @@ class NetworkRackEditorDialog(QDialog):
             self.location_combo.setCurrentIndex(index)
         self.floor_spin = QSpinBox(); self.floor_spin.setRange(-20, 200); self.floor_spin.setValue(int(self.rack.get("floor", default_floor) or 0))
         self.capacity_spin = QSpinBox(); self.capacity_spin.setRange(1, 200); self.capacity_spin.setSuffix("U"); self.capacity_spin.setValue(max(1, int(self.rack.get("capacity_u", default_capacity_u) or default_capacity_u)))
+        self.cabinet_type_combo = QComboBox()
+        self.cabinet_type_combo.addItem("Standard rack cabinet", "standard")
+        self.cabinet_type_combo.addItem("Slim wall cabinet (maximum two switches)", "slim_wall")
+        cabinet_type_index = self.cabinet_type_combo.findData(
+            _text(self.rack.get("cabinet_type")) or "standard"
+        )
+        if cabinet_type_index >= 0:
+            self.cabinet_type_combo.setCurrentIndex(cabinet_type_index)
         self.manufacturer_edit = QLineEdit(_text(self.rack.get("manufacturer")))
         self.model_edit = QLineEdit(_text(self.rack.get("model")))
         self.notes_edit = QTextEdit(_text(self.rack.get("notes"))); self.notes_edit.setMinimumHeight(80)
@@ -1431,6 +1439,7 @@ class NetworkRackEditorDialog(QDialog):
         form.addRow("Location", self.location_combo)
         form.addRow("Floor", self.floor_spin)
         form.addRow("Capacity", self.capacity_spin)
+        form.addRow("Cabinet type", self.cabinet_type_combo)
         form.addRow("Manufacturer", self.manufacturer_edit)
         form.addRow("Model", self.model_edit)
         form.addRow("Notes", self.notes_edit)
@@ -1455,6 +1464,8 @@ class NetworkRackEditorDialog(QDialog):
         self.result = {
             "id": rack_id, "name": name, "location_name": location_name,
             "floor": int(self.floor_spin.value()), "capacity_u": int(self.capacity_spin.value()),
+            "cabinet_type": _text(self.cabinet_type_combo.currentData()) or "standard",
+            "max_switches": 2 if self.cabinet_type_combo.currentData() == "slim_wall" else 0,
             "manufacturer": self.manufacturer_edit.text().strip(), "model": self.model_edit.text().strip(),
             "notes": self.notes_edit.toPlainText().strip(), "auto_generated": bool(self.rack.get("auto_generated", False)),
         }
@@ -1935,6 +1946,24 @@ class PlanningResolutionDialog(QDialog):
             lines.append(f"Downstream device: {self.details.get('from_name')}")
         if self.details.get("to_name"):
             lines.append(f"Upstream device: {self.details.get('to_name')}")
+        maximum_cabinets = int(self.details.get("maximum_cabinets", 0) or 0)
+        required_cabinets = int(self.details.get("required_cabinets", 0) or 0)
+        if maximum_cabinets > 0:
+            lines.append(f"Maximum cabinets at location: {maximum_cabinets}")
+        if required_cabinets > 0:
+            lines.append(f"Cabinets required by design: {required_cabinets}")
+        maximum_switches = int(
+            self.details.get(
+                "maximum_switches_per_cabinet",
+                self.details.get("maximum_switches", 0),
+            )
+            or 0
+        )
+        required_switches = int(self.details.get("required_switches", 0) or 0)
+        if maximum_switches > 0:
+            lines.append(f"Maximum switches per cabinet: {maximum_switches}")
+        if required_switches > 0:
+            lines.append(f"Switches required by design: {required_switches}")
 
         actual_ports = int(self.details.get("actual_port_count", 0) or 0)
         required_ports = int(
@@ -2018,6 +2047,14 @@ class PlanningResolutionDialog(QDialog):
         location = _text(self.details.get("location_name"))
         from_role = _text(self.details.get("from_role")).lower()
         error_code = getattr(self.error, "code", "")
+        if error_code in {
+            "location_cabinet_limit",
+            "slim_wall_cabinet_capacity",
+        }:
+            self.action_combo.addItem(
+                "Stop planning and edit the location cabinet constraint",
+                "review_location",
+            )
         if error_code == "access_stack_spare_capacity" and location:
             self.action_combo.addItem(
                 "Install another rack and create an overflow stack for spare capacity (recommended)",
@@ -2048,17 +2085,27 @@ class PlanningResolutionDialog(QDialog):
         if getattr(self.error, "code", "") in {
             "link_capacity",
             "access_uplink_capacity",
+            "external_north_south_capacity",
         }:
             self.action_combo.addItem(
-                "Create the best available link and ignore the bandwidth shortfall",
+                (
+                    "Use the available external internet capacity and record a warning"
+                    if getattr(self.error, "code", "")
+                    == "external_north_south_capacity"
+                    else "Create the best available link and ignore the bandwidth shortfall"
+                ),
                 "ignore_bandwidth",
             )
             self.action_combo.addItem(
                 "Retry without spare traffic capacity", "remove_spare_capacity"
             )
-        self.action_combo.addItem(
-            "Open the asset library and review the design manually", "review_assets"
-        )
+        if error_code not in {
+            "location_cabinet_limit",
+            "slim_wall_cabinet_capacity",
+        }:
+            self.action_combo.addItem(
+                "Open the asset library and review the design manually", "review_assets"
+            )
 
     def _action_changed(self, *_args) -> None:
         action = _text(self.action_combo.currentData())
@@ -2126,7 +2173,7 @@ class PlanningResolutionDialog(QDialog):
             settings["ignore_link_bandwidth_errors"] = True
         elif action == "remove_spare_capacity":
             settings["spare_capacity_percent"] = 0.0
-        elif action == "review_assets":
+        elif action in {"review_assets", "review_location"}:
             self.selected_action = action
             self.accept()
             return
@@ -4814,6 +4861,15 @@ class NetworkPlannerDialog(QDialog):
                     self.tabs.setCurrentWidget(self.assets_tab)
                     self.refresh_tables()
                     return
+                if resolution.selected_action == "review_location":
+                    progress.close()
+                    QMessageBox.information(
+                        self,
+                        "Edit location cabinet constraint",
+                        "Close Network Configuration, then edit the comms-room point "
+                        "on the drawing to change its cabinet type or maximum cabinet count.",
+                    )
+                    return
 
             applied_resolution_signatures.add(signature)
             settings = self.data.setdefault("network_settings", {})
@@ -4840,15 +4896,33 @@ class NetworkPlannerDialog(QDialog):
         self.refresh_tables()
         self.on_save(self._save_payload())
         self.tabs.setCurrentWidget(self.summary_text)
-        QMessageBox.information(
-            self,
-            "Automatic network planning",
+        completion_message = (
             f"Generated {summary.get('technology', technology)} network configuration.\n\n"
             f"Endpoint ports: {summary.get('required_ports', 0)}\n"
             f"Generated components: {summary.get('auto_generated_instances', 0)}\n"
             f"Copper: {summary.get('estimated_copper_length_m', 0)} m\n"
-            f"Fibre: {summary.get('estimated_fibre_length_m', 0)} m",
+            f"Fibre: {summary.get('estimated_fibre_length_m', 0)} m"
         )
+        warnings = summary.get("warnings", []) or []
+        if warnings:
+            displayed_warnings = [str(warning) for warning in warnings[:8]]
+            if len(warnings) > len(displayed_warnings):
+                displayed_warnings.append(
+                    f"... and {len(warnings) - len(displayed_warnings)} more warning(s)."
+                )
+            QMessageBox.warning(
+                self,
+                "Automatic network planning warnings",
+                completion_message
+                + "\n\nWarnings:\nâ€¢ "
+                + "\nâ€¢ ".join(displayed_warnings),
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Automatic network planning",
+                completion_message,
+            )
 
     def clear_installed_assets_and_connections(self) -> None:
         instance_count = len(self.data.get("network_asset_instances", []))

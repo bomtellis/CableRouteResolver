@@ -1,11 +1,12 @@
 import csv
 import json
 import re
+import math
 from typing import Any
 import time
 from copy import deepcopy
 
-from PySide6.QtCore import Qt, QSortFilterProxyModel
+from PySide6.QtCore import Qt, QItemSelectionModel, QSortFilterProxyModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -134,7 +135,15 @@ class PointEditorDialog(QDialog):
 
 
 class LocationEditorDialog(QDialog):
-    def __init__(self, parent, location_name, location, department_options):
+    def __init__(
+        self,
+        parent,
+        location_name,
+        location,
+        department_options,
+        *,
+        editable_floor=False,
+    ):
         super().__init__(parent)
         self.setWindowTitle(f"Edit {location_name}")
         self.location_name = location_name
@@ -149,10 +158,38 @@ class LocationEditorDialog(QDialog):
         self.name_edit = QLineEdit(str(location_name))
         self.x_edit = QLineEdit(str(location.get("x", 0.0)))
         self.y_edit = QLineEdit(str(location.get("y", 0.0)))
+        if editable_floor:
+            self.floor_control = QSpinBox()
+            self.floor_control.setRange(-20, 200)
+            self.floor_control.setValue(int(location.get("floor", 0) or 0))
+        else:
+            self.floor_control = QLabel(str(location.get("floor", 0)))
 
         self.kind_combo = QComboBox()
         self.kind_combo.addItems(["location", "comms_room"])
         self.kind_combo.setCurrentText(str(location.get("kind", "location")))
+
+        self.cabinet_type_combo = QComboBox()
+        self.cabinet_type_combo.addItem("Standard rack cabinet", "standard")
+        self.cabinet_type_combo.addItem(
+            "Slim wall cabinet (maximum two switches)", "slim_wall"
+        )
+        cabinet_type_index = self.cabinet_type_combo.findData(
+            str(location.get("cabinet_type", "standard") or "standard")
+        )
+        if cabinet_type_index >= 0:
+            self.cabinet_type_combo.setCurrentIndex(cabinet_type_index)
+
+        self.max_cabinets_spin = QSpinBox()
+        self.max_cabinets_spin.setRange(0, 999)
+        self.max_cabinets_spin.setSpecialValueText("Unlimited")
+        self.max_cabinets_spin.setValue(
+            max(0, int(location.get("max_network_cabinets", 0) or 0))
+        )
+        self.max_cabinets_spin.setToolTip(
+            "Maximum number of network cabinets permitted at this location. "
+            "Zero leaves the number unrestricted."
+        )
 
         self.departments_list = QListWidget()
         self.departments_list.setSelectionMode(QAbstractItemView.NoSelection)
@@ -177,8 +214,10 @@ class LocationEditorDialog(QDialog):
         form.addRow("Name", self.name_edit)
         form.addRow("X", self.x_edit)
         form.addRow("Y", self.y_edit)
-        form.addRow("Floor", QLabel(str(location.get("floor", 0))))
+        form.addRow("Floor", self.floor_control)
         form.addRow("Kind", self.kind_combo)
+        form.addRow("Network cabinet type", self.cabinet_type_combo)
+        form.addRow("Maximum network cabinets", self.max_cabinets_spin)
         form.addRow("Departments", self.departments_list)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -204,13 +243,152 @@ class LocationEditorDialog(QDialog):
                 "name": name,
                 "x": float(self.x_edit.text()),
                 "y": float(self.y_edit.text()),
-                "floor": int(self.location.get("floor", 0)),
+                "floor": (
+                    int(self.floor_control.value())
+                    if isinstance(self.floor_control, QSpinBox)
+                    else int(self.location.get("floor", 0))
+                ),
                 "kind": self.kind_combo.currentText().strip(),
+                "cabinet_type": str(
+                    self.cabinet_type_combo.currentData() or "standard"
+                ),
+                "max_network_cabinets": int(self.max_cabinets_spin.value()),
                 "department_ids": department_ids,
             }
             super().accept()
         except Exception as exc:
             QMessageBox.critical(self, "Invalid location", str(exc))
+
+
+class LocationBulkEditDialog(QDialog):
+    """Edit only shared properties across several selected locations."""
+
+    def __init__(self, parent, locations):
+        super().__init__(parent)
+        self.locations = [dict(row) for row in locations if isinstance(row, dict)]
+        self.result = None
+        self.setWindowTitle("Edit Selected Locations")
+        self.resize(600, 300)
+
+        layout = QVBoxLayout(self)
+        heading = QLabel(
+            f"Update common properties for {len(self.locations)} selected locations."
+        )
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        note = QLabel(
+            "Only checked properties are applied. Location names, floors, coordinates "
+            "and department assignments remain unchanged. Mixed values are shown but "
+            "are not modified unless their property is checked."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.apply_kind_check = QCheckBox("Update kind")
+        self.kind_combo = QComboBox()
+        common_kind = self._common_value("kind", "location")
+        if common_kind is None:
+            self.kind_combo.addItem("Mixed values - choose a kind", None)
+            self.kind_combo.setToolTip("The selected locations currently have mixed kinds.")
+        self.kind_combo.addItem("Location", "location")
+        self.kind_combo.addItem("Comms room", "comms_room")
+        if common_kind is not None:
+            index = self.kind_combo.findData(str(common_kind))
+            if index >= 0:
+                self.kind_combo.setCurrentIndex(index)
+        form.addRow(self.apply_kind_check, self.kind_combo)
+
+        self.apply_cabinet_type_check = QCheckBox("Update cabinet type")
+        self.cabinet_type_combo = QComboBox()
+        self.cabinet_type_combo.addItem("Standard rack cabinet", "standard")
+        self.cabinet_type_combo.addItem(
+            "Slim wall cabinet (maximum two switches)", "slim_wall"
+        )
+        common_cabinet_type = self._common_value("cabinet_type", "standard")
+        if common_cabinet_type is None:
+            self.cabinet_type_combo.insertItem(
+                0, "Mixed values - choose a cabinet type", None
+            )
+            self.cabinet_type_combo.setCurrentIndex(0)
+            self.cabinet_type_combo.setToolTip(
+                "The selected locations currently have mixed cabinet types."
+            )
+        else:
+            index = self.cabinet_type_combo.findData(str(common_cabinet_type))
+            if index >= 0:
+                self.cabinet_type_combo.setCurrentIndex(index)
+        form.addRow(self.apply_cabinet_type_check, self.cabinet_type_combo)
+
+        self.apply_max_cabinets_check = QCheckBox("Update cabinet limit")
+        self.max_cabinets_spin = QSpinBox()
+        self.max_cabinets_spin.setRange(0, 999)
+        self.max_cabinets_spin.setSpecialValueText("Unlimited")
+        common_maximum = self._common_value("max_network_cabinets", 0)
+        self.max_cabinets_spin.setValue(
+            max(0, int(common_maximum or 0)) if common_maximum is not None else 0
+        )
+        if common_maximum is None:
+            self.max_cabinets_spin.setToolTip(
+                "The selected locations currently have mixed cabinet limits."
+            )
+        form.addRow(self.apply_max_cabinets_check, self.max_cabinets_spin)
+
+        for check, control in (
+            (self.apply_kind_check, self.kind_combo),
+            (self.apply_cabinet_type_check, self.cabinet_type_combo),
+            (self.apply_max_cabinets_check, self.max_cabinets_spin),
+        ):
+            control.setEnabled(False)
+            check.toggled.connect(control.setEnabled)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Apply).setText("Apply to selected")
+        buttons.button(QDialogButtonBox.Apply).clicked.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _common_value(self, key, default=None):
+        values = [row.get(key, default) for row in self.locations]
+        if not values:
+            return default
+        first = values[0]
+        return first if all(value == first for value in values[1:]) else None
+
+    def accept(self):
+        updates = {}
+        if self.apply_kind_check.isChecked():
+            kind = self.kind_combo.currentData()
+            if not kind:
+                QMessageBox.information(
+                    self, "Choose a kind", "Choose the kind to apply to the selected locations."
+                )
+                return
+            updates["kind"] = str(kind)
+        if self.apply_cabinet_type_check.isChecked():
+            cabinet_type = self.cabinet_type_combo.currentData()
+            if not cabinet_type:
+                QMessageBox.information(
+                    self,
+                    "Choose a cabinet type",
+                    "Choose the cabinet type to apply to the selected locations.",
+                )
+                return
+            updates["cabinet_type"] = str(cabinet_type)
+        if self.apply_max_cabinets_check.isChecked():
+            updates["max_network_cabinets"] = int(self.max_cabinets_spin.value())
+        if not updates:
+            QMessageBox.information(
+                self,
+                "No properties selected",
+                "Check at least one common property to update.",
+            )
+            return
+        self.result = updates
+        super().accept()
 
 
 class BulkLocationPlacementDialog(QDialog):
@@ -605,6 +783,95 @@ class DataPointEditorDialog(QDialog):
             QMessageBox.critical(self, "Invalid data point", str(exc))
 
 
+class PlacementZoneEditorDialog(QDialog):
+    """Edit one rectangular equipment-room placement allowance."""
+
+    def __init__(self, parent=None, seed=None):
+        super().__init__(parent)
+        self.setWindowTitle("Equipment Room Placement Zone")
+        self.result = None
+        seed = dict(seed or {})
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.id_edit = QLineEdit(str(seed.get("id", "") or ""))
+        self.name_edit = QLineEdit(str(seed.get("name", "") or ""))
+        self.floor_spin = QSpinBox()
+        self.floor_spin.setRange(-1000, 1000)
+        self.floor_spin.setValue(int(seed.get("floor", 0) or 0))
+
+        def coordinate_spin(value):
+            spin = QDoubleSpinBox()
+            spin.setRange(-1_000_000_000.0, 1_000_000_000.0)
+            spin.setDecimals(3)
+            spin.setValue(float(value or 0.0))
+            return spin
+
+        self.min_x_spin = coordinate_spin(seed.get("min_x", 0.0))
+        self.min_y_spin = coordinate_spin(seed.get("min_y", 0.0))
+        self.max_x_spin = coordinate_spin(seed.get("max_x", 0.0))
+        self.max_y_spin = coordinate_spin(seed.get("max_y", 0.0))
+        self.allow_comms_check = QCheckBox("Allow comms rooms")
+        self.allow_comms_check.setChecked(bool(seed.get("allow_comms_room", True)))
+        self.allow_der_check = QCheckBox("Allow distributed equipment rooms")
+        self.allow_der_check.setChecked(
+            bool(seed.get("allow_distributed_equipment_room", True))
+        )
+
+        form.addRow("Zone ID", self.id_edit)
+        form.addRow("Name", self.name_edit)
+        form.addRow("Floor", self.floor_spin)
+        form.addRow("Minimum X", self.min_x_spin)
+        form.addRow("Minimum Y", self.min_y_spin)
+        form.addRow("Maximum X", self.max_x_spin)
+        form.addRow("Maximum Y", self.max_y_spin)
+        form.addRow("", self.allow_comms_check)
+        form.addRow("", self.allow_der_check)
+
+        note = QLabel(
+            "Candidate corridor nodes and the final placed room must fall inside "
+            "a zone that permits the selected location type."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self):
+        zone_id = self.id_edit.text().strip()
+        if not zone_id:
+            QMessageBox.critical(self, "Invalid zone", "Zone ID is required.")
+            return
+        if not self.allow_comms_check.isChecked() and not self.allow_der_check.isChecked():
+            QMessageBox.critical(
+                self, "Invalid zone", "Allow at least one equipment-room type."
+            )
+            return
+        min_x, max_x = sorted((self.min_x_spin.value(), self.max_x_spin.value()))
+        min_y, max_y = sorted((self.min_y_spin.value(), self.max_y_spin.value()))
+        if math.isclose(min_x, max_x) or math.isclose(min_y, max_y):
+            QMessageBox.critical(
+                self, "Invalid zone", "The placement zone must have a non-zero area."
+            )
+            return
+        self.result = {
+            "id": zone_id,
+            "name": self.name_edit.text().strip() or zone_id,
+            "floor": int(self.floor_spin.value()),
+            "min_x": round(min_x, 3),
+            "min_y": round(min_y, 3),
+            "max_x": round(max_x, 3),
+            "max_y": round(max_y, 3),
+            "allow_comms_room": self.allow_comms_check.isChecked(),
+            "allow_distributed_equipment_room": self.allow_der_check.isChecked(),
+        }
+        super().accept()
+
+
 class SuggestCommsRoomDialog(QDialog):
     def __init__(
         self, parent, data_point_options, default_name="", selected_data_points=None
@@ -652,11 +919,17 @@ class SuggestCommsRoomDialog(QDialog):
         )
 
         self.name_edit = QLineEdit(default_name)
+        self.location_kind_combo = QComboBox()
+        self.location_kind_combo.addItem("Comms room", "comms_room")
+        self.location_kind_combo.addItem(
+            "Distributed equipment room", "distributed_equipment_room"
+        )
 
         form.addRow("Data points", self.data_points_list)
         form.addRow("Search mode", self.search_mode_combo)
         form.addRow("Max cable length (m)", self.max_length_spin)
-        form.addRow("New comms room name", self.name_edit)
+        form.addRow("Location type", self.location_kind_combo)
+        form.addRow("New location name", self.name_edit)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -687,11 +960,129 @@ class SuggestCommsRoomDialog(QDialog):
                 "data_point_names": data_point_names,
                 "max_cable_length_m": float(self.max_length_spin.value()),
                 "room_name": room_name,
+                "location_kind": self.location_kind_combo.currentData(),
                 "search_mode": self.search_mode_combo.currentText(),
             }
             super().accept()
         except Exception as exc:
             QMessageBox.critical(self, "Invalid input", str(exc))
+
+
+class SuggestRoomsFromZonesDialog(QDialog):
+    def __init__(self, parent=None, current_floor=0, switch_capacity=None):
+        super().__init__(parent)
+        self.setWindowTitle("Suggest Equipment Rooms from Zones")
+        self.result = None
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Suggest comms rooms and distributed equipment rooms from the "
+            "allowed placement zones and the demand from nearby unconnected data ports."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.scope_combo = QComboBox()
+        self.scope_combo.addItem("All floors", "all")
+        self.scope_combo.addItem(f"Current floor ({int(current_floor)})", "current")
+
+        self.max_distance_spin = QDoubleSpinBox()
+        self.max_distance_spin.setRange(0.1, 100000.0)
+        self.max_distance_spin.setDecimals(2)
+        self.max_distance_spin.setValue(90.0)
+        self.max_distance_spin.setSuffix(" m")
+
+        switch_capacity = dict(switch_capacity or {})
+        self.access_ports_per_switch = max(
+            1, int(switch_capacity.get("ports", 48) or 48)
+        )
+        default_comms_switches_per_cabinet = max(
+            1, int(switch_capacity.get("switches_per_full_cabinet", 1) or 1)
+        )
+        switch_name = str(
+            switch_capacity.get("name", "Configured access switch")
+            or "Configured access switch"
+        )
+        rack_size_u = max(1, int(switch_capacity.get("rack_size_u", 42) or 42))
+
+        self.comms_cabinet_count_spin = QSpinBox()
+        self.comms_cabinet_count_spin.setRange(1, 100)
+        self.comms_cabinet_count_spin.setValue(1)
+
+        self.comms_switches_per_cabinet_spin = QSpinBox()
+        self.comms_switches_per_cabinet_spin.setRange(1, 1000)
+        self.comms_switches_per_cabinet_spin.setValue(
+            default_comms_switches_per_cabinet
+        )
+        self.comms_switches_per_cabinet_spin.setToolTip(
+            f"Derived from the configured {rack_size_u}U full-size cabinet and "
+            "the selected access switch rack-unit requirement."
+        )
+
+        self.same_floor_check = QCheckBox(
+            "Keep each data port on the same floor as its suggested room"
+        )
+        self.same_floor_check.setChecked(True)
+        self.same_floor_check.setToolTip(
+            "Prevents suggested data-port connections from traversing floors."
+        )
+
+        self.create_connections_check = QCheckBox(
+            "Create connections from suggested rooms to the assigned data ports"
+        )
+        self.create_connections_check.setChecked(True)
+
+        form.addRow("Scope", self.scope_combo)
+        form.addRow("Cable length limit", self.max_distance_spin)
+        form.addRow(
+            "Access-switch capacity",
+            QLabel(f"{self.access_ports_per_switch} ports — {switch_name}"),
+        )
+        form.addRow(
+            f"Switches per full-size cabinet ({rack_size_u}U)",
+            self.comms_switches_per_cabinet_spin,
+        )
+        form.addRow("Cabinets per comms room", self.comms_cabinet_count_spin)
+        form.addRow(
+            "DER capacity",
+            QLabel("1 slim wall cabinet, maximum 2 switches"),
+        )
+        form.addRow("Floor restriction", self.same_floor_check)
+        form.addRow("Connections", self.create_connections_check)
+
+        note = QLabel(
+            "The nearest suitable zone is used. If that zone permits both room types, "
+            "a comms room is suggested; DER-only zones produce DER suggestions. Any "
+            "room-type assets and their declared data ports are included in demand. "
+            "Any data ports left without a connection will be listed after the "
+            "suggestion is applied."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(640, 440)
+
+    def accept(self):
+        self.result = {
+            "scope": str(self.scope_combo.currentData() or "all"),
+            "max_distance_m": float(self.max_distance_spin.value()),
+            "access_ports_per_switch": int(self.access_ports_per_switch),
+            "comms_cabinet_count": int(self.comms_cabinet_count_spin.value()),
+            "comms_switches_per_cabinet": int(
+                self.comms_switches_per_cabinet_spin.value()
+            ),
+            "der_max_switches": 2,
+            "same_floor_only": bool(self.same_floor_check.isChecked()),
+            "create_connections": bool(self.create_connections_check.isChecked()),
+        }
+        super().accept()
 
 
 class CommsRoomOptimisationProgressDialog(QDialog):
@@ -5535,3 +5926,97 @@ class TableListEditor(QMainWindow):
     def save(self):
         self.on_save(self.items)
         self.close()
+
+
+class PlacementZonesTableEditor(TableListEditor):
+    def prompt_item(self, seed=None):
+        dialog = PlacementZoneEditorDialog(self, seed or {})
+        return dialog.result if dialog.exec() == QDialog.Accepted else None
+
+    def add_item(self):
+        item = self.prompt_item()
+        if item is None:
+            return
+        if any(str(row.get("id", "")) == item["id"] for row in self.items):
+            QMessageBox.critical(self, "Duplicate zone", "Zone ID already exists.")
+            return
+        self.items.append(item)
+        self._refresh_table()
+
+    def edit_item(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        updated = self.prompt_item(self.items[row])
+        if updated is None:
+            return
+        if any(
+            index != row and str(item.get("id", "")) == updated["id"]
+            for index, item in enumerate(self.items)
+        ):
+            QMessageBox.critical(self, "Duplicate zone", "Zone ID already exists.")
+            return
+        self.items[row] = updated
+        self._refresh_table()
+        self.table.selectRow(row)
+
+
+class LocationsTableEditor(TableListEditor):
+    """Location-aware table editor with safe multi-row common-field updates."""
+
+    def _selected_rows(self):
+        rows = sorted(
+            {index.row() for index in self.table.selectionModel().selectedRows()}
+        )
+        if not rows and self.table.currentRow() >= 0:
+            rows = [self.table.currentRow()]
+        return [row for row in rows if 0 <= row < len(self.items)]
+
+    def edit_item(self):
+        rows = self._selected_rows()
+        if not rows:
+            return
+
+        if len(rows) == 1:
+            row = rows[0]
+            current = dict(self.items[row])
+            department_options = []
+            master = self.parent()
+            if master is not None and hasattr(master, "department_options"):
+                department_options = master.department_options()
+            dialog = LocationEditorDialog(
+                self,
+                str(current.get("name", "") or ""),
+                current,
+                department_options,
+                editable_floor=True,
+            )
+            if dialog.exec() != QDialog.Accepted or not dialog.result:
+                return
+            new_name = str(dialog.result.get("name", "") or "").strip()
+            if any(
+                index != row
+                and str(item.get("name", "") or "").strip() == new_name
+                for index, item in enumerate(self.items)
+            ):
+                QMessageBox.critical(
+                    self, "Duplicate location", f"Location {new_name!r} already exists."
+                )
+                return
+            self.items[row] = {**current, **dialog.result}
+            self._refresh_table()
+            self.table.selectRow(row)
+            return
+
+        selected = [self.items[row] for row in rows]
+        dialog = LocationBulkEditDialog(self, selected)
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+        for row in rows:
+            self.items[row].update(dialog.result)
+        self._refresh_table()
+        for row in rows:
+            self.table.selectionModel().select(
+                self.table.model().index(row, 0),
+                QItemSelectionModel.Select | QItemSelectionModel.Rows,
+            )

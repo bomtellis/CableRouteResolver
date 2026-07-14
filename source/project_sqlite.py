@@ -289,6 +289,7 @@ class SQLiteProjectFile:
             "asset_categories": "asset categories",
             "assets": "assets",
             "locations": "locations",
+            "equipment_room_placement_zones": "equipment room placement zones",
             "data_points": "data points",
             "corridors": "corridor settings",
             "corridors.nodes": "corridor nodes",

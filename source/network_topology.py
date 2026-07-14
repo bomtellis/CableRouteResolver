@@ -773,6 +773,7 @@ class TopologyModel:
                 "rack_start_u": 0,
                 "auto_generated": bool(rack.get("auto_generated", False)),
                 "rack_record_id": _text(rack.get("id")),
+                "cabinet_type": _text(rack.get("cabinet_type")) or "standard",
             }
             self.nodes[node_id] = TopologyNode(
                 node_id=node_id,
@@ -790,6 +791,8 @@ class TopologyModel:
                 details={
                     "rack_record_id": _text(rack.get("id")),
                     "capacity_u": capacity_u,
+                    "cabinet_type": _text(rack.get("cabinet_type")) or "standard",
+                    "max_switches": max(0, _int(rack.get("max_switches"), 0)),
                     "used_u": 0,
                     "empty_rack": True,
                     "notes": _text(rack.get("notes")),
@@ -4106,6 +4109,13 @@ class NetworkTopologyDialog(QDialog):
                 self._detail_row("Location", node.location_name)
                 self._detail_row("Floor", str(node.floor))
                 self._detail_row("Capacity", f"{_int(node.details.get('capacity_u'))}U")
+                cabinet_type = _text(node.details.get("cabinet_type")) or "standard"
+                self._detail_row(
+                    "Cabinet type",
+                    "Slim wall (maximum two switches)"
+                    if cabinet_type == "slim_wall"
+                    else "Standard rack",
+                )
                 self._detail_row("Occupied", f"{_int(node.details.get('used_u'))}U")
                 self._detail_row("Status", "Empty cabinet")
                 if _text(node.details.get("notes")):

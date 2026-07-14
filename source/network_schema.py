@@ -1411,6 +1411,14 @@ def ensure_network_schema(data: dict) -> dict:
         for item in data.get("locations", [])
         if isinstance(item, dict) and _text(item.get("name"))
     }
+    for location in locations.values():
+        cabinet_type = _text(location.get("cabinet_type")).lower()
+        location["cabinet_type"] = (
+            cabinet_type if cabinet_type in {"standard", "slim_wall"} else "standard"
+        )
+        location["max_network_cabinets"] = max(
+            0, _as_int(location.get("max_network_cabinets"), 0)
+        )
     assets_by_id = {
         _text(item.get("id")): item
         for item in data.get("network_assets", [])
@@ -1591,6 +1599,13 @@ def ensure_network_schema(data: dict) -> dict:
         rack["floor"] = _as_int(rack.get("floor", linked_location.get("floor", 0)))
         rack["capacity_u"] = max(
             1, _as_int(rack.get("capacity_u"), settings["default_rack_size_u"])
+        )
+        cabinet_type = _text(rack.get("cabinet_type")).lower()
+        rack["cabinet_type"] = (
+            cabinet_type if cabinet_type in {"standard", "slim_wall"} else "standard"
+        )
+        rack["max_switches"] = 2 if rack["cabinet_type"] == "slim_wall" else max(
+            0, _as_int(rack.get("max_switches"), 0)
         )
         rack.setdefault("manufacturer", "")
         rack.setdefault("model", "")

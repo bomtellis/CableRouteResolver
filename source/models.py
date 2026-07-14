@@ -30,6 +30,7 @@ DEFAULT_JSON = {
     "asset_categories": [],
     "assets": [],
     "locations": [],
+    "equipment_room_placement_zones": [],
     "data_points": [],
     "corridors": {
         "nodes": [],
@@ -38,6 +39,10 @@ DEFAULT_JSON = {
     },
     "transitions": [],
     "floor_dxf_files": [],
+    "floor_plan_pdf_settings": {
+        "paper_size": "A1",
+        "scale": 100,
+    },
     "connections": [],
     "route_profiles": {
         "default": {
@@ -115,13 +120,81 @@ class JsonStore:
         self.data.setdefault("asset_categories", [])
         self.data.setdefault("assets", [])
         self.data.setdefault("locations", [])
+        self.data.setdefault("equipment_room_placement_zones", [])
         self.data.setdefault("data_points", [])
         self.data.setdefault("corridors", {}).setdefault("nodes", [])
         self.data.setdefault("corridors", {}).setdefault("edges", [])
         self.data.setdefault("transitions", [])
         self.data.setdefault("floor_dxf_files", [])
+        settings = self.data.setdefault("floor_plan_pdf_settings", {})
+        if not isinstance(settings, dict):
+            settings = {}
+            self.data["floor_plan_pdf_settings"] = settings
+        paper_size = str(settings.get("paper_size", "A1") or "A1").upper()
+        settings["paper_size"] = paper_size if paper_size in {"A0", "A1", "A2"} else "A1"
+        try:
+            settings["scale"] = max(10, min(5000, int(settings.get("scale", 100) or 100)))
+        except (TypeError, ValueError):
+            settings["scale"] = 100
         self.data.setdefault("connections", [])
         self.data.setdefault("route_profiles", deepcopy(DEFAULT_JSON["route_profiles"]))
+
+        for location in self.data.get("locations", []):
+            if not isinstance(location, dict):
+                continue
+            cabinet_type = str(
+                location.get("cabinet_type", "standard") or "standard"
+            ).strip().lower()
+            location["cabinet_type"] = (
+                cabinet_type
+                if cabinet_type in {"standard", "slim_wall"}
+                else "standard"
+            )
+            try:
+                location["max_network_cabinets"] = max(
+                    0, int(location.get("max_network_cabinets", 0) or 0)
+                )
+            except (TypeError, ValueError):
+                location["max_network_cabinets"] = 0
+
+        normalised_zones = []
+        for index, zone in enumerate(
+            self.data.get("equipment_room_placement_zones", []), start=1
+        ):
+            if not isinstance(zone, dict):
+                continue
+            try:
+                x1 = float(zone.get("min_x", zone.get("x1", 0.0)))
+                x2 = float(zone.get("max_x", zone.get("x2", 0.0)))
+                y1 = float(zone.get("min_y", zone.get("y1", 0.0)))
+                y2 = float(zone.get("max_y", zone.get("y2", 0.0)))
+                floor = int(zone.get("floor", 0))
+            except (TypeError, ValueError):
+                continue
+            allow_comms = bool(zone.get("allow_comms_room", True))
+            allow_der = bool(
+                zone.get("allow_distributed_equipment_room", True)
+            )
+            if not allow_comms and not allow_der:
+                continue
+            normalised_zones.append(
+                {
+                    **zone,
+                    "id": str(zone.get("id", f"ZONE-{index}") or f"ZONE-{index}"),
+                    "name": str(
+                        zone.get("name", zone.get("id", f"Zone {index}"))
+                        or f"Zone {index}"
+                    ),
+                    "floor": floor,
+                    "min_x": round(min(x1, x2), 3),
+                    "max_x": round(max(x1, x2), 3),
+                    "min_y": round(min(y1, y2), 3),
+                    "max_y": round(max(y1, y2), 3),
+                    "allow_comms_room": allow_comms,
+                    "allow_distributed_equipment_room": allow_der,
+                }
+            )
+        self.data["equipment_room_placement_zones"] = normalised_zones
 
         for dept in self.data.get("departments", []):
             dept.setdefault("id", "")
@@ -1858,6 +1931,94 @@ class JsonStore:
             total += room_asset_qty * data_points
 
         return max(0, int(total))
+
+    def data_point_required_port_count(self, point: dict) -> int:
+        """Return manual or room-type asset port demand, whichever is greater."""
+        if not isinstance(point, dict):
+            return 0
+        try:
+            manual_ports = max(0, int(point.get("qty", 1) or 0))
+        except (TypeError, ValueError):
+            manual_ports = 1
+        room_type_id = str(point.get("room_type_id", "") or "").strip()
+        asset_ports = self.room_type_cable_qty(room_type_id) if room_type_id else 0
+        return max(manual_ports, asset_ports)
+
+    def access_switch_capacity_profile(self) -> dict:
+        """Return the configured access-switch endpoint and rack-space capacity."""
+        candidates = []
+        excluded_uses = {
+            "uplink", "input", "pon", "stacking", "power", "console", "management"
+        }
+        for asset in self.data.get("network_assets", []) or []:
+            if not isinstance(asset, dict):
+                continue
+            asset_type = str(
+                asset.get("asset_type", asset.get("type", "")) or ""
+            ).strip().lower()
+            output_type = str(asset.get("output_connection_type", "") or "").strip().lower()
+            name = str(asset.get("name", asset.get("id", "")) or "").strip()
+            if (
+                asset_type != "network_switch"
+                or output_type != "copper"
+                or any(word in name.lower() for word in ("core", "distribution", "aggregation"))
+            ):
+                continue
+            definitions = [
+                row
+                for row in asset.get("port_definitions", []) or []
+                if isinstance(row, dict)
+            ]
+            endpoint_ports = sum(
+                max(0, int(row.get("port_count", 0) or 0))
+                for row in definitions
+                if str(row.get("port_use", "") or "").strip().lower()
+                not in excluded_uses
+            )
+            if endpoint_ports <= 0:
+                endpoint_ports = max(0, int(asset.get("number_of_ports", 0) or 0))
+            if endpoint_ports <= 0:
+                continue
+            candidates.append(
+                {
+                    "id": str(asset.get("id", "") or "").strip(),
+                    "name": name or str(asset.get("id", "") or "").strip(),
+                    "ports": endpoint_ports,
+                    "rack_units": max(1, int(asset.get("rack_units", 1) or 1)),
+                }
+            )
+
+        settings = self.data.get("network_settings", {}) or {}
+        preferred_ids = (
+            settings.get("asset_model_preferences", {})
+            .get("access_switch", {})
+            .get("preferred_asset_ids", [])
+        )
+        selected = None
+        for preferred_id in preferred_ids if isinstance(preferred_ids, list) else []:
+            selected = next(
+                (row for row in candidates if row["id"] == str(preferred_id).strip()),
+                None,
+            )
+            if selected is not None:
+                break
+        if selected is None and candidates:
+            selected = max(candidates, key=lambda row: (row["ports"], -row["rack_units"]))
+        if selected is None:
+            selected = {
+                "id": "",
+                "name": "Default 48-port access switch",
+                "ports": 48,
+                "rack_units": 1,
+            }
+        rack_size_u = max(1, int(settings.get("default_rack_size_u", 42) or 42))
+        return {
+            **selected,
+            "rack_size_u": rack_size_u,
+            "switches_per_full_cabinet": max(
+                1, rack_size_u // max(1, int(selected["rack_units"]))
+            ),
+        }
         
     def asset_category_options(self) -> List[Tuple[str, str]]:
         return [

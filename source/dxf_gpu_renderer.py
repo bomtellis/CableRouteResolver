@@ -323,6 +323,7 @@ class GpuDxfGraphView(_ViewBase):
     middleReleased = Signal(object)
     mouseWheelScrolled = Signal(object)
     mouseDragged = Signal(object, float, float)
+    mouseMoved = Signal(object, float, float)
 
     def __init__(self, parent=None):
         _configure_qt_quick_backend()
@@ -345,6 +346,7 @@ class GpuDxfGraphView(_ViewBase):
         self.show_data_points = True
         self.show_locations = True
         self.show_comms_rooms = True
+        self.show_placement_zones = True
         self.show_departments = True
         self.show_network = True
         self.show_network_links = True
@@ -356,6 +358,8 @@ class GpuDxfGraphView(_ViewBase):
         self.selected_point_name: Optional[str] = None
         self.selected_template_names: set[str] = set()
         self.edge_chain_start: Optional[str] = None
+        self.selected_placement_zone_id: Optional[str] = None
+        self.placement_zone_preview: Optional[Dict[str, Any]] = None
 
         self._scale = 1.0
         self._offset = QPointF(0.0, 0.0)
@@ -989,6 +993,7 @@ class GpuDxfGraphView(_ViewBase):
         show_data_points: Optional[bool] = None,
         show_locations: Optional[bool] = None,
         show_comms_rooms: Optional[bool] = None,
+        show_placement_zones: Optional[bool] = None,
         show_departments: Optional[bool] = None,
         show_network: Optional[bool] = None,
         show_network_links: Optional[bool] = None,
@@ -1018,6 +1023,7 @@ class GpuDxfGraphView(_ViewBase):
         assign("show_data_points", show_data_points, DirtyLayer.OBJECTS)
         assign("show_locations", show_locations, DirtyLayer.OBJECTS)
         assign("show_comms_rooms", show_comms_rooms, DirtyLayer.OBJECTS)
+        assign("show_placement_zones", show_placement_zones, DirtyLayer.OBJECTS)
         assign("show_departments", show_departments, DirtyLayer.OBJECTS)
         assign("show_network", show_network, DirtyLayer.EDGES | DirtyLayer.OBJECTS)
         link_value = show_network_connections
@@ -1048,6 +1054,20 @@ class GpuDxfGraphView(_ViewBase):
         self.selected_template_names = names
         self.edge_chain_start = edge_chain_start
         self.request_redraw(DirtyLayer.OBJECTS | DirtyLayer.OVERLAY)
+
+    def set_placement_zone_selection(self, zone_id: Optional[str]) -> None:
+        zone_id = str(zone_id or "").strip() or None
+        if zone_id == self.selected_placement_zone_id:
+            return
+        self.selected_placement_zone_id = zone_id
+        self.request_redraw(DirtyLayer.OBJECTS | DirtyLayer.OVERLAY)
+
+    def set_placement_zone_preview(self, zone: Optional[Dict[str, Any]]) -> None:
+        preview = dict(zone) if isinstance(zone, dict) else None
+        if preview == self.placement_zone_preview:
+            return
+        self.placement_zone_preview = preview
+        self.request_redraw(DirtyLayer.OBJECTS)
 
     def set_overlay_provider(self, overlay_provider) -> None:
         if overlay_provider is self._overlay_provider:
@@ -1320,6 +1340,8 @@ class GpuDxfGraphView(_ViewBase):
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
+        x, y = self.screen_to_world(event.position())
+        self.mouseMoved.emit(event, float(x), float(y))
         if event.buttons() & Qt.MiddleButton and self._last_middle_pos is not None:
             current = event.position().toPoint()
             delta = current - self._last_middle_pos
@@ -1331,7 +1353,6 @@ class GpuDxfGraphView(_ViewBase):
             return
 
         if event.buttons() & Qt.LeftButton:
-            x, y = self.screen_to_world(event.position())
             self._pending_drag = (_PointerEventSnapshot(event), x, y)
             elapsed_ms = (time.monotonic() - self._last_drag_emit) * 1000.0
             if elapsed_ms >= self._frame_interval_ms:
@@ -1408,6 +1429,7 @@ class GpuDxfGraphView(_ViewBase):
             painter.save()
             painter.translate(self._cache_margin_x, self._cache_margin_y)
             if self.show_graph:
+                self._draw_equipment_room_placement_zones(painter)
                 self._draw_departments(painter)
                 self._draw_points(painter)
                 if self.show_network and self.show_network_assets:
@@ -1702,6 +1724,105 @@ class GpuDxfGraphView(_ViewBase):
             painter.drawPolygon(poly)
             if self.show_labels:
                 labels.append((self.world_to_scene(float(dept.get("x", 0.0)), float(dept.get("y", 0.0))), str(dept.get("name") or department_id), QColor("#aaf7ea")))
+        painter.restore()
+        self._draw_label_batch(painter, labels)
+
+    def _draw_equipment_room_placement_zones(self, painter: QPainter) -> None:
+        if not self.show_placement_zones:
+            return
+        snapshot = self._ensure_frame_snapshot()
+        zones = [
+            zone
+            for zone in snapshot.data.get("equipment_room_placement_zones", [])
+            if isinstance(zone, dict)
+            and int(zone.get("floor", 0)) == int(self.floor)
+        ]
+        preview = self.placement_zone_preview
+        if (
+            isinstance(preview, dict)
+            and int(preview.get("floor", 0)) == int(self.floor)
+        ):
+            zones.append(preview)
+        if not zones:
+            return
+        visible = self.visible_world_bounds(20.0)
+        labels: List[Tuple[QPointF, str, QColor]] = []
+        painter.save()
+        self._apply_world_transform(painter)
+        for zone in zones:
+            is_preview = bool(zone.get("preview", False))
+            min_x = float(zone.get("min_x", 0.0))
+            max_x = float(zone.get("max_x", 0.0))
+            min_y = float(zone.get("min_y", 0.0))
+            max_y = float(zone.get("max_y", 0.0))
+            if (
+                max_x < visible[0]
+                or min_x > visible[2]
+                or max_y < visible[1]
+                or min_y > visible[3]
+            ):
+                continue
+            allow_comms = bool(zone.get("allow_comms_room", False))
+            allow_der = bool(zone.get("allow_distributed_equipment_room", False))
+            if allow_comms and allow_der:
+                colour = QColor("#35a7ff")
+                allowance = "CR + DER"
+            elif allow_comms:
+                colour = QColor("#18c37e")
+                allowance = "CR"
+            else:
+                colour = QColor("#ffb347")
+                allowance = "DER"
+            fill = QColor(colour)
+            fill.setAlpha(48 if is_preview else 28)
+            selected = (
+                str(zone.get("id", "")).strip()
+                == str(self.selected_placement_zone_id or "").strip()
+            )
+            pen = QPen(
+                QColor("#ffffff") if selected or is_preview else colour,
+                0.18 if is_preview else (0.16 if selected else 0.12),
+                Qt.DashLine if is_preview else (Qt.SolidLine if selected else Qt.DashLine),
+            )
+            painter.setPen(pen)
+            painter.setBrush(QBrush(fill))
+            rect = QRectF(min_x, -max_y, max_x - min_x, max_y - min_y)
+            painter.drawRect(rect)
+            if selected:
+                handle_radius = max(0.06, 5.0 / max(self._scale, 0.001))
+                painter.setPen(QPen(colour, 0.08))
+                painter.setBrush(QBrush(QColor("#ffffff")))
+                mid_x = (min_x + max_x) / 2.0
+                mid_y = (min_y + max_y) / 2.0
+                for hx, hy in (
+                    (min_x, min_y),
+                    (mid_x, min_y),
+                    (max_x, min_y),
+                    (max_x, mid_y),
+                    (max_x, max_y),
+                    (mid_x, max_y),
+                    (min_x, max_y),
+                    (min_x, mid_y),
+                ):
+                    painter.drawRect(
+                        QRectF(
+                            hx - handle_radius,
+                            -hy - handle_radius,
+                            handle_radius * 2.0,
+                            handle_radius * 2.0,
+                        )
+                    )
+            labels.append(
+                (
+                    self.world_to_scene(min_x, max_y),
+                    (
+                        "Indicative placement area"
+                        if is_preview
+                        else f"{zone.get('name') or zone.get('id') or 'Placement zone'} [{allowance}]"
+                    ),
+                    QColor("#ffffff") if is_preview else colour,
+                )
+            )
         painter.restore()
         self._draw_label_batch(painter, labels)
 
