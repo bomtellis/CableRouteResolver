@@ -11,9 +11,11 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from html import escape
 import math
 import re
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from urllib.parse import quote, unquote
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -55,12 +57,16 @@ from PySide6.QtWidgets import (
 )
 
 from network_schema import (
+    CATALYST_9600_LINE_CARDS,
     MODULAR_PANEL_FRONT_CONNECTORS,
     NETWORK_SCHEMA_VERSION, default_port_speeds, ensure_network_schema,
     next_network_id, normalise_port_speeds, port_speed_label,
 )
 from network_services import circuit_trace, network_traffic_loads
-from network_auto_planner import auto_connect_manual_devices
+from network_auto_planner import (
+    auto_connect_manual_devices,
+    synchronise_network_connection_routes,
+)
 from network_dialogs import (
     NetworkConnectionEditorDialog,
     NetworkInstanceEditorDialog,
@@ -133,7 +139,7 @@ def _expanded_asset_ports(asset: dict) -> List[dict]:
             for name in explicit_names[:count]:
                 result.append({"name": name, "port_type": port_type, "port_use": port_use, "supported_speeds_mbps": supported_speeds})
             count -= min(count, len(explicit_names))
-        prefix = _text(row.get("name_prefix")) or ({"pon":"PON", "sfp":"SFP", "sfp+":"SFP+", "sfp28":"SFP28", "qsfp":"QSFP", "qsfp+":"QSFP+", "qsfp28":"QSFP28", "qsfp56":"QSFP56", "qsfpdd":"QSFP-DD", "osfp":"OSFP", "lc":"LC", "sc":"SC", "mpo":"MPO", "rj45":""}.get(port_type, port_type.upper()))
+        prefix = _text(row.get("name_prefix")) or ({"pon":"PON", "sfp":"SFP", "sfp+":"SFP+", "sfp28":"SFP28", "sfp56":"SFP56", "qsfp":"QSFP", "qsfp+":"QSFP+", "qsfp28":"QSFP28", "qsfp56":"QSFP56", "qsfpdd":"QSFP-DD", "osfp":"OSFP", "lc":"LC", "sc":"SC", "mpo":"MPO", "rj45":""}.get(port_type, port_type.upper()))
         for _ in range(count):
             counters[prefix] += 1
             # A one-port row whose prefix is already a complete physical name
@@ -213,8 +219,10 @@ def _port_group_sort_key(port: dict, fallback_name: str = "") -> Tuple[int, int,
     """Keep connector families together while preserving their physical order."""
     type_order = {
         "rj45": 0, "pon": 1, "lc": 2, "sc": 3, "mpo": 4,
-        "sfp": 5, "sfp+": 6, "qsfp": 7, "qsfp28": 8,
-        "console": 9, "usb": 10, "power": 11, "other": 12,
+        "sfp": 5, "sfp+": 6, "sfp28": 7, "sfp56": 8,
+        "qsfp": 9, "qsfp+": 10, "qsfp28": 11, "qsfp56": 12,
+        "qsfpdd": 13, "osfp": 14, "console": 15, "usb": 16,
+        "power": 17, "other": 18,
     }
     name = _text(port.get("name")) or _text(fallback_name)
     digits = "".join(ch for ch in name if ch.isdigit())
@@ -467,6 +475,7 @@ class TopologyModel:
         # this map so passive panel ports remain red even when their physical
         # links are deliberately omitted from the logical topology graph.
         self.occupied_ports_by_instance: Dict[str, Set[str]] = defaultdict(set)
+        self.physical_port_records_by_instance: Dict[str, Dict[str, List[str]]] = {}
         self._build()
 
     def _build(self) -> None:
@@ -485,6 +494,12 @@ class TopologyModel:
 
         connection_counts: Dict[str, int] = defaultdict(int)
         occupied_ports_by_instance: Dict[str, Set[str]] = defaultdict(set)
+        physical_port_records: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+        instance_names = {
+            _text(row.get("id")): _text(row.get("name")) or _text(row.get("id"))
+            for row in self.data.get("network_asset_instances", [])
+            if isinstance(row, dict) and _text(row.get("id"))
+        }
         patch_panel_ids: Set[str] = set()
         for instance in self.data.get("network_asset_instances", []):
             if not isinstance(instance, dict):
@@ -512,6 +527,17 @@ class TopologyModel:
                 port_name = _text(value)
                 if port_name and port_name != "0":
                     occupied_ports_by_instance[instance_id].add(port_name)
+
+        def add_physical_record(instance_id: str, ports, description: str) -> None:
+            instance_id = _text(instance_id)
+            if isinstance(ports, str):
+                ports = [ports]
+            if not instance_id or not isinstance(ports, (list, tuple, set)):
+                return
+            for value in ports:
+                port = _text(value)
+                if port and port != "0" and description not in physical_port_records[instance_id][port]:
+                    physical_port_records[instance_id][port].append(description)
 
         def add_allocation_ports(allocations) -> None:
             if not isinstance(allocations, (list, tuple)):
@@ -551,6 +577,13 @@ class TopologyModel:
                 occupied_ports_by_instance[source_id].add(source_port)
             if target_id and target_port and target_port != "0":
                 occupied_ports_by_instance[target_id].add(target_port)
+            is_physical = bool(connection.get("topology_hidden")) or bool(connection.get("physical_connection"))
+            if is_physical:
+                connection_label = _text(connection.get("name")) or _text(connection.get("id")) or "Physical connection"
+                source_description = f"{connection_label} to {instance_names.get(target_id, target_id or 'termination')}"
+                target_description = f"{connection_label} to {instance_names.get(source_id, source_id or 'termination')}"
+                add_physical_record(source_id, source_port, source_description + (f" / {target_port}" if target_port else ""))
+                add_physical_record(target_id, target_port, target_description + (f" / {source_port}" if source_port else ""))
 
             # Modular fibre records carry all terminated front connectors in
             # list/allocation fields while from_port/to_port identify only the
@@ -561,11 +594,15 @@ class TopologyModel:
                 "from_field_terminated_panel_ports",
             ):
                 add_occupied_ports(source_id, connection.get(key))
+                if is_physical:
+                    add_physical_record(source_id, connection.get(key), source_description)
             for key in (
                 "to_terminated_panel_ports",
                 "to_field_terminated_panel_ports",
             ):
                 add_occupied_ports(target_id, connection.get(key))
+                if is_physical:
+                    add_physical_record(target_id, connection.get(key), target_description)
             for key in (
                 "panel_termination_allocations",
                 "from_panel_termination_allocations",
@@ -632,6 +669,9 @@ class TopologyModel:
                 occupied_ports_by_instance[instance_id].add(port)
             if peer_instance_id and peer_port and peer_port != "0":
                 occupied_ports_by_instance[peer_instance_id].add(peer_port)
+            lead_label = _text(lead.get("name")) or _text(lead.get("id")) or "Patch lead"
+            add_physical_record(instance_id, port, f"{lead_label} to {instance_names.get(peer_instance_id, peer_instance_id or 'termination')}" + (f" / {peer_port}" if peer_port else ""))
+            add_physical_record(peer_instance_id, peer_port, f"{lead_label} to {instance_names.get(instance_id, instance_id or 'termination')}" + (f" / {port}" if port else ""))
 
         # Cassette state is authoritative even when a project was saved before
         # the corresponding physical connection rows were generated or when
@@ -649,9 +689,15 @@ class TopologyModel:
                     instance_id,
                     cassette.get("used_front_connector_names"),
                 )
+                cassette_label = _text(cassette.get("name")) or f"Cassette {_text(cassette.get('cassette_number')) or '?'}"
+                add_physical_record(instance_id, cassette.get("used_front_connector_names"), f"{cassette_label} allocated fibre termination")
         self.occupied_ports_by_instance = {
             instance_id: set(port_names)
             for instance_id, port_names in occupied_ports_by_instance.items()
+        }
+        self.physical_port_records_by_instance = {
+            instance_id: {port: list(values) for port, values in ports.items()}
+            for instance_id, ports in physical_port_records.items()
         }
 
         for instance in self.data.get("network_asset_instances", []):
@@ -1438,6 +1484,7 @@ class RackEquipmentItem(QGraphicsObject):
         self.port_nodes = list(port_nodes)
         self._port_rects: Dict[str, QRectF] = {}
         self._cassette_rects: Dict[int, QRectF] = {}
+        self._switch_module_rects: List[Tuple[str, QRectF]] = []
         self._compact_vertical_lc = False
         self._selected_port_node_id = ""
         self.search_match = False
@@ -1511,12 +1558,41 @@ class RackEquipmentItem(QGraphicsObject):
         members = self._stack_member_count()
         if members <= 1:
             return [self.boundingRect()]
+        member_slots = [
+            max(1, _int(value, 1))
+            for value in self.node.instance.get("stack_member_start_half_us", [])
+        ]
+        if len(member_slots) == members:
+            first_half = min(member_slots)
+            top_half = max(value + 1 for value in member_slots)
+            span_half = max(2, top_half - first_half + 1)
+            half_pitch = self._height / float(span_half)
+            return [
+                QRectF(
+                    0.0,
+                    (top_half - (half_slot + 1)) * half_pitch,
+                    self._width,
+                    2.0 * half_pitch,
+                )
+                for half_slot in member_slots
+            ]
         gap = max(3.0, min(7.0, self._height * 0.012))
         member_h = max(10.0, (self._height - gap * (members - 1)) / members)
         return [
             QRectF(0.0, index * (member_h + gap), self._width, member_h)
             for index in range(members)
         ]
+
+    def shape(self) -> QPainterPath:
+        member_slots = self.node.instance.get("stack_member_start_half_us", [])
+        if self._stack_member_count() > 1 and member_slots:
+            path = QPainterPath()
+            for rect in self._stack_member_rects():
+                path.addRoundedRect(rect, 2.5, 2.5)
+            return path
+        path = QPainterPath()
+        path.addRect(self.boundingRect())
+        return path
 
     def _stack_member_for_port(self, port_node: TopologyNode, index: int) -> int:
         members = self._stack_member_count()
@@ -1537,6 +1613,7 @@ class RackEquipmentItem(QGraphicsObject):
     def _build_port_rects(self) -> None:
         self._port_rects.clear()
         self._cassette_rects.clear()
+        self._switch_module_rects.clear()
         self._compact_vertical_lc = False
         if not self.port_nodes or self._width < 42.0 or self._height < 14.0:
             return
@@ -1669,7 +1746,20 @@ class RackEquipmentItem(QGraphicsObject):
         usable_w = max(8.0, right - left)
         usable_h = max(6.0, bottom - top)
         columns = 24
-        rows = max(1, self.units * 2, int(math.ceil(len(self.port_nodes) / columns)))
+        half_height_panel = max(
+            0,
+            _int(self.node.instance.get("rack_height_half_u")),
+            _int(self.node.asset.get("rack_height_half_u")),
+        ) == 1
+        rows = (
+            max(1, int(math.ceil(len(self.port_nodes) / columns)))
+            if half_height_panel
+            else max(
+                1,
+                self.units * 2,
+                int(math.ceil(len(self.port_nodes) / columns)),
+            )
+        )
         gap_x = max(0.55, min(1.25, 0.95 * scale))
         gap_y = max(0.8, min(2.0, 1.4 * scale))
         port_w = max(2.0, (usable_w - gap_x * (columns - 1)) / columns)
@@ -1762,6 +1852,23 @@ class RackEquipmentItem(QGraphicsObject):
                     )
 
     def _build_network_switch_port_rects(self) -> None:
+        identity = " ".join(
+            _text(value).lower()
+            for value in (
+                self.node.name,
+                self.node.asset.get("name"),
+                self.node.asset.get("model"),
+                self.node.asset.get("notes"),
+            )
+        )
+        if (
+            self.units >= 4
+            and len(self.port_nodes) >= 96
+            and any(token in identity for token in ("modular", "chassis", "line card"))
+        ):
+            self._build_modular_switch_chassis_port_rects()
+            return
+
         scale = self._width / 482.6
         ear_w = min(15.0, self._width * 0.045)
         left = ear_w + max(5.0, 7.0 * scale)
@@ -1776,7 +1883,14 @@ class RackEquipmentItem(QGraphicsObject):
         for port_node in self.port_nodes:
             port_use = _text(port_node.details.get("port_use")).lower()
             kind = self._port_kind(port_node.details.get("port_type") or port_node.details.get("port_name", ""))
-            if port_use in uplink_uses or kind in {"sfp", "qsfp", "lc", "sc", "mpo"}:
+            optical_downlink = (
+                port_use in {"downlink", "output", "client"}
+                and kind in {"sfp", "qsfp", "lc", "sc", "mpo"}
+            )
+            if port_use in uplink_uses or (
+                kind in {"sfp", "qsfp", "lc", "sc", "mpo"}
+                and not optical_downlink
+            ):
                 uplink_ports.append(port_node)
             else:
                 access_ports.append(port_node)
@@ -1784,7 +1898,7 @@ class RackEquipmentItem(QGraphicsObject):
         uplink_w = min(max(30.0, 42.0 * scale), usable_w * 0.22) if uplink_ports else 0.0
         access_right = right - uplink_w - (max(3.0, 5.0 * scale) if uplink_ports else 0.0)
         access_w = max(8.0, access_right - left)
-        rows = 2
+        rows = max(2, int(math.ceil(len(access_ports) / 24.0)))
         columns = max(1, int(math.ceil(max(1, len(access_ports)) / float(rows))))
         if len(access_ports) >= 40:
             columns = 24
@@ -1825,6 +1939,130 @@ class RackEquipmentItem(QGraphicsObject):
                     u_w,
                     u_h,
                 )
+
+    def _build_modular_switch_chassis_port_rects(self) -> None:
+        """Lay out a modular core as line-card and supervisor slots."""
+
+        scale = self._width / 482.6
+        ear_w = min(15.0, self._width * 0.045)
+        left = ear_w + max(7.0, 9.0 * scale)
+        right = self._width - ear_w - max(7.0, 9.0 * scale)
+        top = max(14.0, self._height * 0.075)
+        bottom = self._height - max(8.0, self._height * 0.045)
+        usable_w = max(40.0, right - left)
+        usable_h = max(30.0, bottom - top)
+
+        downlinks: List[TopologyNode] = []
+        supervisors: List[TopologyNode] = []
+        for port_node in self.port_nodes:
+            port_use = _text(port_node.details.get("port_use")).lower()
+            if port_use in {"downlink", "output", "client"}:
+                downlinks.append(port_node)
+            else:
+                supervisors.append(port_node)
+
+        card_capacity = max(0, _int(self.node.asset.get("line_card_port_capacity"), 0))
+        if card_capacity <= 1:
+            note = _text(self.node.asset.get("notes")).lower()
+            match = re.search(r"(\d+)\s*[- ]port\s+(?:fibre\s+)?line card", note)
+            card_capacity = max(0, _int(match.group(1), 0)) if match else 0
+        if card_capacity <= 1:
+            card_capacity = (
+                56
+                if len(downlinks) >= 112 and len(downlinks) % 56 == 0
+                else 48
+            )
+        card_count = max(1, int(math.ceil(len(downlinks) / float(card_capacity))))
+        supervisor_slot_count = 2 if supervisors else 0
+        power_zone_h = max(18.0, usable_h * 0.16)
+        gap = max(2.0, 3.0 * scale)
+        slot_count = card_count + supervisor_slot_count
+        slot_h = max(
+            18.0,
+            (
+                usable_h
+                - power_zone_h
+                - gap * max(0, slot_count)
+            )
+            / max(1, slot_count),
+        )
+
+        def place_ports(
+            ports: Sequence[TopologyNode], module_rect: QRectF, columns: int
+        ) -> None:
+            label_h = max(10.0, min(16.0, module_rect.height() * 0.08))
+            grid = module_rect.adjusted(5.0, label_h + 4.0, -5.0, -6.0)
+            columns = max(1, min(columns, len(ports) or 1))
+            rows = max(1, int(math.ceil(len(ports) / float(columns))))
+            gap_x = max(0.8, 1.2 * scale)
+            gap_y = max(0.8, 1.2 * scale)
+            port_w = max(
+                2.4,
+                (grid.width() - gap_x * max(0, columns - 1)) / columns,
+            )
+            port_h = max(
+                2.4,
+                min(
+                    8.0,
+                    (grid.height() - gap_y * max(0, rows - 1)) / rows,
+                ),
+            )
+            block_h = rows * port_h + gap_y * max(0, rows - 1)
+            y0 = grid.top() + max(0.0, (grid.height() - block_h) / 2.0)
+            for index, port_node in enumerate(ports):
+                row, col = divmod(index, columns)
+                self._port_rects[port_node.node_id] = QRectF(
+                    grid.left() + col * (port_w + gap_x),
+                    y0 + row * (port_h + gap_y),
+                    port_w,
+                    port_h,
+                )
+
+        ordered_modules: List[Tuple[str, Sequence[TopologyNode], int]] = []
+        configured = self.node.asset.get("chassis_modules", [])
+        if not isinstance(configured, list) or not configured:
+            configured = [
+                {"slot": index + 1, "module_type": "line_card", "model": "Line card"}
+                for index in range(card_count)
+            ]
+        down_cursor = 0
+        up_cursor = 0
+        for module in sorted(
+            (row for row in configured if isinstance(row, dict)),
+            key=lambda row: _int(row.get("slot"), 0),
+        ):
+            slot = max(1, _int(module.get("slot"), len(ordered_modules) + 1))
+            model = _text(module.get("model"))
+            module_type = _text(module.get("module_type")).lower()
+            if module_type == "supervisor":
+                ordered_modules.append((f"SLOT {slot}  {model or 'SUPERVISOR'}", [], 1))
+                continue
+            definitions = CATALYST_9600_LINE_CARDS.get(model, [])
+            down_count = sum(count for _kind, count, use, _speeds in definitions if use == "downlink")
+            up_count = sum(count for _kind, count, use, _speeds in definitions if use == "uplink")
+            if not definitions:
+                down_count = card_capacity
+                up_count = int(math.ceil(len(supervisors) / float(max(1, card_count))))
+            ports = list(downlinks[down_cursor : down_cursor + down_count])
+            ports.extend(supervisors[up_cursor : up_cursor + up_count])
+            down_cursor += down_count
+            up_cursor += up_count
+            ordered_modules.append((f"SLOT {slot}  {model or 'LINE CARD'}", ports, 30))
+
+        cursor_y = top
+        for module_name, module_ports, columns in ordered_modules:
+            module_rect = QRectF(left, cursor_y, usable_w, slot_h)
+            self._switch_module_rects.append((module_name, module_rect))
+            place_ports(module_ports, module_rect, columns)
+            cursor_y += slot_h + gap
+
+        power_rect = QRectF(
+            left,
+            cursor_y,
+            usable_w,
+            max(12.0, bottom - cursor_y),
+        )
+        self._switch_module_rects.append(("POWER SUPPLIES / FAN TRAY", power_rect))
 
     def _build_modular_patch_panel_port_rects(self) -> None:
         scale = self._width / 482.6
@@ -1927,16 +2165,27 @@ class RackEquipmentItem(QGraphicsObject):
         painter.setRenderHint(QPainter.Antialiasing, True)
         selected = self.isSelected()
         border = QColor('#8fc7ff') if selected else (QColor('#f5bf42') if self.search_match else QColor('#71808b'))
-        painter.setPen(QPen(border, 2.0 if selected or self.search_match else 1.2))
-        painter.setBrush(QColor('#26323c'))
-        painter.drawRoundedRect(rect.adjusted(1.0, 1.0, -1.0, -1.0), 3.0, 3.0)
         ear_w = min(15.0, self._width * 0.045)
-        painter.setBrush(QColor('#151c22'))
-        painter.drawRect(QRectF(1.0, 2.0, ear_w, max(2.0, rect.height()-4.0)))
-        painter.drawRect(QRectF(rect.right()-ear_w-1.0, 2.0, ear_w, max(2.0, rect.height()-4.0)))
+        spaced_stack = bool(
+            self.node.asset_type == "network_switch"
+            and self._stack_member_count() > 1
+            and self.node.instance.get("stack_member_start_half_us")
+        )
+        if not spaced_stack:
+            painter.setPen(QPen(border, 2.0 if selected or self.search_match else 1.2))
+            painter.setBrush(QColor('#26323c'))
+            painter.drawRoundedRect(rect.adjusted(1.0, 1.0, -1.0, -1.0), 3.0, 3.0)
+            painter.setBrush(QColor('#151c22'))
+            painter.drawRect(QRectF(1.0, 2.0, ear_w, max(2.0, rect.height()-4.0)))
+            painter.drawRect(QRectF(rect.right()-ear_w-1.0, 2.0, ear_w, max(2.0, rect.height()-4.0)))
 
         if self.node.asset_type == "network_switch" and self._stack_member_count() > 1:
             self._paint_stack_member_faces(painter, ear_w)
+            if spaced_stack and (selected or self.search_match):
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(border, 2.0))
+                for member_rect in self._stack_member_rects():
+                    painter.drawRoundedRect(member_rect.adjusted(0.8, 0.8, -0.8, -0.8), 2.5, 2.5)
         else:
             painter.setPen(QColor('#dce5ea'))
             font = QFont('Arial', 7 if rect.height() >= 28 else 5)
@@ -1944,6 +2193,20 @@ class RackEquipmentItem(QGraphicsObject):
             painter.setFont(font)
             name_rect = QRectF(ear_w + 4.0, 1.0, max(10.0, rect.width() - 2 * ear_w - 8.0), min(10.0, rect.height() * 0.28))
             painter.drawText(name_rect, Qt.AlignCenter, QFontMetrics(font).elidedText(self.node.name, Qt.ElideRight, int(name_rect.width())))
+
+        for module_name, module_rect in self._switch_module_rects:
+            painter.setBrush(QColor("#1b252d"))
+            painter.setPen(QPen(QColor("#60717e"), 1.0))
+            painter.drawRoundedRect(module_rect, 2.5, 2.5)
+            module_font = QFont("Arial", 5 if module_rect.height() < 28 else 6)
+            module_font.setBold(True)
+            painter.setFont(module_font)
+            painter.setPen(QColor("#b8c8d4"))
+            painter.drawText(
+                module_rect.adjusted(3.0, 2.0, -3.0, 0.0),
+                Qt.AlignLeft | Qt.AlignTop,
+                module_name,
+            )
 
         for cassette, cassette_rect in sorted(self._cassette_rects.items()):
             painter.setBrush(QColor("#1a242c"))
@@ -2216,7 +2479,14 @@ class SwitchFrontPanelItem(QGraphicsObject):
         for port_node in self.port_nodes:
             port_use = _text(port_node.details.get("port_use")).lower()
             kind = self._port_kind(port_node.details.get("port_type") or port_node.details.get("port_name", ""))
-            if port_use in uplink_uses or kind in {"sfp", "qsfp", "lc", "sc", "mpo"}:
+            optical_downlink = (
+                port_use in {"downlink", "output", "client"}
+                and kind in {"sfp", "qsfp", "lc", "sc", "mpo"}
+            )
+            if port_use in uplink_uses or (
+                kind in {"sfp", "qsfp", "lc", "sc", "mpo"}
+                and not optical_downlink
+            ):
                 uplink_ports.append(port_node)
             else:
                 access_ports.append(port_node)
@@ -2230,7 +2500,7 @@ class SwitchFrontPanelItem(QGraphicsObject):
         access_gap = 18.0 if uplink_ports else 0.0
         access_w = max(20.0, usable_w - uplink_w - access_gap)
 
-        rows = 2
+        rows = max(2, int(math.ceil(len(access_ports) / 24.0)))
         columns = max(1, int(math.ceil(max(1, len(access_ports)) / float(rows))))
         if len(access_ports) >= 40:
             columns = 24
@@ -3036,14 +3306,12 @@ class TopologyGraphicsView(QGraphicsView):
                 event.accept()
                 self._request_full_repaint()
                 return
-            if self._scene_item_at(position) is None:
+            # Rack frames and U-grid artwork are passive scene items.  They
+            # must behave like empty rack space for the add-device gesture.
+            if self._interactive_item_at(position) is None:
                 self.emptySceneDoubleClicked.emit(
                     self.mapToScene(position)
                 )
-                event.accept()
-                self._request_full_repaint()
-                return
-            if self._interactive_item_at(position) is None:
                 event.accept()
                 self._request_full_repaint()
                 return
@@ -3108,7 +3376,6 @@ class TopologyGraphicsView(QGraphicsView):
         # Shift/Ctrl drag on empty space performs rubber-band multi-selection.
         if (
             interactive_item is None
-            and scene_item is None
             and event.modifiers() & (Qt.ShiftModifier | Qt.ControlModifier)
         ):
             self._rubber_band_selecting = True
@@ -4080,6 +4347,84 @@ class NetworkTopologyDialog(QDialog):
         layout.addWidget(val, 1)
         self.details_layout.addWidget(row)
 
+    def _detail_link_list(self, label: str, links: Sequence[dict]) -> None:
+        """Add readable, one-per-line links to devices and physical ports."""
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 3, 0, 3)
+        key = QLabel(label)
+        key.setStyleSheet("color: #6c757d;")
+        key.setMinimumWidth(98)
+        values = QWidget()
+        values_layout = QVBoxLayout(values)
+        values_layout.setContentsMargins(0, 0, 0, 0)
+        values_layout.setSpacing(4)
+        for record in links:
+            text = _text(record.get("text")) or "Connection"
+            target_id = _text(record.get("target_id"))
+            target_port = _text(record.get("target_port"))
+            item = QLabel()
+            item.setWordWrap(True)
+            if target_id:
+                href = "network-asset:" + quote(target_id, safe="")
+                if target_port:
+                    href += "|" + quote(target_port, safe="")
+                item.setText(f'<a href="{href}">{escape(text)}</a>')
+                item.setTextInteractionFlags(Qt.TextBrowserInteraction)
+                item.setOpenExternalLinks(False)
+                item.linkActivated.connect(self._navigate_detail_link)
+                item.setStyleSheet("color: #0b62a4;")
+            else:
+                item.setText(escape(text))
+                item.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                item.setStyleSheet("color: #343a40;")
+            values_layout.addWidget(item)
+        layout.addWidget(key, 0, Qt.AlignTop)
+        layout.addWidget(values, 1)
+        self.details_layout.addWidget(row)
+
+    def _navigate_detail_link(self, href: str) -> None:
+        value = _text(href)
+        if not value.startswith("network-asset:"):
+            return
+        payload = value[len("network-asset:"):]
+        encoded_id, separator, encoded_port = payload.partition("|")
+        instance_id = unquote(encoded_id)
+        port_name = unquote(encoded_port) if separator else ""
+        node = self.model.nodes.get(instance_id)
+        if node is None:
+            return
+        if port_name and self._supports_port_view(node):
+            self.rack_focus = self._switch_group_key(instance_id)
+            if self.rack_focus == (0, "", ""):
+                self.rack_focus = None
+            self.switch_port_focus = instance_id
+            self.rebuild_scene(fit=True)
+            port_node_id = next(
+                (
+                    node_id
+                    for node_id, port_node in self._switch_port_nodes_by_id.items()
+                    if _text(port_node.details.get("parent_instance_id")) == instance_id
+                    and _text(port_node.details.get("port_name")) == port_name
+                ),
+                "",
+            )
+            if port_node_id:
+                self._card_activated(port_node_id)
+            return
+        key = self._rack_group_key(instance_id)
+        self.switch_port_focus = None
+        if key != (0, "", ""):
+            self.rack_focus = key
+        else:
+            self.rack_focus = None
+        self.rebuild_scene(fit=True)
+        item = self.node_items.get(instance_id)
+        if item is not None:
+            self.scene.clearSelection()
+            item.setSelected(True)
+            self._show_node_details(instance_id)
+
     def _show_node_details(self, node_id: str) -> None:
         node = self.visible_nodes.get(node_id)
         if node is None:
@@ -4210,10 +4555,16 @@ class NetworkTopologyDialog(QDialog):
                         node.details.update(self._port_connection_details(parent_instance_id, port_name))
                 fibre_details = node.details.get("fibre_cable_details", []) or []
                 if fibre_details:
-                    self._detail_row("Fibre cable", "\n".join(str(value) for value in fibre_details))
+                    if all(isinstance(value, dict) for value in fibre_details):
+                        self._detail_link_list("Fibre cable", fibre_details)
+                    else:
+                        self._detail_row("Fibre cable", "\n".join(str(value) for value in fibre_details))
                 patch_details = node.details.get("rack_patch_details", []) or []
                 if patch_details:
-                    self._detail_row("Rack patch", "\n".join(str(value) for value in patch_details))
+                    if all(isinstance(value, dict) for value in patch_details):
+                        self._detail_link_list("Rack patch", patch_details)
+                    else:
+                        self._detail_row("Rack patch", "\n".join(str(value) for value in patch_details))
                 next_active = node.details.get("next_active_devices", []) or []
                 if next_active:
                     self._detail_row("Next active device", "\n".join(str(value) for value in next_active))
@@ -4269,6 +4620,19 @@ class NetworkTopologyDialog(QDialog):
                 continue
             suffix = " (failover)" if edge.standby or edge.redundancy_role.lower() in {"secondary", "standby"} else ""
             connected.append(f"{neighbour.name} — {edge.medium.title()}{suffix}")
+            peer_port = (
+                edge.target_port
+                if edge.source_id == node.node_id
+                else edge.source_port
+            )
+            connected[-1] = {
+                "text": (
+                    f"{neighbour.name} — {edge.medium.title()}{suffix}"
+                    + (f" — port {peer_port}" if peer_port else "")
+                ),
+                "target_id": neighbour_id,
+                "target_port": peer_port,
+            }
         if connected:
             separator = QFrame()
             separator.setFrameShape(QFrame.HLine)
@@ -4277,11 +4641,7 @@ class NetworkTopologyDialog(QDialog):
             links_title = QLabel("Connected devices")
             links_title.setStyleSheet("font-weight: 600; color: #212529;")
             self.details_layout.addWidget(links_title)
-            for text in connected[:30]:
-                item = QLabel(f"• {text}")
-                item.setWordWrap(True)
-                item.setStyleSheet("color: #495057;")
-                self.details_layout.addWidget(item)
+            self._detail_link_list("", connected[:30])
             if len(connected) > 30:
                 item = QLabel(f"… and {len(connected) - 30} more")
                 item.setStyleSheet("color: #6c757d;")
@@ -4656,7 +5016,7 @@ class NetworkTopologyDialog(QDialog):
         self._pdu_nodes_by_rack: Dict[Tuple[int, str, str], List[TopologyNode]] = defaultdict(list)
         rack_name_sets: Dict[Tuple[int, str], Set[str]] = defaultdict(set)
         self._rack_capacity_cache: Dict[Tuple[int, str, str], int] = {}
-        occupied_units: Dict[Tuple[int, str, str], Set[int]] = defaultdict(set)
+        occupied_half_units: Dict[Tuple[int, str, str], Set[int]] = defaultdict(set)
         default_capacity = max(
             1,
             _int(
@@ -4686,16 +5046,16 @@ class NetworkTopologyDialog(QDialog):
                 self._pdu_nodes_by_rack[rack_key].append(node)
                 continue
             self._rack_nodes_by_location[location_key].append(node_id)
-            units = self._node_rack_units(node_id)
-            if units <= 0:
+            half_units = self._node_rack_half_units(node_id)
+            if half_units <= 0:
                 continue
-            start_u = max(1, _int(node.instance.get("rack_start_u"), 1))
+            start_half_u = self._node_rack_start_half_u(node)
             capacity = self._rack_capacity_cache[rack_key]
-            for rack_u in range(start_u, start_u + units):
-                if 1 <= rack_u <= capacity:
-                    occupied_units[rack_key].add(rack_u)
+            for rack_half_u in range(start_half_u, start_half_u + half_units):
+                if 1 <= rack_half_u <= capacity * 2:
+                    occupied_half_units[rack_key].add(rack_half_u)
 
-        occupied_keys = set(occupied_units) | set(self._pdu_nodes_by_rack)
+        occupied_keys = set(occupied_half_units) | set(self._pdu_nodes_by_rack)
         for rack in self.data.get("network_racks", []):
             if not isinstance(rack, dict):
                 continue
@@ -4718,9 +5078,9 @@ class NetworkTopologyDialog(QDialog):
             for key, values in rack_name_sets.items()
         }
         self._rack_used_cache = {
-            key: len(values) for key, values in occupied_units.items()
+            key: int(math.ceil(len(values) / 2.0))
+            for key, values in occupied_half_units.items()
         }
-
     def _defined_ports(self, node: TopologyNode) -> List[dict]:
         asset_id = _text(node.asset.get("id")) or node.node_id
         cached = self._expanded_ports_cache.get(asset_id)
@@ -4824,8 +5184,8 @@ class NetworkTopologyDialog(QDialog):
     def _port_connection_details(self, instance_id: str, port_name: str) -> dict:
         instance_id = _text(instance_id)
         port_name = _text(port_name)
-        fibre_rows: List[str] = []
-        patch_rows: List[str] = []
+        fibre_rows: List[dict] = []
+        patch_rows: List[dict] = []
         logical_ids: Set[str] = set()
 
         for connection in self.data.get("network_connections", []):
@@ -4851,9 +5211,17 @@ class NetworkTopologyDialog(QDialog):
             if length_m:
                 row += f" ({length_m:.1f} m)"
             if medium in {"fibre", "fiber", "optical"}:
-                fibre_rows.append(row)
+                fibre_rows.append(
+                    {"text": row, "target_id": peer_id, "target_port": peer_port}
+                )
             else:
-                patch_rows.append(f"{medium.title() or 'Connection'} {row}")
+                patch_rows.append(
+                    {
+                        "text": f"{medium.title() or 'Connection'} {row}",
+                        "target_id": peer_id,
+                        "target_port": peer_port,
+                    }
+                )
 
         for cable in self.data.get("network_fibre_cables", []):
             if not isinstance(cable, dict):
@@ -4878,7 +5246,17 @@ class NetworkTopologyDialog(QDialog):
                 extras.append(f"{core_count}F")
             if length_m:
                 extras.append(f"{length_m:.1f} m")
-            fibre_rows.append(f"{name}{f' [{cable_id}]' if cable_id and cable_id != name else ''}: {self._instance_rack_description(peer_id, peer_port)}" + (f" ({', '.join(extras)})" if extras else ""))
+            fibre_rows.append(
+                {
+                    "text": (
+                        f"{name}{f' [{cable_id}]' if cable_id and cable_id != name else ''}: "
+                        f"{self._instance_rack_description(peer_id, peer_port)}"
+                        + (f" ({', '.join(extras)})" if extras else "")
+                    ),
+                    "target_id": peer_id,
+                    "target_port": peer_port,
+                }
+            )
 
         for lead in self.data.get("network_patch_leads", []):
             if not isinstance(lead, dict):
@@ -4893,11 +5271,21 @@ class NetworkTopologyDialog(QDialog):
                 target_id, target_port = local_id, local_port
             else:
                 continue
-            patch_rows.append(f"{_text(lead.get('id')) or 'Patch cable'}: {(_text(lead.get('medium')) or 'patch').title()} to {self._instance_rack_description(target_id, target_port)}")
+            patch_rows.append(
+                {
+                    "text": (
+                        f"{_text(lead.get('id')) or 'Patch cable'}: "
+                        f"{(_text(lead.get('medium')) or 'patch').title()} to "
+                        f"{self._instance_rack_description(target_id, target_port)}"
+                    ),
+                    "target_id": target_id,
+                    "target_port": target_port,
+                }
+            )
 
         return {
-            "fibre_cable_details": list(dict.fromkeys(fibre_rows)),
-            "rack_patch_details": list(dict.fromkeys(patch_rows)),
+            "fibre_cable_details": fibre_rows,
+            "rack_patch_details": patch_rows,
         }
 
     def _port_trace_details(self, device_id: str, port_name: str) -> dict:
@@ -5000,6 +5388,8 @@ class NetworkTopologyDialog(QDialog):
             asset_name = _text(assignment.get("endpoint_asset_name"))
             records[port].append(endpoint + (f" — {asset_name}" if asset_name else ""))
             poe_by_port[port] += max(0.0, _float(assignment.get("poe_power_w")))
+        for port, descriptions in self.model.physical_port_records_by_instance.get(device_id, {}).items():
+            records[port].extend(description for description in descriptions if description not in records[port])
         for port in sorted(self.model.occupied_ports_by_instance.get(device_id, set())):
             if port and not records.get(port):
                 records[port].append("Physical fibre termination")
@@ -5685,13 +6075,13 @@ class NetworkTopologyDialog(QDialog):
             rack_name = _text(node.instance.get("rack_name"))
             rack_key = (floor, location, rack_name)
             capacity = self._rack_capacity_for_key(rack_key)
-            start_u = max(1, _int(node.instance.get("rack_start_u"), 1))
-            units = max(1, self._node_rack_units(node_id))
+            start_half_u = self._node_rack_start_half_u(node)
+            half_units = max(1, self._node_rack_half_units(node_id))
             # Invalid legacy placements are kept visible but constrained to the
             # rack drawing. New auto-planned equipment is prevented from creating
             # these positions by network_auto_planner.py.
-            top_u = min(capacity, start_u + units - 1)
-            y = rack_top + (capacity - top_u) * unit_pitch
+            top_half_u = min(capacity * 2, start_half_u + half_units - 1)
+            y = rack_top + (capacity * 2 - top_half_u) * (unit_pitch / 2.0)
             rack_left = rack_x_by_name.get(rack_name, rack_left_start)
             shared_capacity = max(1, _int(node.instance.get("shared_rack_unit_capacity"), 1))
             shared_position = max(1, _int(node.instance.get("shared_rack_unit_position"), 1))
@@ -6266,6 +6656,7 @@ class NetworkTopologyDialog(QDialog):
                 self.visible_nodes[node_id] = node
                 if self.rack_focus is not None:
                     units = max(1, self._node_rack_units(node_id))
+                    half_units = max(1, self._node_rack_half_units(node_id))
                     shared_capacity = max(
                         1,
                         _int(node.instance.get("shared_rack_unit_capacity"), 1),
@@ -6284,7 +6675,7 @@ class NetworkTopologyDialog(QDialog):
                         display_units = 1
                     else:
                         equipment_width = 482.6
-                        equipment_height = units * 44.45 - 4.0
+                        equipment_height = half_units * (44.45 / 2.0) - 4.0
                         display_units = units
                     port_nodes = self._rack_port_nodes(node_id)
                     item = (
@@ -6417,7 +6808,8 @@ class NetworkTopologyDialog(QDialog):
             node = self._node_for(node_id)
             shared_capacity = max(1, _int(node.instance.get("shared_rack_unit_capacity"), 1)) if node is not None else 1
             width = (482.6 - 8.0) / shared_capacity if shared_capacity > 1 else 482.6
-            return QRectF(pos.x(), pos.y(), width, max(1, self._node_rack_units(node_id)) * 44.45 - 4.0)
+            height = max(1, self._node_rack_half_units(node_id)) * (44.45 / 2.0) - 4.0
+            return QRectF(pos.x(), pos.y(), width, height)
         if self.switch_port_focus is not None and node_id == _text(self.switch_port_focus):
             units = max(1, self._node_rack_units(node_id))
             return QRectF(pos.x(), pos.y(), 965.2, max(88.9, units * 88.9))
@@ -6746,6 +7138,32 @@ class NetworkTopologyDialog(QDialog):
             allowance = max(0, _int(node.asset.get("switch_rack_unit_allowance"), _int(node.asset.get("rack_units"), 1)))
             return max(1, allowance) * members
         return max(0, _int(node.asset.get("rack_units"), 1))
+
+    @staticmethod
+    def _node_rack_start_half_u(node: TopologyNode) -> int:
+        explicit = max(0, _int(node.instance.get("rack_start_half_u")))
+        if explicit:
+            return explicit
+        return (max(1, _int(node.instance.get("rack_start_u"), 1)) - 1) * 2 + 1
+
+    def _node_rack_half_units(self, node_id: str) -> int:
+        node = self._node_for(node_id)
+        if node is None:
+            return 0
+        member_slots = [
+            max(1, _int(value, 1))
+            for value in node.instance.get("stack_member_start_half_us", [])
+        ]
+        if len(member_slots) > 1:
+            return max(member_slots) + 1 - min(member_slots) + 1
+        explicit = max(
+            0,
+            _int(node.instance.get("rack_height_half_u")),
+            _int(node.asset.get("rack_height_half_u")),
+        )
+        if explicit:
+            return explicit
+        return max(0, self._node_rack_units(node_id) * 2)
 
     def _rack_names_for_location(self, floor: int, location: str) -> List[str]:
         return list(self._rack_names_cache.get((int(floor), location), []))
@@ -8036,7 +8454,11 @@ class NetworkTopologyDialog(QDialog):
             self._show_node_details(node_id)
             return
         item = self.node_items.get(node_id)
-        if item is not None and not item.isSelected():
+        modified_selection = bool(
+            QApplication.keyboardModifiers()
+            & (Qt.ShiftModifier | Qt.ControlModifier)
+        )
+        if item is not None and not item.isSelected() and not modified_selection:
             self.scene.clearSelection()
             item.setSelected(True)
         self._select_front_panel_port("")
@@ -8295,8 +8717,11 @@ class NetworkTopologyDialog(QDialog):
         rack_height = capacity * unit_pitch
         if not (rack_top <= scene_position.y() < rack_top + rack_height):
             return
-        row_from_top = int((scene_position.y() - rack_top) // unit_pitch)
-        rack_u = capacity - row_from_top
+        half_row_from_top = int(
+            (scene_position.y() - rack_top) // (unit_pitch / 2.0)
+        )
+        rack_half_u = capacity * 2 - half_row_from_top
+        rack_u = int(math.ceil(rack_half_u / 2.0))
         for node_id, node in self.model.nodes.items():
             if node.pseudo or node.asset_type in {"rack_cabinet", "pdu"}:
                 continue
@@ -8306,9 +8731,14 @@ class NetworkTopologyDialog(QDialog):
                 or _text(node.instance.get("rack_name")) != rack_name
             ):
                 continue
-            start_u = max(1, _int(node.instance.get("rack_start_u"), 1))
-            units = max(0, self._node_rack_units(node_id))
-            if units > 0 and start_u <= rack_u <= start_u + units - 1:
+            start_half_u = self._node_rack_start_half_u(node)
+            half_units = max(0, self._node_rack_half_units(node_id))
+            if (
+                half_units > 0
+                and start_half_u
+                <= rack_half_u
+                <= start_half_u + half_units - 1
+            ):
                 self.status_label.setText(
                     f"{rack_name} U{rack_u} is occupied by {node.name}; double-click an empty rack unit to add equipment."
                 )
@@ -8822,6 +9252,9 @@ class NetworkTopologyDialog(QDialog):
         self.add_link_button.setText("Add link")
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self.data.setdefault("network_connections", []).append(dialog.result)
+            synchronise_network_connection_routes(
+                self.data, [_text(dialog.result.get("id"))], force=True
+            )
             self.rack_focus = None; self.switch_port_focus = None
             self._commit_changes()
         else:
@@ -8844,6 +9277,9 @@ class NetworkTopologyDialog(QDialog):
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self.data.setdefault("network_connections", []).append(dialog.result)
+            synchronise_network_connection_routes(
+                self.data, [_text(dialog.result.get("id"))], force=True
+            )
             self._commit_changes()
 
     def _edit_connection(self, connection_id: str) -> None:
@@ -8858,6 +9294,9 @@ class NetworkTopologyDialog(QDialog):
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             rows[index] = dialog.result
+            synchronise_network_connection_routes(
+                self.data, [_text(dialog.result.get("id"))], force=True
+            )
             self._commit_changes()
 
     def _delete_connection(self, connection_id: str) -> None:
@@ -9425,6 +9864,66 @@ class NetworkTopologyDialog(QDialog):
         item.setSelected(True)
         self.view.focus_on_item(item)
         self._show_node_details(node_id)
+
+    def focus_location(self, location_name: str) -> bool:
+        """Reveal and centre the topology devices installed at a location."""
+        location_name = _text(location_name)
+        if not location_name:
+            return False
+
+        candidate_ids = [
+            node_id
+            for node_id, node in self.model.nodes.items()
+            if not node.pseudo
+            and _text(node.location_name) == location_name
+            and self._is_active_topology_device(node_id)
+        ]
+        if not candidate_ids:
+            self.status_label.setText(
+                f"{location_name} has no devices shown in the topology map."
+            )
+            return False
+
+        self.rack_focus = None
+        self.switch_port_focus = None
+        self.floor_combo.blockSignals(True)
+        self.floor_combo.setCurrentIndex(0)
+        self.floor_combo.blockSignals(False)
+
+        # Dense topology branches may be collapsed by default. Open only the
+        # ancestor paths needed to reveal this location, leaving other branches
+        # and the user's existing expansion choices untouched.
+        for node_id in candidate_ids:
+            parent_id = self.model.parent.get(node_id, "")
+            guard = 0
+            while parent_id and guard <= len(self.model.nodes):
+                self.explicit_expanded.add(parent_id)
+                self.explicit_collapsed.discard(parent_id)
+                parent_id = self.model.parent.get(parent_id, "")
+                guard += 1
+
+        self.search_edit.setText(location_name)
+        self.rebuild_scene(fit=False)
+        visible_ids = [
+            node_id for node_id in candidate_ids if node_id in self.node_items
+        ]
+        if not visible_ids:
+            self.status_label.setText(
+                f"{location_name} has no devices shown in the topology map."
+            )
+            return False
+
+        self.scene.clearSelection()
+        for node_id in visible_ids:
+            self.node_items[node_id].setSelected(True)
+        first_id = visible_ids[0]
+        self.view.focus_on_item(self.node_items[first_id])
+        self._show_node_details(first_id)
+        self.status_label.setText(
+            f"Found {len(visible_ids)} topology device"
+            f"{'s' if len(visible_ids) != 1 else ''} at {location_name}."
+        )
+        return True
 
     def refresh_from_data(self) -> None:
         if _int(self.data.get("network_schema_version"), 0) < NETWORK_SCHEMA_VERSION:

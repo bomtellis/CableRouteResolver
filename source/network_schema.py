@@ -11,6 +11,52 @@ from network_services import FIBRE_COLOURS, build_fibre_cores, fibre_layer_defau
 
 NETWORK_SCHEMA_VERSION = 12
 
+# Cisco Catalyst 9600 line-card catalogue.  Port layouts and supervisor
+# compatibility are taken from the 2025 Catalyst 9600 Series data sheet.
+CATALYST_9600_LINE_CARDS = {
+    "C9600X-LC-56YL4C": [("sfp56", 56, "downlink", [10000, 25000, 50000]), ("qsfp28", 4, "uplink", [40000, 100000])],
+    "C9600X-LC-32CD": [("qsfp28", 30, "downlink", [40000, 100000]), ("qsfpdd", 2, "uplink", [100000, 200000, 400000])],
+    "C9600-LC-40YL4CD": [("sfp56", 40, "downlink", [1000, 10000, 25000, 50000]), ("qsfp28", 2, "uplink", [40000, 100000]), ("qsfpdd", 2, "uplink", [200000, 400000])],
+    "C9600-LC-24C": [("qsfp28", 24, "downlink", [40000, 100000])],
+    "C9600-LC-48YL": [("sfp28", 48, "downlink", [1000, 10000, 25000, 50000])],
+    "C9600-LC-48TX": [("rj45", 48, "downlink", [100, 1000, 2500, 5000, 10000])],
+    "C9600-LC-48S": [("sfp", 48, "downlink", [100, 1000])],
+}
+
+
+def catalyst_9600_port_definitions(modules) -> List[dict]:
+    """Expand installed line cards into the chassis' authoritative ports."""
+    result: List[dict] = []
+    if not isinstance(modules, list):
+        return result
+    for module in sorted(
+        (row for row in modules if isinstance(row, dict)),
+        key=lambda row: _as_int(row.get("slot"), 0),
+    ):
+        if _text(module.get("module_type")).lower() != "line_card":
+            continue
+        slot = max(1, _as_int(module.get("slot"), 1))
+        model = _text(module.get("model"))
+        for group_index, (port_type, count, port_use, speeds) in enumerate(
+            CATALYST_9600_LINE_CARDS.get(model, []), start=1
+        ):
+            prefix = f"S{slot}-{port_type.upper()}"
+            result.append(
+                {
+                    "port_type": port_type,
+                    "port_count": count,
+                    "port_use": port_use,
+                    "name_prefix": prefix,
+                    "explicit_names": [f"{prefix}-{number}" for number in range(1, count + 1)],
+                    "supported_speeds_mbps": list(speeds),
+                    "default_speed_mbps": max(speeds) if speeds else 0,
+                    "chassis_slot": slot,
+                    "module_model": model,
+                    "module_port_group": group_index,
+                }
+            )
+    return result
+
 
 DEFAULT_FIBRE_CABLE_TYPES = [
     {
@@ -200,6 +246,9 @@ NETWORK_DEFAULTS = {
         "redundant_core": True,
         "topology_model": "collapsed_core",
         "independent_link_count": 2,
+        "access_stacking_enabled": True,
+        "access_stack_max_members": 8,
+        "access_stack_topology": "ring",
         "layer_connection_rules": [],
         "manufacturer_preferences": {},
         "asset_model_preferences": {},
@@ -679,6 +728,9 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("redundant_core", True)
     settings.setdefault("topology_model", "collapsed_core")
     settings.setdefault("independent_link_count", 2)
+    settings.setdefault("access_stacking_enabled", True)
+    settings.setdefault("access_stack_max_members", 8)
+    settings.setdefault("access_stack_topology", "ring")
     settings.setdefault("layer_connection_rules", [])
     settings.setdefault("manufacturer_preferences", {})
     settings.setdefault("asset_model_preferences", {})
@@ -731,6 +783,16 @@ def ensure_network_schema(data: dict) -> dict:
     )
     settings["independent_link_count"] = max(
         1, min(16, _as_int(settings.get("independent_link_count"), 2))
+    )
+    settings["access_stacking_enabled"] = bool(
+        settings.get("access_stacking_enabled", True)
+    )
+    settings["access_stack_max_members"] = max(
+        1, min(64, _as_int(settings.get("access_stack_max_members"), 8))
+    )
+    stack_topology = _text(settings.get("access_stack_topology")).lower()
+    settings["access_stack_topology"] = (
+        stack_topology if stack_topology in {"ring", "chain"} else "ring"
     )
     settings["layer_connection_rules"] = normalise_layer_connection_rules(
         settings.get("layer_connection_rules"),
@@ -805,11 +867,31 @@ def ensure_network_schema(data: dict) -> dict:
         if _text(location) and _text(mode).lower() in {"defer", "new_rack"}
     }
 
+    additional_ders = overrides.get("additional_der_by_location")
+    additional_ders = additional_ders if isinstance(additional_ders, dict) else {}
+    additional_ders = {
+        _text(location): max(1, _as_int(count, 1))
+        for location, count in additional_ders.items()
+        if _text(location) and _as_int(count, 0) > 0
+    }
+
+    additional_der_assets = overrides.get("additional_der_asset_by_location")
+    additional_der_assets = (
+        additional_der_assets if isinstance(additional_der_assets, dict) else {}
+    )
+    additional_der_assets = {
+        _text(location): _text(asset_id)
+        for location, asset_id in additional_der_assets.items()
+        if _text(location) and _text(asset_id)
+    }
+
     settings["auto_planner_resolution_overrides"] = {
         "access_asset_by_location": access_assets,
         "upstream_asset_by_layer": upstream_assets,
         "minimum_access_switches_by_location": minimum_switches,
         "spare_capacity_mode_by_location": spare_modes,
+        "additional_der_by_location": additional_ders,
+        "additional_der_asset_by_location": additional_der_assets,
     }
     settings["spare_capacity_percent"] = max(
         0.0, _as_float(settings.get("spare_capacity_percent"), 15.0)
@@ -1205,6 +1287,42 @@ def ensure_network_schema(data: dict) -> dict:
         asset["max_stack_members"] = max(1, _as_int(asset.get("max_stack_members"), 1))
         if not asset["supports_stacking"]:
             asset["max_stack_members"] = 1
+        model_identity = " ".join(
+            (_text(asset.get("manufacturer")), _text(asset.get("model")), _text(asset.get("name")))
+        ).upper()
+        is_catalyst_9600 = asset["asset_type"] == "network_switch" and (
+            "C9606R" in model_identity or "CATALYST 9600" in model_identity
+        )
+        asset["modular_chassis"] = bool(asset.get("modular_chassis", is_catalyst_9600))
+        modules = asset.get("chassis_modules")
+        if not isinstance(modules, list):
+            modules = []
+        if is_catalyst_9600 and not modules:
+            installed = "C9600X-LC-56YL4C"
+            modules = [
+                {"slot": slot, "module_type": "line_card", "model": installed}
+                for slot in (1, 2, 5, 6)
+            ] + [
+                {"slot": 3, "module_type": "supervisor", "model": "C9600X-SUP-2"},
+                {"slot": 4, "module_type": "supervisor", "model": "C9600X-SUP-2"},
+            ]
+        normalised_modules = []
+        for row in modules:
+            if not isinstance(row, dict):
+                continue
+            slot = max(1, _as_int(row.get("slot"), len(normalised_modules) + 1))
+            module_type = _text(row.get("module_type")).lower() or "line_card"
+            model = _text(row.get("model"))
+            if module_type == "line_card" and model not in CATALYST_9600_LINE_CARDS:
+                model = "C9600X-LC-56YL4C" if is_catalyst_9600 else model
+            normalised_modules.append({"slot": slot, "module_type": module_type, "model": model})
+        asset["chassis_modules"] = sorted(normalised_modules, key=lambda row: row["slot"])
+        if asset["modular_chassis"] and any(
+            row.get("module_type") == "line_card" for row in asset["chassis_modules"]
+        ):
+            asset["port_definitions"] = catalyst_9600_port_definitions(
+                asset["chassis_modules"]
+            )
         asset["rack_units"] = max(0, _as_int(asset.get("rack_units"), 1))
         asset["olt_units_per_rack_unit"] = max(
             1, _as_int(asset.get("olt_units_per_rack_unit"), 1)
@@ -1446,6 +1564,15 @@ def ensure_network_schema(data: dict) -> dict:
         instance.setdefault("rack_name", "")
         instance["rack_start_u"] = max(0, _as_int(instance.get("rack_start_u")))
         instance["rack_size_u"] = max(0, _as_int(instance.get("rack_size_u")))
+        # Generated rack layouts may use half-U rails while the manual editor
+        # remains intentionally whole-U.  Keep the exact physical slot in
+        # separate integer metadata so normalisation cannot round it away.
+        instance["rack_start_half_u"] = max(
+            0, _as_int(instance.get("rack_start_half_u"))
+        )
+        instance["rack_height_half_u"] = max(
+            0, _as_int(instance.get("rack_height_half_u"))
+        )
         layer = _text(instance.get("network_layer") or instance.get("design_layer")).lower()
         layer = {
             "distribution": "aggregation",
@@ -1529,6 +1656,12 @@ def ensure_network_schema(data: dict) -> dict:
         instance["stack_member_count"] = max(
             1, _as_int(instance.get("stack_member_count"), 1)
         )
+        raw_member_slots = instance.get("stack_member_start_half_us", [])
+        if not isinstance(raw_member_slots, list):
+            raw_member_slots = []
+        instance["stack_member_start_half_us"] = [
+            max(1, _as_int(value, 1)) for value in raw_member_slots
+        ][: instance["stack_member_count"]]
         instance.setdefault("stack_member_asset_id", "")
         instance["stack_interconnect_count"] = max(
             0,
@@ -2346,6 +2479,28 @@ def validate_network_data(data: dict, include_advisories: bool = True) -> List[s
     for connection in data.get("network_connections", []):
         if not isinstance(connection, dict):
             continue
+        if not bool(connection.get("physical_connection")) and not bool(
+            connection.get("topology_hidden")
+        ):
+            left_instance = instances_by_id.get(
+                _text(connection.get("from_instance_id")), {}
+            )
+            right_instance = instances_by_id.get(
+                _text(connection.get("to_instance_id")), {}
+            )
+            left_role = _text(left_instance.get("design_role")).lower()
+            right_role = _text(right_instance.get("design_role")).lower()
+            if "edge_router" in {left_role, right_role}:
+                peer = right_instance if left_role == "edge_router" else left_instance
+                peer_role = _text(peer.get("design_role")).lower()
+                peer_asset = assets_by_id.get(_text(peer.get("asset_id")), {})
+                peer_type = _text(peer_asset.get("asset_type")).lower()
+                if peer_role != "core_switch" and peer_type != "external_network":
+                    messages.append(
+                        f"Edge-router connection {_text(connection.get('id'))} must terminate "
+                        "at a core switch (or an external-network demarcation), not "
+                        f"{peer_role or peer_type or 'an unclassified device'}."
+                    )
         speed = _as_int(connection.get("link_speed_mbps"))
         if speed <= 0:
             continue

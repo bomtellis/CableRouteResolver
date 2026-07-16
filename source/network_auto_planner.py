@@ -390,26 +390,6 @@ class RoutingGraph:
                     self.graph[a_name].append((b_name, weight))
                     self.graph[b_name].append((a_name, weight))
 
-        # Existing project connections are part of the routing graph where both
-        # endpoints are known points.  This preserves user-drawn spurs between
-        # rooms/data points and the corridor network.
-        for connection in self.data.get("connections", []):
-            if not isinstance(connection, dict):
-                continue
-            a_name = _text(connection.get("from"))
-            b_name = _text(connection.get("to"))
-            a = self.points.get(a_name)
-            b = self.points.get(b_name)
-            if not a or not b or a_name == b_name:
-                continue
-            explicit = _float(
-                connection.get("length_m", connection.get("length", 0.0)), 0.0
-            )
-            weight = explicit if explicit > 0.0 else _distance(a, b, self.floor_height_m)
-            if not any(neighbour == b_name for neighbour, _weight in self.graph[a_name]):
-                self.graph[a_name].append((b_name, weight))
-                self.graph[b_name].append((a_name, weight))
-
         # Preserve the importer-selected same-floor corridor attachment.  This
         # edge represents the surveyed X/Y spur from the wireless symbol to its
         # nearest corridor node; the remainder of the route then follows the
@@ -443,7 +423,15 @@ class RoutingGraph:
         for point_name, point in list(self.points.items()):
             if _text(point.get("kind")).lower() in {"corridor_node", "transition_node"}:
                 continue
-            if self.graph.get(point_name):
+            # Links to another room/device do not make this point part of the
+            # corridor graph.  Generated adjacent DERs, for example, form a
+            # small equipment-room component that still needs one surveyed
+            # spur into the nearest corridor node.
+            if any(
+                _text(self.points.get(neighbour, {}).get("kind")).lower()
+                in {"corridor_node", "transition_node"}
+                for neighbour, _weight in self.graph.get(point_name, [])
+            ):
                 continue
             candidates = route_nodes_by_floor.get(_int(point.get("floor")), [])
             if not candidates:
@@ -541,6 +529,254 @@ class RoutingGraph:
             guard += 1
         path.reverse()
         return float(distances[destination]), path
+
+
+def synchronise_network_connection_routes(
+    data: dict,
+    connection_ids: Optional[Iterable[str]] = None,
+    *,
+    force: bool = False,
+) -> dict:
+    """Route logical network links and endpoint assignments over the route graph.
+
+    Manual network links historically kept an empty ``route_path`` and were
+    therefore rendered as straight device-to-device lines.  This uses the same
+    ``RoutingGraph`` as the automatic planner.  Full-project synchronisation
+    also repairs endpoint assignments; hidden patch leads and physical fibre
+    segments retain their own routes.
+    """
+
+    requested_ids = {
+        _text(value) for value in (connection_ids or []) if _text(value)
+    }
+    graph = RoutingGraph(data)
+    instances = {
+        _text(row.get("id")): row
+        for row in data.get("network_asset_instances", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    updated: List[str] = []
+    skipped: List[str] = []
+    updated_assignments: List[str] = []
+    skipped_assignments: List[str] = []
+
+    def anchor(instance: dict) -> str:
+        return _text(instance.get("route_anchor")) or _text(
+            instance.get("location_name")
+        )
+
+    def route_is_valid(current_path: Sequence[str], source: str, target: str) -> bool:
+        if source == target:
+            return list(current_path) == [source]
+        return (
+            bool(current_path)
+            and current_path[0] == source
+            and current_path[-1] == target
+            and all(
+                any(neighbour == b for neighbour, _weight in graph.graph.get(a, []))
+                for a, b in zip(current_path, current_path[1:])
+            )
+        )
+
+    for connection in data.get("network_connections", []):
+        if not isinstance(connection, dict):
+            continue
+        connection_id = _text(connection.get("id"))
+        if requested_ids and connection_id not in requested_ids:
+            continue
+        if bool(connection.get("topology_hidden")) or bool(
+            connection.get("physical_connection")
+        ):
+            continue
+        source = instances.get(_text(connection.get("from_instance_id")))
+        target = instances.get(_text(connection.get("to_instance_id")))
+        if not source or not target:
+            skipped.append(connection_id)
+            continue
+        source_anchor = anchor(source)
+        target_anchor = anchor(target)
+        if source_anchor not in graph.points or target_anchor not in graph.points:
+            skipped.append(connection_id)
+            continue
+
+        current_path = [
+            _text(value)
+            for value in connection.get("route_path", [])
+            if _text(value)
+        ]
+        path_is_valid = route_is_valid(current_path, source_anchor, target_anchor)
+        if path_is_valid and not force:
+            continue
+
+        length_m, route_path = graph.route(source_anchor, target_anchor)
+        connection["route_path"] = list(route_path)
+        connection["length_m"] = round(max(0.0, float(length_m)), 3)
+        connection["route_source"] = source_anchor
+        connection["route_destination"] = target_anchor
+        updated.append(connection_id)
+
+    # A scoped call is used when one manual logical link changes.  Endpoint
+    # assignments are repaired only during full project/open synchronisation.
+    if not requested_ids:
+        for assignment in data.get("network_endpoint_assignments", []):
+            if not isinstance(assignment, dict):
+                continue
+            assignment_id = _text(assignment.get("id"))
+            source = instances.get(_text(assignment.get("network_instance_id")))
+            source_anchor = anchor(source) if source else ""
+            endpoint_name = _text(assignment.get("endpoint_name"))
+            if (
+                not source_anchor
+                or source_anchor not in graph.points
+                or endpoint_name not in graph.points
+            ):
+                skipped_assignments.append(assignment_id)
+                continue
+
+            current_path = [
+                _text(value)
+                for value in assignment.get("route_path", [])
+                if _text(value)
+            ]
+            if route_is_valid(current_path, source_anchor, endpoint_name) and not force:
+                continue
+
+            length_m, route_path = graph.route(source_anchor, endpoint_name)
+            extension_m = max(
+                0.0, _float(graph.points[endpoint_name].get("extension_distance_m"))
+            )
+            assignment["route_path"] = list(route_path)
+            assignment["copper_length_m"] = round(
+                max(0.0, float(length_m) + extension_m), 3
+            )
+            updated_assignments.append(assignment_id)
+
+    return {
+        "updated_connection_ids": updated,
+        "skipped_connection_ids": skipped,
+        "updated_assignment_ids": updated_assignments,
+        "skipped_assignment_ids": skipped_assignments,
+    }
+
+
+def align_auto_edge_routers_to_cores(data: dict) -> dict:
+    """Move legacy auto edge routers beside their connected MER cores.
+
+    Older plans selected edge locations from every comms-room candidate before
+    the core association was considered.  Repair only planner-owned routers;
+    manually placed edge equipment remains exactly where the user put it.
+    """
+
+    instances = {
+        _text(row.get("id")): row
+        for row in data.get("network_asset_instances", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    assets = {
+        _text(row.get("id")): row
+        for row in data.get("network_assets", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    locations = {
+        _text(row.get("name")): row
+        for row in data.get("locations", [])
+        if isinstance(row, dict) and _text(row.get("name"))
+    }
+    core_by_edge: Dict[str, List[dict]] = defaultdict(list)
+    for connection in data.get("network_connections", []):
+        if (
+            not isinstance(connection, dict)
+            or bool(connection.get("topology_hidden"))
+            or bool(connection.get("physical_connection"))
+        ):
+            continue
+        left = instances.get(_text(connection.get("from_instance_id")))
+        right = instances.get(_text(connection.get("to_instance_id")))
+        if not left or not right:
+            continue
+        left_role = _text(left.get("design_role")).lower()
+        right_role = _text(right.get("design_role")).lower()
+        if left_role == "edge_router" and right_role == "core_switch":
+            core_by_edge[_text(left.get("id"))].append(right)
+        elif right_role == "edge_router" and left_role == "core_switch":
+            core_by_edge[_text(right.get("id"))].append(left)
+
+    rack_capacity = max(
+        1, _int(data.get("network_settings", {}).get("default_rack_size_u"), 42)
+    )
+
+    def rack_units(instance: dict) -> int:
+        asset = assets.get(_text(instance.get("asset_id")), {})
+        members = (
+            max(1, _int(instance.get("stack_member_count"), 1))
+            if bool(instance.get("logical_stack"))
+            else 1
+        )
+        return max(1, _rack_units_for_asset(asset, members))
+
+    def free_start(edge_id: str, location_name: str, rack_name: str, units: int) -> int:
+        occupied: List[Tuple[int, int]] = []
+        for other_id, other in instances.items():
+            if (
+                other_id == edge_id
+                or _text(other.get("location_name")) != location_name
+                or _text(other.get("rack_name")) != rack_name
+            ):
+                continue
+            start = max(1, _int(other.get("rack_start_u"), 1))
+            occupied.append((start, start + rack_units(other) - 1))
+        for start in range(1, rack_capacity - units + 2):
+            end = start + units - 1
+            if not any(start <= other_end and end >= other_start for other_start, other_end in occupied):
+                return start
+        return 0
+
+    updated: List[str] = []
+    for edge_id, cores in sorted(core_by_edge.items()):
+        edge = instances.get(edge_id, {})
+        if not bool(edge.get("auto_generated")) or not cores:
+            continue
+        preferred_core_id = _text(edge.get("associated_core_instance_id"))
+        core = next(
+            (row for row in cores if _text(row.get("id")) == preferred_core_id),
+            sorted(cores, key=lambda row: _text(row.get("id")))[0],
+        )
+        location_name = _text(core.get("location_name"))
+        location = locations.get(location_name)
+        rack_name = _text(core.get("target_rack_name") or core.get("rack_name"))
+        if location is None or not rack_name:
+            continue
+        changed = (
+            _text(edge.get("location_name")) != location_name
+            or _text(edge.get("route_anchor")) != (
+                _text(core.get("route_anchor")) or location_name
+            )
+            or _text(edge.get("rack_name")) != rack_name
+        )
+        if not changed:
+            continue
+        units = rack_units(edge)
+        start_u = free_start(edge_id, location_name, rack_name, units)
+        if not start_u:
+            # Keep it in the MER but use an adjacent rack if the core rack is
+            # full; the normal rack repacker will consolidate it on the next run.
+            rack_name = f"{rack_name}-EDGE"
+            start_u = 1
+        edge.update(
+            {
+                "location_name": location_name,
+                "floor": _int(location.get("floor")),
+                "x": round(_float(location.get("x")), 3),
+                "y": round(_float(location.get("y")), 3),
+                "route_anchor": _text(core.get("route_anchor")) or location_name,
+                "rack_name": rack_name,
+                "target_rack_name": rack_name,
+                "rack_start_u": start_u,
+                "associated_core_instance_id": _text(core.get("id")),
+            }
+        )
+        updated.append(edge_id)
+    return {"updated_instance_ids": updated}
 
 
 DEFAULT_POE_BY_KEYWORD = {
@@ -978,10 +1214,17 @@ def _minimum_asset_mix(
     actual_poe_w: float,
     spare_fraction: float,
     label: str,
+    *,
+    endpoint_ports_only: bool = False,
 ) -> List[dict]:
     """Return a minimum-device-count capacity mix using a Pareto frontier."""
 
-    candidates = [item for item in candidates if _int(item.get("number_of_ports")) > 0]
+    def port_capacity(asset: dict) -> int:
+        if endpoint_ports_only:
+            return len(_asset_endpoint_port_slots(asset))
+        return max(0, _int(asset.get("number_of_ports")))
+
+    candidates = [item for item in candidates if port_capacity(item) > 0]
     if not candidates:
         raise NetworkPlanningError(
             f"No usable {label} assets exist in the network asset library."
@@ -989,7 +1232,7 @@ def _minimum_asset_mix(
 
     required_ports = max(0, int(math.ceil(actual_ports * (1.0 + spare_fraction))))
     required_poe = max(0, int(math.ceil(actual_poe_w * (1.0 + spare_fraction))))
-    max_ports = max(_int(item.get("number_of_ports")) for item in candidates)
+    max_ports = max(port_capacity(item) for item in candidates)
     max_poe = max(
         int(math.floor(_float(item.get("poe_budget_w")))) for item in candidates
     )
@@ -1003,7 +1246,7 @@ def _minimum_asset_mix(
     )
     single_counts = []
     for asset in candidates:
-        ports = _int(asset.get("number_of_ports"))
+        ports = port_capacity(asset)
         poe = int(math.floor(_float(asset.get("poe_budget_w"))))
         if ports <= 0 or (required_poe and poe <= 0):
             continue
@@ -1028,7 +1271,7 @@ def _minimum_asset_mix(
         ] = {}
         for (ports, poe), (indices, preference, power, rack) in frontier.items():
             for candidate_index, asset in enumerate(candidates):
-                next_ports = min(port_cap, ports + _int(asset.get("number_of_ports")))
+                next_ports = min(port_cap, ports + port_capacity(asset))
                 next_poe = min(
                     poe_cap, poe + int(math.floor(_float(asset.get("poe_budget_w"))))
                 )
@@ -1219,7 +1462,7 @@ def _asset_endpoint_port_slots(asset: dict) -> List[dict]:
         remaining = count - min(count, len(explicit))
         prefix = _text(row.get("name_prefix")) or {
             "rj45": "", "lc": "LC", "sc": "SC", "mpo": "MPO",
-            "sfp": "SFP", "sfp+": "SFP+", "sfp28": "SFP28",
+            "sfp": "SFP", "sfp+": "SFP+", "sfp28": "SFP28", "sfp56": "SFP56",
             "qsfp": "QSFP", "qsfp+": "QSFP+", "qsfp28": "QSFP28",
             "qsfp56": "QSFP56", "qsfpdd": "QSFP-DD", "osfp": "OSFP",
         }.get(port_type, port_type.upper())
@@ -1276,13 +1519,36 @@ def _pack_ports_to_devices(
     port_items: Sequence[PortDemand],
     device_assets: Sequence[dict],
     spare_fraction: float,
+    *,
+    reserve_ports_per_device: bool = False,
+    fill_device_groups: int = 0,
 ) -> List[List[PortDemand]]:
     # Spare capacity is enforced when selecting the aggregate device mix.  The
-    # physical allocation below additionally reserves a real client-facing port
-    # whose declared line rate can carry each endpoint's expected bandwidth.
+    # normal physical allocation balances endpoints across that mix. DER callers
+    # can instead fill each two-switch room as a group before using the next one.
+    def allocation_slots(asset: dict) -> List[dict]:
+        slots = list(_asset_endpoint_port_slots(asset))
+        if not reserve_ports_per_device or spare_fraction <= 0.0:
+            return slots
+        usable_count = max(
+            0,
+            int(
+                math.floor(
+                    len(slots) / (1.0 + max(0.0, float(spare_fraction)))
+                )
+            ),
+        )
+        slots.sort(
+            key=lambda row: max(
+                normalise_port_speeds(row.get("speeds")) or [0]
+            ),
+            reverse=True,
+        )
+        return slots[:usable_count]
+
     devices = [
         {
-            "slots": list(_asset_endpoint_port_slots(asset)),
+            "slots": allocation_slots(asset),
             "poe": max(0.0, _float(asset.get("poe_budget_w"))),
             "bandwidth": _effective_asset_bandwidth_mbps(asset),
             "packets": (
@@ -1324,7 +1590,13 @@ def _pack_ports_to_devices(
                     continue
                 choices.append(
                     (
+                        (
+                            device_index // max(1, fill_device_groups)
+                            if fill_device_groups > 0
+                            else 0
+                        ),
                         selected_speed - item.expected_bandwidth_mbps,
+                        -(len(device["slots"]) - 1),
                         (
                             device["bandwidth"] - item.expected_bandwidth_mbps
                             if device["bandwidth"] is not None
@@ -1336,7 +1608,6 @@ def _pack_ports_to_devices(
                             else float("inf")
                         ),
                         device["poe"] - item.poe_power_w,
-                        len(device["slots"]) - 1,
                         device_index,
                         slot_index,
                         selected_speed,
@@ -1376,6 +1647,24 @@ def _next_identifier(existing: set[str], prefix: str) -> str:
 
 
 def _clear_previous_auto_design(data: dict) -> None:
+    def generated_location(item: dict) -> bool:
+        if not isinstance(item, dict):
+            return False
+        if bool(item.get("auto_network_location")):
+            return True
+        # Recover legacy planner-owned rows saved before the ownership flag was
+        # consistently persisted.  Manual DERs never carry an overflow parent.
+        return bool(
+            _text(item.get("overflow_parent_location"))
+            and _text(item.get("kind")).lower()
+            == "distributed_equipment_room"
+        ) or _text(item.get("name")).startswith("AUTO-POLAN-")
+
+    removed_location_names = {
+        _text(item.get("name"))
+        for item in data.get("locations", [])
+        if generated_location(item) and _text(item.get("name"))
+    }
     removed_instance_ids = {
         _text(item.get("id"))
         for item in data.get("network_asset_instances", [])
@@ -1414,13 +1703,14 @@ def _clear_previous_auto_design(data: dict) -> None:
     data["locations"] = [
         item
         for item in data.get("locations", [])
-        if not bool(item.get("auto_network_location"))
+        if not generated_location(item)
     ]
     corridors = data.setdefault("corridors", {})
     corridors["edges"] = [
         item
         for item in corridors.get("edges", [])
         if not bool(item.get("auto_network_edge"))
+        and _text(item.get("edge_role")) != "der_overflow_adjacency"
     ]
     data["network_redundancy_groups"] = [
         item
@@ -1447,6 +1737,25 @@ def _clear_previous_auto_design(data: dict) -> None:
     # Optical paths are derived from the current logical and physical design.
     # Never carry calculated paths across a fresh automatic design pass.
     data["network_optical_paths"] = []
+
+    # Resolution choices for a generated overflow DER belong to that generated
+    # row, not to the next planner run.  Retain choices made against manual
+    # parent rooms while removing stale generated-location keys.
+    overrides = data.setdefault("network_settings", {}).get(
+        "auto_planner_resolution_overrides", {}
+    )
+    if isinstance(overrides, dict) and removed_location_names:
+        for key in (
+            "access_asset_by_location",
+            "minimum_access_switches_by_location",
+            "spare_capacity_mode_by_location",
+            "additional_der_by_location",
+            "additional_der_asset_by_location",
+        ):
+            values = overrides.get(key)
+            if isinstance(values, dict):
+                for location_name in removed_location_names:
+                    values.pop(location_name, None)
 
 
 class DesignBuilder:
@@ -1572,7 +1881,7 @@ class DesignBuilder:
                 result.append({**row, "name": name, "port_type": port_type, "port_use": port_use, "medium": self._port_medium(port_type), "supported_speeds_mbps": speeds})
             remaining = count - min(count, len(explicit))
             prefix = _text(row.get("name_prefix")) or {
-                "pon": "PON", "sfp": "SFP", "sfp+": "SFP+", "sfp28": "SFP28",
+                "pon": "PON", "sfp": "SFP", "sfp+": "SFP+", "sfp28": "SFP28", "sfp56": "SFP56",
                 "qsfp": "QSFP", "qsfp+": "QSFP+", "qsfp28": "QSFP28",
                 "qsfp56": "QSFP56", "qsfpdd": "QSFP-DD", "osfp": "OSFP",
                 "lc": "LC", "sc": "SC", "mpo": "MPO", "rj45": "",
@@ -1778,6 +2087,33 @@ class DesignBuilder:
         right_rows = self._connection_port_candidates(
             to_instance, requested_to, medium, "input"
         )
+
+        def intended_free_count(
+            instance: dict, rows: Sequence[dict], requested: str, fallback: str
+        ) -> int:
+            wanted = self._requested_use(requested, fallback)
+            expanded = [
+                row
+                for row in self._expanded_ports(instance)
+                if _text(row.get("medium")) == medium
+            ]
+            if any(
+                _text(row.get("port_use")).lower() == wanted
+                for row in expanded
+            ):
+                return sum(
+                    1
+                    for row in rows
+                    if _text(row.get("port_use")).lower() == wanted
+                )
+            return len(rows)
+
+        free_left_port_count = intended_free_count(
+            from_instance, left_rows, requested_from, "uplink"
+        )
+        free_right_port_count = intended_free_count(
+            to_instance, right_rows, requested_to, "input"
+        )
         speed_candidates: Set[int] = set()
         for left in left_rows:
             left_speeds = normalise_port_speeds(
@@ -1855,6 +2191,8 @@ class DesignBuilder:
         return {
             "left_rows": left_rows,
             "right_rows": right_rows,
+            "free_left_port_count": free_left_port_count,
+            "free_right_port_count": free_right_port_count,
             "capabilities": capabilities,
             "transparent_pair": transparent_pair,
             "max_capacity_mbps": max(
@@ -2135,6 +2473,12 @@ class DesignBuilder:
                     "max_compatible_capacity_mbps": max_capacity,
                     "shortfall_mbps": max(0.0, required - max_capacity),
                     "capabilities": capabilities,
+                    "free_from_port_count": max(
+                        0, _int(bundle_info.get("free_left_port_count"))
+                    ),
+                    "free_to_port_count": max(
+                        0, _int(bundle_info.get("free_right_port_count"))
+                    ),
                     "current_location_switch_count": location_switch_count,
                     "suggested_device_count": suggested_devices,
                     **alternatives,
@@ -2515,9 +2859,13 @@ class DesignBuilder:
         )
         return module_id
 
-    def add_patch_lead(self, *, connection_id: str = "", assignment_id: str = "", instance: dict, port: str, medium: str, peer_instance_id: str = "", peer_port: str = "", endpoint_name: str = "", preferred_use: str = "") -> dict:
+    def add_patch_lead(self, *, connection_id: str = "", assignment_id: str = "", instance: dict, port: str, medium: str, peer_instance_id: str = "", peer_port: str = "", endpoint_name: str = "", preferred_use: str = "", length_m: Optional[float] = None) -> dict:
         definition = self._port_definition(instance, port, medium, preferred_use)
-        default_length = 2.0 if medium in {"copper", "fibre"} else 0.0
+        default_length = (
+            max(0.0, float(length_m))
+            if length_m is not None
+            else (2.0 if medium in {"copper", "fibre"} else 0.0)
+        )
         lead = {
             "id": _next_identifier(self.patch_lead_ids, "AUTO-PL-"), "connection_id": connection_id, "assignment_id": assignment_id,
             "instance_id": _text(instance.get("id")), "port": str(port), "peer_instance_id": peer_instance_id, "peer_port": str(peer_port),
@@ -2915,12 +3263,48 @@ class DesignBuilder:
             suffix += 1
         self.location_names.add(name)
 
-        spacing_m = 2.5
+        # Keep the adjacent node close enough to represent the same equipment
+        # area, but far enough from its parent and other graph nodes to remain
+        # independently visible/selectable in the plan view.
+        spacing_m = 3.0
+        parent_x = _float(parent.get("x"))
+        parent_y = _float(parent.get("y"))
+        parent_floor = _int(parent.get("floor"))
+        candidate_offsets = []
+        for ring in range(1, max(3, overflow_index + 1)):
+            distance = spacing_m * ring
+            candidate_offsets.extend(
+                [
+                    (distance, 0.0),
+                    (0.0, distance),
+                    (-distance, 0.0),
+                    (0.0, -distance),
+                    (distance, distance),
+                    (-distance, distance),
+                    (-distance, -distance),
+                    (distance, -distance),
+                ]
+            )
+        x, y = parent_x + spacing_m * (overflow_index - 1), parent_y
+        for dx, dy in candidate_offsets:
+            candidate_x = parent_x + dx
+            candidate_y = parent_y + dy
+            if all(
+                _int(point.get("floor")) != parent_floor
+                or math.hypot(
+                    candidate_x - _float(point.get("x")),
+                    candidate_y - _float(point.get("y")),
+                )
+                >= spacing_m * 0.8
+                for point in self.graph.points.values()
+            ):
+                x, y = candidate_x, candidate_y
+                break
         location = {
             **deepcopy(parent),
             "name": name,
-            "x": round(_float(parent.get("x")) + spacing_m * (overflow_index - 1), 3),
-            "y": round(_float(parent.get("y")), 3),
+            "x": round(x, 3),
+            "y": round(y, 3),
             "kind": "distributed_equipment_room",
             "max_network_cabinets": 1,
             "der_switch_capacity": 2,
@@ -2931,10 +3315,12 @@ class DesignBuilder:
         self.locations.append(location)
         self.graph._add_point(name, location, "distributed_equipment_room")
 
-        previous_name = (
-            parent_name if overflow_index == 2 else f"{parent_name}-{overflow_index - 1}"
-        )
-        previous = self.graph.points.get(previous_name) or self.graph.points.get(parent_name)
+        # Every overflow DER is anchored directly to the first DER.  This
+        # mirrors the original DER's graph reachability and avoids a fragile
+        # chain where removing one intermediate generated DER disconnects all
+        # later rooms.
+        previous_name = parent_name
+        previous = self.graph.points.get(parent_name)
         current = self.graph.points.get(name)
         if previous and current:
             weight = _distance(previous, current, self.graph.floor_height_m)
@@ -3020,6 +3406,8 @@ def _planner_resolution_overrides(settings: dict) -> dict:
         "upstream_asset_by_layer",
         "minimum_access_switches_by_location",
         "spare_capacity_mode_by_location",
+        "additional_der_by_location",
+        "additional_der_asset_by_location",
     ):
         value = overrides.get(key)
         if not isinstance(value, dict):
@@ -3443,11 +3831,32 @@ def _asset_layer_port_capacity(asset: dict) -> int:
     return structured if structured > 0 else max(0, _int(asset.get("number_of_ports")))
 
 
+def _asset_layer_downlink_port_capacity(asset: dict) -> int:
+    """Return ports the runtime selector can use for downstream layer links.
+
+    When a switch declares dedicated downlink ports, connection allocation
+    intentionally prefers only those ports.  Layer sizing must use the same
+    inventory instead of also counting dedicated uplinks, otherwise a core can
+    be selected with apparent spare capacity that cannot terminate another
+    access link.
+    """
+
+    downlinks = sum(
+        max(0, _int(row.get("port_count")))
+        for row in asset.get("port_definitions", [])
+        if isinstance(row, dict)
+        and _text(row.get("port_use")).lower() == "downlink"
+        and _text(row.get("port_type")).lower()
+        in PLUGGABLE_OPTIC_PORT_TYPES | {"lc", "sc", "mpo", "pon"}
+    )
+    return downlinks if downlinks > 0 else _asset_layer_port_capacity(asset)
+
+
 def _layer_capacity_candidates(candidates: Sequence[dict]) -> List[dict]:
     return [
-        {**asset, "number_of_ports": _asset_layer_port_capacity(asset)}
+        {**asset, "number_of_ports": _asset_layer_downlink_port_capacity(asset)}
         for asset in candidates
-        if _asset_layer_port_capacity(asset) > 0
+        if _asset_layer_downlink_port_capacity(asset) > 0
     ]
 
 
@@ -4076,8 +4485,10 @@ def _connect_layer_targets(
                             0 if source_id not in used_sources else 1,
                             member_count,
                             -selected_speed,
-                            _instance_remaining_layer_ports(builder, source)
-                            - member_count,
+                            -(
+                                _instance_remaining_layer_ports(builder, source)
+                                - member_count
+                            ),
                             source_id,
                             core_id,
                             source,
@@ -4557,10 +4968,12 @@ def _stack_group_plan(
     *,
     rack_deployment_model: str = "end_of_row",
     copper_panel_capacity: int = 48,
-    copper_panel_u: int = 1,
-    cable_manager_u: int = 1,
+    copper_panel_u: float = 1.0,
+    cable_manager_u: float = 0.0,
     ups_reserved_u: int = 5,
     max_switches_per_cabinet: int = 0,
+    stacking_enabled: bool = True,
+    configured_max_stack_members: int = 8,
 ) -> List[dict]:
     """Return logical access-stack groups for the selected cabinet strategy.
 
@@ -4575,8 +4988,8 @@ def _stack_group_plan(
     deployment = _text(rack_deployment_model).lower()
     top_of_rack = deployment == "top_of_rack"
     panel_capacity = max(1, int(copper_panel_capacity or 1))
-    panel_u = max(1, int(copper_panel_u or 1))
-    manager_u = max(1, int(cable_manager_u or 1))
+    panel_u = max(0.5, float(copper_panel_u or 0.5))
+    manager_u = max(0.0, float(cable_manager_u or 0.0))
     ups_u = max(0, int(ups_reserved_u or 0))
 
     groups: List[dict] = []
@@ -4587,8 +5000,12 @@ def _stack_group_plan(
         per_member_rack_u = max(1, _rack_units_for_asset(asset, 1))
         max_stack_members = (
             max(1, _int(asset.get("max_stack_members"), 1))
-            if bool(asset.get("supports_stacking"))
+            if stacking_enabled and bool(asset.get("supports_stacking"))
             else 1
+        )
+        max_stack_members = min(
+            max_stack_members,
+            max(1, int(configured_max_stack_members or 1)),
         )
         max_stack_members = min(
             max_stack_members,
@@ -4611,11 +5028,11 @@ def _stack_group_plan(
                 panel_count = int(
                     math.ceil((endpoint_ports * member_count) / float(panel_capacity))
                 )
-                required_u = (
+                required_u = int(math.ceil(
                     per_member_rack_u * member_count
                     + panel_count * (panel_u + manager_u)
                     + powered_reserve
-                )
+                ))
                 if required_u <= rack_size_u:
                     physically_feasible = member_count
                 else:
@@ -4647,7 +5064,9 @@ def _stack_group_plan(
             panel_count = int(
                 math.ceil((endpoint_ports * member_count) / float(panel_capacity))
             )
-            reserved_bundle_u += panel_count * (panel_u + manager_u)
+            reserved_bundle_u += int(
+                math.ceil(panel_count * (panel_u + manager_u))
+            )
             if _float(asset.get("power_input_w"), 0.0) > 0:
                 reserved_bundle_u += ups_u
         groups.append(
@@ -5648,10 +6067,17 @@ def _traditional_design(
         rack_deployment_model = "end_of_row"
     builder.settings["rack_deployment_model"] = rack_deployment_model
 
-    stack_plan_kwargs = {"rack_deployment_model": rack_deployment_model}
+    stack_plan_kwargs = {
+        "rack_deployment_model": rack_deployment_model,
+        "stacking_enabled": bool(
+            builder.settings.get("access_stacking_enabled", True)
+        ),
+        "configured_max_stack_members": max(
+            1, _int(builder.settings.get("access_stack_max_members"), 8)
+        ),
+    }
     if rack_deployment_model == "top_of_rack":
         panel_asset = _copper_patch_panel_asset(builder)
-        manager_asset = _cable_manager_asset(builder)
         ups_asset = _ups_asset(builder)
         ups_u = max(1, _int(ups_asset.get("rack_units"), 2))
         stack_plan_kwargs.update(
@@ -5659,12 +6085,16 @@ def _traditional_design(
                 "copper_panel_capacity": max(
                     1, _int(panel_asset.get("number_of_ports"), 48)
                 ),
-                "copper_panel_u": max(
-                    1, _int(panel_asset.get("rack_units"), 1)
+                # The standard access layout uses two 0.5U 24-port panels
+                # around each 1U switch.  Spare capacity is held as free ports;
+                # it must not consume a logical stack-member position or a
+                # separate cable-manager U.
+                "copper_panel_u": (
+                    0.5
+                    if max(1, _int(panel_asset.get("number_of_ports"), 48)) <= 24
+                    else float(_copper_patch_panel_rack_units(panel_asset))
                 ),
-                "cable_manager_u": max(
-                    1, _int(manager_asset.get("rack_units"), 1)
-                ),
+                "cable_manager_u": 0.0,
                 "ups_reserved_u": ups_u * 2 + 1,
             }
         )
@@ -5775,6 +6205,7 @@ def _traditional_design(
                 room_poe,
                 local_spare_fraction,
                 f"access switch at {room_name}",
+                endpoint_ports_only=True,
             )
             selected = _ensure_aggregate_traffic_capacity(
                 room_candidates,
@@ -5817,7 +6248,11 @@ def _traditional_design(
         # optimisation pass.
         calculate_base_mix = (
             spare_fraction > 0.0
-            and (spare_mode == "defer" or len(full_stack_groups) > 1)
+            and (
+                is_distributed_equipment_room
+                or spare_mode == "defer"
+                or len(full_stack_groups) > 1
+            )
         )
         base_mix = access_mix(0.0) if calculate_base_mix else list(full_spare_mix)
         base_stack_groups = _stack_group_plan(
@@ -5829,7 +6264,11 @@ def _traditional_design(
             and len(full_spare_mix) > len(base_mix)
             and len(full_stack_groups) > len(base_stack_groups)
         )
-        if spare_requires_extra_stack and not spare_mode:
+        if (
+            spare_requires_extra_stack
+            and not spare_mode
+            and not is_distributed_equipment_room
+        ):
             max_members = max(
                 (
                     _int(group.get("max_stack_members"), 1)
@@ -5867,12 +6306,18 @@ def _traditional_design(
             # The dialog applies all overrides before the planner is rerun.
             continue
 
+        # A DER is a fixed two-switch equipment-room unit. Consume all of that
+        # physical capacity before creating an adjacent DER; the project-wide
+        # spare percentage must not create a partly used overflow room.
+        use_current_demand_capacity = (
+            is_distributed_equipment_room or spare_mode == "defer"
+        )
         local_spare_fraction = (
-            0.0 if spare_mode == "defer" else spare_fraction
+            0.0 if use_current_demand_capacity else spare_fraction
         )
         mix = (
             list(base_mix)
-            if spare_mode == "defer"
+            if use_current_demand_capacity
             else list(full_spare_mix)
         )
         if spare_mode == "defer" and spare_fraction > 0.0:
@@ -5890,21 +6335,60 @@ def _traditional_design(
                 )
             ),
         )
+        requested_additional_ders = max(
+            0,
+            _int(
+                overrides.get("additional_der_by_location", {}).get(
+                    room_name, 0
+                )
+            ),
+        )
+        if is_distributed_equipment_room and requested_additional_ders:
+            # This is deliberately relative to the freshly optimised mix.  An
+            # absolute minimum (for example 3) has no effect when the planner
+            # already selected more devices elsewhere in a large DER design,
+            # so the retry would reproduce the identical constraint.
+            minimum_switches = max(
+                minimum_switches, len(mix) + requested_additional_ders
+            )
         if minimum_switches > len(mix):
-            padding_asset = min(
-                room_candidates,
-                key=lambda asset: (
-                    _asset_preference_rank(asset),
-                    -float(_effective_asset_bandwidth_mbps(asset) or 0.0),
-                    max(1, _rack_units_for_asset(asset, 1)),
-                    _float(asset.get("power_input_w")),
-                    _text(asset.get("id")),
-                ),
+            requested_der_asset_id = _text(
+                overrides.get("additional_der_asset_by_location", {}).get(
+                    room_name, ""
+                )
+            )
+            requested_der_assets = [
+                asset
+                for asset in room_candidates
+                if _text(asset.get("id")) == requested_der_asset_id
+            ]
+            padding_asset = (
+                requested_der_assets[0]
+                if requested_der_assets
+                else min(
+                    room_candidates,
+                    key=lambda asset: (
+                        _asset_preference_rank(asset),
+                        -float(_effective_asset_bandwidth_mbps(asset) or 0.0),
+                        max(1, _rack_units_for_asset(asset, 1)),
+                        _float(asset.get("power_input_w")),
+                        _text(asset.get("id")),
+                    ),
+                )
             )
             mix.extend([padding_asset] * (minimum_switches - len(mix)))
 
         packed = _pack_ports_to_devices(
-            port_items, mix, local_spare_fraction
+            port_items,
+            mix,
+            local_spare_fraction,
+            reserve_ports_per_device=(
+                is_distributed_equipment_room
+                and requested_additional_ders > 0
+            ),
+            # Each consecutive pair is one DER. Prefer any compatible capacity
+            # in that pair before assigning endpoints to the next room.
+            fill_device_groups=2 if is_distributed_equipment_room else 0,
         )
         stack_groups = _stack_group_plan(
             mix, rack_size_u, **room_stack_plan_kwargs
@@ -5946,6 +6430,11 @@ def _traditional_design(
                 rack_switch_count = 0
                 spare_rack_started = False
             is_stack = member_count > 1
+            stack_topology = _text(
+                builder.settings.get("access_stack_topology")
+            ).lower()
+            if stack_topology not in {"ring", "chain"}:
+                stack_topology = "ring"
             instance_name = (
                 f"AUTO {active_room_name} Access Stack {stack_number}"
                 if is_stack
@@ -6059,10 +6548,20 @@ def _traditional_design(
                 stack_member_count=member_count,
                 stack_member_asset_id=_text(asset.get("id")) if is_stack else "",
                 stack_max_members=max_stack_members if is_stack else 1,
-                stack_interconnect_count=max(0, member_count - 1) if is_stack else 0,
+                stack_topology=stack_topology if is_stack else "",
+                stack_interconnect_count=(
+                    member_count
+                    if is_stack and stack_topology == "ring"
+                    else max(0, member_count - 1) if is_stack else 0
+                ),
                 stack_interconnect_medium="stacking",
                 stack_interconnect_specification=(
-                    "Cisco StackWise stacking cables" if is_stack else ""
+                    (
+                        _text(asset.get("stacking_technology"))
+                        or f"{stack_topology.title()} switch-stack interconnect"
+                    )
+                    if is_stack
+                    else ""
                 ),
                 planned_spare_capacity_fraction=local_spare_fraction,
                 spare_capacity_mode=spare_mode or "standard",
@@ -7362,7 +7861,32 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
     if any(bool(record.get("redundant", True)) for record in external_records):
         required_router_count = max(2, required_router_count)
 
-    roots = _locations_by_kind(builder.data, {"mer", "comms_room", "telco_pop"})
+    cores = [
+        row for row in builder.instances
+        if _text(row.get("design_role")) == "core_switch"
+    ]
+    locations_by_name = {
+        _text(row.get("name")): row
+        for row in builder.data.get("locations", [])
+        if isinstance(row, dict) and _text(row.get("name"))
+    }
+    # Edge equipment belongs with the core layer, not in an arbitrary comms
+    # room or carrier demarcation.  Use the actual generated core locations in
+    # preference to every other root candidate; these are normally MERs.
+    roots: List[dict] = []
+    seen_root_names: Set[str] = set()
+    for core in cores:
+        root_name = _text(core.get("route_anchor")) or _text(
+            core.get("location_name")
+        )
+        root = locations_by_name.get(root_name)
+        if root is not None and root_name not in seen_root_names:
+            roots.append(root)
+            seen_root_names.add(root_name)
+    if not roots:
+        roots = _locations_by_kind(builder.data, {"mer"})
+    if not roots:
+        roots = _locations_by_kind(builder.data, {"comms_room", "telco_pop"})
     if not roots:
         builder.warnings.append("External networks were not connected because no MER/comms-room location exists.")
         return
@@ -7392,18 +7916,37 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
             "The user accepted the bandwidth-shortfall override."
         )
     routers: List[dict] = []
+    router_core_pairs: List[Tuple[dict, Optional[dict]]] = []
     for index in range(required_router_count):
-        root = roots[index % len(roots)]
+        local_core = cores[index % len(cores)] if cores else None
+        root_name = (
+            _text(local_core.get("route_anchor"))
+            or _text(local_core.get("location_name"))
+            if local_core is not None
+            else ""
+        )
+        root = locations_by_name.get(root_name) or roots[index % len(roots)]
+        core_rack_name = (
+            _text(
+                local_core.get("target_rack_name")
+                or local_core.get("rack_name")
+            )
+            if local_core is not None
+            else ""
+        )
         router = builder.add_instance(
             best_router,
             f"AUTO Edge Router {index + 1}",
             root,
             "edge_router",
-            rack_name=f"AUTO-RACK-{_text(root.get('name'))}",
+            rack_name=core_rack_name or f"AUTO-RACK-{_text(root.get('name'))}",
             rack_start_u=index + 1,
             rack_size_u=max(1, _int(builder.settings.get("default_rack_size_u"), 42)),
             route_anchor=_text(root.get("name")),
             network_layer="edge",
+            associated_core_instance_id=(
+                _text(local_core.get("id")) if local_core is not None else ""
+            ),
             expected_north_south_bandwidth_mbps=round(
                 north_south_demand, 6
             ),
@@ -7412,14 +7955,11 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
             expected_packet_rate_pps=round(edge_packet_rate, 3),
         )
         routers.append(router)
+        router_core_pairs.append((router, local_core))
 
-    cores = [
-        row for row in builder.instances
-        if _text(row.get("design_role")) == "core_switch"
-    ]
     if cores:
-        for index, router in enumerate(routers):
-            core = cores[index % len(cores)]
+        for index, (router, paired_core) in enumerate(router_core_pairs):
+            core = paired_core or cores[index % len(cores)]
             group_id = f"AUTO-EDGE-CORE-{index + 1}"
             builder.add_connection(
                 router,
@@ -7766,6 +8306,13 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             "termination_mode": termination_mode,
             "rear_connector": rear_connector,
             "connectorised_breakout": connectorised_breakout,
+            "cassette_lane": (
+                "failover"
+                if bool(logical.get("standby"))
+                or _text(logical.get("redundancy_role")).lower()
+                in {"secondary", "standby", "failover"}
+                else "primary"
+            ),
         }
         for instance in (a, b):
             rack = rack_key(instance)
@@ -7819,6 +8366,8 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                 "used_fibres": 0,
                 "cable_ids": [],
                 "associated_instance_ids": [],
+                "cassette_assignment_key": "",
+                "redundancy_role": "",
             }
             for index in range(1, cassette_count + 1)
         ]
@@ -7899,6 +8448,8 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         cable_core_count: int,
         termination_mode: str,
         rear_connector: str,
+        cassette_assignment_key: str = "",
+        cassette_lane: str = "",
         exclude_panel_ids: Optional[Set[str]] = None,
     ) -> List[dict]:
         key = panel_pool_key(instance)
@@ -7950,7 +8501,22 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                     continue
                 names = panel_port_names(panel)
                 cassette_rows = panel.setdefault("fibre_cassettes", empty_cassettes())
-                for cassette_index in range(cassette_count):
+                cassette_indices = list(range(cassette_count))
+                if cassette_assignment_key:
+                    cassette_indices.sort(
+                        key=lambda index: (
+                            0
+                            if _text(cassette_rows[index].get("cassette_assignment_key"))
+                            == cassette_assignment_key
+                            and _text(cassette_rows[index].get("redundancy_role"))
+                            == cassette_lane
+                            else 1
+                            if not _text(cassette_rows[index].get("cassette_assignment_key"))
+                            else 2,
+                            index,
+                        )
+                    )
+                for cassette_index in cassette_indices:
                     cassette = cassette_rows[cassette_index]
                     used_names = {
                         _text(value)
@@ -7960,13 +8526,28 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                     existing_mode = _text(cassette.get("termination_mode")).lower()
                     existing_rear = _text(cassette.get("rear_connector")).lower()
                     cassette_used = bool(used_names)
-                    compatible = (
-                        not cassette_used
+                    existing_assignment = _text(
+                        cassette.get("cassette_assignment_key")
+                    )
+                    existing_lane = _text(cassette.get("redundancy_role"))
+                    assignment_compatible = (
+                        not cassette_assignment_key
+                        or not existing_assignment
                         or (
-                            existing_mode == termination_mode
-                            and (
-                                termination_mode != "connectorised"
-                                or existing_rear == rear_connector
+                            existing_assignment == cassette_assignment_key
+                            and existing_lane == cassette_lane
+                        )
+                    )
+                    compatible = (
+                        assignment_compatible
+                        and (
+                            not cassette_used
+                            or (
+                                existing_mode == termination_mode
+                                and (
+                                    termination_mode != "connectorised"
+                                    or existing_rear == rear_connector
+                                )
                             )
                         )
                     )
@@ -7988,6 +8569,9 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                     cassette["front_connector_capacity"] = cassette_capacity
                     cassette["termination_mode"] = termination_mode
                     cassette["rear_connector"] = rear_connector if termination_mode == "connectorised" else "splice"
+                    if cassette_assignment_key:
+                        cassette["cassette_assignment_key"] = cassette_assignment_key
+                        cassette["redundancy_role"] = cassette_lane
                     cassette["used_front_connector_names"] = sorted(used_names, key=lambda value: names.index(value) if value in names else capacity)
                     cassette["used_front_connectors"] = len(used_names)
                     cassette["used_fibres"] = max(0, _int(cassette.get("used_fibres"))) + chunk_fibres
@@ -8080,6 +8664,14 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         active_positions = plan["active_positions"]
         termination_mode = plan["termination_mode"]
         rear_connector = plan["rear_connector"]
+        cassette_lane = plan["cassette_lane"]
+
+        def access_cassette_key(instance: dict) -> str:
+            return (
+                _text(instance.get("id"))
+                if _text(instance.get("design_role")) == "access_switch"
+                else ""
+            )
 
         a_termination = a
         a_port = _text(logical.get("from_port"))
@@ -8092,6 +8684,8 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                 cable_core_count=cable_core_count,
                 termination_mode=termination_mode,
                 rear_connector=rear_connector,
+                cassette_assignment_key=access_cassette_key(a),
+                cassette_lane=cassette_lane,
             )
             a_panel_ports = flatten_ports(a_allocations)
             a_termination = a_allocations[0]["panel"]
@@ -8137,6 +8731,8 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                 cable_core_count=cable_core_count,
                 termination_mode=termination_mode,
                 rear_connector=rear_connector,
+                cassette_assignment_key=access_cassette_key(b),
+                cassette_lane=cassette_lane,
                 exclude_panel_ids=excluded_panels,
             )
             b_panel_ports = flatten_ports(b_allocations)
@@ -8208,6 +8804,13 @@ def _copper_patch_panel_asset(builder: DesignBuilder) -> dict:
         lambda asset: _text(asset.get("patch_panel_type")).lower() == "copper"
         and _int(asset.get("number_of_ports")) > 0,
     )
+    # The standard access-switch dressing uses two 0.5U 24-port panels around
+    # each 48-port switch.  Prefer an actual 24-port library asset; a 48-port
+    # 1U rail cannot represent that physical layout.
+    candidates = [
+        asset for asset in candidates
+        if _int(asset.get("number_of_ports")) == 24
+    ]
     candidates = _apply_manufacturer_preference(builder.data, candidates, "copper_patch_panel", "copper patch panel")
     if candidates:
         selected = min(
@@ -8219,20 +8822,22 @@ def _copper_patch_panel_asset(builder: DesignBuilder) -> dict:
                 _text(a.get("id")),
             ),
         )
-        selected["rack_units"] = _copper_patch_panel_rack_units(selected)
+        selected["rack_units"] = 1
+        selected["rack_height_half_u"] = 1
         return selected
     asset = {
-        "id": "AUTO-COPPER-PATCH-PANEL-48",
-        "name": "48-port Category 6A patch panel",
+        "id": "AUTO-COPPER-PATCH-PANEL-24-0.5U",
+        "name": "0.5U 24-port Category 6A patch panel",
         "asset_type": "patch_panel",
         "patch_panel_type": "copper",
-        "number_of_ports": 48,
-        "connections_in": 48,
-        "connections_out": 48,
-        "port_definitions": [{"port_type": "rj45", "port_count": 48, "port_use": "patch", "name_prefix": "Port"}],
+        "number_of_ports": 24,
+        "connections_in": 24,
+        "connections_out": 24,
+        "port_definitions": [{"port_type": "rj45", "port_count": 24, "port_use": "patch", "name_prefix": "Port"}],
         "input_connection_type": "copper",
         "output_connection_type": "copper",
         "rack_units": 1,
+        "rack_height_half_u": 1,
         "power_input_w": 0.0,
         "notes": "Automatically generated copper patch-panel allowance.",
         "auto_network_asset": True,
@@ -8291,8 +8896,15 @@ def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) 
         for row in builder.data.get("locations", [])
         if isinstance(row, dict)
     }
+    locations.update(
+        {
+            _text(row.get("name")): row
+            for row in builder.locations
+            if isinstance(row, dict) and _text(row.get("name"))
+        }
+    )
     panel_asset = _copper_patch_panel_asset(builder)
-    capacity = max(1, _int(panel_asset.get("number_of_ports"), 48))
+    capacity = max(1, _int(panel_asset.get("number_of_ports"), 24))
 
     switches_by_location: Dict[Tuple[int, str], List[dict]] = defaultdict(list)
     for switch in builder.instances:
@@ -8305,6 +8917,8 @@ def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) 
             _int(switch.get("floor")),
             _text(switch.get("location_name")),
         )].append(switch)
+
+    der_capacity_issues: List[dict] = []
 
     for (_floor, location_name), switches in sorted(switches_by_location.items()):
         switches.sort(
@@ -8390,9 +9004,61 @@ def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) 
             remaining_panels -= 1
 
         if remaining_panels > 0:
+            location = locations.get(location_name, {})
+            is_der = _is_distributed_equipment_room(location)
+            parent_location = _text(
+                location.get("overflow_parent_location")
+            ) or location_name
+            current_switch_count = sum(
+                max(1, _int(row.get("stack_member_count"), 1))
+                if bool(row.get("logical_stack"))
+                else 1
+                for row in switches
+            )
+            reference_switch_asset = builder._asset_for_instance(switches[0])
+            panels_per_switch = max(
+                1,
+                int(
+                    math.ceil(
+                        len(_asset_endpoint_port_slots(reference_switch_asset))
+                        / float(capacity)
+                    )
+                ),
+            )
+            additional_switches = max(
+                1, int(math.ceil(remaining_panels / float(panels_per_switch)))
+            )
+            issue = {
+                    "location_name": location_name,
+                    "parent_location_name": parent_location,
+                    "location_kind": _text(location.get("kind")),
+                    "required_port_count_with_spare": required_positions,
+                    "available_port_count": sum(
+                        maximum_panel_counts.values()
+                    )
+                    * capacity,
+                    "remaining_panel_count": remaining_panels,
+                    "patch_panel_capacity": capacity,
+                    "current_location_switch_count": current_switch_count,
+                    "suggested_device_count": current_switch_count
+                    + additional_switches,
+                    "switch_asset_id": _text(switches[0].get("asset_id")),
+                    "switch_asset_name": _text(
+                        builder._asset_for_instance(switches[0]).get("name")
+                    )
+                    or _text(switches[0].get("asset_id")),
+                }
+            if is_der:
+                # Continue checking the remaining generated DERs in this same
+                # pass.  Returning every matching fault together avoids a full
+                # building-wide planner restart for DER1, DER2, DER3, etc.
+                der_capacity_issues.append(issue)
+                continue
             raise NetworkPlanningError(
                 f"Copper patch-panel capacity at {location_name} cannot provide "
-                f"{required_positions} positions across the installed access stacks."
+                f"{required_positions} positions across the installed access stacks.",
+                code="patch_panel_capacity",
+                details=issue,
             )
 
         location = locations.get(location_name) or {
@@ -8477,7 +9143,7 @@ def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) 
                     physical_segment="copper_patch_cable",
                     assignment_id=assignment_id,
                     cable_specification="Category 6A copper patch lead",
-                    length_m=2.0,
+                    length_m=0.3,
                 )
                 builder.add_patch_lead(
                     connection_id=_text(patch_connection.get("id")),
@@ -8489,7 +9155,25 @@ def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) 
                     peer_port=panel_port,
                     endpoint_name=_text(assignment.get("endpoint_name")),
                     preferred_use="client",
+                    length_m=0.3,
                 )
+
+    if der_capacity_issues:
+        locations_text = ", ".join(
+            _text(issue.get("location_name"))
+            for issue in der_capacity_issues[:6]
+        )
+        if len(der_capacity_issues) > 6:
+            locations_text += f" and {len(der_capacity_issues) - 6} more"
+        raise NetworkPlanningError(
+            f"{len(der_capacity_issues)} DER location(s) need adjacent capacity: "
+            f"{locations_text}.",
+            code="der_patch_panel_capacity_batch",
+            details={
+                "issues": der_capacity_issues,
+                "issue_count": len(der_capacity_issues),
+            },
+        )
 
 
 def _support_rack_asset(
@@ -8808,7 +9492,11 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
                     },
                 )
             candidates = []
-            if preferred:
+            if preferred and preferred in rack_by_name:
+                candidates.append(create_rack(preferred))
+            elif preferred and not racks:
+                # Preserve the first planned cabinet name, then fill that
+                # cabinet before honouring later per-stack placeholder names.
                 candidates.append(create_rack(preferred))
             candidates.extend(r for r in racks if r not in candidates)
             for rack in candidates:
@@ -8822,7 +9510,7 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
                 prospective = rack["bottom_next"] + (ups_reserved_u if powered and not rack["ups_added"] else 0)
                 if prospective + units - 1 <= rack["top_next"]:
                     return rack
-            rack = create_rack()
+            rack = create_rack(preferred if preferred and preferred not in rack_by_name else "")
             prospective = rack["bottom_next"] + (ups_reserved_u if powered else 0)
             if prospective + units - 1 > rack["top_next"]:
                 raise NetworkPlanningError(
@@ -8959,25 +9647,107 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
                 if "switch" in _text(instance.get("design_role")).lower()
                 else 0
             )
+            compact_copper_layout = bool(
+                switch_members
+                and copper_rows
+                and all(
+                    max(
+                        0,
+                        _int(
+                            assets.get(_text(panel.get("asset_id")), {}).get(
+                                "rack_height_half_u"
+                            ),
+                            _int(panel.get("rack_height_half_u")),
+                        ),
+                    )
+                    == 1
+                    for panel in copper_rows
+                )
+            )
             copper_bundle_u = sum(
                 copper_manager_units(panel)
                 + max(1, _int(panel.get("_calculated_rack_units"), 1))
                 for panel in copper_rows
             )
+            compact_bundle_u = int(
+                math.ceil((switch_members * 2 + len(copper_rows)) / 2.0)
+            )
             rack = choose_bottom(
-                units + copper_bundle_u if tor_atomic else units,
+                (
+                    compact_bundle_u
+                    if compact_copper_layout
+                    else (units + copper_bundle_u if tor_atomic else units)
+                ),
                 powered,
                 preferred,
                 switch_members,
             )
-            place_bottom(instance, rack, units, powered, switch_members)
+            if compact_copper_layout:
+                # Lay out each physical member independently while retaining a
+                # single logical stack for capacity, ports and topology:
+                # 0.5U panel / 1U switch / 0.5U panel.
+                if powered:
+                    ensure_ups(rack)
+                if rack["bottom_next"] + compact_bundle_u - 1 > rack["top_next"]:
+                    raise NetworkPlanningError(
+                        f"Rack {rack['name']} at {location_name} has insufficient "
+                        "space for the access-switch patching layout."
+                    )
+                base_u = rack["bottom_next"]
+                half_cursor = (base_u - 1) * 2 + 1
+                remaining_panels = iter(copper_rows)
+                member_half_slots: List[int] = []
+
+                def place_half_panel(panel: dict, half_slot: int) -> None:
+                    panel["rack_name"] = rack["name"]
+                    panel["target_rack_name"] = rack["name"]
+                    panel["rack_start_u"] = (half_slot + 1) // 2
+                    panel["rack_start_half_u"] = half_slot
+                    panel["rack_height_half_u"] = 1
+                    panel["rack_size_u"] = rack_size_u
+                    panel["rack_deployment_model"] = rack_deployment_model
+                    panel["cabinet_type"] = cabinet_type
+
+                for _member in range(switch_members):
+                    lower_panel = next(remaining_panels, None)
+                    if lower_panel is not None:
+                        place_half_panel(lower_panel, half_cursor)
+                        half_cursor += 1
+                    member_half_slots.append(half_cursor)
+                    half_cursor += 2
+                    upper_panel = next(remaining_panels, None)
+                    if upper_panel is not None:
+                        place_half_panel(upper_panel, half_cursor)
+                        half_cursor += 1
+                for panel in remaining_panels:
+                    place_half_panel(panel, half_cursor)
+                    half_cursor += 1
+
+                instance["rack_name"] = rack["name"]
+                instance["rack_start_u"] = (member_half_slots[0] + 1) // 2
+                instance["rack_start_half_u"] = member_half_slots[0]
+                instance["rack_height_half_u"] = 2
+                instance["stack_member_start_half_us"] = member_half_slots
+                instance["rack_size_u"] = rack_size_u
+                instance["rack_deployment_model"] = rack_deployment_model
+                instance["cabinet_type"] = cabinet_type
+                instance.setdefault("rack_function", _text(instance.get("design_role")))
+                rack["bottom_next"] = base_u + compact_bundle_u
+                rack["switch_count"] += switch_members
+                if powered:
+                    rack["powered_items"].append(instance)
+            else:
+                place_bottom(instance, rack, units, powered, switch_members)
 
             # Bottom-to-top order is switch, cable manager, copper patch panel;
             # therefore the rack elevation reads panel / manager / switch. In
             # end-of-row designs complete pairs may spill to an adjacent rack;
             # top-of-rack final connections must remain with their switch.
             copper_rack = rack
-            for panel_index, panel in enumerate(copper_rows, start=1):
+            for panel_index, panel in enumerate(
+                [] if compact_copper_layout else copper_rows,
+                start=1,
+            ):
                 panel_u = max(1, _int(panel.get("_calculated_rack_units"), 1))
                 panel_manager_u = copper_manager_units(panel)
                 pair_u = panel_manager_u + panel_u
@@ -9284,8 +10054,14 @@ def _auto_connect_expanded_ports(instance: dict, asset: dict) -> List[dict]:
             "pon": "PON",
             "sfp": "SFP",
             "sfp+": "SFP+",
+            "sfp28": "SFP28",
+            "sfp56": "SFP56",
             "qsfp": "QSFP",
+            "qsfp+": "QSFP+",
             "qsfp28": "QSFP28",
+            "qsfp56": "QSFP56",
+            "qsfpdd": "QSFP-DD",
+            "osfp": "OSFP",
             "lc": "LC",
             "sc": "SC",
             "mpo": "MPO",
@@ -9439,12 +10215,36 @@ def auto_connect_manual_devices(
         layer = layers.get(device_id, "")
         if layer in {"access", "aggregation"}:
             rule = rule_for_target(layer)
-            if rule:
+            allowed_sources = (
+                {"aggregation", "core"} if layer == "access" else {"core"}
+            )
+            configured_source = _text(
+                (rule or {}).get("source_layer")
+            ).lower()
+            if configured_source not in allowed_sources:
+                if layer == "access":
+                    configured_source = (
+                        "aggregation"
+                        if any(value == "aggregation" for value in layers.values())
+                        and _text(settings.get("topology_model")).lower()
+                        == "three_tier"
+                        else "core"
+                    )
+                else:
+                    configured_source = "core"
+            if configured_source:
                 return {
-                    "source_layer": _text(rule.get("source_layer")).lower(),
+                    "source_layer": configured_source,
                     "target_layer": layer,
-                    "links": max(1, _int(rule.get("links_per_target"), 1)),
-                    "distinct": max(1, _int(rule.get("minimum_distinct_sources"), 1)),
+                    "links": max(
+                        1, _int((rule or {}).get("links_per_target"), 1)
+                    ),
+                    "distinct": max(
+                        1,
+                        _int(
+                            (rule or {}).get("minimum_distinct_sources"), 1
+                        ),
+                    ),
                     "direction": "candidate_to_device",
                 }
         if layer == "core":
@@ -9468,8 +10268,7 @@ def auto_connect_manual_devices(
                 links = 1
             return {"source_layer": "core", "target_layer": "edge", "links": links, "distinct": min(links, 2), "direction": "device_to_candidate"}
         if layer == "olt":
-            source_layer = "edge" if any(value == "edge" for value in layers.values()) else "core"
-            return {"source_layer": source_layer, "target_layer": "olt", "links": 1, "distinct": 1, "direction": "candidate_to_device"}
+            return {"source_layer": "core", "target_layer": "olt", "links": 1, "distinct": 1, "direction": "candidate_to_device"}
         if layer == "splitter":
             asset = assets.get(_text(instances[device_id].get("asset_id")), {})
             links = max(1, _int(asset.get("connections_in"), 1))
@@ -9770,6 +10569,241 @@ def auto_connect_pending_imported_wireless_devices(data: dict) -> dict:
     return result
 
 
+def estimate_network_switch_counts(data: dict) -> dict:
+    """Return a fast minimum switch estimate for each Traditional layer.
+
+    The estimate uses the configured asset/model preferences, endpoint port and
+    PoE demand, spare capacity, access stacking policy, layer link counts and
+    source-diversity rules.  Final routing, per-room cabinet limits and physical
+    patching can increase the generated quantities, so the result is presented
+    as an estimate rather than a committed design.
+    """
+
+    working = deepcopy(data)
+    ensure_network_schema(working)
+    settings = working.setdefault("network_settings", {})
+    technology = _text(settings.get("technology")) or "Traditional"
+    if technology.lower() != "traditional":
+        return {
+            "available": False,
+            "technology": technology,
+            "core_switches": 0,
+            "aggregation_switches": 0,
+            "access_switches": 0,
+            "access_stacks": 0,
+            "endpoint_ports": 0,
+            "note": "Core/aggregation/access switch estimation applies to Traditional designs.",
+        }
+
+    endpoints, warnings = build_endpoint_demands(working)
+    port_groups: Dict[str, List[PortDemand]] = defaultdict(list)
+    for endpoint in endpoints:
+        group_name = _text(endpoint.existing_comms_room) or f"Floor {endpoint.floor}"
+        port_groups[group_name].extend(endpoint.ports)
+
+    access_candidates = _candidate_assets(
+        working,
+        "network_switch",
+        lambda asset: _text(asset.get("output_connection_type")).lower() == "copper"
+        and _int(asset.get("number_of_ports")) > 0
+        and not any(
+            word in _text(asset.get("name")).lower()
+            for word in ("core", "distribution", "aggregation")
+        ),
+    )
+    if not access_candidates:
+        raise NetworkPlanningError(
+            "No copper-output access switch is available for the layer estimate."
+        )
+    access_candidates = _apply_manufacturer_preference(
+        working, access_candidates, "access_switch", "access switch"
+    )
+    access_candidates = [_endpoint_capacity_asset(asset) for asset in access_candidates]
+
+    spare_fraction = max(
+        0.0, _float(settings.get("spare_capacity_percent"), 15.0)
+    ) / 100.0
+    rack_size_u = max(1, _int(settings.get("default_rack_size_u"), 42))
+    stacking_enabled = bool(settings.get("access_stacking_enabled", True))
+    stack_limit = max(1, _int(settings.get("access_stack_max_members"), 8))
+    minimum_by_location = _planner_resolution_overrides(settings).get(
+        "minimum_access_switches_by_location", {}
+    )
+    locations_by_name = {
+        _text(location.get("name")): location
+        for location in working.get("locations", [])
+        if isinstance(location, dict) and _text(location.get("name"))
+    }
+
+    access_members = 0
+    access_stacks = 0
+    total_bandwidth = 0.0
+    total_packets = 0.0
+    for group_name, ports in sorted(port_groups.items()):
+        port_count = len(ports)
+        poe_w = sum(max(0.0, item.poe_power_w) for item in ports)
+        bandwidth = sum(max(0.0, item.expected_bandwidth_mbps) for item in ports)
+        packets = sum(max(0.0, item.expected_packet_rate_pps) for item in ports)
+        mix = _minimum_asset_mix(
+            access_candidates,
+            port_count,
+            poe_w,
+            spare_fraction,
+            f"access switch estimate at {group_name}",
+            endpoint_ports_only=True,
+        )
+        mix = _ensure_aggregate_traffic_capacity(
+            access_candidates,
+            mix,
+            bandwidth,
+            packets,
+            spare_fraction,
+            f"access switch estimate at {group_name}",
+        )
+        minimum_members = max(
+            0, _int(minimum_by_location.get(group_name), 0)
+        )
+        if minimum_members > len(mix):
+            padding = min(
+                access_candidates,
+                key=lambda asset: (
+                    _asset_preference_rank(asset),
+                    -_int(asset.get("number_of_ports")),
+                    _text(asset.get("id")),
+                ),
+            )
+            mix.extend([padding] * (minimum_members - len(mix)))
+        access_members += len(mix)
+        location = locations_by_name.get(group_name, {})
+        max_switches_per_cabinet = (
+            2
+            if _text(location.get("cabinet_type")).lower() == "slim_wall"
+            or _is_distributed_equipment_room(location)
+            else 0
+        )
+        access_stacks += len(
+            _stack_group_plan(
+                mix,
+                rack_size_u,
+                stacking_enabled=stacking_enabled,
+                configured_max_stack_members=stack_limit,
+                max_switches_per_cabinet=max_switches_per_cabinet,
+            )
+        )
+        total_bandwidth += bandwidth
+        total_packets += packets
+
+    topology = _text(settings.get("topology_model")).lower()
+    if topology not in {"collapsed_core", "three_tier"}:
+        topology = "collapsed_core"
+    required_pairs = (
+        {("core", "aggregation"), ("aggregation", "access")}
+        if topology == "three_tier"
+        else {("core", "access")}
+    )
+    current_rules = normalise_layer_connection_rules(
+        settings.get("layer_connection_rules"),
+        topology,
+        bool(settings.get("redundant_core", True)),
+        _int(settings.get("independent_link_count"), 2),
+    )
+    current_pairs = {
+        (
+            _text(rule.get("source_layer")).lower(),
+            _text(rule.get("target_layer")).lower(),
+        )
+        for rule in current_rules
+        if bool(rule.get("enabled", True))
+    }
+    if not required_pairs.issubset(current_pairs):
+        current_rules = normalise_layer_connection_rules(
+            [],
+            topology,
+            bool(settings.get("redundant_core", True)),
+            _int(settings.get("independent_link_count"), 2),
+        )
+    settings["layer_connection_rules"] = current_rules
+
+    def estimate_layer(
+        candidates: Sequence[dict],
+        target_count: int,
+        rule: Optional[dict],
+        peer_rule: Optional[dict],
+        label: str,
+        per_device_ports: int = 0,
+    ) -> int:
+        if not candidates or target_count <= 0 or rule is None:
+            return 0
+        capacity_candidates = _layer_capacity_candidates(candidates)
+        links = max(1, _int(rule.get("links_per_target"), 1))
+        fixed_ports = target_count * links
+        minimum = max(1, _int(rule.get("minimum_distinct_sources"), 1))
+        peer_links = max(
+            0, _int((peer_rule or {}).get("links_per_target"), 0)
+        )
+        mix = _minimum_layer_mix(
+            capacity_candidates,
+            fixed_ports,
+            per_device_ports,
+            peer_links,
+            minimum,
+            spare_fraction,
+            label,
+            total_bandwidth,
+            total_packets,
+            bundle_port_demands=[1] * fixed_ports,
+        )
+        return len(mix)
+
+    core_peer = _layer_rule(settings, "core", "core")
+    aggregation_count = 0
+    if topology == "three_tier":
+        aggregation_access = _layer_rule(settings, "aggregation", "access")
+        core_aggregation = _layer_rule(settings, "core", "aggregation")
+        aggregation_peer = _layer_rule(settings, "aggregation", "aggregation")
+        aggregation_count = estimate_layer(
+            _choose_aggregation_candidates(working),
+            access_stacks,
+            aggregation_access,
+            aggregation_peer,
+            "aggregation switch estimate",
+            per_device_ports=max(
+                1, _int((core_aggregation or {}).get("links_per_target"), 1)
+            ),
+        )
+        core_count = estimate_layer(
+            _choose_core_candidates(working),
+            aggregation_count,
+            core_aggregation,
+            core_peer,
+            "core switch estimate",
+        )
+    else:
+        core_access = _layer_rule(settings, "core", "access")
+        core_count = estimate_layer(
+            _choose_core_candidates(working),
+            access_stacks,
+            core_access,
+            core_peer,
+            "core switch estimate",
+        )
+
+    return {
+        "available": True,
+        "technology": "Traditional",
+        "topology_model": topology,
+        "core_switches": core_count,
+        "aggregation_switches": aggregation_count,
+        "access_switches": access_members,
+        "access_stacks": access_stacks,
+        "endpoint_ports": sum(len(endpoint.ports) for endpoint in endpoints),
+        "warnings": warnings,
+        "note": (
+            "Estimated minimum before final route, cabinet and patch-panel placement."
+        ),
+    }
+
+
 def generate_network_design(
     data: dict,
     technology: Optional[str] = None,
@@ -9809,6 +10843,9 @@ def generate_network_design(
     settings.setdefault("default_expected_packet_rate_pps", 0.0)
     settings.setdefault("topology_model", "collapsed_core")
     settings.setdefault("independent_link_count", 2)
+    settings.setdefault("access_stacking_enabled", True)
+    settings.setdefault("access_stack_max_members", 8)
+    settings.setdefault("access_stack_topology", "ring")
     settings.setdefault("layer_connection_rules", [])
     settings.setdefault("asset_model_preferences", {})
     settings.setdefault("rack_deployment_model", "end_of_row")

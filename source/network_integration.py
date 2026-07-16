@@ -45,8 +45,10 @@ from network_dialogs import (
     rack_selection_records,
 )
 from network_auto_planner import (
+    align_auto_edge_routers_to_cores,
     auto_connect_manual_devices,
     auto_connect_pending_imported_wireless_devices,
+    synchronise_network_connection_routes,
 )
 from network_reports import write_network_schedules
 from network_topology import NetworkTopologyDialog
@@ -463,7 +465,7 @@ def _open_network_planner(editor) -> None:
     editor._network_planner_dialog = None
 
 
-def _open_network_topology(editor) -> None:
+def _open_network_topology(editor, focus_location_name: str = "") -> None:
     """Open the editable logical network hierarchy and rack/device views."""
     _ensure_network_schema_current(editor.store.data)
     windows = getattr(editor, "_network_topology_windows", None)
@@ -483,6 +485,15 @@ def _open_network_topology(editor) -> None:
 
     dialog.destroyed.connect(forget_window)
     dialog.showMaximized()
+    if _text(focus_location_name):
+        QTimer.singleShot(
+            0, lambda: dialog.focus_location(_text(focus_location_name))
+        )
+
+
+def _find_network_location_in_topology(editor, location_name: str) -> None:
+    """Open the logical topology and reveal equipment at a plan location."""
+    _open_network_topology(editor, _text(location_name))
 
 
 def _apply_network_payload(editor, payload: dict) -> None:
@@ -1221,6 +1232,11 @@ def _connect_network_asset(editor, x: float, y: float) -> None:
     if dialog.exec() == QDialog.Accepted and dialog.result:
         _safe_push_undo(editor, "Add network connection")
         editor.store.data["network_connections"].append(dialog.result)
+        synchronise_network_connection_routes(
+            editor.store.data,
+            [_text(dialog.result.get("id"))],
+            force=True,
+        )
         editor.selected_point_name = picked
         editor.refresh_canvas()
         if hasattr(editor, "set_status"):
@@ -1424,6 +1440,11 @@ def _edit_network_connection(editor, connection_id: str) -> None:
         return
     _safe_push_undo(editor, "Edit network connection")
     _replace_by_id(connections, dialog.result, old_id=connection_id)
+    synchronise_network_connection_routes(
+        editor.store.data,
+        [_text(dialog.result.get("id"))],
+        force=True,
+    )
     editor.selected_point_name = new_id
     editor.refresh_canvas()
 
@@ -1500,6 +1521,23 @@ def _show_network_context_menu(editor, event, instance_id: str) -> None:
     menu = QMenu(editor)
     edit_action = menu.addAction("Edit installed network asset")
     connect_action = menu.addAction("Start network connection")
+    instance = network_instances_by_id(editor.store.data).get(instance_id, {})
+    location_name = _text(instance.get("location_name"))
+    location = next(
+        (
+            row
+            for row in editor.store.data.get("locations", [])
+            if isinstance(row, dict) and _text(row.get("name")) == location_name
+        ),
+        {},
+    )
+    location_kind = _text(location.get("kind")).lower()
+    find_topology_action = None
+    if location_kind in {"comms_room", "distributed_equipment_room"} or (
+        location_name.upper().startswith("DER")
+    ):
+        find_topology_action = menu.addAction("Find in topology map")
+    menu.addSeparator()
     delete_action = menu.addAction("Delete installed network asset")
     action = menu.exec(event.globalPosition().toPoint())
     if action == edit_action:
@@ -1509,6 +1547,8 @@ def _show_network_context_menu(editor, event, instance_id: str) -> None:
         _set_network_mode(editor, "network_connection")
         if hasattr(editor, "set_status"):
             editor.set_status(f"Network connection start: {instance_id}")
+    elif find_topology_action is not None and action == find_topology_action:
+        _find_network_location_in_topology(editor, location_name)
     elif action == delete_action:
         _delete_network_instance(editor, instance_id)
 
@@ -1633,6 +1673,9 @@ def install_network_planning(editor_class) -> None:
     def init_wrapper(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
         ensure_network_schema(self.store.data)
+        align_auto_edge_routers_to_cores(self.store.data)
+        # Repair legacy/manual logical links that have no valid graph route.
+        synchronise_network_connection_routes(self.store.data)
         self._network_connection_start = None
         self._network_drag_instance_id = None
         self._network_drag_location_name = None
@@ -1868,6 +1911,8 @@ def install_network_planning(editor_class) -> None:
             # QAction.triggered(bool) must not be forwarded to the original zero-argument method.
             result = original_open_json(self)
             ensure_network_schema(self.store.data)
+            align_auto_edge_routers_to_cores(self.store.data)
+            synchronise_network_connection_routes(self.store.data)
             _sync_network_technology_controls(self)
             self.refresh_canvas()
             return result
@@ -1911,6 +1956,9 @@ def install_network_planning(editor_class) -> None:
         editor_class._is_point_kind_visible = visible_wrapper
 
     editor_class.open_network_topology = _open_network_topology
+    editor_class.find_network_location_in_topology = (
+        _find_network_location_in_topology
+    )
     editor_class.open_physical_fibre_topology = _open_physical_fibre_topology
     editor_class.open_network_planner = _open_network_planner
     editor_class.import_wireless_devices = _import_wireless_devices

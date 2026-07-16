@@ -362,14 +362,29 @@ class DXFLoadWorker(QObject):
             self.finished_batch.emit()
             return
 
-        worker_count = min(len(jobs), max(1, (os.cpu_count() or 2) - 1))
+        # DXF parsing produces a large Python entity graph and returning it from
+        # a child process briefly holds both the worker copy and the unpickled
+        # main-process copy.  Starting one worker per floor exhausted memory on
+        # multi-floor projects (typically one floor completed and the rest of
+        # the process pool died).  Two concurrent parsers retain useful I/O/CPU
+        # overlap without multiplying that peak across every mapped drawing.
+        worker_count = min(len(jobs), 2)
 
         try:
             with ProcessPoolExecutor(max_workers=worker_count) as pool:
-                futures = [pool.submit(_load_dxf_floor_process, job) for job in jobs]
+                futures = {
+                    pool.submit(_load_dxf_floor_process, job): job for job in jobs
+                }
 
                 for future in as_completed(futures):
-                    result = future.result()
+                    job_floor, job_path = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        # A failed child process used to abort the result loop,
+                        # leaving the progress dialog permanently at e.g. 5/6.
+                        self.failed.emit(int(job_floor), str(job_path), str(exc))
+                        continue
                     floor = int(result["floor"])
                     path = str(result["path"])
 
@@ -8475,6 +8490,14 @@ class CableRouteEditor(QMainWindow):
             menu = QMenu(self)
             show_edges_action = menu.addAction("Show all edge connections")
             estimate_cables_action = menu.addAction("Show estimated cables passing")
+            find_topology_action = None
+            if (
+                kind in {"comms_room", "distributed_equipment_room"}
+                or (picked.upper().startswith("DER") and kind == "location")
+            ) and callable(
+                getattr(self, "find_network_location_in_topology", None)
+            ):
+                find_topology_action = menu.addAction("Find in topology map")
 
             menu.addSeparator()
             copy_selected_action = menu.addAction(
@@ -8556,6 +8579,11 @@ class CableRouteEditor(QMainWindow):
                 self._show_edge_connections_dialog(picked)
             elif action == estimate_cables_action:
                 self.show_cable_count_for_node(picked)
+            elif (
+                find_topology_action is not None
+                and action == find_topology_action
+            ):
+                self.find_network_location_in_topology(picked)
             elif action == copy_selected_action:
                 self.copy_selected_template_items()
             elif action == paste_here_action:

@@ -65,13 +65,14 @@ SPLIT_RATIOS = [
 ]
 FREQUENCY_OPTIONS = ["2.4 GHz", "5 GHz", "6 GHz", "60 GHz", "868 MHz", "433 MHz"]
 NETWORK_TECHNOLOGIES = ["Traditional", "PoLAN"]
-PORT_TYPE_OPTIONS = ["rj45", "sfp", "sfp+", "sfp28", "qsfp", "qsfp+", "qsfp28", "qsfp56", "qsfpdd", "osfp", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"]
+PORT_TYPE_OPTIONS = ["rj45", "sfp", "sfp+", "sfp28", "sfp56", "qsfp", "qsfp+", "qsfp28", "qsfp56", "qsfpdd", "osfp", "pon", "lc", "sc", "mpo", "usb", "console", "power", "other"]
 PORT_USE_OPTIONS = ["input", "output", "uplink", "downlink", "management", "console", "pon", "client", "patch", "stacking", "power", "spare", "other"]
 
 from network_auto_planner import (
     NetworkPlanningError,
     auto_connect_manual_devices,
     auto_connect_pending_imported_wireless_devices,
+    estimate_network_switch_counts,
     generate_network_design,
 )
 from network_services import cable_core_statistics, ensure_physical_fibre_for_design, generate_ip_address_plan, set_core_status_from_splices
@@ -81,10 +82,12 @@ from network_fibre_dialogs import (
 )
 from network_schema import (
     ASSET_MODEL_PREFERENCE_COMPONENTS,
+    CATALYST_9600_LINE_CARDS,
     MANUFACTURER_PREFERENCE_COMPONENTS,
     NETWORK_PORT_SPEED_OPTIONS,
     PLUGGABLE_OPTIC_PORT_TYPES,
     compatible_port_speeds,
+    catalyst_9600_port_definitions,
     default_layer_connection_rules,
     default_port_speeds,
     normalise_asset_model_preferences,
@@ -97,6 +100,19 @@ from network_schema import (
 
 def _text(value) -> str:
     return str(value if value is not None else "").strip()
+
+
+def _layer_switch_estimate_text(estimate: dict) -> str:
+    if not bool(estimate.get("available", True)):
+        return _text(estimate.get("note")) or "Layer estimate is unavailable."
+    return (
+        f"Core: {int(estimate.get('core_switches', 0) or 0)}   |   "
+        f"Aggregation: {int(estimate.get('aggregation_switches', 0) or 0)}   |   "
+        f"Access: {int(estimate.get('access_switches', 0) or 0)} physical "
+        f"switches in {int(estimate.get('access_stacks', 0) or 0)} logical stacks\n"
+        f"Based on {int(estimate.get('endpoint_ports', 0) or 0)} endpoint ports. "
+        f"{_text(estimate.get('note'))}"
+    )
 
 
 
@@ -232,7 +248,7 @@ def _expanded_instance_ports(instance: dict, asset: dict) -> List[dict]:
         for name in explicit[:count]:
             result.append({"name": name, "port_type": port_type, "port_use": port_use, "speeds": speeds})
         prefix = _text(row.get("name_prefix")) or {
-            "pon": "PON", "sfp": "SFP", "sfp+": "SFP+", "sfp28": "SFP28",
+            "pon": "PON", "sfp": "SFP", "sfp+": "SFP+", "sfp28": "SFP28", "sfp56": "SFP56",
             "qsfp": "QSFP", "qsfp+": "QSFP+", "qsfp28": "QSFP28",
             "qsfp56": "QSFP56", "qsfpdd": "QSFP-DD", "osfp": "OSFP",
             "lc": "LC", "sc": "SC", "mpo": "MPO", "rj45": "",
@@ -555,6 +571,28 @@ class NetworkAssetEditorDialog(QDialog):
         port_buttons_layout.addStretch(1)
         self.port_table.itemChanged.connect(self._sync_legacy_port_counts)
 
+        self.chassis_module_table = QTableWidget(6, 3)
+        self.chassis_module_table.setHorizontalHeaderLabels(["Slot", "Module type", "Installed module"])
+        self.chassis_module_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        configured_modules = {
+            int(row.get("slot", 0) or 0): row
+            for row in self.asset.get("chassis_modules", [])
+            if isinstance(row, dict)
+        }
+        for table_row, slot in enumerate((1, 2, 3, 4, 5, 6)):
+            self.chassis_module_table.setItem(table_row, 0, QTableWidgetItem(str(slot)))
+            type_item = QTableWidgetItem("Supervisor" if slot in {3, 4} else "Line card")
+            type_item.setFlags(type_item.flags() & ~Qt.ItemIsEditable)
+            self.chassis_module_table.setItem(table_row, 1, type_item)
+            module_combo = QComboBox()
+            module_combo.addItem("Empty", "")
+            choices = ("C9600-SUP-1", "C9600X-SUP-2") if slot in {3, 4} else tuple(CATALYST_9600_LINE_CARDS)
+            for model in choices:
+                module_combo.addItem(model, model)
+            _set_combo_text(module_combo, _text(configured_modules.get(slot, {}).get("model")))
+            self.chassis_module_table.setCellWidget(table_row, 2, module_combo)
+            module_combo.currentIndexChanged.connect(self._sync_chassis_port_definitions)
+
         self.supports_stacking_check = QCheckBox("Can form a logical stack")
         self.supports_stacking_check.setChecked(
             bool(self.asset.get("supports_stacking", False))
@@ -712,6 +750,12 @@ class NetworkAssetEditorDialog(QDialog):
         ports_layout.addLayout(ports_form)
         self.tabs.addTab(ports_page, "Ports and connectivity")
 
+        chassis_page = QWidget()
+        chassis_layout = QVBoxLayout(chassis_page)
+        chassis_layout.addWidget(QLabel("Catalyst 9606R line-card slots: 1, 2, 5 and 6; supervisor slots: 3 and 4."))
+        chassis_layout.addWidget(self.chassis_module_table, 1)
+        self.tabs.addTab(chassis_page, "Chassis modules")
+
         _optics_page, optics_form = add_scroll_form_tab("Optics")
         optics_form.addRow("Optic form factor", self.optic_form_factor_combo)
         optics_form.addRow("Optic supported speeds", self.optic_speeds_button)
@@ -735,6 +779,8 @@ class NetworkAssetEditorDialog(QDialog):
         self.patch_panel_cassette_count_spin.valueChanged.connect(self._update_visibility)
         self.patch_panel_cassette_mode_combo.currentIndexChanged.connect(self._update_visibility)
         self.supports_stacking_check.toggled.connect(self._update_visibility)
+        if configured_modules:
+            self._sync_chassis_port_definitions()
         self._update_visibility()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -774,6 +820,35 @@ class NetworkAssetEditorDialog(QDialog):
         )
         for row in rows:
             self.port_table.removeRow(row)
+        self._sync_legacy_port_counts()
+
+    def _sync_chassis_port_definitions(self, *_args) -> None:
+        """Rebuild the visible port inventory from the installed line cards."""
+        if not hasattr(self, "chassis_module_table"):
+            return
+        modules = []
+        for row in range(self.chassis_module_table.rowCount()):
+            combo = self.chassis_module_table.cellWidget(row, 2)
+            model = _text(combo.currentData()) if isinstance(combo, QComboBox) else ""
+            if not model:
+                continue
+            slot_item = self.chassis_module_table.item(row, 0)
+            slot = int(slot_item.text()) if slot_item is not None else row + 1
+            modules.append({
+                "slot": slot,
+                "module_type": "supervisor" if slot in {3, 4} else "line_card",
+                "model": model,
+            })
+        definitions = catalyst_9600_port_definitions(modules)
+        if not definitions and not modules:
+            return
+        self.port_table.blockSignals(True)
+        try:
+            self.port_table.setRowCount(0)
+            for definition in definitions:
+                self._append_port_row(definition)
+        finally:
+            self.port_table.blockSignals(False)
         self._sync_legacy_port_counts()
 
     def _port_definitions(self) -> List[dict]:
@@ -993,6 +1068,19 @@ class NetworkAssetEditorDialog(QDialog):
                 }
             ]
 
+        chassis_modules = []
+        for row in range(self.chassis_module_table.rowCount()):
+            combo = self.chassis_module_table.cellWidget(row, 2)
+            model = _text(combo.currentData()) if isinstance(combo, QComboBox) else ""
+            if not model:
+                continue
+            slot = int(self.chassis_module_table.item(row, 0).text())
+            chassis_modules.append({
+                "slot": slot,
+                "module_type": "supervisor" if slot in {3, 4} else "line_card",
+                "model": model,
+            })
+
         self.result = {
             **self.asset,
             "id": asset_id,
@@ -1064,6 +1152,8 @@ class NetworkAssetEditorDialog(QDialog):
                 asset_type == "network_switch"
                 and self.supports_stacking_check.isChecked()
             ),
+            "modular_chassis": bool(asset_type == "network_switch" and chassis_modules),
+            "chassis_modules": chassis_modules if asset_type == "network_switch" else [],
             "max_stack_members": (
                 int(self.max_stack_members_spin.value())
                 if asset_type == "network_switch"
@@ -1940,8 +2030,22 @@ class PlanningResolutionDialog(QDialog):
             lines.append(f"Best compatible port bundle: {maximum:.3f} Mbps")
         if shortfall > 0.0:
             lines.append(f"Capacity shortfall: {shortfall:.3f} Mbps")
+        if self.details.get("free_from_port_count") is not None:
+            lines.append(
+                "Free fibre ports: "
+                f"downstream {int(self.details.get('free_from_port_count', 0) or 0)}, "
+                f"upstream {int(self.details.get('free_to_port_count', 0) or 0)}"
+            )
         if self.details.get("location_name"):
             lines.append(f"Location: {self.details.get('location_name')}")
+        if self.details.get("parent_location_name"):
+            lines.append(
+                f"Parent DER: {self.details.get('parent_location_name')}"
+            )
+        if self.details.get("switch_asset_name"):
+            lines.append(
+                f"Access-switch model to clone: {self.details.get('switch_asset_name')}"
+            )
         if self.details.get("from_name"):
             lines.append(f"Downstream device: {self.details.get('from_name')}")
         if self.details.get("to_name"):
@@ -2047,6 +2151,12 @@ class PlanningResolutionDialog(QDialog):
         location = _text(self.details.get("location_name"))
         from_role = _text(self.details.get("from_role")).lower()
         error_code = getattr(self.error, "code", "")
+        upstream_ports_exhausted = (
+            error_code == "link_capacity"
+            and from_role in {"access", "access_switch"}
+            and int(self.details.get("free_from_port_count", 0) or 0) > 0
+            and int(self.details.get("free_to_port_count", 0) or 0) == 0
+        )
         if error_code in {
             "location_cabinet_limit",
             "slim_wall_cabinet_capacity",
@@ -2064,9 +2174,24 @@ class PlanningResolutionDialog(QDialog):
                 "Defer spare access-port capacity at this location",
                 "defer_location_spare_capacity",
             )
-        if location and error_code != "access_stack_spare_capacity" and (
-            from_role in {"access", "access_switch"}
-            or error_code == "access_uplink_capacity"
+        if error_code == "der_patch_panel_capacity" and location:
+            self.action_combo.addItem(
+                "Place another DER adjacent to the existing DER and connect it automatically (recommended)",
+                "add_adjacent_der",
+            )
+        if upstream_ports_exhausted and self.details.get("upstream_alternatives"):
+            self.action_combo.addItem(
+                "Use a core/aggregation model with more downlink ports (recommended)",
+                "select_upstream_asset",
+            )
+        if (
+            not upstream_ports_exhausted
+            and location
+            and error_code != "access_stack_spare_capacity"
+            and (
+                from_role in {"access", "access_switch"}
+                or error_code == "access_uplink_capacity"
+            )
         ):
             self.action_combo.addItem(
                 "Add an access switch and redistribute traffic (recommended)",
@@ -2077,7 +2202,7 @@ class PlanningResolutionDialog(QDialog):
                 "Use a selected access-switch model at this location",
                 "select_access_asset",
             )
-        if self.details.get("upstream_alternatives"):
+        if self.details.get("upstream_alternatives") and not upstream_ports_exhausted:
             self.action_combo.addItem(
                 "Use a selected upstream core/aggregation switch model",
                 "select_upstream_asset",
@@ -2140,6 +2265,10 @@ class PlanningResolutionDialog(QDialog):
         spare_modes = overrides.setdefault(
             "spare_capacity_mode_by_location", {}
         )
+        additional_ders = overrides.setdefault("additional_der_by_location", {})
+        additional_der_assets = overrides.setdefault(
+            "additional_der_asset_by_location", {}
+        )
 
         location = _text(self.details.get("location_name"))
         if action == "add_spare_capacity_rack":
@@ -2155,6 +2284,26 @@ class PlanningResolutionDialog(QDialog):
             minimum_switches[location] = max(
                 int(minimum_switches.get(location, 0) or 0),
                 requested,
+            )
+            settings["auto_add_switches_for_bandwidth"] = True
+        elif action == "add_adjacent_der":
+            parent_location = _text(
+                self.details.get("parent_location_name")
+            ) or location
+            if not parent_location:
+                return
+            requested = max(
+                1, int(self.details.get("remaining_panel_count", 1) or 1)
+            )
+            additional_ders[parent_location] = max(
+                0, int(additional_ders.get(parent_location, 0) or 0)
+            ) + requested
+            switch_asset_id = _text(self.details.get("switch_asset_id"))
+            if switch_asset_id:
+                additional_der_assets[parent_location] = switch_asset_id
+            minimum_switches[parent_location] = max(
+                int(minimum_switches.get(parent_location, 0) or 0),
+                int(self.details.get("suggested_device_count", 0) or 0),
             )
             settings["auto_add_switches_for_bandwidth"] = True
         elif action == "select_access_asset":
@@ -2195,6 +2344,8 @@ class PlanningResolutionSequenceDialog(QDialog):
         self.error = error
         self.data = data
         details = dict(getattr(error, "details", {}) or {})
+        self.issue_mode = _text(getattr(error, "code", "")).lower()
+        self.is_der_batch = self.issue_mode == "der_patch_panel_capacity_batch"
         self.issues = [
             dict(issue)
             for issue in details.get("issues", []) or []
@@ -2206,11 +2357,18 @@ class PlanningResolutionSequenceDialog(QDialog):
 
         layout = QVBoxLayout(self)
         heading = QLabel(
-            "The same stack and cabinet constraint occurs in more than one "
-            "comms room. Work through each affected room below. The guided "
-            "planner setup remains active, every decision is retained, and the "
-            "network is recalculated only after all currently known occurrences "
-            "have been resolved."
+            (
+                "The planner found every DER that currently needs adjacent "
+                "capacity. Work through the affected DERs below; all decisions "
+                "are applied together before the network is recalculated once."
+                if self.is_der_batch
+                else
+                "The same stack and cabinet constraint occurs in more than one "
+                "comms room. Work through each affected room below. The guided "
+                "planner setup remains active, every decision is retained, and the "
+                "network is recalculated only after all currently known occurrences "
+                "have been resolved."
+            )
         )
         heading.setWordWrap(True)
         layout.addWidget(heading)
@@ -2229,15 +2387,21 @@ class PlanningResolutionSequenceDialog(QDialog):
 
         form = QFormLayout()
         self.action_combo = QComboBox()
-        self.action_combo.addItem(
-            "Install another cabinet and the required overflow switch stack "
-            "(recommended)",
-            "new_rack",
-        )
-        self.action_combo.addItem(
-            "Defer spare access-port capacity in this comms room",
-            "defer",
-        )
+        if self.is_der_batch:
+            self.action_combo.addItem(
+                "Place another DER adjacent to the parent and clone its access switch (recommended)",
+                "add_adjacent_der",
+            )
+        else:
+            self.action_combo.addItem(
+                "Install another cabinet and the required overflow switch stack "
+                "(recommended)",
+                "new_rack",
+            )
+            self.action_combo.addItem(
+                "Defer spare access-port capacity in this comms room",
+                "defer",
+            )
         form.addRow("Resolution", self.action_combo)
         layout.addLayout(form)
 
@@ -2248,10 +2412,17 @@ class PlanningResolutionSequenceDialog(QDialog):
         layout.addWidget(self.apply_remaining_check)
 
         note = QLabel(
-            "Installing another cabinet preserves the configured spare capacity "
-            "and adds the required switches. Deferring spare capacity affects "
-            "only the selected comms room; the global spare percentage remains "
-            "active elsewhere."
+            (
+                "Each added DER is spaced away from its parent so it remains "
+                "selectable, receives a direct graph edge to that parent, and "
+                "uses the affected DER's access-switch model."
+                if self.is_der_batch
+                else
+                "Installing another cabinet preserves the configured spare capacity "
+                "and adds the required switches. Deferring spare capacity affects "
+                "only the selected comms room; the global spare percentage remains "
+                "active elsewhere."
+            )
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -2278,6 +2449,16 @@ class PlanningResolutionSequenceDialog(QDialog):
         return self.issues[self.current_index]
 
     def _issue_diagnostic_text(self, issue: dict) -> str:
+        if self.is_der_batch:
+            return "\n".join(
+                [
+                    f"Parent DER: {_text(issue.get('parent_location_name'))}",
+                    f"Required patch positions: {int(issue.get('required_port_count_with_spare', 0) or 0)}",
+                    f"Available patch positions: {int(issue.get('available_port_count', 0) or 0)}",
+                    f"Additional panels required: {max(1, int(issue.get('remaining_panel_count', 1) or 1))}",
+                    f"Access-switch model to clone: {_text(issue.get('switch_asset_name'))}",
+                ]
+            )
         actual_ports = int(issue.get("actual_port_count", 0) or 0)
         required_ports = int(
             issue.get("required_port_count_with_spare", 0) or 0
@@ -2309,16 +2490,24 @@ class PlanningResolutionSequenceDialog(QDialog):
         location = _text(issue.get("location_name"))
         count = len(self.issues)
         self.issue_progress_label.setText(
-            f"Recurring issue {self.current_index + 1} of {count}: {location}"
+            f"Issue {self.current_index + 1} of {count}: {location}"
         )
         self.issue_message_label.setText(
-            f"Spare capacity at {location} requires another logical access "
-            "switch stack and therefore another cabinet. Choose how this room "
-            "should be handled, then continue to the next occurrence."
+            (
+                f"{location} needs more local switch and patch-panel capacity. "
+                "Confirm the adjacent DER, then continue to the next fault."
+                if self.is_der_batch
+                else
+                f"Spare capacity at {location} requires another logical access "
+                "switch stack and therefore another cabinet. Choose how this room "
+                "should be handled, then continue to the next occurrence."
+            )
         )
         self.diagnostics.setPlainText(self._issue_diagnostic_text(issue))
 
-        saved_action = self.decisions.get(location, "new_rack")
+        saved_action = self.decisions.get(
+            location, "add_adjacent_der" if self.is_der_batch else "new_rack"
+        )
         index = self.action_combo.findData(saved_action)
         if index >= 0:
             self.action_combo.setCurrentIndex(index)
@@ -2337,7 +2526,12 @@ class PlanningResolutionSequenceDialog(QDialog):
         issue = self._current_issue()
         location = _text(issue.get("location_name"))
         action = _text(self.action_combo.currentData()).lower()
-        if action not in {"new_rack", "defer"}:
+        allowed_actions = (
+            {"add_adjacent_der"}
+            if self.is_der_batch
+            else {"new_rack", "defer"}
+        )
+        if action not in allowed_actions:
             return ""
         self.decisions[location] = action
         return action
@@ -2393,13 +2587,42 @@ class PlanningResolutionSequenceDialog(QDialog):
         if not isinstance(overrides, dict):
             overrides = {}
             settings["auto_planner_resolution_overrides"] = overrides
-        spare_modes = overrides.setdefault("spare_capacity_mode_by_location", {})
-        if not isinstance(spare_modes, dict):
-            spare_modes = {}
-            overrides["spare_capacity_mode_by_location"] = spare_modes
-
-        for location, action in self.decisions.items():
-            spare_modes[location] = action
+        if self.is_der_batch:
+            additional_ders = overrides.setdefault("additional_der_by_location", {})
+            additional_assets = overrides.setdefault(
+                "additional_der_asset_by_location", {}
+            )
+            minimum_switches = overrides.setdefault(
+                "minimum_access_switches_by_location", {}
+            )
+            for issue in self.issues:
+                location = _text(issue.get("location_name"))
+                if self.decisions.get(location) != "add_adjacent_der":
+                    continue
+                parent_location = _text(
+                    issue.get("parent_location_name")
+                ) or location
+                requested = max(
+                    1, int(issue.get("remaining_panel_count", 1) or 1)
+                )
+                additional_ders[parent_location] = max(
+                    0, int(additional_ders.get(parent_location, 0) or 0)
+                ) + requested
+                asset_id = _text(issue.get("switch_asset_id"))
+                if asset_id:
+                    additional_assets[parent_location] = asset_id
+                minimum_switches[parent_location] = max(
+                    int(minimum_switches.get(parent_location, 0) or 0),
+                    int(issue.get("suggested_device_count", 0) or 0),
+                )
+            settings["auto_add_switches_for_bandwidth"] = True
+        else:
+            spare_modes = overrides.setdefault("spare_capacity_mode_by_location", {})
+            if not isinstance(spare_modes, dict):
+                spare_modes = {}
+                overrides["spare_capacity_mode_by_location"] = spare_modes
+            for location, action in self.decisions.items():
+                spare_modes[location] = action
         self.selected_actions = dict(self.decisions)
         self.accept()
 
@@ -2459,6 +2682,38 @@ class AutoPlannerSetupWizard(QWizard):
         )
         design_form.addRow("Independent uplinks", self.link_count_spin)
 
+        self.access_stacking_check = QCheckBox(
+            "Stack compatible access-layer switches"
+        )
+        self.access_stacking_check.setChecked(
+            bool(self.settings.get("access_stacking_enabled", True))
+        )
+        design_form.addRow("", self.access_stacking_check)
+        self.access_stack_max_spin = QSpinBox()
+        self.access_stack_max_spin.setRange(1, 64)
+        self.access_stack_max_spin.setValue(
+            max(1, int(self.settings.get("access_stack_max_members", 8) or 8))
+        )
+        self.access_stack_max_spin.setToolTip(
+            "The selected switch model's lower manufacturer limit still applies."
+        )
+        design_form.addRow("Maximum access stack members", self.access_stack_max_spin)
+        self.access_stack_topology_combo = QComboBox()
+        self.access_stack_topology_combo.addItem("Ring (resilient)", "ring")
+        self.access_stack_topology_combo.addItem("Chain", "chain")
+        stack_topology_index = self.access_stack_topology_combo.findData(
+            _text(self.settings.get("access_stack_topology")) or "ring"
+        )
+        if stack_topology_index >= 0:
+            self.access_stack_topology_combo.setCurrentIndex(stack_topology_index)
+        design_form.addRow("Access stack interconnect", self.access_stack_topology_combo)
+        self.access_stacking_check.toggled.connect(self.access_stack_max_spin.setEnabled)
+        self.access_stacking_check.toggled.connect(
+            self.access_stack_topology_combo.setEnabled
+        )
+        self.access_stack_max_spin.setEnabled(self.access_stacking_check.isChecked())
+        self.access_stack_topology_combo.setEnabled(self.access_stacking_check.isChecked())
+
         self.spare_spin = QDoubleSpinBox()
         self.spare_spin.setRange(0.0, 100.0)
         self.spare_spin.setDecimals(1)
@@ -2467,6 +2722,14 @@ class AutoPlannerSetupWizard(QWizard):
             float(self.settings.get("spare_capacity_percent", 15.0) or 0.0)
         )
         design_form.addRow("Spare port, PoE and traffic capacity", self.spare_spin)
+        self.layer_estimate_button = QPushButton("Estimate layer switch quantities")
+        self.layer_estimate_button.clicked.connect(self._refresh_layer_estimate)
+        design_form.addRow("", self.layer_estimate_button)
+        self.layer_estimate_label = QLabel(
+            "Select the planner rules, then calculate the estimated switch quantities."
+        )
+        self.layer_estimate_label.setWordWrap(True)
+        design_form.addRow("Layer estimate", self.layer_estimate_label)
         self.addPage(design_page)
 
         rack_page = QWizardPage()
@@ -3081,6 +3344,43 @@ class AutoPlannerSetupWizard(QWizard):
             combo.setEnabled(relevant)
             strict.setEnabled(relevant and bool(_text(combo.currentData())))
 
+    def _refresh_layer_estimate(self) -> None:
+        working = deepcopy(self.data)
+        settings = working.setdefault("network_settings", {})
+        settings["technology"] = self.technology_combo.currentText().strip()
+        settings["topology_model"] = (
+            _text(self.topology_combo.currentData()) or "collapsed_core"
+        )
+        settings["redundant_core"] = bool(self.redundant_check.isChecked())
+        settings["independent_link_count"] = int(self.link_count_spin.value())
+        settings["spare_capacity_percent"] = float(self.spare_spin.value())
+        settings["access_stacking_enabled"] = bool(
+            self.access_stacking_check.isChecked()
+        )
+        settings["access_stack_max_members"] = int(self.access_stack_max_spin.value())
+        settings["access_stack_topology"] = (
+            _text(self.access_stack_topology_combo.currentData()) or "ring"
+        )
+        settings["rack_deployment_model"] = (
+            _text(self.rack_model_combo.currentData()) or "end_of_row"
+        )
+        settings["default_rack_size_u"] = int(self.rack_size_spin.value())
+        model_preferences: Dict[str, dict] = {}
+        for component, (combo, strict) in self.model_controls.items():
+            asset_id = _text(combo.currentData())
+            model_preferences[component] = {
+                "preferred_asset_ids": [asset_id] if asset_id else [],
+                "strict": bool(strict.isChecked() and asset_id),
+            }
+        settings["asset_model_preferences"] = normalise_asset_model_preferences(
+            model_preferences
+        )
+        try:
+            estimate = estimate_network_switch_counts(working)
+            self.layer_estimate_label.setText(_layer_switch_estimate_text(estimate))
+        except NetworkPlanningError as exc:
+            self.layer_estimate_label.setText(f"Estimate unavailable: {exc}")
+
     def apply_settings(self) -> None:
         settings = self.data.setdefault("network_settings", {})
         technology = self.technology_combo.currentText().strip()
@@ -3090,6 +3390,13 @@ class AutoPlannerSetupWizard(QWizard):
         )
         settings["redundant_core"] = bool(self.redundant_check.isChecked())
         settings["independent_link_count"] = int(self.link_count_spin.value())
+        settings["access_stacking_enabled"] = bool(
+            self.access_stacking_check.isChecked()
+        )
+        settings["access_stack_max_members"] = int(self.access_stack_max_spin.value())
+        settings["access_stack_topology"] = (
+            _text(self.access_stack_topology_combo.currentData()) or "ring"
+        )
         settings["spare_capacity_percent"] = float(self.spare_spin.value())
         settings["rack_deployment_model"] = (
             _text(self.rack_model_combo.currentData()) or "end_of_row"
@@ -3137,7 +3444,12 @@ class NetworkPlannerDialog(QDialog):
     def __init__(self, parent, data: dict, on_save: Callable[[dict], None]):
         super().__init__(parent)
         self.setWindowTitle("Network Planning")
-        self.resize(1250, 780)
+        screen = parent.screen() if parent is not None and hasattr(parent, "screen") else QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        target_width = min(1120, max(720, available.width() - 120)) if available is not None else 1100
+        target_height = min(720, max(520, available.height() - 140)) if available is not None else 700
+        self.resize(target_width, target_height)
+        self.setMinimumSize(min(720, target_width), min(500, target_height))
         self.data = _planner_working_copy(data)
         self.on_save = on_save
 
@@ -3145,8 +3457,17 @@ class NetworkPlannerDialog(QDialog):
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
 
-        settings_tab = QWidget()
-        settings_layout = QFormLayout(settings_tab)
+        settings_tab = QScrollArea()
+        settings_tab.setWidgetResizable(True)
+        settings_tab.setFrameShape(QScrollArea.NoFrame)
+        settings_tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        settings_tab.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        settings_content = QWidget()
+        settings_content.setObjectName("networkPlannerSettingsContent")
+        settings_layout = QFormLayout(settings_content)
+        settings_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        settings_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        settings_tab.setWidget(settings_content)
         self.technology_combo = QComboBox()
         self.technology_combo.addItems(NETWORK_TECHNOLOGIES)
         _set_combo_text(
@@ -3213,6 +3534,40 @@ class NetworkPlannerDialog(QDialog):
             "Default number of separate uplinks generated for each downstream device. "
             "Redundant designs require at least two distinct source devices and two different core paths."
         )
+        self.access_stacking_check = QCheckBox(
+            "Stack compatible access-layer switches"
+        )
+        self.access_stacking_check.setChecked(
+            bool(settings.get("access_stacking_enabled", True))
+        )
+        self.access_stack_max_spin = QSpinBox()
+        self.access_stack_max_spin.setRange(1, 64)
+        self.access_stack_max_spin.setValue(
+            max(1, int(settings.get("access_stack_max_members", 8) or 8))
+        )
+        self.access_stack_max_spin.setToolTip(
+            "The lower of this value and the switch model's stacking limit is used."
+        )
+        self.access_stack_topology_combo = QComboBox()
+        self.access_stack_topology_combo.addItem("Ring (resilient)", "ring")
+        self.access_stack_topology_combo.addItem("Chain", "chain")
+        stack_topology_index = self.access_stack_topology_combo.findData(
+            _text(settings.get("access_stack_topology")) or "ring"
+        )
+        if stack_topology_index >= 0:
+            self.access_stack_topology_combo.setCurrentIndex(stack_topology_index)
+        self.access_stacking_check.toggled.connect(self.access_stack_max_spin.setEnabled)
+        self.access_stacking_check.toggled.connect(
+            self.access_stack_topology_combo.setEnabled
+        )
+        self.access_stack_max_spin.setEnabled(self.access_stacking_check.isChecked())
+        self.access_stack_topology_combo.setEnabled(self.access_stacking_check.isChecked())
+        self.layer_estimate_button = QPushButton("Estimate layer switch quantities")
+        self.layer_estimate_button.clicked.connect(self._refresh_layer_estimate)
+        self.layer_estimate_label = QLabel(
+            "Calculate an estimated minimum before generating the design."
+        )
+        self.layer_estimate_label.setWordWrap(True)
         self.spare_capacity_spin = QDoubleSpinBox()
         self.spare_capacity_spin.setRange(0.0, 100.0)
         self.spare_capacity_spin.setDecimals(1)
@@ -3414,6 +3769,15 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow(
             "Independent links per target", self.independent_link_count_spin
         )
+        settings_layout.addRow("", self.access_stacking_check)
+        settings_layout.addRow(
+            "Maximum access stack members", self.access_stack_max_spin
+        )
+        settings_layout.addRow(
+            "Access stack interconnect", self.access_stack_topology_combo
+        )
+        settings_layout.addRow("", self.layer_estimate_button)
+        settings_layout.addRow("Layer estimate", self.layer_estimate_label)
         settings_layout.addRow("Spare port, PoE and traffic capacity", self.spare_capacity_spin)
         settings_layout.addRow(
             "Default north-south endpoint traffic",
@@ -4430,7 +4794,7 @@ class NetworkPlannerDialog(QDialog):
                 self,
                 "Clear planner overrides",
                 "Clear selected switch models and minimum switch counts created "
-                "by planning issue resolutions?",
+                "by planning issue resolutions, including adjacent-DER choices?",
             )
             != QMessageBox.Yes
         ):
@@ -4439,6 +4803,14 @@ class NetworkPlannerDialog(QDialog):
         QMessageBox.information(
             self, "Planner overrides", "Automatic-planner overrides were cleared."
         )
+
+    def _refresh_layer_estimate(self) -> None:
+        self._sync_planner_settings()
+        try:
+            estimate = estimate_network_switch_counts(self.data)
+            self.layer_estimate_label.setText(_layer_switch_estimate_text(estimate))
+        except NetworkPlanningError as exc:
+            self.layer_estimate_label.setText(f"Estimate unavailable: {exc}")
 
     def _sync_planner_settings(self) -> None:
         settings = self.data.setdefault("network_settings", {})
@@ -4465,6 +4837,13 @@ class NetworkPlannerDialog(QDialog):
         settings["tor_allow_adjacent_cabinet_uplinks"] = True
         settings["independent_link_count"] = int(
             self.independent_link_count_spin.value()
+        )
+        settings["access_stacking_enabled"] = bool(
+            self.access_stacking_check.isChecked()
+        )
+        settings["access_stack_max_members"] = int(self.access_stack_max_spin.value())
+        settings["access_stack_topology"] = (
+            _text(self.access_stack_topology_combo.currentData()) or "ring"
         )
         settings["layer_connection_rules"] = normalise_layer_connection_rules(
             self._layer_rules_from_table(),
@@ -4614,6 +4993,18 @@ class NetworkPlannerDialog(QDialog):
                     else "install a separate spare-capacity rack"
                 )
                 lines.append(f"  Spare capacity at {location}: {description}")
+            for location, count in sorted(
+                (overrides.get("additional_der_by_location", {}) or {}).items()
+            ):
+                asset_id = _text(
+                    (overrides.get("additional_der_asset_by_location", {}) or {}).get(
+                        location, ""
+                    )
+                )
+                asset_text = f" using {asset_id}" if asset_id else ""
+                lines.append(
+                    f"  Adjacent DERs at {location}: {count}{asset_text}"
+                )
         deferred_locations = summary.get(
             "deferred_spare_capacity_locations", []
         ) or []
@@ -4842,7 +5233,10 @@ class NetworkPlannerDialog(QDialog):
                 return
 
             error_code = _text(getattr(planning_error, "code", ""))
-            if error_code == "access_stack_spare_capacity_batch":
+            if error_code in {
+                "access_stack_spare_capacity_batch",
+                "der_patch_panel_capacity_batch",
+            }:
                 resolution = PlanningResolutionSequenceDialog(
                     self, planning_error, self.data
                 )

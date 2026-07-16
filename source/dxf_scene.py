@@ -182,6 +182,26 @@ class DXFScene:
         entities: List[Dict] = []
         all_points = []
 
+        # CableRouteResolver stores all project geometry in metres.  DXF model
+        # space coordinates are expressed in the unit declared by $INSUNITS;
+        # keeping those raw values made a millimetre drawing 1000 times larger
+        # than the routing graph and prevented otherwise identical origins from
+        # lining up.
+        unit_scale = 1.0
+        try:
+            from ezdxf import units
+
+            drawing_units = int(getattr(doc, "units", 0) or 0)
+            if drawing_units:
+                unit_scale = float(units.conversion_factor(drawing_units, units.M))
+        except (TypeError, ValueError, IndexError):
+            # Unitless and uncommon unsupported unit declarations retain the
+            # historical 1 drawing unit == 1 metre behaviour.
+            unit_scale = 1.0
+
+        def metres_point(point):
+            return float(point[0]) * unit_scale, float(point[1]) * unit_scale
+
         def append_entity(entity: Dict):
             if "bbox" not in entity or entity["bbox"] is None:
                 entity["bbox"] = cls._bbox_from_points(entity.get("points", []))
@@ -193,8 +213,8 @@ class DXFScene:
 
         def add_line(start, end):
             points = [
-                (float(start[0]), float(start[1])),
-                (float(end[0]), float(end[1])),
+                metres_point(start),
+                metres_point(end),
             ]
             track_points(points)
             append_entity(
@@ -209,7 +229,7 @@ class DXFScene:
         def add_polyline(points, closed=False):
             if len(points) < 2:
                 return
-            clean = [(float(x), float(y)) for x, y in points]
+            clean = [metres_point((x, y)) for x, y in points]
             track_points(clean)
             append_entity(
                 {
@@ -221,9 +241,8 @@ class DXFScene:
             )
 
         def add_text_entity(insert, text, height=2.5, rotation=0.0):
-            x = float(insert[0])
-            y = float(insert[1])
-            h = float(height or 2.5)
+            x, y = metres_point(insert)
+            h = float(height or 2.5) * unit_scale
             track_points([(x, y), (x + h, y + h)])
             append_entity(
                 {
@@ -237,9 +256,8 @@ class DXFScene:
             )
 
         def add_circle(center, radius):
-            cx = float(center[0])
-            cy = float(center[1])
-            r = float(radius)
+            cx, cy = metres_point(center)
+            r = float(radius) * unit_scale
             bbox = (cx - r, cy - r, cx + r, cy + r)
             track_points([(bbox[0], bbox[1]), (bbox[2], bbox[3])])
             append_entity(
@@ -247,9 +265,8 @@ class DXFScene:
             )
 
         def add_arc(center, radius, start_angle, end_angle):
-            cx = float(center[0])
-            cy = float(center[1])
-            r = float(radius)
+            cx, cy = metres_point(center)
+            r = float(radius) * unit_scale
             bbox = (cx - r, cy - r, cx + r, cy + r)
             track_points([(bbox[0], bbox[1]), (bbox[2], bbox[3])])
             append_entity(
@@ -311,6 +328,13 @@ class DXFScene:
             insert = entity.dxf.insert
             ix = float(insert.x)
             iy = float(insert.y)
+            try:
+                base = block.block.dxf.base_point
+                bx = float(base.x)
+                by = float(base.y)
+            except Exception:
+                bx = 0.0
+                by = 0.0
             sx = float(getattr(entity.dxf, "xscale", 1.0) or 1.0)
             sy = float(getattr(entity.dxf, "yscale", 1.0) or 1.0)
             rotation = math.radians(float(getattr(entity.dxf, "rotation", 0.0) or 0.0))
@@ -318,8 +342,11 @@ class DXFScene:
             sin_r = math.sin(rotation)
 
             def transform_point(x, y):
-                x *= sx
-                y *= sy
+                # INSERT positions refer to the block base point, not (0, 0).
+                # Omitting this subtraction offsets every block whose author
+                # chose a non-zero base point.
+                x = (float(x) - bx) * sx
+                y = (float(y) - by) * sy
                 rx = (x * cos_r) - (y * sin_r)
                 ry = (x * sin_r) + (y * cos_r)
                 return ix + rx, iy + ry

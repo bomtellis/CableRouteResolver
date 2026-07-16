@@ -346,7 +346,8 @@ def _draw_comms_rooms(
         row
         for row in data.get("locations", [])
         if isinstance(row, dict)
-        and _text(row.get("kind")).lower() in {"comms_room", "mer"}
+        and _text(row.get("kind")).lower()
+        in {"comms_room", "mer", "distributed_equipment_room"}
         and int(row.get("floor", 0) or 0) == floor
     ]
     for room in rooms:
