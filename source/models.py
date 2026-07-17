@@ -175,6 +175,19 @@ class JsonStore:
             allow_der = bool(
                 zone.get("allow_distributed_equipment_room", True)
             )
+            try:
+                max_comms_rooms = max(
+                    0, int(zone.get("max_comms_rooms", 0) or 0)
+                )
+            except (TypeError, ValueError):
+                max_comms_rooms = 0
+            try:
+                max_der_rooms = max(
+                    0,
+                    int(zone.get("max_distributed_equipment_rooms", 0) or 0),
+                )
+            except (TypeError, ValueError):
+                max_der_rooms = 0
             if not allow_comms and not allow_der:
                 continue
             normalised_zones.append(
@@ -192,6 +205,8 @@ class JsonStore:
                     "max_y": round(max(y1, y2), 3),
                     "allow_comms_room": allow_comms,
                     "allow_distributed_equipment_room": allow_der,
+                    "max_comms_rooms": max_comms_rooms,
+                    "max_distributed_equipment_rooms": max_der_rooms,
                 }
             )
         self.data["equipment_room_placement_zones"] = normalised_zones
@@ -802,6 +817,7 @@ class JsonStore:
         y: float,
         kind: str = "location",
         department_ids: Optional[List[str]] = None,
+        max_cable_length_m: float = 90.0,
     ) -> None:
         self.data["locations"].append(
             {
@@ -813,6 +829,7 @@ class JsonStore:
                 "department_ids": [
                     str(x).strip() for x in (department_ids or []) if str(x).strip()
                 ],
+                "max_cable_length_m": max(0.1, float(max_cable_length_m)),
             }
         )
 
@@ -1232,6 +1249,153 @@ class JsonStore:
                     )
         return errors
 
+    def invalid_connections_and_routes(self) -> dict:
+        """Return structurally invalid cable connections and routing edges.
+
+        The check is deliberately read-only and limited to ``connections`` and
+        ``corridors.edges``. A connection is invalid when its endpoints/profile/
+        quantity are invalid or no permitted graph route joins its endpoints.
+        """
+        points = self.all_points()
+        invalid_routes = []
+        valid_edges = []
+        for index, edge in enumerate(self.data.get("corridors", {}).get("edges", [])):
+            start = str(edge.get("from", "") or "").strip()
+            end = str(edge.get("to", "") or "").strip()
+            reason = ""
+            if start not in points or end not in points:
+                reason = "missing route endpoint"
+            elif start == end:
+                reason = "route starts and ends at the same point"
+            elif int(points[start].get("floor", 0)) != int(points[end].get("floor", 0)):
+                reason = "cross-floor route does not use a transition"
+            if reason:
+                invalid_routes.append(
+                    {"index": index, "from": start, "to": end, "reason": reason}
+                )
+            else:
+                valid_edges.append((start, end))
+
+        graph = {name: set() for name in points}
+        for start, end in valid_edges:
+            graph[start].add(end)
+            graph[end].add(start)
+        for transition in self.data.get("transitions", []):
+            transition_id = str(transition.get("id", "") or "").strip()
+            names = [
+                f"{transition_id}-F{floor}"
+                for floor in (transition.get("floor_locations", {}) or {})
+                if f"{transition_id}-F{floor}" in points
+            ]
+            for first_index, start in enumerate(names):
+                for end in names[first_index + 1 :]:
+                    graph[start].add(end)
+                    graph[end].add(start)
+
+        profiles = self.data.get("route_profiles", {}) or {}
+
+        def has_route(start, end, profile):
+            allowed_nodes = set(profile.get("allowed_nodes", []) or [])
+            allowed_edges = {
+                tuple(pair)
+                for pair in (profile.get("allowed_edges", []) or [])
+                if isinstance(pair, (list, tuple)) and len(pair) == 2
+            }
+            allowed_transitions = set(profile.get("allowed_transitions", []) or [])
+
+            def transition_id(name):
+                point = points.get(name, {})
+                if str(point.get("kind", "")) != "transition_node" or "-F" not in name:
+                    return ""
+                return name.rsplit("-F", 1)[0]
+
+            def node_allowed(name):
+                point = points.get(name, {})
+                if allowed_nodes and name not in allowed_nodes and str(
+                    point.get("kind", "")
+                ) != "transition_node":
+                    return False
+                node_transition = transition_id(name)
+                return not (
+                    allowed_transitions
+                    and node_transition
+                    and node_transition not in allowed_transitions
+                )
+
+            if not node_allowed(start) or not node_allowed(end):
+                return False
+            pending = [start]
+            visited = {start}
+            while pending:
+                current = pending.pop()
+                if current == end:
+                    return True
+                for neighbour in graph.get(current, set()):
+                    if neighbour in visited or not node_allowed(neighbour):
+                        continue
+                    if allowed_edges and (current, neighbour) not in allowed_edges:
+                        same_transition = (
+                            transition_id(current)
+                            and transition_id(current) == transition_id(neighbour)
+                        )
+                        if not same_transition:
+                            continue
+                    visited.add(neighbour)
+                    pending.append(neighbour)
+            return False
+
+        invalid_connections = []
+        for index, connection in enumerate(self.data.get("connections", [])):
+            connection_id = str(connection.get("id", "") or "").strip() or f"row {index + 1}"
+            start = str(connection.get("from", "") or "").strip()
+            end = str(connection.get("to", "") or "").strip()
+            profile_name = str(connection.get("route_profile", "") or "").strip()
+            reason = ""
+            if start not in points or end not in points:
+                reason = "missing connection endpoint"
+            elif start == end:
+                reason = "connection starts and ends at the same point"
+            else:
+                try:
+                    if int(connection.get("qty", 1)) <= 0:
+                        reason = "quantity is not greater than zero"
+                except (TypeError, ValueError):
+                    reason = "quantity is invalid"
+            if not reason and profile_name and profile_name not in profiles:
+                reason = "route profile does not exist"
+            if not reason:
+                profile = profiles.get(profile_name, {}) if profile_name else {}
+                if not has_route(start, end, profile):
+                    reason = "no permitted graph route joins the endpoints"
+            if reason:
+                invalid_connections.append(
+                    {
+                        "index": index,
+                        "id": connection_id,
+                        "from": start,
+                        "to": end,
+                        "reason": reason,
+                    }
+                )
+
+        return {"connections": invalid_connections, "routes": invalid_routes}
+
+    def remove_invalid_connections_and_routes(self) -> dict:
+        """Remove only invalid cable connections and corridor routing edges."""
+        invalid = self.invalid_connections_and_routes()
+        connection_indexes = {row["index"] for row in invalid["connections"]}
+        route_indexes = {row["index"] for row in invalid["routes"]}
+        self.data["connections"] = [
+            row for index, row in enumerate(self.data.get("connections", []))
+            if index not in connection_indexes
+        ]
+        self.data.setdefault("corridors", {})["edges"] = [
+            row
+            for index, row in enumerate(self.data.get("corridors", {}).get("edges", []))
+            if index not in route_indexes
+        ]
+        return invalid
+
     def suggest_next_department_id(self) -> str:
         nums = []
         for item in self.data.get("departments", []):
@@ -1397,6 +1561,9 @@ class JsonStore:
                     "y": round(float(record.get("y", 0.0)) + float(offset_y), 3),
                     "kind": kind,
                     "department_ids": [],
+                    "max_cable_length_m": max(
+                        0.1, float(record.get("max_cable_length_m", 90.0) or 90.0)
+                    ),
                 }
 
                 self.data.setdefault("locations", []).append(new_record)
@@ -2046,7 +2213,7 @@ class JsonStore:
             room_type_id = str(point.get("room_type_id", "") or "").strip()
             if room_type_id:
                 point["qty"] = self.room_type_cable_qty(room_type_id)
-            return int(point.get("qty", 1) or 1)
+            return max(0, int(point.get("qty", 1) or 0))
 
         return 1
 

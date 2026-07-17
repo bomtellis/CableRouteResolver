@@ -1533,10 +1533,15 @@ def _show_network_context_menu(editor, event, instance_id: str) -> None:
     )
     location_kind = _text(location.get("kind")).lower()
     find_topology_action = None
+    show_extents_action = None
     if location_kind in {"comms_room", "distributed_equipment_room"} or (
         location_name.upper().startswith("DER")
     ):
         find_topology_action = menu.addAction("Find in topology map")
+        if callable(getattr(editor, "show_equipment_room_extents", None)):
+            show_extents_action = menu.addAction(
+                "Show current and possible extents"
+            )
     menu.addSeparator()
     delete_action = menu.addAction("Delete installed network asset")
     action = menu.exec(event.globalPosition().toPoint())
@@ -1549,6 +1554,8 @@ def _show_network_context_menu(editor, event, instance_id: str) -> None:
             editor.set_status(f"Network connection start: {instance_id}")
     elif find_topology_action is not None and action == find_topology_action:
         _find_network_location_in_topology(editor, location_name)
+    elif show_extents_action is not None and action == show_extents_action:
+        editor.show_equipment_room_extents(location_name)
     elif action == delete_action:
         _delete_network_instance(editor, instance_id)
 

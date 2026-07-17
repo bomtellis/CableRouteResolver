@@ -166,7 +166,9 @@ class LocationEditorDialog(QDialog):
             self.floor_control = QLabel(str(location.get("floor", 0)))
 
         self.kind_combo = QComboBox()
-        self.kind_combo.addItems(["location", "comms_room"])
+        self.kind_combo.addItems(
+            ["location", "comms_room", "distributed_equipment_room"]
+        )
         self.kind_combo.setCurrentText(str(location.get("kind", "location")))
 
         self.cabinet_type_combo = QComboBox()
@@ -189,6 +191,18 @@ class LocationEditorDialog(QDialog):
         self.max_cabinets_spin.setToolTip(
             "Maximum number of network cabinets permitted at this location. "
             "Zero leaves the number unrestricted."
+        )
+
+        self.max_cable_length_spin = QDoubleSpinBox()
+        self.max_cable_length_spin.setRange(0.1, 100000.0)
+        self.max_cable_length_spin.setDecimals(2)
+        self.max_cable_length_spin.setSingleStep(1.0)
+        self.max_cable_length_spin.setValue(
+            max(0.1, float(location.get("max_cable_length_m", 90.0) or 90.0))
+        )
+        self.max_cable_length_spin.setSuffix(" m")
+        self.max_cable_length_spin.setToolTip(
+            "Maximum cable distance represented by the possible room extent."
         )
 
         self.departments_list = QListWidget()
@@ -218,6 +232,7 @@ class LocationEditorDialog(QDialog):
         form.addRow("Kind", self.kind_combo)
         form.addRow("Network cabinet type", self.cabinet_type_combo)
         form.addRow("Maximum network cabinets", self.max_cabinets_spin)
+        form.addRow("Maximum cable distance", self.max_cable_length_spin)
         form.addRow("Departments", self.departments_list)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -253,6 +268,7 @@ class LocationEditorDialog(QDialog):
                     self.cabinet_type_combo.currentData() or "standard"
                 ),
                 "max_network_cabinets": int(self.max_cabinets_spin.value()),
+                "max_cable_length_m": float(self.max_cable_length_spin.value()),
                 "department_ids": department_ids,
             }
             super().accept()
@@ -418,6 +434,16 @@ class BulkLocationPlacementDialog(QDialog):
             ["location", "comms_room", "distributed_equipment_room"]
         )
 
+        self.max_cable_length_spin = QDoubleSpinBox()
+        self.max_cable_length_spin.setRange(0.1, 100000.0)
+        self.max_cable_length_spin.setDecimals(2)
+        self.max_cable_length_spin.setSingleStep(1.0)
+        self.max_cable_length_spin.setValue(90.0)
+        self.max_cable_length_spin.setSuffix(" m")
+        self.max_cable_length_spin.setToolTip(
+            "Maximum cable distance used for comms-room and DER extent previews."
+        )
+
         self.departments_list = QListWidget()
         self.departments_list.setSelectionMode(QAbstractItemView.NoSelection)
 
@@ -449,6 +475,7 @@ class BulkLocationPlacementDialog(QDialog):
         form.addRow("Starting number", self.start_number_edit)
         form.addRow("Number to place", self.count_edit)
         form.addRow("Kind", self.kind_combo)
+        form.addRow("Maximum cable distance", self.max_cable_length_spin)
         form.addRow("Departments", self.departments_list)
         form.addRow("Floor", QLabel(str(default_floor)))
 
@@ -484,6 +511,7 @@ class BulkLocationPlacementDialog(QDialog):
                 "start_number": start_number,
                 "count": count,
                 "kind": self.kind_combo.currentText().strip(),
+                "max_cable_length_m": float(self.max_cable_length_spin.value()),
                 "department_ids": self._checked_department_ids(),
             }
             super().accept()
@@ -534,6 +562,8 @@ class BulkDataPointPlacementDialog(QDialog):
                 raise ValueError("Number to place must be greater than 0")
             if qty <= 0:
                 raise ValueError("Qty must be greater than 0")
+            if extension_distance_m < 0:
+                raise ValueError("Extension distance cannot be negative")
 
             self.result = {
                 "prefix": prefix,
@@ -768,13 +798,19 @@ class DataPointEditorDialog(QDialog):
             name = self.name_edit.text().strip()
             if not name:
                 raise ValueError("Name is required")
+            qty = int(self.qty_edit.text())
+            extension_distance_m = float(self.extension_edit.text())
+            if qty <= 0:
+                raise ValueError("Qty must be greater than 0")
+            if extension_distance_m < 0:
+                raise ValueError("Extension distance cannot be negative")
             self.result = {
                 "name": name,
                 "x": float(self.x_edit.text()),
                 "y": float(self.y_edit.text()),
                 "floor": int(self.seed.get("floor", self.default_floor)),
-                "qty": int(self.qty_edit.text()),
-                "extension_distance_m": float(self.extension_edit.text()),
+                "qty": qty,
+                "extension_distance_m": extension_distance_m,
                 "department_ids": self._checked_department_ids(),
                 "room_type_id": self._selected_room_type_id(),
             }
@@ -819,6 +855,26 @@ class PlacementZoneEditorDialog(QDialog):
         self.allow_der_check.setChecked(
             bool(seed.get("allow_distributed_equipment_room", True))
         )
+        self.max_comms_rooms_spin = QSpinBox()
+        self.max_comms_rooms_spin.setRange(0, 999)
+        self.max_comms_rooms_spin.setSpecialValueText("Unlimited")
+        self.max_comms_rooms_spin.setValue(
+            max(0, int(seed.get("max_comms_rooms", 0) or 0))
+        )
+        self.max_comms_rooms_spin.setToolTip(
+            "Maximum total comms rooms in this zone. Existing rooms count toward "
+            "the limit; zero leaves the count unlimited."
+        )
+        self.max_der_rooms_spin = QSpinBox()
+        self.max_der_rooms_spin.setRange(0, 999)
+        self.max_der_rooms_spin.setSpecialValueText("Unlimited")
+        self.max_der_rooms_spin.setValue(
+            max(0, int(seed.get("max_distributed_equipment_rooms", 0) or 0))
+        )
+        self.max_der_rooms_spin.setToolTip(
+            "Maximum total DERs in this zone. Existing DERs count toward the limit; "
+            "zero leaves the count unlimited."
+        )
 
         form.addRow("Zone ID", self.id_edit)
         form.addRow("Name", self.name_edit)
@@ -828,7 +884,9 @@ class PlacementZoneEditorDialog(QDialog):
         form.addRow("Maximum X", self.max_x_spin)
         form.addRow("Maximum Y", self.max_y_spin)
         form.addRow("", self.allow_comms_check)
+        form.addRow("Maximum comms rooms", self.max_comms_rooms_spin)
         form.addRow("", self.allow_der_check)
+        form.addRow("Maximum DERs", self.max_der_rooms_spin)
 
         note = QLabel(
             "Candidate corridor nodes and the final placed room must fall inside "
@@ -868,6 +926,8 @@ class PlacementZoneEditorDialog(QDialog):
             "max_y": round(max_y, 3),
             "allow_comms_room": self.allow_comms_check.isChecked(),
             "allow_distributed_equipment_room": self.allow_der_check.isChecked(),
+            "max_comms_rooms": int(self.max_comms_rooms_spin.value()),
+            "max_distributed_equipment_rooms": int(self.max_der_rooms_spin.value()),
         }
         super().accept()
 
@@ -985,9 +1045,14 @@ class SuggestRoomsFromZonesDialog(QDialog):
         form = QFormLayout()
         layout.addLayout(form)
 
-        self.scope_combo = QComboBox()
-        self.scope_combo.addItem("All floors", "all")
-        self.scope_combo.addItem(f"Current floor ({int(current_floor)})", "current")
+        self.ignore_other_floors_check = QCheckBox(
+            f"Ignore data points on other floors (use floor {int(current_floor)} only)"
+        )
+        self.ignore_other_floors_check.setChecked(False)
+        self.ignore_other_floors_check.setToolTip(
+            "When selected, option generation excludes demand from every floor "
+            "except the currently displayed floor."
+        )
 
         self.max_distance_spin = QDoubleSpinBox()
         self.max_distance_spin.setRange(0.1, 100000.0)
@@ -1035,7 +1100,7 @@ class SuggestRoomsFromZonesDialog(QDialog):
         )
         self.create_connections_check.setChecked(True)
 
-        form.addRow("Scope", self.scope_combo)
+        form.addRow("Generation scope", self.ignore_other_floors_check)
         form.addRow("Cable length limit", self.max_distance_spin)
         form.addRow(
             "Access-switch capacity",
@@ -1054,8 +1119,11 @@ class SuggestRoomsFromZonesDialog(QDialog):
         form.addRow("Connections", self.create_connections_check)
 
         note = QLabel(
-            "The nearest suitable zone is used. If that zone permits both room types, "
-            "a comms room is suggested; DER-only zones produce DER suggestions. Any "
+            "Candidate zones within the cable limit are assessed. The design options "
+            "compare routing and room-allocation outcomes. A DER is only considered "
+            "when an available comms-room option cannot serve the demand within the "
+            "cable limit. Per-zone room limits include rooms already "
+            "placed in that zone. Any "
             "room-type assets and their declared data ports are included in demand. "
             "Any data ports left without a connection will be listed after the "
             "suggestion is applied."
@@ -1071,7 +1139,12 @@ class SuggestRoomsFromZonesDialog(QDialog):
 
     def accept(self):
         self.result = {
-            "scope": str(self.scope_combo.currentData() or "all"),
+            "scope": (
+                "current" if self.ignore_other_floors_check.isChecked() else "all"
+            ),
+            "ignore_other_floors": bool(
+                self.ignore_other_floors_check.isChecked()
+            ),
             "max_distance_m": float(self.max_distance_spin.value()),
             "access_ports_per_switch": int(self.access_ports_per_switch),
             "comms_cabinet_count": int(self.comms_cabinet_count_spin.value()),
@@ -5811,20 +5884,21 @@ class TableListEditor(QMainWindow):
 
         button_row = QHBoxLayout()
         layout.addLayout(button_row)
-        add_btn = QPushButton("Add")
-        edit_btn = QPushButton("Edit")
-        delete_btn = QPushButton("Delete")
-        save_btn = QPushButton("Save")
-        button_row.addWidget(add_btn)
-        button_row.addWidget(edit_btn)
-        button_row.addWidget(delete_btn)
+        self.button_row = button_row
+        self.add_btn = QPushButton("Add")
+        self.edit_btn = QPushButton("Edit")
+        self.delete_btn = QPushButton("Delete")
+        self.save_btn = QPushButton("Save")
+        button_row.addWidget(self.add_btn)
+        button_row.addWidget(self.edit_btn)
+        button_row.addWidget(self.delete_btn)
         button_row.addStretch(1)
-        button_row.addWidget(save_btn)
+        button_row.addWidget(self.save_btn)
 
-        add_btn.clicked.connect(self.add_item)
-        edit_btn.clicked.connect(self.edit_item)
-        delete_btn.clicked.connect(self.delete_item)
-        save_btn.clicked.connect(self.save)
+        self.add_btn.clicked.connect(self.add_item)
+        self.edit_btn.clicked.connect(self.edit_item)
+        self.delete_btn.clicked.connect(self.delete_item)
+        self.save_btn.clicked.connect(self.save)
 
         self._refresh_table()
         self.show()
@@ -6020,3 +6094,366 @@ class LocationsTableEditor(TableListEditor):
                 self.table.model().index(row, 0),
                 QItemSelectionModel.Select | QItemSelectionModel.Rows,
             )
+
+
+class DataPointBulkEditDialog(QDialog):
+    """Safely update common fields across selected data points."""
+
+    def __init__(
+        self,
+        parent,
+        data_points,
+        department_options=None,
+        room_type_options=None,
+    ):
+        super().__init__(parent)
+        self.data_points = [
+            dict(row) for row in data_points if isinstance(row, dict)
+        ]
+        self.department_options = list(department_options or [])
+        self.room_type_options = list(room_type_options or [])
+        self.result = None
+        self.setWindowTitle("Edit Selected Data Points")
+        self.resize(620, 520)
+
+        layout = QVBoxLayout(self)
+        heading = QLabel(
+            f"Update common properties for {len(self.data_points)} selected data points."
+        )
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+        note = QLabel(
+            "Only checked properties are applied. Names, floors and coordinates "
+            "remain unchanged. Use Select All in the manager to update every data point."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        def common_value(key, default):
+            values = [row.get(key, default) for row in self.data_points]
+            if not values:
+                return deepcopy(default)
+            first_signature = json.dumps(values[0], sort_keys=True, default=str)
+            if all(
+                json.dumps(value, sort_keys=True, default=str) == first_signature
+                for value in values[1:]
+            ):
+                return deepcopy(values[0])
+            return deepcopy(default)
+
+        def controlled_row(check_text, control):
+            widget = QWidget(self)
+            row_layout = QHBoxLayout(widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            check = QCheckBox(check_text)
+            control.setEnabled(False)
+            check.toggled.connect(control.setEnabled)
+            row_layout.addWidget(check)
+            row_layout.addWidget(control, 1)
+            return widget, check
+
+        self.extension_spin = QDoubleSpinBox()
+        self.extension_spin.setRange(0.0, 100000.0)
+        self.extension_spin.setDecimals(2)
+        self.extension_spin.setSingleStep(0.5)
+        self.extension_spin.setSuffix(" m")
+        self.extension_spin.setValue(
+            max(0.0, float(common_value("extension_distance_m", 0.0) or 0.0))
+        )
+        extension_row, self.apply_extension_check = controlled_row(
+            "Apply", self.extension_spin
+        )
+        form.addRow("Extension distance", extension_row)
+
+        self.qty_spin = QSpinBox()
+        self.qty_spin.setRange(1, 1000000)
+        self.qty_spin.setValue(max(1, int(common_value("qty", 1) or 1)))
+        qty_row, self.apply_qty_check = controlled_row("Apply", self.qty_spin)
+        form.addRow("Quantity", qty_row)
+
+        self.room_type_combo = QComboBox()
+        self.room_type_combo.addItem("Manual / no room type", "")
+        for room_type_id, room_type_name in self.room_type_options:
+            room_type_id = str(room_type_id or "").strip()
+            label = (
+                f"{room_type_id} - {str(room_type_name or '').strip()}"
+                if str(room_type_name or "").strip()
+                else room_type_id
+            )
+            self.room_type_combo.addItem(label, room_type_id)
+        common_room_type = str(common_value("room_type_id", "") or "").strip()
+        room_type_index = self.room_type_combo.findData(common_room_type)
+        if room_type_index >= 0:
+            self.room_type_combo.setCurrentIndex(room_type_index)
+        room_type_row, self.apply_room_type_check = controlled_row(
+            "Apply", self.room_type_combo
+        )
+        form.addRow("Room type", room_type_row)
+
+        self.departments_list = QListWidget()
+        self.departments_list.setSelectionMode(QAbstractItemView.NoSelection)
+        common_departments = common_value("department_ids", [])
+        if not isinstance(common_departments, list):
+            common_departments = []
+        selected_departments = {
+            str(value).strip() for value in common_departments if str(value).strip()
+        }
+        for department_id, department_name in self.department_options:
+            department_id = str(department_id or "").strip()
+            label = (
+                f"{department_id} - {str(department_name or '').strip()}"
+                if str(department_name or "").strip()
+                else department_id
+            )
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setData(Qt.UserRole, department_id)
+            item.setCheckState(
+                Qt.Checked
+                if department_id in selected_departments
+                else Qt.Unchecked
+            )
+            self.departments_list.addItem(item)
+        self.departments_list.setEnabled(False)
+        departments_widget = QWidget(self)
+        departments_layout = QVBoxLayout(departments_widget)
+        departments_layout.setContentsMargins(0, 0, 0, 0)
+        self.apply_departments_check = QCheckBox("Apply")
+        self.apply_departments_check.toggled.connect(
+            self.departments_list.setEnabled
+        )
+        departments_layout.addWidget(self.apply_departments_check)
+        departments_layout.addWidget(self.departments_list)
+        form.addRow("Departments", departments_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Apply to selected")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self):
+        result = {}
+        if self.apply_extension_check.isChecked():
+            result["extension_distance_m"] = float(self.extension_spin.value())
+        if self.apply_qty_check.isChecked():
+            result["qty"] = int(self.qty_spin.value())
+        if self.apply_room_type_check.isChecked():
+            result["room_type_id"] = str(
+                self.room_type_combo.currentData() or ""
+            ).strip()
+        if self.apply_departments_check.isChecked():
+            result["department_ids"] = [
+                str(self.departments_list.item(index).data(Qt.UserRole) or "").strip()
+                for index in range(self.departments_list.count())
+                if self.departments_list.item(index).checkState() == Qt.Checked
+            ]
+        if not result:
+            QMessageBox.information(
+                self,
+                "No properties selected",
+                "Check at least one property to apply.",
+            )
+            return
+        self.result = result
+        super().accept()
+
+
+class DataPointsTableEditor(TableListEditor):
+    """Data-point manager with staged single and multi-row editing."""
+
+    def __init__(self, master, title, columns, items, on_save):
+        source_items = list(items)
+        self.original_names = {
+            str(item.get("name", "") or "").strip()
+            for item in source_items
+            if isinstance(item, dict) and str(item.get("name", "") or "").strip()
+        }
+        super().__init__(master, title, columns, deepcopy(source_items), on_save)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        instructions = QLabel(
+            "Select one row and choose Edit Selected for the full data-point editor. "
+            "Select multiple rows - or Select All - to update extension distance and "
+            "other common properties in one operation."
+        )
+        instructions.setWordWrap(True)
+        self.centralWidget().layout().insertWidget(0, instructions)
+        self.edit_btn.setText("Edit Selected")
+        select_all_btn = QPushButton("Select All")
+        clear_selection_btn = QPushButton("Clear Selection")
+        self.button_row.insertWidget(0, select_all_btn)
+        self.button_row.insertWidget(1, clear_selection_btn)
+        select_all_btn.clicked.connect(self.table.selectAll)
+        clear_selection_btn.clicked.connect(self.table.clearSelection)
+        self.table.itemDoubleClicked.connect(lambda _item: self.edit_item())
+
+    def _selected_rows(self):
+        rows = sorted(
+            {index.row() for index in self.table.selectionModel().selectedRows()}
+        )
+        if not rows and self.table.currentRow() >= 0:
+            rows = [self.table.currentRow()]
+        return [row for row in rows if 0 <= row < len(self.items)]
+
+    def _master_options(self):
+        master = self.parent()
+        departments = (
+            master.department_options()
+            if master is not None and hasattr(master, "department_options")
+            else []
+        )
+        room_types = (
+            master.store.room_type_options()
+            if master is not None
+            and hasattr(master, "store")
+            and hasattr(master.store, "room_type_options")
+            else []
+        )
+        return master, departments, room_types
+
+    def add_item(self):
+        master, departments, room_types = self._master_options()
+        floor = (
+            int(master.floor_spin.value())
+            if master is not None and hasattr(master, "floor_spin")
+            else 0
+        )
+        default_name = (
+            master.store.suggest_next_data_point_name(floor)
+            if master is not None
+            and hasattr(master, "store")
+            and hasattr(master.store, "suggest_next_data_point_name")
+            else ""
+        )
+        dialog = DataPointEditorDialog(
+            self,
+            seed={"floor": floor, "department_ids": []},
+            default_floor=floor,
+            default_name=default_name,
+            department_options=departments,
+            room_type_options=room_types,
+        )
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+        name = str(dialog.result.get("name", "") or "").strip()
+        if any(str(item.get("name", "")).strip() == name for item in self.items):
+            QMessageBox.critical(self, "Duplicate data point", f"{name} already exists.")
+            return
+        self.items.append(dict(dialog.result))
+        self._refresh_table()
+        self.table.selectRow(len(self.items) - 1)
+
+    def _apply_bulk_update(self, rows, updates):
+        master, _departments, _room_types = self._master_options()
+        for row in rows:
+            item = self.items[row]
+            room_type_changed = "room_type_id" in updates
+            item.update(deepcopy(updates))
+            room_type_id = str(item.get("room_type_id", "") or "").strip()
+            if (
+                room_type_changed
+                and room_type_id
+                and master is not None
+                and hasattr(master, "store")
+                and hasattr(master.store, "room_type_cable_qty")
+            ):
+                item["qty"] = int(master.store.room_type_cable_qty(room_type_id))
+
+    def edit_item(self):
+        rows = self._selected_rows()
+        if not rows:
+            return
+        master, departments, room_types = self._master_options()
+        if len(rows) == 1:
+            row = rows[0]
+            current = dict(self.items[row])
+            dialog = DataPointEditorDialog(
+                self,
+                seed=current,
+                default_floor=int(current.get("floor", 0) or 0),
+                default_x=float(current.get("x", 0.0) or 0.0),
+                default_y=float(current.get("y", 0.0) or 0.0),
+                default_name=str(current.get("name", "") or ""),
+                department_options=departments,
+                room_type_options=room_types,
+            )
+            dialog.setWindowTitle(
+                f"Edit Data Point {str(current.get('name', '') or '')}"
+            )
+            dialog.name_edit.setEnabled(False)
+            if dialog.exec() != QDialog.Accepted or not dialog.result:
+                return
+            updated = {**current, **dialog.result}
+            room_type_id = str(updated.get("room_type_id", "") or "").strip()
+            if (
+                room_type_id
+                and master is not None
+                and hasattr(master, "store")
+                and hasattr(master.store, "room_type_cable_qty")
+            ):
+                updated["qty"] = int(master.store.room_type_cable_qty(room_type_id))
+            self.items[row] = updated
+            self._refresh_table()
+            self.table.selectRow(row)
+            return
+
+        dialog = DataPointBulkEditDialog(
+            self,
+            [self.items[row] for row in rows],
+            department_options=departments,
+            room_type_options=room_types,
+        )
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+        self._apply_bulk_update(rows, dialog.result)
+        self._refresh_table()
+        for row in rows:
+            self.table.selectionModel().select(
+                self.table.model().index(row, 0),
+                QItemSelectionModel.Select | QItemSelectionModel.Rows,
+            )
+
+    def save(self):
+        names = [str(item.get("name", "") or "").strip() for item in self.items]
+        if any(not name for name in names):
+            QMessageBox.critical(
+                self, "Invalid data point", "Every data point must have a name."
+            )
+            return
+        if len(set(names)) != len(names):
+            QMessageBox.critical(
+                self, "Duplicate data point", "Data point names must be unique."
+            )
+            return
+        master = self.parent()
+        if master is not None and hasattr(master, "store"):
+            other_names = set(master.store.names_in_use()) - self.original_names
+            conflicts = sorted(set(names) & other_names)
+            if conflicts:
+                QMessageBox.critical(
+                    self,
+                    "Duplicate name",
+                    "These names are already used by other model items: "
+                    + ", ".join(conflicts[:20]),
+                )
+                return
+        try:
+            for item in self.items:
+                qty = int(item.get("qty", 1) or 1)
+                extension = float(item.get("extension_distance_m", 0.0) or 0.0)
+                if qty <= 0:
+                    raise ValueError(
+                        f"{item.get('name')}: quantity must be greater than zero"
+                    )
+                if extension < 0:
+                    raise ValueError(
+                        f"{item.get('name')}: extension distance cannot be negative"
+                    )
+        except (TypeError, ValueError) as exc:
+            QMessageBox.critical(self, "Invalid data point", str(exc))
+            return
+        self.on_save(deepcopy(self.items))
+        self.close()

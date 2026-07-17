@@ -360,6 +360,8 @@ class GpuDxfGraphView(_ViewBase):
         self.edge_chain_start: Optional[str] = None
         self.selected_placement_zone_id: Optional[str] = None
         self.placement_zone_preview: Optional[Dict[str, Any]] = None
+        self.equipment_room_extent_overlay: Optional[Dict[str, Any]] = None
+        self.data_room_measurement_overlay: Optional[Dict[str, Any]] = None
 
         self._scale = 1.0
         self._offset = QPointF(0.0, 0.0)
@@ -1069,6 +1071,24 @@ class GpuDxfGraphView(_ViewBase):
         self.placement_zone_preview = preview
         self.request_redraw(DirtyLayer.OBJECTS)
 
+    def set_equipment_room_extent_overlay(
+        self, overlay: Optional[Dict[str, Any]]
+    ) -> None:
+        value = dict(overlay) if isinstance(overlay, dict) else None
+        if value == self.equipment_room_extent_overlay:
+            return
+        self.equipment_room_extent_overlay = value
+        self.request_redraw(DirtyLayer.OBJECTS)
+
+    def set_data_room_measurement_overlay(
+        self, overlay: Optional[Dict[str, Any]]
+    ) -> None:
+        value = dict(overlay) if isinstance(overlay, dict) else None
+        if value == self.data_room_measurement_overlay:
+            return
+        self.data_room_measurement_overlay = value
+        self.request_redraw(DirtyLayer.OBJECTS)
+
     def set_overlay_provider(self, overlay_provider) -> None:
         if overlay_provider is self._overlay_provider:
             return
@@ -1430,6 +1450,8 @@ class GpuDxfGraphView(_ViewBase):
             painter.translate(self._cache_margin_x, self._cache_margin_y)
             if self.show_graph:
                 self._draw_equipment_room_placement_zones(painter)
+                self._draw_equipment_room_extents(painter)
+                self._draw_data_room_measurement(painter)
                 self._draw_departments(painter)
                 self._draw_points(painter)
                 if self.show_network and self.show_network_assets:
@@ -1818,13 +1840,153 @@ class GpuDxfGraphView(_ViewBase):
                     (
                         "Indicative placement area"
                         if is_preview
-                        else f"{zone.get('name') or zone.get('id') or 'Placement zone'} [{allowance}]"
+                        else (
+                            f"{zone.get('name') or zone.get('id') or 'Placement zone'} "
+                            f"[{allowance}; CR "
+                            f"{zone.get('max_comms_rooms', 0) or 'unlimited'}; DER "
+                            f"{zone.get('max_distributed_equipment_rooms', 0) or 'unlimited'}]"
+                        )
                     ),
                     QColor("#ffffff") if is_preview else colour,
                 )
             )
         painter.restore()
         self._draw_label_batch(painter, labels)
+
+    def _draw_equipment_room_extents(self, painter: QPainter) -> None:
+        overlay = self.equipment_room_extent_overlay
+        if not isinstance(overlay, dict):
+            return
+        if int(overlay.get("floor", 0)) != int(self.floor):
+            return
+
+        x = float(overlay.get("x", 0.0))
+        y = float(overlay.get("y", 0.0))
+        distance_limit = max(0.0, float(overlay.get("distance_limit_m", 0.0)))
+        possible_polylines = list(overlay.get("possible_polylines", []) or [])
+        current_polylines = list(overlay.get("current_polylines", []) or [])
+        boundary_polyline = list(overlay.get("boundary_polyline", []) or [])
+        if not possible_polylines and not current_polylines:
+            return
+
+        def build_path(polylines) -> QPainterPath:
+            path = QPainterPath()
+            for polyline in polylines:
+                if not isinstance(polyline, (list, tuple)) or len(polyline) < 2:
+                    continue
+                first = polyline[0]
+                if not isinstance(first, (list, tuple)) or len(first) < 2:
+                    continue
+                path.moveTo(float(first[0]), -float(first[1]))
+                for point in polyline[1:]:
+                    if isinstance(point, (list, tuple)) and len(point) >= 2:
+                        path.lineTo(float(point[0]), -float(point[1]))
+            return path
+
+        possible_colour = QColor("#35a7ff")
+        current_colour = QColor("#18c37e")
+        painter.save()
+        self._apply_world_transform(painter)
+        possible_path = build_path(possible_polylines)
+        if not possible_path.isEmpty():
+            painter.setPen(QPen(possible_colour, 0.24, Qt.SolidLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(possible_path)
+        current_path = build_path(current_polylines)
+        if not current_path.isEmpty():
+            painter.setPen(QPen(current_colour, 0.32, Qt.SolidLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(current_path)
+        boundary_path = build_path([boundary_polyline])
+        if not boundary_path.isEmpty():
+            boundary_pen = QPen(QColor("#8bd3ff"), 0.28, Qt.DashLine)
+            painter.setPen(boundary_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(boundary_path)
+        painter.restore()
+
+        name = str(overlay.get("name", "Proposed equipment room")).strip()
+        label = f"{name}: graph extent {distance_limit:.1f} m"
+        if current_polylines:
+            label += " | current routes"
+        self._draw_label_batch(
+            painter,
+            [(self.world_to_scene(x, y), label, possible_colour)],
+        )
+
+    def _draw_data_room_measurement(self, painter: QPainter) -> None:
+        overlay = self.data_room_measurement_overlay
+        if not isinstance(overlay, dict):
+            return
+        floor_points = [
+            point
+            for point in overlay.get("path_points", []) or []
+            if isinstance(point, dict)
+            and int(point.get("floor", 0)) == int(self.floor)
+        ]
+        if not floor_points:
+            return
+
+        colour = QColor(
+            "#198754" if bool(overlay.get("within_limit", False)) else "#dc3545"
+        )
+        path = QPainterPath()
+        active = False
+        previous_floor = None
+        for point in overlay.get("path_points", []) or []:
+            if not isinstance(point, dict):
+                active = False
+                previous_floor = None
+                continue
+            point_floor = int(point.get("floor", 0))
+            if point_floor != int(self.floor):
+                active = False
+                previous_floor = point_floor
+                continue
+            px = float(point.get("x", 0.0))
+            py = -float(point.get("y", 0.0))
+            if not active or previous_floor != point_floor:
+                path.moveTo(px, py)
+            else:
+                path.lineTo(px, py)
+            active = True
+            previous_floor = point_floor
+
+        painter.save()
+        self._apply_world_transform(painter)
+        if not path.isEmpty():
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#ffffff"), 0.85, Qt.SolidLine))
+            painter.drawPath(path)
+            painter.setPen(QPen(colour, 0.42, Qt.SolidLine))
+            painter.drawPath(path)
+        painter.restore()
+
+        label_point = floor_points[len(floor_points) // 2]
+        total = float(overlay.get("total_distance_m", 0.0) or 0.0)
+        routed = float(overlay.get("routed_distance_m", 0.0) or 0.0)
+        extension = float(overlay.get("extension_distance_m", 0.0) or 0.0)
+        limit = float(overlay.get("distance_limit_m", 0.0) or 0.0)
+        outcome = "within limit" if overlay.get("within_limit") else "OVER LIMIT"
+        label = (
+            f"{overlay.get('data_point_name', '')} to "
+            f"{overlay.get('room_name', '')}: {total:.2f} m "
+            f"(route {routed:.2f} + extension {extension:.2f}) | "
+            f"limit {limit:.2f} m - {outcome}"
+        )
+        self._draw_label_batch(
+            painter,
+            [
+                (
+                    self.world_to_scene(
+                        float(label_point.get("x", 0.0)),
+                        float(label_point.get("y", 0.0)),
+                    ),
+                    label,
+                    colour,
+                )
+            ],
+        )
 
     def _draw_points(self, painter: QPainter) -> None:
         snapshot = self._ensure_frame_snapshot()

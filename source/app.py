@@ -108,6 +108,7 @@ from dialogs import (
     LocationEditorDialog,
     PointEditorDialog,
     TableListEditor,
+    DataPointsTableEditor,
     LocationsTableEditor,
     PlacementZoneEditorDialog,
     PlacementZonesTableEditor,
@@ -215,32 +216,53 @@ _AUTOROUTE_GRAPH = None
 _AUTOROUTE_POINTS = None
 _AUTOROUTE_COMMS_ROOMS = None
 _AUTOROUTE_SAME_FLOOR = False
+_AUTOROUTE_PREFERRED_EDGES = None
 
 
-def _init_autoroute_process(graph, points, comms_rooms, same_floor=False):
+def _init_autoroute_process(
+    graph, points, comms_rooms, same_floor=False, preferred_edges=None
+):
     global _AUTOROUTE_GRAPH, _AUTOROUTE_POINTS, _AUTOROUTE_COMMS_ROOMS
-    global _AUTOROUTE_SAME_FLOOR
+    global _AUTOROUTE_SAME_FLOOR, _AUTOROUTE_PREFERRED_EDGES
     _AUTOROUTE_GRAPH = graph
     _AUTOROUTE_POINTS = points
     _AUTOROUTE_COMMS_ROOMS = comms_rooms
     _AUTOROUTE_SAME_FLOOR = bool(same_floor)
+    _AUTOROUTE_PREFERRED_EDGES = set(preferred_edges or ())
 
 
-def _autoroute_shortest_path(graph, start, end, points=None, allowed_floor=None):
+def _autoroute_edge_key(first, second):
+    return tuple(sorted((str(first), str(second))))
+
+
+def _autoroute_shortest_path(
+    graph,
+    start,
+    end,
+    points=None,
+    allowed_floor=None,
+    preferred_edges=None,
+):
     if start not in graph or end not in graph:
         return None, []
 
-    heap = [(0.0, start)]
-    dist = {start: 0.0}
+    preferred_edges = set(preferred_edges or ())
+    heap = [(0.0, 0.0, start)]
+    distances = {start: (0.0, 0.0)}
+    previous = {}
 
     while heap:
-        cost, node = heapq.heappop(heap)
+        score, cost, node = heapq.heappop(heap)
 
-        if cost > dist.get(node, math.inf):
+        if (score, cost) != distances.get(node):
             continue
 
         if node == end:
-            return cost, []
+            path = [node]
+            while path[-1] != start:
+                path.append(previous[path[-1]])
+            path.reverse()
+            return cost, path
 
         for next_node, weight in graph.get(node, []):
             if allowed_floor is not None and points is not None:
@@ -249,12 +271,107 @@ def _autoroute_shortest_path(graph, start, end, points=None, allowed_floor=None)
                     allowed_floor
                 ):
                     continue
-            new_cost = cost + float(weight)
-            if new_cost < dist.get(next_node, math.inf):
-                dist[next_node] = new_cost
-                heapq.heappush(heap, (new_cost, next_node))
+            weight = float(weight)
+            new_cost = cost + weight
+            reuse_factor = (
+                0.25
+                if _autoroute_edge_key(node, next_node) in preferred_edges
+                else 1.0
+            )
+            new_score = score + weight * reuse_factor
+            if (new_score, new_cost) < distances.get(
+                next_node, (math.inf, math.inf)
+            ):
+                distances[next_node] = (new_score, new_cost)
+                previous[next_node] = node
+                heapq.heappush(heap, (new_score, new_cost, next_node))
 
     return None, []
+
+
+def _autoroute_existing_route_edges(graph, comms_rooms, connections):
+    """Return graph edges already used by room-to-data-point connections."""
+    room_names = set(comms_rooms)
+    result = set()
+    unresolved = {}
+
+    for connection in connections:
+        if not isinstance(connection, dict):
+            continue
+        left = str(connection.get("from", "") or "").strip()
+        right = str(connection.get("to", "") or "").strip()
+        if left in room_names:
+            room_name, target_name = left, right
+        elif right in room_names:
+            room_name, target_name = right, left
+        else:
+            continue
+
+        route_path = [
+            str(value).strip()
+            for value in connection.get("route_path", [])
+            if str(value).strip()
+        ]
+        route_path_is_valid = len(route_path) >= 2 and all(
+            first in graph
+            and any(next_node == second for next_node, _weight in graph[first])
+            for first, second in zip(route_path, route_path[1:])
+        )
+        if route_path_is_valid:
+            result.update(
+                _autoroute_edge_key(first, second)
+                for first, second in zip(route_path, route_path[1:])
+            )
+        elif room_name in graph and target_name in graph:
+            unresolved.setdefault(room_name, set()).add(target_name)
+
+    # Older autoroutes did not save route_path. Build one shortest-path tree per
+    # room so their paths can still guide new routes without running a search
+    # separately for every connected data point.
+    for room_name, targets in unresolved.items():
+        heap = [(0.0, room_name)]
+        distances = {room_name: 0.0}
+        previous = {}
+        remaining = set(targets)
+        while heap and remaining:
+            cost, node = heapq.heappop(heap)
+            if cost > distances.get(node, math.inf):
+                continue
+            remaining.discard(node)
+            for next_node, weight in graph.get(node, []):
+                new_cost = cost + float(weight)
+                if new_cost < distances.get(next_node, math.inf):
+                    distances[next_node] = new_cost
+                    previous[next_node] = node
+                    heapq.heappush(heap, (new_cost, next_node))
+
+        for target_name in targets - remaining:
+            node = target_name
+            while node != room_name and node in previous:
+                parent = previous[node]
+                result.add(_autoroute_edge_key(parent, node))
+                node = parent
+
+    return result
+
+
+def _autoroute_route_score(graph, route_path, preferred_edges):
+    """Score a route with already-used edges discounted, preserving real length."""
+    preferred_edges = set(preferred_edges or ())
+    score = 0.0
+    for first, second in zip(route_path, route_path[1:]):
+        weight = next(
+            (
+                float(value)
+                for next_node, value in graph.get(first, [])
+                if next_node == second
+            ),
+            0.0,
+        )
+        if _autoroute_edge_key(first, second) in preferred_edges:
+            weight *= 0.25
+        score += weight
+    return score
 
 
 def _autoroute_data_point_worker(data_point):
@@ -262,6 +379,7 @@ def _autoroute_data_point_worker(data_point):
     points = _AUTOROUTE_POINTS
     comms_rooms = _AUTOROUTE_COMMS_ROOMS
     same_floor = bool(_AUTOROUTE_SAME_FLOOR)
+    preferred_edges = set(_AUTOROUTE_PREFERRED_EDGES or ())
 
     point_name = str(data_point.get("name", "")).strip()
     if not point_name:
@@ -273,6 +391,8 @@ def _autoroute_data_point_worker(data_point):
     best_room = None
     best_cost = None
     best_priority = None
+    best_selection_score = None
+    best_route_path = []
     point_floor = int(points[point_name].get("floor", 0))
 
     for comms_room in comms_rooms:
@@ -287,6 +407,7 @@ def _autoroute_data_point_worker(data_point):
             comms_room,
             points=points if same_floor else None,
             allowed_floor=point_floor if same_floor else None,
+            preferred_edges=preferred_edges,
         )
         if route_cost is None:
             continue
@@ -294,6 +415,32 @@ def _autoroute_data_point_worker(data_point):
         total_cost = float(route_cost) + float(
             data_point.get("extension_distance_m", 0.0) or 0.0
         )
+        selection_score = _autoroute_route_score(
+            graph, _route_path, preferred_edges
+        ) + float(data_point.get("extension_distance_m", 0.0) or 0.0)
+        room_distance_limit = max(
+            0.1,
+            float(points[comms_room].get("max_cable_length_m", 90.0) or 90.0),
+        )
+        if total_cost > room_distance_limit + 1e-9 and preferred_edges:
+            # Reuse is a preference, not permission to make an otherwise valid
+            # endpoint fail its real cable-length limit.
+            route_cost, _route_path = _autoroute_shortest_path(
+                graph,
+                point_name,
+                comms_room,
+                points=points if same_floor else None,
+                allowed_floor=point_floor if same_floor else None,
+            )
+            if route_cost is not None:
+                total_cost = float(route_cost) + float(
+                    data_point.get("extension_distance_m", 0.0) or 0.0
+                )
+                selection_score = _autoroute_route_score(
+                    graph, _route_path, preferred_edges
+                ) + float(data_point.get("extension_distance_m", 0.0) or 0.0)
+        if total_cost > room_distance_limit + 1e-9:
+            continue
 
         # A full comms room is the preferred termination point. Distributed
         # equipment rooms are the fallback for endpoints that cannot be served
@@ -306,12 +453,16 @@ def _autoroute_data_point_worker(data_point):
 
         if (
             best_cost is None
-            or (room_priority, total_cost, comms_room)
-            < (best_priority, best_cost, best_room)
+            or (room_priority, selection_score, total_cost, comms_room)
+            < (best_priority, best_selection_score, best_cost, best_room)
         ):
             best_cost = total_cost
             best_room = comms_room
             best_priority = room_priority
+            best_selection_score = selection_score
+            # Connections are stored room -> data point, while this search runs
+            # data point -> room.
+            best_route_path = list(reversed(_route_path))
 
     if best_room is None:
         return {"status": "unreachable", "point_name": point_name}
@@ -321,9 +472,18 @@ def _autoroute_data_point_worker(data_point):
         "point_name": point_name,
         "from": best_room,
         "to": point_name,
-        "qty": int(data_point.get("qty", 1) or 1),
+        "qty": max(
+            0,
+            int(
+                data_point.get(
+                    "_required_ports", data_point.get("qty", 1)
+                )
+                or 0
+            ),
+        ),
         "route_profile": "",
         "cost": best_cost,
+        "route_path": best_route_path,
     }
 
 
@@ -1298,6 +1458,163 @@ class FloorPlanPdfOptionsDialog(QDialog):
         }
 
 
+class EquipmentRoomExtentsPdfOptionsDialog(QDialog):
+    """Collect page and exact DXF scale settings for room extent sheets."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export Equipment Room Extents PDF")
+        self.resize(500, 240)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        layout.addLayout(form)
+        self.paper_size_combo = QComboBox()
+        self.paper_size_combo.addItems(["A0", "A1", "A2", "A3", "A4"])
+        self.scale_spin = QSpinBox()
+        self.scale_spin.setRange(10, 5000)
+        self.scale_spin.setPrefix("1:")
+        self.scale_spin.setSingleStep(50)
+        saved = {}
+        if parent is not None and hasattr(parent, "store"):
+            saved = parent.store.data.get("equipment_room_extents_pdf_settings", {}) or {}
+        paper = str(saved.get("paper_size", "A1") or "A1").upper()
+        index = self.paper_size_combo.findText(paper)
+        if index >= 0:
+            self.paper_size_combo.setCurrentIndex(index)
+        self.scale_spin.setValue(max(10, int(saved.get("scale", 100) or 100)))
+        form.addRow("Paper size (landscape)", self.paper_size_combo)
+        form.addRow("DXF printed scale", self.scale_spin)
+        note = QLabel(
+            "Creates one scaled sheet per comms room or DER. Each sheet shows the "
+            "DXF background, maximum reachable graph, current served routes, extent "
+            "boundary, drawing key, title block and furthest served data-point tag."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Export PDF")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def export_options(self):
+        return {
+            "paper_size": self.paper_size_combo.currentText(),
+            "scale": int(self.scale_spin.value()),
+        }
+
+
+class ZoneDesignOptionsPdfOptionsDialog(QDialog):
+    """Collect sheet settings for the zone design comparison report."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export Zone Design Options PDF")
+        self.resize(490, 220)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        layout.addLayout(form)
+        self.paper_size_combo = QComboBox()
+        self.paper_size_combo.addItems(["A0", "A1", "A2", "A3", "A4"])
+        self.scale_spin = QSpinBox()
+        self.scale_spin.setRange(10, 5000)
+        self.scale_spin.setPrefix("1:")
+        self.scale_spin.setSingleStep(50)
+        self.floor_scope_combo = QComboBox()
+        self.floor_scope_combo.addItem("All floors", "all")
+        floors = []
+        if parent is not None and hasattr(parent, "_all_model_floors"):
+            floors = list(parent._all_model_floors())
+        for floor in floors:
+            self.floor_scope_combo.addItem(f"Floor {int(floor)} only", int(floor))
+        saved = {}
+        if parent is not None and hasattr(parent, "store"):
+            saved = parent.store.data.get("zone_design_options_pdf_settings", {}) or {}
+        paper = str(saved.get("paper_size", "A1") or "A1").upper()
+        index = self.paper_size_combo.findText(paper)
+        if index >= 0:
+            self.paper_size_combo.setCurrentIndex(index)
+        self.scale_spin.setValue(max(10, int(saved.get("scale", 100) or 100)))
+        saved_scope = saved.get("floor_scope", "all")
+        scope_index = self.floor_scope_combo.findData(saved_scope)
+        if scope_index < 0 and str(saved_scope).lstrip("-").isdigit():
+            scope_index = self.floor_scope_combo.findData(int(saved_scope))
+        if scope_index >= 0:
+            self.floor_scope_combo.setCurrentIndex(scope_index)
+        form.addRow("Paper size (landscape)", self.paper_size_combo)
+        form.addRow("DXF printed scale", self.scale_spin)
+        form.addRow("Floors to export", self.floor_scope_combo)
+        note = QLabel(
+            "Exports every generated zone-placement option without applying it. "
+            "The first page compares the options; following sheets show each "
+            "option and floor against the mapped DXF at the selected scale."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Export PDF")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def export_options(self):
+        return {
+            "paper_size": self.paper_size_combo.currentText(),
+            "scale": int(self.scale_spin.value()),
+            "floor_scope": self.floor_scope_combo.currentData(),
+        }
+
+
+class ZoneDesignOptionsSelectionDialog(QDialog):
+    """Choose a generated design or export every option for comparison."""
+
+    def __init__(self, option_labels, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Zone-based Design Options")
+        self.resize(920, 390)
+        self.result_action = ""
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Select the zone-placement design to apply, or export all options to "
+            "PDF for review before changing the project."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.options_list = QListWidget()
+        for label in option_labels:
+            item = QListWidgetItem(str(label))
+            item.setToolTip(str(label))
+            self.options_list.addItem(item)
+        if self.options_list.count():
+            self.options_list.setCurrentRow(0)
+        layout.addWidget(self.options_list, 1)
+        button_row = QHBoxLayout()
+        self.export_button = QPushButton("Export all options PDF")
+        self.apply_button = QPushButton("Apply selected option")
+        self.cancel_button = QPushButton("Cancel")
+        button_row.addWidget(self.export_button)
+        button_row.addStretch(1)
+        button_row.addWidget(self.apply_button)
+        button_row.addWidget(self.cancel_button)
+        layout.addLayout(button_row)
+        self.export_button.clicked.connect(self._export)
+        self.apply_button.clicked.connect(self._apply)
+        self.cancel_button.clicked.connect(self.reject)
+
+    def _export(self):
+        self.result_action = "export"
+        self.accept()
+
+    def _apply(self):
+        if self.options_list.currentRow() < 0:
+            return
+        self.result_action = "apply"
+        self.accept()
+
+    def selected_index(self):
+        return max(0, int(self.options_list.currentRow()))
+
+
 _NETWORK_UNDO_KEYS = (
     "network_settings", "network_assets", "network_asset_instances",
     "network_racks", "network_connections", "network_endpoint_assignments",
@@ -1348,6 +1665,7 @@ class CableRouteEditor(QMainWindow):
 
         self.last_pan = None
         self.selected_for_edge = None
+        self._measure_data_point_name = None
         self.selected_point_name = None
         self.selected_template_names = set()
         self.selection_clipboard = None
@@ -1376,6 +1694,7 @@ class CableRouteEditor(QMainWindow):
         self.dragging_placement_zone_handle = None
         self.placement_zone_drag_start = None
         self.placement_zone_drag_original = None
+        self._pinned_equipment_room_extent_name = None
         self._comms_optimisation_dialog = None
         self._clear_canvas_multi_selection()
 
@@ -1399,6 +1718,7 @@ class CableRouteEditor(QMainWindow):
         self._show_render_stats = True
 
         self._ribbon_buttons = []
+        self._ribbon_groups = []
         self._ribbon_scroll_areas = []
         self._responsive_compact = None
         self._responsive_layout_timer = QTimer(self)
@@ -1536,6 +1856,8 @@ class CableRouteEditor(QMainWindow):
         self.selected_point_name = None
         self.selected_template_names.clear()
         self.selected_for_edge = None
+        self._measure_data_point_name = None
+        self._clear_data_room_measurement_overlay()
         self.edge_delete_start = None
         self.selected_placement_zone_id = None
         self.dragging_placement_zone_id = None
@@ -1608,6 +1930,7 @@ class CableRouteEditor(QMainWindow):
             ("transition", "Transition", "transition_node"),
             ("placement_zone", "Room Zone", "placement_zone"),
             ("edge", "Edge", "edge"),
+            ("measure_data_room", "Measure", "measure"),
             ("pan", "Pan", "pan"),
             ("delete", "Delete", "delete"),
         ]
@@ -1695,6 +2018,17 @@ class CableRouteEditor(QMainWindow):
             painter.drawLine(QPointF(size - 9, cy - 4), QPointF(size - 5, cy))
             painter.drawLine(QPointF(size - 9, cy + 4), QPointF(size - 5, cy))
 
+        elif icon_key == "measure":
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#0d6efd"), 2))
+            painter.drawLine(QPointF(5, size - 6), QPointF(size - 5, 5))
+            for offset in (0.28, 0.5, 0.72):
+                px = 5 + (size - 10) * offset
+                py = size - 6 - (size - 11) * offset
+                painter.drawLine(
+                    QPointF(px - 2, py - 2), QPointF(px + 2, py + 2)
+                )
+
         elif icon_key == "select":
             painter.setBrush(QBrush(QColor("#ffffff")))
             painter.drawPolygon(QPolygonF([
@@ -1722,6 +2056,7 @@ class CableRouteEditor(QMainWindow):
         return QIcon(pixmap)
 
     def _set_editor_mode(self, mode):
+        previous_mode = self.mode_combo.currentText()
         if mode == "placement_zone" and hasattr(self, "show_placement_zones_check"):
             self.show_placement_zones_check.setChecked(True)
         if mode != "placement_zone":
@@ -1732,6 +2067,9 @@ class CableRouteEditor(QMainWindow):
             self.dragging_placement_zone_handle = None
             self.placement_zone_drag_start = None
             self.placement_zone_drag_original = None
+        if mode != "measure_data_room" or previous_mode != mode:
+            self._measure_data_point_name = None
+            self._clear_data_room_measurement_overlay()
         self.mode_combo.setCurrentText(mode)
 
         for button_mode, button in getattr(self, "_mode_buttons", {}).items():
@@ -1740,7 +2078,10 @@ class CableRouteEditor(QMainWindow):
             button.blockSignals(False)
 
         if hasattr(self, "status_label"):
-            self.set_status(f"Mode: {mode}")
+            if mode == "measure_data_room":
+                self.set_status("Measure mode: click a data point first")
+            else:
+                self.set_status(f"Mode: {mode}")
 
     def _mode_icon_button(self, mode, text, icon_key):
         btn = QToolButton()
@@ -1749,7 +2090,12 @@ class CableRouteEditor(QMainWindow):
         btn.setIcon(self._make_mode_icon(icon_key))
         btn.setIconSize(QSize(18, 18))
         btn.setText(text)
-        btn.setToolTip(f"Set mode: {text}")
+        btn.setToolTip(
+            "Measure routed cable distance: click a data point, then a comms "
+            "room or DER"
+            if mode == "measure_data_room"
+            else f"Set mode: {text}"
+        )
         self._configure_ribbon_button(btn)
         btn.clicked.connect(lambda checked=False, m=mode: self._set_editor_mode(m))
         return btn
@@ -1813,6 +2159,7 @@ class CableRouteEditor(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         scroll.setWidget(content)
         self._ribbon_scroll_areas.append(scroll)
         ribbon.addTab(scroll, title)
@@ -1831,6 +2178,7 @@ class CableRouteEditor(QMainWindow):
             try:
                 button.setMinimumSize(minimum_width, button_height)
                 button.setMaximumSize(maximum_width, button_height + 2)
+                button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
                 button.setIconSize(QSize(17 if compact else 18, 17 if compact else 18))
             except RuntimeError:
                 continue
@@ -2508,6 +2856,14 @@ class CableRouteEditor(QMainWindow):
         set_action_icon(import_room_type_matrix_action, "box-arrow-right")
         import_room_type_matrix_action.triggered.connect(self.import_room_type_asset_matrix)
 
+        remove_invalid_routes_action = tools_menu.addAction(
+            "Remove Invalid Connections and Routes…"
+        )
+        set_action_icon(remove_invalid_routes_action, "trash", "#dc3545")
+        remove_invalid_routes_action.triggered.connect(
+            self.remove_invalid_connections_and_routes
+        )
+
         validate_action = tools_menu.addAction("Validate")
         set_action_icon(validate_action, "check-circle", BOOTSTRAP_GREEN)
         validate_action.triggered.connect(self.validate_json)
@@ -2542,6 +2898,7 @@ class CableRouteEditor(QMainWindow):
         frame.setObjectName("RibbonGroup")
         frame.setFrameShape(QFrame.StyledPanel)
         frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Minimum)
+        self._ribbon_groups.append(frame)
 
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(6, 5, 6, 4)
@@ -2567,7 +2924,6 @@ class CableRouteEditor(QMainWindow):
                 row_layout.setContentsMargins(2, 1, 2, 1)
                 row_layout.setSpacing(6)
                 row_layout.setAlignment(Qt.AlignLeft)
-
                 for widget in row_widgets:
                     row_layout.addWidget(widget)
 
@@ -2965,6 +3321,24 @@ class CableRouteEditor(QMainWindow):
             "When enabled, autoroute only considers comms rooms and graph paths "
             "on the data point's own floor."
         )
+        self.autoroute_follow_existing_check = self._ribbon_toggle_button(
+            "Follow Existing",
+            QStyle.SP_ArrowForward,
+            False,
+        )
+        self.autoroute_follow_existing_check.setToolTip(
+            "Prefer graph segments already used by autorouted data-point "
+            "connections while still enforcing the true cable-distance limit."
+        )
+        self.autoroute_ignore_unconnected_check = self._ribbon_toggle_button(
+            "Ignore Unconnected",
+            QStyle.SP_DialogCancelButton,
+            False,
+        )
+        self.autoroute_ignore_unconnected_check.setToolTip(
+            "Skip data points that have no connection to the routing graph. "
+            "This option is off by default."
+        )
 
         self._add_ribbon_group(
             routing_layout,
@@ -2995,6 +3369,8 @@ class CableRouteEditor(QMainWindow):
                     self.autoroute_data_points,
                 ),
                 self.autoroute_same_floor_check,
+                self.autoroute_follow_existing_check,
+                self.autoroute_ignore_unconnected_check,
                 self._ribbon_icon_button(
                     "Suggest",
                     "Suggest comms room",
@@ -3110,13 +3486,15 @@ class CableRouteEditor(QMainWindow):
                     QStyle.SP_FileIcon,
                     self.export_all_floors_pdf,
                 ),
+                self._ribbon_icon_button(
+                    "Room Extents PDF",
+                    "Export current and maximum graph extents for every comms room and DER",
+                    QStyle.SP_FileIcon,
+                    self.export_equipment_room_extents_pdf,
+                ),
             ],
-            columns=3,
+            columns=4,
         )
-
-        home_layout.addStretch(1)
-        data_layout.addStretch(1)
-        routing_layout.addStretch(1)
 
         self._add_scrollable_ribbon_tab(ribbon, output_tab, "Output")
 
@@ -3406,6 +3784,7 @@ class CableRouteEditor(QMainWindow):
     def cancel_bulk_location_placement(self):
         if self.bulk_location_session:
             self.bulk_location_session = None
+            self._clear_equipment_room_extent_overlay()
             self.set_status("Mass create cancelled")
 
     def cancel_bulk_data_point_placement(self):
@@ -5307,6 +5686,41 @@ class CableRouteEditor(QMainWindow):
             None,
         )
 
+    @staticmethod
+    def _zone_room_limit(zone, location_kind):
+        key = (
+            "max_distributed_equipment_rooms"
+            if location_kind == "distributed_equipment_room"
+            else "max_comms_rooms"
+        )
+        return max(0, int(zone.get(key, 0) or 0))
+
+    def _existing_room_count_for_zone(self, zone, location_kind):
+        zone_id = str(zone.get("id", "")).strip()
+        floor = int(zone.get("floor", 0))
+        count = 0
+        for room in self.store.data.get("locations", []):
+            if str(room.get("kind", "")).strip() != location_kind:
+                continue
+            if int(room.get("floor", 0)) != floor:
+                continue
+            assigned_zone = str(room.get("placement_zone_id", "")).strip()
+            if assigned_zone:
+                if assigned_zone == zone_id:
+                    count += 1
+                continue
+            if self._point_inside_placement_zone(
+                float(room.get("x", 0.0)), float(room.get("y", 0.0)), zone
+            ):
+                count += 1
+        return count
+
+    def _zone_has_room_availability(self, zone, location_kind):
+        limit = self._zone_room_limit(zone, location_kind)
+        return limit <= 0 or self._existing_room_count_for_zone(
+            zone, location_kind
+        ) < limit
+
     def _placement_allowed_at(self, floor, x, y, location_kind):
         floor_zones = self._equipment_room_placement_zones(floor)
         if not floor_zones:
@@ -5314,6 +5728,7 @@ class CableRouteEditor(QMainWindow):
         return any(
             self._zone_allows_location_kind(zone, location_kind)
             and self._point_inside_placement_zone(x, y, zone)
+            and self._zone_has_room_availability(zone, location_kind)
             for zone in floor_zones
         )
 
@@ -5397,6 +5812,7 @@ class CableRouteEditor(QMainWindow):
         room_port_limits,
         same_floor_only=True,
         current_floor_only=False,
+        design_strategy="shortest_routes",
     ):
         if isinstance(room_port_limits, dict):
             port_limits = {
@@ -5450,108 +5866,515 @@ class CableRouteEditor(QMainWindow):
             point["_required_ports"] = int(required_ports)
             if required_ports > 0:
                 data_points.append(point)
-        floor_height_m = float(
-            self.store.data.get("building", {}).get("floor_height_m", 4.0)
-        )
-        assignments = {zone["_suggestion_key"]: [] for zone in zones}
+        routing_graph, routing_points = self._build_routing_graph()
+        routing_anchors = [
+            name
+            for name, record in routing_points.items()
+            if str(record.get("kind", "")).strip() == "corridor_node"
+            and routing_graph.get(name)
+        ]
+        placement_anchors = [
+            name
+            for name in routing_anchors
+            if not bool(routing_points[name].get("restricted", False))
+        ]
+
+        component_by_name = {}
+        component_number = 0
+        for source_name in routing_graph:
+            if source_name in component_by_name:
+                continue
+            component_number += 1
+            pending = [source_name]
+            component_by_name[source_name] = component_number
+            while pending:
+                current_name = pending.pop()
+                current_floor = int(routing_points[current_name].get("floor", 0))
+                for neighbour, _weight in routing_graph.get(current_name, []):
+                    if (
+                        same_floor_only
+                        and int(routing_points[neighbour].get("floor", 0))
+                        != current_floor
+                    ):
+                        continue
+                    if neighbour in component_by_name:
+                        continue
+                    component_by_name[neighbour] = component_number
+                    pending.append(neighbour)
+
+        anchors_by_floor_component = {}
+        for anchor_name in routing_anchors:
+            anchor = routing_points[anchor_name]
+            key = (
+                int(anchor.get("floor", 0)),
+                component_by_name.get(anchor_name),
+            )
+            anchors_by_floor_component.setdefault(key, []).append(anchor_name)
+
+        start_anchor_cache = {}
+
+        def candidate_start_anchors(room_floor, room_x, room_y):
+            cache_key = (
+                int(room_floor),
+                round(float(room_x), 4),
+                round(float(room_y), 4),
+            )
+            if cache_key in start_anchor_cache:
+                return start_anchor_cache[cache_key]
+            result = []
+            for (floor, _component), names in anchors_by_floor_component.items():
+                if floor != int(room_floor):
+                    continue
+                result.append(
+                    min(
+                        names,
+                        key=lambda name: math.hypot(
+                            float(routing_points[name].get("x", 0.0)) - room_x,
+                            float(routing_points[name].get("y", 0.0)) - room_y,
+                        ),
+                    )
+                )
+            start_anchor_cache[cache_key] = result
+            return result
+
+        distance_maps = {}
+
+        def shortest_graph_distance(start, end, allowed_floor=None):
+            if start not in routing_graph or end not in routing_graph:
+                return None
+            cache_key = (start, allowed_floor)
+            if cache_key in distance_maps:
+                return distance_maps[cache_key].get(end)
+            pending = [(0.0, start)]
+            best = {start: 0.0}
+            while pending:
+                cost, name = heapq.heappop(pending)
+                if cost > best.get(name, math.inf):
+                    continue
+                for neighbour, weight in routing_graph.get(name, []):
+                    if (
+                        allowed_floor is not None
+                        and int(routing_points[neighbour].get("floor", 0))
+                        != int(allowed_floor)
+                    ):
+                        continue
+                    candidate = cost + float(weight)
+                    if candidate < best.get(neighbour, math.inf):
+                        best[neighbour] = candidate
+                        heapq.heappush(pending, (candidate, neighbour))
+            distance_maps[cache_key] = best
+            return best.get(end)
+
+        def graph_distance_from_room(
+            room_floor, room_x, room_y, point, start_anchor
+        ):
+            point_floor = int(point.get("floor", 0))
+            if start_anchor not in routing_graph:
+                return None
+            point_name = str(point.get("name", "") or "").strip()
+            if point_name in routing_graph and routing_graph.get(point_name):
+                end_candidates = [point_name]
+            else:
+                end_candidates = [
+                    name
+                    for name in routing_anchors
+                    if int(routing_points[name].get("floor", 0)) == point_floor
+                    and component_by_name.get(name)
+                    == component_by_name.get(start_anchor)
+                ]
+                if not end_candidates:
+                    return None
+            best_end = None
+            best_end_name = None
+            for end in end_candidates:
+                graph_distance = shortest_graph_distance(
+                    start_anchor,
+                    end,
+                    int(room_floor) if same_floor_only else None,
+                )
+                if graph_distance is None:
+                    continue
+                end_spur = 0.0
+                if end != point_name:
+                    end_spur = math.hypot(
+                        float(point.get("x", 0.0))
+                        - float(routing_points[end].get("x", 0.0)),
+                        float(point.get("y", 0.0))
+                        - float(routing_points[end].get("y", 0.0)),
+                    )
+                total = float(graph_distance) + end_spur
+                if best_end is None or total < best_end:
+                    best_end = total
+                    best_end_name = end
+            if best_end is None:
+                return None
+            start_spur = math.hypot(
+                float(routing_points[start_anchor].get("x", 0.0)) - room_x,
+                float(routing_points[start_anchor].get("y", 0.0)) - room_y,
+            )
+            return (
+                best_end
+                + start_spur
+                + max(0.0, float(point.get("extension_distance_m", 0.0) or 0.0)),
+                best_end_name,
+            )
+
+        zone_position_cache = {}
+
+        def zone_candidate_positions(zone):
+            zone_key = str(zone.get("_suggestion_key", "") or "")
+            if zone_key in zone_position_cache:
+                return zone_position_cache[zone_key]
+            floor = int(zone.get("floor", 0))
+            positions = []
+            centre = {
+                "x": (
+                    float(zone.get("min_x", 0.0))
+                    + float(zone.get("max_x", 0.0))
+                )
+                / 2.0,
+                "y": (
+                    float(zone.get("min_y", 0.0))
+                    + float(zone.get("max_y", 0.0))
+                )
+                / 2.0,
+                "_required_ports": 1,
+            }
+            positions.append(
+                self._position_inside_zone_near_points(zone, [centre], 0)
+            )
+            for anchor_name in placement_anchors:
+                anchor = routing_points[anchor_name]
+                if int(anchor.get("floor", 0)) != floor:
+                    continue
+                if self._distance_from_point_to_zone(anchor, zone, 0.0) > float(
+                    max_distance_m
+                ):
+                    continue
+                positions.append(
+                    self._position_inside_zone_near_points(
+                        zone,
+                        [{**anchor, "_required_ports": 1}],
+                        0,
+                    )
+                )
+            unique = []
+            seen = set()
+            for x, y in positions:
+                key = (round(float(x), 4), round(float(y), 4))
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append((float(x), float(y)))
+            zone_position_cache[zone_key] = unique
+            return unique
+
+        def best_room_position(zone, members, preferred_positions=()):
+            positions = list(preferred_positions)
+            positions.append(
+                self._position_inside_zone_near_points(zone, members, 0)
+            )
+            positions.extend(zone_candidate_positions(zone))
+            best_result = None
+            seen = set()
+            for room_x, room_y in positions:
+                key = (round(float(room_x), 4), round(float(room_y), 4))
+                if key in seen:
+                    continue
+                seen.add(key)
+                for start_anchor in candidate_start_anchors(
+                    int(zone.get("floor", 0)), room_x, room_y
+                ):
+                    distances = []
+                    end_anchors = []
+                    valid = True
+                    for member in members:
+                        value = graph_distance_from_room(
+                            int(zone.get("floor", 0)),
+                            room_x,
+                            room_y,
+                            member,
+                            start_anchor,
+                        )
+                        if value is None:
+                            valid = False
+                            break
+                        member_distance, end_anchor = value
+                        if member_distance > float(max_distance_m):
+                            valid = False
+                            break
+                        distances.append(float(member_distance))
+                        end_anchors.append(str(end_anchor or ""))
+                    if not valid:
+                        continue
+                    score = (max(distances, default=0.0), sum(distances))
+                    if best_result is None or score < best_result[0]:
+                        best_result = (
+                            score,
+                            float(room_x),
+                            float(room_y),
+                            start_anchor,
+                            distances,
+                            end_anchors,
+                        )
+            if best_result is None:
+                return None
+            (
+                _score,
+                room_x,
+                room_y,
+                start_anchor,
+                distances,
+                end_anchors,
+            ) = best_result
+            return room_x, room_y, start_anchor, distances, end_anchors
+
         unassigned = []
 
-        for point in data_points:
+        pools = {}
+        for zone in zones:
+            for kind, allow_key in (
+                ("comms_room", "allow_comms_room"),
+                (
+                    "distributed_equipment_room",
+                    "allow_distributed_equipment_room",
+                ),
+            ):
+                if not bool(zone.get(allow_key, False)):
+                    continue
+                limit = self._zone_room_limit(zone, kind)
+                existing = self._existing_room_count_for_zone(zone, kind)
+                max_new = None if limit <= 0 else max(0, limit - existing)
+                if design_strategy == "fewest_comms_rooms" and kind == "comms_room":
+                    max_new = min(1, max_new) if max_new is not None else 1
+                pools[(zone["_suggestion_key"], kind)] = {
+                    "zone": zone,
+                    "kind": kind,
+                    "bins": [],
+                    "limit": limit,
+                    "existing": existing,
+                    "max_new": max_new,
+                }
+
+        for point in sorted(
+            data_points,
+            key=lambda item: (
+                -int(item.get("_required_ports", 0) or 0),
+                str(item.get("name", "")),
+            ),
+        ):
+            qty = max(0, int(point.get("_required_ports", 0) or 0))
             candidates = []
-            for zone in zones:
+            for pool in pools.values():
+                zone = pool["zone"]
+                kind = pool["kind"]
                 if same_floor_only and int(point.get("floor", 0)) != int(
                     zone.get("floor", 0)
                 ):
                     continue
-                distance = self._distance_from_point_to_zone(
-                    point, zone, floor_height_m
-                )
-                distance += max(
-                    0.0, float(point.get("extension_distance_m", 0.0) or 0.0)
-                )
-                if distance > float(max_distance_m):
+                if qty > port_limits[kind]:
                     continue
-                if bool(zone.get("allow_comms_room", False)):
-                    kind = "comms_room"
-                    type_priority = 0
-                elif bool(zone.get("allow_distributed_equipment_room", False)):
-                    kind = "distributed_equipment_room"
-                    type_priority = 1
+
+                target_index = None
+                best_remaining = None
+                distance = None
+                route_span = None
+                selected_position = None
+                selected_anchor = None
+                selected_distances = None
+                selected_end_anchors = None
+                for index, room_bin in enumerate(pool["bins"]):
+                    remaining = port_limits[kind] - int(room_bin["ports"]) - qty
+                    if remaining < 0:
+                        continue
+                    prospective_points = list(room_bin["points"]) + [point]
+                    position_result = best_room_position(
+                        zone,
+                        prospective_points,
+                        preferred_positions=[
+                            (float(room_bin["x"]), float(room_bin["y"]))
+                        ],
+                    )
+                    if position_result is None:
+                        continue
+                    (
+                        room_x,
+                        room_y,
+                        start_anchor,
+                        route_distances,
+                        end_anchors,
+                    ) = position_result
+                    point_distance = float(route_distances[-1])
+                    candidate_span = max(route_distances, default=0.0)
+                    if best_remaining is None or (remaining, candidate_span) < (
+                        best_remaining,
+                        float(route_span),
+                    ):
+                        target_index = index
+                        best_remaining = remaining
+                        distance = float(point_distance)
+                        route_span = candidate_span
+                        selected_position = (room_x, room_y)
+                        selected_anchor = start_anchor
+                        selected_distances = route_distances
+                        selected_end_anchors = end_anchors
+                creates_room = target_index is None
+                if creates_room and pool["max_new"] is not None and len(
+                    pool["bins"]
+                ) >= int(pool["max_new"]):
+                    continue
+                if creates_room:
+                    position_result = best_room_position(zone, [point])
+                    if position_result is None:
+                        continue
+                    (
+                        room_x,
+                        room_y,
+                        start_anchor,
+                        route_distances,
+                        end_anchors,
+                    ) = position_result
+                    distance = float(route_distances[0])
+                    selected_position = (room_x, room_y)
+                    selected_anchor = start_anchor
+                    selected_distances = route_distances
+                    selected_end_anchors = end_anchors
+                    if distance > float(max_distance_m):
+                        continue
+                    route_span = float(distance)
+                remaining_after = (
+                    port_limits[kind] - qty
+                    if creates_room
+                    else int(best_remaining)
+                )
+                type_priority = (
+                    0
+                    if (
+                        design_strategy == "der_priority"
+                        and kind == "distributed_equipment_room"
+                    )
+                    or (
+                        design_strategy != "der_priority"
+                        and kind == "comms_room"
+                    )
+                    else 1
+                )
+                if design_strategy in {"comms_priority", "der_priority"}:
+                    score = (
+                        type_priority,
+                        1 if creates_room else 0,
+                        route_span,
+                        remaining_after,
+                    )
                 else:
-                    continue
-                if int(point.get("_required_ports", 0) or 0) > port_limits[kind]:
-                    continue
-                area = max(
-                    0.0,
-                    (float(zone.get("max_x", 0.0)) - float(zone.get("min_x", 0.0)))
-                    * (float(zone.get("max_y", 0.0)) - float(zone.get("min_y", 0.0))),
+                    score = (
+                        1 if creates_room else 0,
+                        route_span,
+                        type_priority,
+                        remaining_after,
+                    )
+                candidates.append(
+                    (
+                        score,
+                        pool,
+                        target_index,
+                        distance,
+                        selected_position,
+                        selected_anchor,
+                        selected_distances,
+                        selected_end_anchors,
+                    )
                 )
-                candidates.append((type_priority, distance, area, zone, kind))
+
+            # Reuse a reachable CR first. Establishing the first CR in an unused
+            # CR zone also takes precedence. Once a zone already has a CR, a DER
+            # that can reach the point is preferred over opening another CR there.
+            existing_cr_candidates = [
+                item
+                for item in candidates
+                if item[1]["kind"] == "comms_room" and item[2] is not None
+            ]
+            first_cr_in_zone_candidates = [
+                item
+                for item in candidates
+                if item[1]["kind"] == "comms_room"
+                and item[2] is None
+                and not item[1]["bins"]
+            ]
+            der_candidates = [
+                item
+                for item in candidates
+                if item[1]["kind"] == "distributed_equipment_room"
+            ]
+            if existing_cr_candidates:
+                candidates = existing_cr_candidates
+            elif first_cr_in_zone_candidates:
+                candidates = first_cr_in_zone_candidates
+            elif der_candidates:
+                candidates = der_candidates
 
             if not candidates:
                 unassigned.append(str(point.get("name", "")).strip())
                 continue
-            _priority, _distance, _area, selected_zone, selected_kind = min(
-                candidates, key=lambda item: (item[1], item[0], item[2])
+            (
+                _score,
+                selected_pool,
+                target_index,
+                distance,
+                selected_position,
+                selected_anchor,
+                selected_distances,
+                selected_end_anchors,
+            ) = min(
+                candidates, key=lambda item: item[0]
             )
             assigned = dict(point)
-            assigned["_suggested_kind"] = selected_kind
-            assigned["_zone_cable_length_m"] = float(_distance)
-            assignments[selected_zone["_suggestion_key"]].append(assigned)
+            assigned["_zone_cable_length_m"] = float(distance)
+            if target_index is None:
+                room_x, room_y = selected_position
+                selected_pool["bins"].append(
+                    {
+                        "ports": 0,
+                        "points": [],
+                        "x": float(room_x),
+                        "y": float(room_y),
+                        "anchor_name": str(selected_anchor or ""),
+                        "data_point_anchor_names": {},
+                        "max_route_distance_m": 0.0,
+                    }
+                )
+                target_index = len(selected_pool["bins"]) - 1
+            target_bin = selected_pool["bins"][target_index]
+            room_x, room_y = selected_position
+            target_bin["x"] = float(room_x)
+            target_bin["y"] = float(room_y)
+            target_bin["anchor_name"] = str(selected_anchor or "")
+            target_bin["points"].append(assigned)
+            target_bin["ports"] += qty
+            for member, member_distance in zip(
+                target_bin["points"], selected_distances
+            ):
+                member["_zone_cable_length_m"] = float(member_distance)
+            target_bin["data_point_anchor_names"] = {
+                str(member.get("name", "")).strip(): str(end_anchor or "")
+                for member, end_anchor in zip(
+                    target_bin["points"], selected_end_anchors
+                )
+            }
+            target_bin["max_route_distance_m"] = max(
+                selected_distances, default=0.0
+            )
 
-        corridor_nodes = [
-            item
-            for item in self.store.data.get("corridors", {}).get("nodes", [])
-            if str(item.get("name", "")).strip()
-            and not bool(item.get("restricted", False))
-        ]
         suggestions = []
 
-        for zone in zones:
-            assigned_points = assignments.get(zone["_suggestion_key"], [])
-            if not assigned_points:
-                continue
-            kind = str(assigned_points[0].get("_suggested_kind", "comms_room"))
+        for pool in pools.values():
+            zone = pool["zone"]
+            kind = pool["kind"]
             port_limit = port_limits[kind]
-            bins = []
-            for point in sorted(
-                assigned_points,
-                key=lambda item: int(item.get("_required_ports", 0) or 0),
-                reverse=True,
-            ):
-                qty = max(0, int(point.get("_required_ports", 0) or 0))
-                target_bin = next(
-                    (
-                        room_bin
-                        for room_bin in bins
-                        if room_bin["ports"] + qty <= port_limit
-                    ),
-                    None,
-                )
-                if target_bin is None:
-                    target_bin = {"ports": 0, "points": []}
-                    bins.append(target_bin)
-                target_bin["points"].append(point)
-                target_bin["ports"] += qty
-
-            for room_index, room_bin in enumerate(bins):
-                x, y = self._position_inside_zone_near_points(
-                    zone, room_bin["points"], room_index
-                )
+            for room_index, room_bin in enumerate(pool["bins"]):
+                x = float(room_bin["x"])
+                y = float(room_bin["y"])
                 floor = int(zone.get("floor", 0))
-                same_floor_nodes = [
-                    node
-                    for node in corridor_nodes
-                    if int(node.get("floor", 0)) == floor
-                ]
-                anchor = min(
-                    same_floor_nodes,
-                    key=lambda node: math.hypot(
-                        float(node.get("x", 0.0)) - x,
-                        float(node.get("y", 0.0)) - y,
-                    ),
-                    default=None,
-                )
                 suggestions.append(
                     {
                         "zone_id": zone["_suggestion_key"],
@@ -5567,8 +6390,11 @@ class CableRouteEditor(QMainWindow):
                             str(point.get("name", "")).strip()
                             for point in room_bin["points"]
                         ],
-                        "anchor_name": (
-                            str(anchor.get("name", "")).strip() if anchor else ""
+                        "anchor_name": str(
+                            room_bin.get("anchor_name", "") or ""
+                        ).strip(),
+                        "data_point_anchor_names": dict(
+                            room_bin.get("data_point_anchor_names", {}) or {}
                         ),
                     }
                 )
@@ -5577,7 +6403,91 @@ class CableRouteEditor(QMainWindow):
             "suggestions": suggestions,
             "unassigned": sorted(set(unassigned)),
             "considered": len(data_points),
+            "strategy": design_strategy,
+            "zone_usage": [
+                {
+                    "zone_id": pool["zone"]["_suggestion_key"],
+                    "zone_name": str(pool["zone"].get("name", "")).strip()
+                    or pool["zone"]["_suggestion_key"],
+                    "kind": pool["kind"],
+                    "existing": int(pool["existing"]),
+                    "proposed": len(pool["bins"]),
+                    "limit": int(pool["limit"]),
+                }
+                for pool in pools.values()
+            ],
         }
+
+    def _export_zone_design_options_pdf(
+        self,
+        design_options,
+        strategy_names,
+        planning_options,
+        room_port_limits,
+    ):
+        settings_dialog = ZoneDesignOptionsPdfOptionsDialog(self)
+        if settings_dialog.exec() != QDialog.Accepted:
+            return False
+        pdf_options = settings_dialog.export_options()
+        source_path = (
+            getattr(self.store, "storage_path", "") or self.current_json_path or ""
+        )
+        base_path = Path(source_path) if source_path else Path("cable_routes.crsdb")
+        initial = str(
+            base_path.with_suffix("").with_name(
+                base_path.stem + "_zone_design_options.pdf"
+            )
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Zone Design Options PDF",
+            initial,
+            "PDF files (*.pdf)",
+        )
+        if not path:
+            return False
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            from zone_design_options_pdf import export_zone_design_options_pdf
+
+            output_path = export_zone_design_options_pdf(
+                self.store.data,
+                design_options,
+                path,
+                strategy_names=strategy_names,
+                planning_options=planning_options,
+                room_port_limits=room_port_limits,
+                source_path=source_path,
+                paper_size=pdf_options["paper_size"],
+                scale=pdf_options["scale"],
+                floor_scope=pdf_options["floor_scope"],
+                revision_number=self.latest_project_revision_number(),
+            )
+        except ImportError as exc:
+            QMessageBox.critical(
+                self,
+                "Zone Design Options PDF failed",
+                f"PDF export requires reportlab.\n\n{exc}",
+            )
+            return False
+        except Exception as exc:
+            QMessageBox.critical(self, "Zone Design Options PDF failed", str(exc))
+            return False
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.store.data["zone_design_options_pdf_settings"] = dict(pdf_options)
+        self.set_status(f"Exported zone design options PDF: {Path(output_path).name}")
+        QMessageBox.information(
+            self,
+            "Zone Design Options PDF complete",
+            f"Exported {len(design_options)} unapplied design option(s) to:\n\n"
+            f"{output_path}",
+        )
+        return True
 
     def suggest_equipment_rooms_from_zones(self):
         if not self._equipment_room_placement_zones():
@@ -5624,12 +6534,91 @@ class CableRouteEditor(QMainWindow):
                 * int(options["der_max_switches"])
             ),
         }
-        plan = self._build_zone_room_suggestion_plan(
-            max_distance_m=options["max_distance_m"],
-            room_port_limits=room_port_limits,
-            same_floor_only=options["same_floor_only"],
-            current_floor_only=options["scope"] == "current",
-        )
+        strategy_names = {
+            "shortest_routes": "Shortest routes",
+            "fewest_comms_rooms": "Fewest comms rooms",
+            "comms_priority": "Comms-room priority",
+            "der_priority": "DER priority",
+        }
+        design_options = []
+        seen_signatures = set()
+        for strategy in strategy_names:
+            candidate_plan = self._build_zone_room_suggestion_plan(
+                max_distance_m=options["max_distance_m"],
+                room_port_limits=room_port_limits,
+                same_floor_only=options["same_floor_only"],
+                current_floor_only=bool(options.get("ignore_other_floors", False)),
+                design_strategy=strategy,
+            )
+            signature = (
+                tuple(
+                    sorted(
+                        (
+                            item["zone_id"],
+                            item["kind"],
+                            tuple(sorted(item["data_point_names"])),
+                        )
+                        for item in candidate_plan["suggestions"]
+                    )
+                ),
+                tuple(candidate_plan["unassigned"]),
+            )
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            design_options.append(candidate_plan)
+
+        if not design_options:
+            design_options = [
+                self._build_zone_room_suggestion_plan(
+                    max_distance_m=options["max_distance_m"],
+                    room_port_limits=room_port_limits,
+                    same_floor_only=options["same_floor_only"],
+                    current_floor_only=bool(options.get("ignore_other_floors", False)),
+                )
+            ]
+
+        option_labels = []
+        for index, candidate_plan in enumerate(design_options, start=1):
+            candidate_suggestions = candidate_plan["suggestions"]
+            candidate_comms = sum(
+                1
+                for item in candidate_suggestions
+                if item["kind"] == "comms_room"
+            )
+            candidate_ders = len(candidate_suggestions) - candidate_comms
+            assigned = sum(
+                len(item["data_point_names"]) for item in candidate_suggestions
+            )
+            zone_summary = "; ".join(
+                f"{usage['zone_name']} "
+                f"{'DER' if usage['kind'] == 'distributed_equipment_room' else 'CR'} "
+                f"{usage['proposed']}/{usage['limit'] or 'unlimited'}"
+                for usage in candidate_plan.get("zone_usage", [])
+                if usage["proposed"]
+            )
+            option_labels.append(
+                f"Option {index} - {strategy_names.get(candidate_plan['strategy'], candidate_plan['strategy'])}: "
+                f"{candidate_comms} CR, {candidate_ders} DER, "
+                f"{assigned} assigned, {len(candidate_plan['unassigned'])} unassigned"
+                + (f" | {zone_summary}" if zone_summary else "")
+            )
+        while True:
+            selection_dialog = ZoneDesignOptionsSelectionDialog(
+                option_labels, self
+            )
+            if selection_dialog.exec() != QDialog.Accepted:
+                return
+            if selection_dialog.result_action == "export":
+                self._export_zone_design_options_pdf(
+                    design_options,
+                    strategy_names,
+                    options,
+                    room_port_limits,
+                )
+                continue
+            plan = design_options[selection_dialog.selected_index()]
+            break
         suggestions = plan["suggestions"]
         if not suggestions:
             QMessageBox.warning(
@@ -5646,6 +6635,7 @@ class CableRouteEditor(QMainWindow):
         assigned_count = sum(len(item["data_point_names"]) for item in suggestions)
         assigned_ports = sum(int(item["ports"]) for item in suggestions)
         confirmation = [
+            f"Design option: {strategy_names.get(plan['strategy'], plan['strategy'])}",
             f"Suggested comms rooms: {comms_count}",
             f"Suggested DERs: {der_count}",
             f"Assigned data-port locations: {assigned_count}",
@@ -5655,6 +6645,24 @@ class CableRouteEditor(QMainWindow):
             f"DER capacity: {room_port_limits['distributed_equipment_room']} ports "
             f"({options['der_max_switches']} switches)",
             f"Currently unassigned: {len(plan['unassigned'])}",
+            "",
+            "Zone usage (existing + proposed / limit):",
+        ]
+        for usage in plan.get("zone_usage", []):
+            if not usage["proposed"] and not usage["existing"]:
+                continue
+            kind_label = (
+                "DER"
+                if usage["kind"] == "distributed_equipment_room"
+                else "CR"
+            )
+            limit_label = str(usage["limit"]) if usage["limit"] else "unlimited"
+            confirmation.append(
+                f"  {usage['zone_name']} - {kind_label}: "
+                f"{usage['existing']} + {usage['proposed']} / {limit_label}"
+            )
+        confirmation.extend(
+            [
             "",
             (
                 "Data ports will be kept on the same floor."
@@ -5668,7 +6676,8 @@ class CableRouteEditor(QMainWindow):
             ),
             "",
             "Apply these suggestions?",
-        ]
+            ]
+        )
         if QMessageBox.question(
             self,
             "Apply Zone-based Equipment Room Suggestions",
@@ -5708,6 +6717,7 @@ class CableRouteEditor(QMainWindow):
                 suggestion["x"],
                 suggestion["y"],
                 kind=kind,
+                max_cable_length_m=float(options["max_distance_m"]),
             )
             for location in self.store.data.get("locations", []):
                 if str(location.get("name", "")).strip() == room_name:
@@ -5743,6 +6753,21 @@ class CableRouteEditor(QMainWindow):
                         None,
                     )
                     if point is None:
+                        continue
+                    point_anchor_name = str(
+                        (
+                            suggestion.get("data_point_anchor_names", {}) or {}
+                        ).get(point_name, "")
+                        or ""
+                    ).strip()
+                    if (
+                        point_anchor_name
+                        and point_anchor_name != point_name
+                        and not self._safe_add_same_floor_edge(
+                            point_name, point_anchor_name
+                        )
+                    ):
+                        missing_anchor.append(point_name)
                         continue
                     if hasattr(self.store, "data_point_required_port_count"):
                         connection_ports = self.store.data_point_required_port_count(
@@ -5957,26 +6982,107 @@ class CableRouteEditor(QMainWindow):
             QMessageBox.critical(self, "Autoroute", "No comms rooms found.")
             return
 
+        # Room-type asset edits can change the number of physical ports needed
+        # at every placed data point. Synchronise both the point quantities and
+        # any existing graph connections before selecting autoroute candidates.
+        required_ports_by_name = {}
+        quantity_sync_required = False
+        for point in self.store.data.get("data_points", []):
+            if not isinstance(point, dict):
+                continue
+            point_name = str(point.get("name", "") or "").strip()
+            if not point_name:
+                continue
+            room_type_id = str(point.get("room_type_id", "") or "").strip()
+            required_ports = (
+                self.store.room_type_cable_qty(room_type_id)
+                if room_type_id
+                else self.store.data_point_required_port_count(point)
+            )
+            required_ports_by_name[point_name] = int(required_ports)
+            try:
+                stored_ports = int(point.get("qty", 1) or 0)
+            except (TypeError, ValueError):
+                stored_ports = 1
+            if stored_ports != int(required_ports):
+                quantity_sync_required = True
+
+        for connection in self.store.data.get("connections", []):
+            if not isinstance(connection, dict):
+                continue
+            point_name = str(connection.get("to", "") or "").strip()
+            if point_name not in required_ports_by_name:
+                point_name = str(connection.get("from", "") or "").strip()
+            if point_name not in required_ports_by_name:
+                continue
+            try:
+                connection_ports = int(connection.get("qty", 1) or 0)
+            except (TypeError, ValueError):
+                connection_ports = 1
+            if connection_ports != required_ports_by_name[point_name]:
+                quantity_sync_required = True
+                break
+
+        undo_pushed = False
+        if quantity_sync_required:
+            self.push_undo_state("Update data point quantities for autoroute")
+            undo_pushed = True
+        self.store.sync_all_room_type_quantities()
+
         graph, points = self._build_routing_graph()
         same_floor_only = bool(self.autoroute_same_floor_check.isChecked())
+        follow_existing = bool(
+            self.autoroute_follow_existing_check.isChecked()
+        )
+        ignore_unconnected = bool(
+            self.autoroute_ignore_unconnected_check.isChecked()
+        )
         existing_targets = self._existing_connection_targets()
+        graph_unconnected = (
+            self._unconnected_data_point_names() if ignore_unconnected else set()
+        )
+        preferred_edges = (
+            _autoroute_existing_route_edges(
+                graph,
+                comms_rooms,
+                self.store.data.get("connections", []),
+            )
+            if follow_existing
+            else set()
+        )
 
         data_points = [
-            item
+            {
+                **item,
+                "_required_ports": self.store.data_point_required_port_count(item),
+            }
             for item in self.store.data.get("data_points", [])
             if str(item.get("name", "")).strip()
             and str(item.get("name", "")).strip() not in existing_targets
+            and str(item.get("name", "")).strip() not in graph_unconnected
+            and self.store.data_point_required_port_count(item) > 0
         ]
 
-        skipped_existing = len(self.store.data.get("data_points", [])) - len(
-            data_points
+        skipped_existing = sum(
+            1
+            for item in self.store.data.get("data_points", [])
+            if str(item.get("name", "")).strip() in existing_targets
+        )
+        skipped_graph_unconnected = sum(
+            1
+            for item in self.store.data.get("data_points", [])
+            if str(item.get("name", "")).strip() in graph_unconnected
+            and str(item.get("name", "")).strip() not in existing_targets
         )
 
         if not data_points:
             QMessageBox.information(
                 self,
                 "Autoroute",
-                f"No data points to autoroute. {skipped_existing} already had connections.",
+                "No data points to autoroute. "
+                f"{skipped_existing} already had connections and "
+                f"{skipped_graph_unconnected} were ignored because they are "
+                "not connected to the routing graph.",
             )
             return
 
@@ -6023,7 +7129,13 @@ class CableRouteEditor(QMainWindow):
             with ProcessPoolExecutor(
                 max_workers=worker_count,
                 initializer=_init_autoroute_process,
-                initargs=(graph, points, comms_rooms, same_floor_only),
+                initargs=(
+                    graph,
+                    points,
+                    comms_rooms,
+                    same_floor_only,
+                    preferred_edges,
+                ),
             ) as pool:
                 futures = [
                     pool.submit(_autoroute_data_point_worker, data_point)
@@ -6051,6 +7163,7 @@ class CableRouteEditor(QMainWindow):
                     message_label.setText(
                         f"Autorouting with {worker_count} process(es)"
                         + (" on the same floor only..." if same_floor_only else "...")
+                        + (" Following existing routes." if follow_existing else "")
                     )
                     QApplication.processEvents()
 
@@ -6093,15 +7206,19 @@ class CableRouteEditor(QMainWindow):
                     "to": result["to"],
                     "qty": result["qty"],
                     "route_profile": result.get("route_profile", ""),
+                    "route_path": list(result.get("route_path", [])),
+                    "length_m": round(float(result.get("cost", 0.0) or 0.0), 3),
                 }
             )
 
         if created_rows:
-            self.push_undo_state("Autoroute data points")
+            if not undo_pushed:
+                self.push_undo_state("Autoroute data points")
             self.store.data.setdefault("connections", []).extend(created_rows)
             self.set_status(
                 f"Autorouted {len(created_rows)} data point(s) using {worker_count} process(es)"
                 + (" on the same floor only" if same_floor_only else "")
+                + (" while following existing routes" if follow_existing else "")
             )
 
         message_lines = [f"Created {len(created_rows)} connection(s)."]
@@ -6110,10 +7227,19 @@ class CableRouteEditor(QMainWindow):
             if same_floor_only
             else "Floor restriction: cross-floor routing permitted."
         )
+        message_lines.append(
+            f"Existing-route preference: {'enabled' if follow_existing else 'disabled'}."
+        )
 
         if skipped_existing:
             message_lines.append(
                 f"Skipped {skipped_existing} already-connected data point(s)."
+            )
+
+        if skipped_graph_unconnected:
+            message_lines.append(
+                f"Ignored {skipped_graph_unconnected} data point(s) not connected "
+                "to the routing graph."
             )
 
         if skipped_unreachable:
@@ -6359,6 +7485,8 @@ class CableRouteEditor(QMainWindow):
     def _activate_loaded_project(self, store, path, status_message):
         self.store = store
         self._render_data_revision += 1
+        self._measure_data_point_name = None
+        self._clear_data_room_measurement_overlay()
         self.bulk_location_session = None
         self.bulk_data_point_session = None
         self.current_json_path = str(path)
@@ -6619,6 +7747,106 @@ class CableRouteEditor(QMainWindow):
             f"{output_path}",
         )
 
+    def export_equipment_room_extents_pdf(self):
+        rooms = [
+            row
+            for row in self.store.data.get("locations", [])
+            if isinstance(row, dict)
+            and str(row.get("kind", "")).strip()
+            in {"comms_room", "distributed_equipment_room"}
+        ]
+        if not rooms:
+            QMessageBox.information(
+                self,
+                "Equipment Room Extents PDF",
+                "No comms rooms or distributed equipment rooms are present.",
+            )
+            return
+
+        options_dialog = EquipmentRoomExtentsPdfOptionsDialog(self)
+        if options_dialog.exec() != QDialog.Accepted:
+            return
+        options = options_dialog.export_options()
+        source_path = (
+            getattr(self.store, "storage_path", "") or self.current_json_path or ""
+        )
+        base_path = Path(source_path) if source_path else Path("cable_routes.crsdb")
+        initial = str(
+            base_path.with_suffix("").with_name(
+                base_path.stem + "_equipment_room_extents.pdf"
+            )
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Equipment Room Extents PDF",
+            initial,
+            "PDF files (*.pdf)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            payloads = []
+            for room in sorted(
+                rooms,
+                key=lambda row: (
+                    int(row.get("floor", 0) or 0),
+                    str(row.get("name", "")),
+                ),
+            ):
+                payloads.append(
+                    self._equipment_room_graph_extent_overlay(
+                        name=str(room.get("name", "")).strip(),
+                        floor=int(room.get("floor", 0) or 0),
+                        x=float(room.get("x", 0.0)),
+                        y=float(room.get("y", 0.0)),
+                        distance_limit=max(
+                            0.1,
+                            float(room.get("max_cable_length_m", 90.0) or 90.0),
+                        ),
+                        source_name=str(room.get("name", "")).strip(),
+                        include_current=True,
+                    )
+                )
+            from equipment_room_extents_pdf import export_equipment_room_extents_pdf
+
+            output_path = export_equipment_room_extents_pdf(
+                self.store.data,
+                payloads,
+                path,
+                source_path=source_path,
+                paper_size=options["paper_size"],
+                scale=options["scale"],
+                revision_number=self.latest_project_revision_number(),
+            )
+        except ImportError as exc:
+            QMessageBox.critical(
+                self,
+                "Equipment Room Extents PDF failed",
+                f"PDF export requires reportlab.\n\n{exc}",
+            )
+            return
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Equipment Room Extents PDF failed", str(exc)
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.store.data["equipment_room_extents_pdf_settings"] = dict(options)
+        self.set_status(
+            f"Exported equipment room extents PDF: {Path(output_path).name}"
+        )
+        QMessageBox.information(
+            self,
+            "Equipment Room Extents PDF complete",
+            f"Exported {len(payloads)} room extent sheet(s) to:\n\n{output_path}",
+        )
+
     def export_project_summary_pdf(self):
         options = ProjectSummaryPdfOptionsDialog(self)
         if options.exec() != QDialog.Accepted:
@@ -6780,6 +8008,66 @@ class CableRouteEditor(QMainWindow):
         if hasattr(self.canvas, "invalidate_dxf_cache"):
             self.canvas.invalidate_dxf_cache()
         self.refresh_canvas()
+
+    def remove_invalid_connections_and_routes(self):
+        invalid = self.store.invalid_connections_and_routes()
+        invalid_connections = invalid["connections"]
+        invalid_routes = invalid["routes"]
+        connection_count = len(invalid_connections)
+        route_count = len(invalid_routes)
+        if not connection_count and not route_count:
+            QMessageBox.information(
+                self,
+                "Remove Invalid Connections and Routes",
+                "No invalid connections or routing edges were found.",
+            )
+            self.set_status("No invalid connections or routes found")
+            return
+
+        examples = []
+        for row in invalid_connections[:4]:
+            examples.append(f"Connection {row['id']}: {row['reason']}")
+        for row in invalid_routes[:4]:
+            label = f"{row['from']} -> {row['to']}".strip(" ->") or "unnamed route"
+            examples.append(f"Route {label}: {row['reason']}")
+        detail = "\n".join(f"• {value}" for value in examples)
+        if connection_count + route_count > len(examples):
+            detail += f"\n• …and {connection_count + route_count - len(examples)} more"
+        message = (
+            f"Remove {connection_count} invalid connection(s) and "
+            f"{route_count} invalid routing edge(s)?\n\n"
+            "Only those connection and route records will be removed. Points, "
+            "rooms, transitions and valid graph edges will not be changed."
+        )
+        if detail:
+            message += f"\n\n{detail}"
+        if (
+            QMessageBox.question(
+                self,
+                "Remove Invalid Connections and Routes",
+                message,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+
+        self.push_undo_state("Remove invalid connections and routes")
+        removed = self.store.remove_invalid_connections_and_routes()
+        removed_connections = len(removed["connections"])
+        removed_routes = len(removed["routes"])
+        self.refresh_canvas()
+        self.set_status(
+            f"Removed {removed_connections} invalid connection(s) and "
+            f"{removed_routes} invalid route(s)"
+        )
+        QMessageBox.information(
+            self,
+            "Invalid Connections and Routes Removed",
+            f"Removed {removed_connections} invalid connection(s) and "
+            f"{removed_routes} invalid routing edge(s).",
+        )
 
     def validate_json(self):
         errors = self.store.validate()
@@ -7051,7 +8339,7 @@ class CableRouteEditor(QMainWindow):
             ("extension_distance_m", "Extension m", 100),
             ("room_type_id", "Room Type", 120),
         ]
-        TableListEditor(
+        DataPointsTableEditor(
             self,
             "Data Points",
             columns,
@@ -7061,14 +8349,47 @@ class CableRouteEditor(QMainWindow):
 
     def _save_data_points(self, items):
         self.push_undo_state("Save data points")
-        self.store.data["data_points"] = items
+        old_names = {
+            str(point.get("name", "")).strip()
+            for point in self.store.data.get("data_points", [])
+            if str(point.get("name", "")).strip()
+        }
+        clean_items = []
+        for source in items:
+            point = dict(source)
+            point["name"] = str(point.get("name", "")).strip()
+            point["qty"] = max(1, int(point.get("qty", 1) or 1))
+            point["extension_distance_m"] = max(
+                0.0,
+                float(point.get("extension_distance_m", 0.0) or 0.0),
+            )
+            point["department_ids"] = [
+                str(value).strip()
+                for value in point.get("department_ids", [])
+                if str(value).strip()
+            ]
+            point["room_type_id"] = str(
+                point.get("room_type_id", "") or ""
+            ).strip()
+            if point["room_type_id"]:
+                point["qty"] = self.store.room_type_cable_qty(
+                    point["room_type_id"]
+                )
+            clean_items.append(point)
+
+        new_names = {
+            point["name"] for point in clean_items if point.get("name")
+        }
+        for removed_name in sorted(old_names - new_names):
+            self.store.delete_point(removed_name)
+        self.store.data["data_points"] = clean_items
 
         for point in self.store.data.get("data_points", []):
             name = str(point.get("name", "")).strip()
             if name:
                 self.store.sync_connection_qty_for_data_point(name)
 
-        self.set_status("Data points updated")
+        self.set_status(f"Updated {len(clean_items)} data point(s)")
         self.refresh_canvas()
 
     def manage_transitions(self):
@@ -7544,6 +8865,9 @@ class CableRouteEditor(QMainWindow):
                 "remaining": count,
                 "kind": kind,
                 "department_ids": department_ids,
+                "max_cable_length_m": float(
+                    dialog.result.get("max_cable_length_m", 90.0) or 90.0
+                ),
             }
 
             self.mode_combo.setCurrentText("location")
@@ -7642,6 +8966,499 @@ class CableRouteEditor(QMainWindow):
         ):
             self.canvas.set_placement_zone_preview(None)
 
+    def _set_equipment_room_extent_overlay(self, overlay):
+        if hasattr(self, "canvas") and hasattr(
+            self.canvas, "set_equipment_room_extent_overlay"
+        ):
+            self.canvas.set_equipment_room_extent_overlay(overlay)
+
+    def _clear_equipment_room_extent_overlay(self):
+        self._set_equipment_room_extent_overlay(None)
+
+    def _set_data_room_measurement_overlay(self, overlay):
+        if hasattr(self, "canvas") and hasattr(
+            self.canvas, "set_data_room_measurement_overlay"
+        ):
+            self.canvas.set_data_room_measurement_overlay(overlay)
+
+    def _clear_data_room_measurement_overlay(self):
+        self._set_data_room_measurement_overlay(None)
+
+    def _data_room_measurement(self, data_point_name, room_name):
+        data_point_name = str(data_point_name or "").strip()
+        room_name = str(room_name or "").strip()
+        points = self.store.all_points()
+        data_point = points.get(data_point_name)
+        room = points.get(room_name)
+        if not data_point or not room:
+            return None
+
+        graph, points = self._build_routing_graph()
+        routing_anchors = self._routing_anchor_names()
+
+        def endpoint_candidates(name, record):
+            if graph.get(name):
+                return [(name, 0.0)]
+            result = []
+            endpoint_floor = int(record.get("floor", 0))
+            for anchor_name in routing_anchors:
+                anchor = points.get(anchor_name)
+                if not anchor or int(anchor.get("floor", 0)) != endpoint_floor:
+                    continue
+                result.append(
+                    (
+                        anchor_name,
+                        math.hypot(
+                            float(record.get("x", 0.0))
+                            - float(anchor.get("x", 0.0)),
+                            float(record.get("y", 0.0))
+                            - float(anchor.get("y", 0.0)),
+                        ),
+                    )
+                )
+            return result
+
+        point_candidates = endpoint_candidates(data_point_name, data_point)
+        room_candidates = endpoint_candidates(room_name, room)
+        best = None
+        for point_anchor, point_spur in point_candidates:
+            for room_anchor, room_spur in room_candidates:
+                graph_distance, route_path = self._shortest_path_length(
+                    graph, point_anchor, room_anchor
+                )
+                if graph_distance is None or not route_path:
+                    continue
+                routed_distance = (
+                    float(point_spur)
+                    + float(graph_distance)
+                    + float(room_spur)
+                )
+                score = (routed_distance, float(point_spur) + float(room_spur))
+                if best is None or score < best[0]:
+                    best = (
+                        score,
+                        routed_distance,
+                        route_path,
+                        point_anchor,
+                        room_anchor,
+                    )
+        if best is None:
+            return None
+
+        _score, routed_distance, route_path, point_anchor, room_anchor = best
+        extension = max(
+            0.0,
+            float(data_point.get("extension_distance_m", 0.0) or 0.0),
+        )
+        total_distance = routed_distance + extension
+        distance_limit = max(
+            0.1, float(room.get("max_cable_length_m", 90.0) or 90.0)
+        )
+
+        ordered_names = [data_point_name]
+        if point_anchor != data_point_name:
+            ordered_names.append(point_anchor)
+        ordered_names.extend(route_path)
+        if room_anchor != room_name:
+            ordered_names.append(room_name)
+        elif not ordered_names or ordered_names[-1] != room_name:
+            ordered_names.append(room_name)
+        deduplicated_names = []
+        for name in ordered_names:
+            if not deduplicated_names or name != deduplicated_names[-1]:
+                deduplicated_names.append(name)
+
+        path_points = []
+        for name in deduplicated_names:
+            record = points.get(name)
+            if not record:
+                continue
+            path_points.append(
+                {
+                    "name": name,
+                    "floor": int(record.get("floor", 0)),
+                    "x": float(record.get("x", 0.0)),
+                    "y": float(record.get("y", 0.0)),
+                }
+            )
+
+        return {
+            "data_point_name": data_point_name,
+            "room_name": room_name,
+            "path_points": path_points,
+            "routed_distance_m": float(routed_distance),
+            "extension_distance_m": float(extension),
+            "total_distance_m": float(total_distance),
+            "distance_limit_m": float(distance_limit),
+            "within_limit": bool(total_distance <= distance_limit + 1e-9),
+        }
+
+    def _nearest_measurement_target(self, x, y, floor, names):
+        points = self.store.all_points()
+        best_name = None
+        best_distance = None
+        radius = float(self._select_pick_radius())
+        for name in names:
+            point = points.get(name)
+            if not point or int(point.get("floor", 0)) != int(floor):
+                continue
+            distance = math.hypot(
+                float(point.get("x", 0.0)) - float(x),
+                float(point.get("y", 0.0)) - float(y),
+            )
+            if distance <= radius and (
+                best_distance is None or distance < best_distance
+            ):
+                best_name = name
+                best_distance = distance
+        return best_name
+
+    def _handle_data_room_measurement_click(self, x, y, floor):
+        if not self._measure_data_point_name:
+            point_name = self._nearest_measurement_target(
+                x, y, floor, set(self.data_point_names())
+            )
+            if not point_name:
+                self.set_status("Measure mode: click a data point first")
+                return
+            self._measure_data_point_name = point_name
+            self.selected_point_name = point_name
+            self._clear_data_room_measurement_overlay()
+            self.refresh_canvas()
+            self.set_status(
+                f"Measure start: {point_name}. Now click a comms room or DER"
+            )
+            return
+
+        room_names = set(self.comms_room_names())
+        for location in self.store.data.get("locations", []):
+            name = str(location.get("name", "")).strip()
+            if name.upper().startswith(("CR", "DER")):
+                room_names.add(name)
+        room_name = self._nearest_measurement_target(x, y, floor, room_names)
+        if not room_name:
+            self.set_status(
+                f"Measure start: {self._measure_data_point_name}. "
+                "Click a comms room or DER"
+            )
+            return
+
+        point_name = self._measure_data_point_name
+        result = self._data_room_measurement(point_name, room_name)
+        if result is None:
+            QMessageBox.warning(
+                self,
+                "No Graph Route",
+                f"No routing-graph path connects {point_name} to {room_name}.",
+            )
+            self.set_status(
+                f"No graph route from {point_name} to {room_name}; choose another room"
+            )
+            return
+
+        self._measure_data_point_name = None
+        self.selected_point_name = room_name
+        self._set_data_room_measurement_overlay(result)
+        self.refresh_canvas()
+        difference = abs(
+            result["distance_limit_m"] - result["total_distance_m"]
+        )
+        outcome = (
+            f"within limit by {difference:.2f} m"
+            if result["within_limit"]
+            else f"exceeds limit by {difference:.2f} m"
+        )
+        self.set_status(
+            f"{point_name} to {room_name}: {result['total_distance_m']:.2f} m "
+            f"({outcome}). Click another data point to measure again"
+        )
+
+    @staticmethod
+    def _clip_extent_polyline(points, distance_limit):
+        points = [(float(x), float(y)) for x, y in points]
+        remaining = max(0.0, float(distance_limit))
+        if len(points) < 2 or remaining <= 0.0:
+            return points[:1]
+        result = [points[0]]
+        for start, end in zip(points, points[1:]):
+            length = math.hypot(end[0] - start[0], end[1] - start[1])
+            if length <= 1e-9:
+                continue
+            if length <= remaining + 1e-9:
+                result.append(end)
+                remaining -= length
+                continue
+            ratio = remaining / length
+            result.append(
+                (
+                    start[0] + (end[0] - start[0]) * ratio,
+                    start[1] + (end[1] - start[1]) * ratio,
+                )
+            )
+            break
+        return result
+
+    @staticmethod
+    def _extent_boundary_polyline(polylines):
+        points = sorted(
+            {
+                (round(float(point[0]), 6), round(float(point[1]), 6))
+                for polyline in polylines
+                for point in polyline
+                if isinstance(point, (list, tuple)) and len(point) >= 2
+            }
+        )
+        if len(points) < 3:
+            return points
+
+        def cross(origin, a, b):
+            return (a[0] - origin[0]) * (b[1] - origin[1]) - (
+                a[1] - origin[1]
+            ) * (b[0] - origin[0])
+
+        lower = []
+        for point in points:
+            while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+                lower.pop()
+            lower.append(point)
+        upper = []
+        for point in reversed(points):
+            while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+                upper.pop()
+            upper.append(point)
+        hull = lower[:-1] + upper[:-1]
+        return hull + [hull[0]] if len(hull) >= 3 else hull
+
+    def _equipment_room_graph_extent_overlay(
+        self,
+        *,
+        name,
+        floor,
+        x,
+        y,
+        distance_limit,
+        source_name="",
+        include_current=False,
+        preview=False,
+    ):
+        floor = int(floor)
+        x = float(x)
+        y = float(y)
+        distance_limit = max(0.1, float(distance_limit))
+        graph, points = self._build_routing_graph()
+
+        source_name = str(source_name or "").strip()
+        source_anchor = None
+        source_spur = 0.0
+        if source_name in graph and graph.get(source_name):
+            source_anchor = source_name
+        else:
+            best = None
+            for anchor_name in self._routing_anchor_names():
+                anchor = points.get(anchor_name)
+                if not anchor or int(anchor.get("floor", 0)) != floor:
+                    continue
+                distance = math.hypot(
+                    float(anchor.get("x", 0.0)) - x,
+                    float(anchor.get("y", 0.0)) - y,
+                )
+                candidate = (distance, anchor_name)
+                if best is None or candidate < best:
+                    best = candidate
+            if best is not None:
+                source_spur, source_anchor = best
+
+        possible_polylines = []
+        current_polylines = []
+        current_max_target = ""
+        current_max_distance = 0.0
+        current_max_point = None
+        distances = {}
+
+        if source_anchor is not None:
+            anchor = points[source_anchor]
+            anchor_xy = (
+                float(anchor.get("x", 0.0)),
+                float(anchor.get("y", 0.0)),
+            )
+            if source_anchor != source_name or source_spur > 1e-9:
+                clipped_spur = self._clip_extent_polyline(
+                    [(x, y), anchor_xy], distance_limit
+                )
+                if len(clipped_spur) >= 2:
+                    possible_polylines.append(clipped_spur)
+
+            if source_spur <= distance_limit + 1e-9:
+                distances[source_anchor] = source_spur
+                heap = [(source_spur, source_anchor)]
+                while heap:
+                    cost, node = heapq.heappop(heap)
+                    if cost > distance_limit + 1e-9:
+                        continue
+                    if cost > distances.get(node, float("inf")) + 1e-9:
+                        continue
+                    for next_node, weight in graph.get(node, []):
+                        next_cost = cost + float(weight)
+                        if next_cost < distances.get(next_node, float("inf")) - 1e-9:
+                            distances[next_node] = next_cost
+                            heapq.heappush(heap, (next_cost, next_node))
+
+                for edge in self.store.data.get("corridors", {}).get("edges", []):
+                    a_name = str(edge.get("from", "")).strip()
+                    b_name = str(edge.get("to", "")).strip()
+                    a = points.get(a_name)
+                    b = points.get(b_name)
+                    if not a or not b:
+                        continue
+                    if int(a.get("floor", 0)) != floor or int(b.get("floor", 0)) != floor:
+                        continue
+                    a_xy = (float(a.get("x", 0.0)), float(a.get("y", 0.0)))
+                    b_xy = (float(b.get("x", 0.0)), float(b.get("y", 0.0)))
+                    edge_length = math.hypot(b_xy[0] - a_xy[0], b_xy[1] - a_xy[1])
+                    if edge_length <= 1e-9:
+                        continue
+                    da = distances.get(a_name, float("inf"))
+                    db = distances.get(b_name, float("inf"))
+                    reach_a = max(0.0, distance_limit - da)
+                    reach_b = max(0.0, distance_limit - db)
+                    if reach_a <= 0.0 and reach_b <= 0.0:
+                        continue
+                    if reach_a + reach_b >= edge_length - 1e-9:
+                        possible_polylines.append([a_xy, b_xy])
+                        continue
+                    if reach_a > 0.0:
+                        ratio = min(1.0, reach_a / edge_length)
+                        possible_polylines.append(
+                            [
+                                a_xy,
+                                (
+                                    a_xy[0] + (b_xy[0] - a_xy[0]) * ratio,
+                                    a_xy[1] + (b_xy[1] - a_xy[1]) * ratio,
+                                ),
+                            ]
+                        )
+                    if reach_b > 0.0:
+                        ratio = min(1.0, reach_b / edge_length)
+                        possible_polylines.append(
+                            [
+                                b_xy,
+                                (
+                                    b_xy[0] + (a_xy[0] - b_xy[0]) * ratio,
+                                    b_xy[1] + (a_xy[1] - b_xy[1]) * ratio,
+                                ),
+                            ]
+                        )
+
+        if include_current and source_anchor is not None:
+            for connection in self.store.data.get("connections", []):
+                if str(connection.get("from", "")).strip() != source_name:
+                    continue
+                target_name = str(connection.get("to", "")).strip()
+                target = points.get(target_name)
+                if not target or int(target.get("floor", 0)) != floor:
+                    continue
+                target_anchor = target_name if graph.get(target_name) else None
+                target_spur = 0.0
+                if target_anchor is None:
+                    target_anchor, target_spur = self._nearest_routing_anchor_for_point(
+                        target_name
+                    )
+                if target_anchor is None:
+                    continue
+                route_length, node_path = self._shortest_path_length(
+                    graph, source_anchor, target_anchor
+                )
+                if not node_path:
+                    continue
+                route = [(x, y)]
+                route.extend(
+                    (
+                        float(points[node_name].get("x", 0.0)),
+                        float(points[node_name].get("y", 0.0)),
+                    )
+                    for node_name in node_path
+                    if int(points[node_name].get("floor", 0)) == floor
+                )
+                target_xy = (
+                    float(target.get("x", 0.0)),
+                    float(target.get("y", 0.0)),
+                )
+                if not route or route[-1] != target_xy:
+                    route.append(target_xy)
+                extension = max(
+                    0.0, float(target.get("extension_distance_m", 0.0) or 0.0)
+                )
+                served_distance = (
+                    float(source_spur)
+                    + float(route_length or 0.0)
+                    + float(target_spur or 0.0)
+                    + extension
+                )
+                if len(route) >= 2:
+                    current_polylines.append(route)
+                if served_distance > current_max_distance:
+                    current_max_distance = served_distance
+                    current_max_target = target_name
+                    current_max_point = target_xy
+
+        return {
+            "name": str(name),
+            "floor": floor,
+            "x": x,
+            "y": y,
+            "distance_limit_m": distance_limit,
+            "possible_polylines": possible_polylines,
+            "current_polylines": current_polylines,
+            "boundary_polyline": self._extent_boundary_polyline(
+                possible_polylines
+            ),
+            "current_max_target": current_max_target,
+            "current_max_distance_m": current_max_distance,
+            "current_max_point": current_max_point,
+            "preview": bool(preview),
+        }
+
+    def show_equipment_room_extents(self, location_name):
+        location_name = str(location_name or "").strip()
+        location = next(
+            (
+                row
+                for row in self.store.data.get("locations", [])
+                if str(row.get("name", "")).strip() == location_name
+            ),
+            None,
+        )
+        if not location:
+            return
+
+        kind = str(location.get("kind", "")).strip()
+        if kind not in {"comms_room", "distributed_equipment_room"} and not (
+            location_name.upper().startswith("DER") and kind == "location"
+        ):
+            return
+
+        floor = int(location.get("floor", 0))
+        x = float(location.get("x", 0.0))
+        y = float(location.get("y", 0.0))
+        distance_limit = max(
+            0.1, float(location.get("max_cable_length_m", 90.0) or 90.0)
+        )
+        self._pinned_equipment_room_extent_name = location_name
+        self._set_equipment_room_extent_overlay(
+            self._equipment_room_graph_extent_overlay(
+                name=location_name,
+                floor=floor,
+                x=x,
+                y=y,
+                distance_limit=distance_limit,
+                source_name=location_name,
+                include_current=True,
+            )
+        )
+        self.set_status(
+            f"Showing {location_name} graph extents within {distance_limit:.1f} m"
+        )
+
     def _update_placement_zone_preview(self, x, y):
         if self.placement_zone_start is None or not hasattr(
             self.canvas, "set_placement_zone_preview"
@@ -7664,10 +9481,31 @@ class CableRouteEditor(QMainWindow):
         )
 
     def on_mouse_move(self, _event, sx, sy):
-        if (
-            self.mode_combo.currentText() != "placement_zone"
-            or self.placement_zone_start is None
-        ):
+        mode = self.mode_combo.currentText()
+        if mode == "location":
+            session = self.bulk_location_session or {}
+            kind = str(session.get("kind", "")).strip()
+            if kind in {"comms_room", "distributed_equipment_room"} or not session:
+                x, y = self.snap(sx, sy)
+                self._set_equipment_room_extent_overlay(
+                    self._equipment_room_graph_extent_overlay(
+                        name="Proposed comms room / DER",
+                        floor=int(self.floor_spin.value()),
+                        x=float(x),
+                        y=float(y),
+                        distance_limit=max(
+                            0.1,
+                            float(session.get("max_cable_length_m", 90.0) or 90.0),
+                        ),
+                        preview=True,
+                    )
+                )
+            else:
+                self._clear_equipment_room_extent_overlay()
+            return
+        if mode != "placement_zone" or self.placement_zone_start is None:
+            if not self._pinned_equipment_room_extent_name:
+                self._clear_equipment_room_extent_overlay()
             return
         floor, _, _ = self.placement_zone_start
         if int(floor) != int(self.floor_spin.value()):
@@ -7685,6 +9523,10 @@ class CableRouteEditor(QMainWindow):
 
         if mode == "pan":
             self.last_pan = event.position().toPoint()
+            return
+
+        if mode == "measure_data_room":
+            self._handle_data_room_measurement_click(x, y, floor)
             return
 
         if mode == "placement_zone":
@@ -7970,6 +9812,9 @@ class CableRouteEditor(QMainWindow):
                     y,
                     kind=session["kind"],
                     department_ids=list(session.get("department_ids", [])),
+                    max_cable_length_m=float(
+                        session.get("max_cable_length_m", 90.0) or 90.0
+                    ),
                 )
 
                 session["next_number"] = number
@@ -8017,9 +9862,32 @@ class CableRouteEditor(QMainWindow):
                     "This location type is not allowed at the selected point.",
                 )
                 return
-            self.store.add_location(name, floor, x, y, kind=kind, department_ids=[])
+            max_cable_length_m = 90.0
+            if kind in {"comms_room", "distributed_equipment_room"}:
+                max_cable_length_m, ok = QInputDialog.getDouble(
+                    self,
+                    "Equipment room distance limit",
+                    "Maximum cable distance (m):",
+                    90.0,
+                    0.1,
+                    100000.0,
+                    2,
+                )
+                if not ok:
+                    return
+            self.store.add_location(
+                name,
+                floor,
+                x,
+                y,
+                kind=kind,
+                department_ids=[],
+                max_cable_length_m=max_cable_length_m,
+            )
             self.set_status(f"Added {kind} {name}")
             self.refresh_canvas()
+            if kind in {"comms_room", "distributed_equipment_room"}:
+                self.show_equipment_room_extents(name)
             return
 
         if mode == "department":
@@ -8309,7 +10177,11 @@ class CableRouteEditor(QMainWindow):
                 self.refresh_canvas()
             return
 
-        if point.get("kind") in {"location", "comms_room"}:
+        if point.get("kind") in {
+            "location",
+            "comms_room",
+            "distributed_equipment_room",
+        }:
             location_item = next(
                 (
                     item
@@ -8341,9 +10213,23 @@ class CableRouteEditor(QMainWindow):
                         item["department_ids"] = list(
                             dialog.result.get("department_ids", [])
                         )
+                        item["cabinet_type"] = dialog.result.get(
+                            "cabinet_type", "standard"
+                        )
+                        item["max_network_cabinets"] = max(
+                            0,
+                            int(dialog.result.get("max_network_cabinets", 0) or 0),
+                        )
+                        item["max_cable_length_m"] = max(
+                            0.1,
+                            float(dialog.result.get("max_cable_length_m", 90.0) or 90.0),
+                        )
                         break
 
                 self.selected_point_name = new_name
+                if self._pinned_equipment_room_extent_name == picked:
+                    self._pinned_equipment_room_extent_name = new_name
+                    self.show_equipment_room_extents(new_name)
                 self.set_status(f"Edited {new_name}")
                 self.refresh_canvas()
             return
@@ -8491,6 +10377,7 @@ class CableRouteEditor(QMainWindow):
             show_edges_action = menu.addAction("Show all edge connections")
             estimate_cables_action = menu.addAction("Show estimated cables passing")
             find_topology_action = None
+            show_extents_action = None
             if (
                 kind in {"comms_room", "distributed_equipment_room"}
                 or (picked.upper().startswith("DER") and kind == "location")
@@ -8498,6 +10385,12 @@ class CableRouteEditor(QMainWindow):
                 getattr(self, "find_network_location_in_topology", None)
             ):
                 find_topology_action = menu.addAction("Find in topology map")
+            if kind in {"comms_room", "distributed_equipment_room"} or (
+                picked.upper().startswith("DER") and kind == "location"
+            ):
+                show_extents_action = menu.addAction(
+                    "Show current and possible extents"
+                )
 
             menu.addSeparator()
             copy_selected_action = menu.addAction(
@@ -8584,6 +10477,8 @@ class CableRouteEditor(QMainWindow):
                 and action == find_topology_action
             ):
                 self.find_network_location_in_topology(picked)
+            elif show_extents_action is not None and action == show_extents_action:
+                self.show_equipment_room_extents(picked)
             elif action == copy_selected_action:
                 self.copy_selected_template_items()
             elif action == paste_here_action:
