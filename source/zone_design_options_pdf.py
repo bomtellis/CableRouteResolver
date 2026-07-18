@@ -26,6 +26,27 @@ PAPER_SIZES = {
 }
 
 
+def _studio_enabled(settings, key, default=True):
+    return bool((settings or {}).get(key, default))
+
+
+def _studio_callout(settings, key):
+    value = ((settings or {}).get("callouts", {}) or {}).get(str(key), {})
+    return value if isinstance(value, dict) else {}
+
+
+def _zone_callout_text(zone, usage_rows):
+    label = _zone_label(zone)
+    matching = [row for row in usage_rows if row.get("zone_id") == zone.get("id")]
+    usage = []
+    for row in matching:
+        kind = "DER" if row.get("kind") == "distributed_equipment_room" else "CR"
+        usage.append(f"{kind} +{int(row.get('proposed', 0))}")
+    if usage:
+        label += " | " + ", ".join(usage)
+    return label[:110]
+
+
 def _text(value) -> str:
     return str(value or "").strip()
 
@@ -203,7 +224,9 @@ def _option_counts(plan: dict):
     ders = len(suggestions) - comms
     assigned = sum(len(row.get("data_point_names", []) or []) for row in suggestions)
     ports = sum(int(row.get("ports", 0) or 0) for row in suggestions)
-    return comms, ders, assigned, ports, len(plan.get("unassigned", []) or [])
+    unassigned_points = len(plan.get("unassigned", []) or [])
+    unassigned_ports = int(plan.get("unassigned_port_count", 0) or 0)
+    return comms, ders, assigned, ports, unassigned_points, unassigned_ports
 
 
 def _draw_cover(
@@ -240,7 +263,14 @@ def _draw_cover(
     settings_y = height - 55 * mm
     settings = [
         ("Cable limit", f"{float(planning_options.get('max_distance_m', 0.0)):.2f} m"),
-        ("Scope", _text(planning_options.get("scope")).title()),
+        (
+            "Planning scope",
+            (
+                f"Floor {int(planning_options.get('scope_floor', 0) or 0)} only"
+                if _text(planning_options.get("scope")) == "current"
+                else "All selected floors"
+            ),
+        ),
         (
             "Floor rule",
             "Same floor" if planning_options.get("same_floor_only") else "Cross-floor allowed",
@@ -265,8 +295,11 @@ def _draw_cover(
     top = settings_y - 30 * mm
     table_x = margin
     table_w = width - 2 * margin
-    columns = [0.07, 0.25, 0.10, 0.10, 0.13, 0.13, 0.12]
-    headings = ["OPTION", "STRATEGY", "CR", "DER", "ASSIGNED", "PORTS", "UNASSIGNED"]
+    columns = [0.05, 0.19, 0.06, 0.06, 0.10, 0.11, 0.11, 0.11, 0.19]
+    headings = [
+        "OPTION", "STRATEGY", "CR", "DER", "ASSIGNED PTS", "ASSIGNED PORTS",
+        "UNASSIGNED PTS", "UNASSIGNED PORTS", "EST. CABLE",
+    ]
     row_h = 12 * mm
     c.setFillColor(colors.HexColor("#203746"))
     c.rect(table_x, top - row_h, table_w, row_h, stroke=0, fill=1)
@@ -279,7 +312,7 @@ def _draw_cover(
 
     y = top - row_h
     for index, plan in enumerate(plans, 1):
-        comms, ders, assigned, ports, unassigned = _option_counts(plan)
+        comms, ders, assigned, ports, unassigned, unassigned_ports = _option_counts(plan)
         values = [
             str(index),
             strategy_names.get(plan.get("strategy"), _text(plan.get("strategy"))),
@@ -288,6 +321,8 @@ def _draw_cover(
             str(assigned),
             str(ports),
             str(unassigned),
+            str(unassigned_ports),
+            f"{float(plan.get('total_cable_length_m', 0.0) or 0.0):,.1f} m",
         ]
         fill = colors.HexColor("#f2f6f8") if index % 2 else colors.white
         c.setFillColor(fill)
@@ -302,6 +337,94 @@ def _draw_cover(
         y -= row_h
 
     y -= 8 * mm
+    c.setFont("Helvetica", 7.5)
+    c.setFillColor(colors.HexColor("#52616c"))
+    scope_note = (
+        "Counts cover unconnected demand on the selected planning floor only; "
+        "other floors are excluded and this is not a whole-model port total."
+        if _text(planning_options.get("scope")) == "current"
+        else "Counts cover unconnected demand in the selected planning scope, not every port in the model."
+    )
+    c.drawString(table_x, y, scope_note[:145])
+    y -= 6 * mm
+    if planning_options.get("same_floor_only"):
+        c.drawString(
+            table_x,
+            y,
+            "Same-floor satisfaction is evaluated independently for each floor; zero unassigned ports means that floor is fully satisfied.",
+        )
+        y -= 6 * mm
+
+    failed_plans = [
+        (index, plan)
+        for index, plan in enumerate(plans, 1)
+        if int(plan.get("unassigned_port_count", 0) or 0) > 0
+    ]
+    if failed_plans:
+        c.setFont("Helvetica-Bold", 8)
+        c.setFillColor(colors.HexColor("#a12b2b"))
+        c.drawString(table_x, y, "Coverage shortfall reasons")
+        y -= 5 * mm
+        for option_index, plan in failed_plans:
+            for reason_row in plan.get("shortfall_reasons", []) or []:
+                reason_text = (
+                    f"Option {option_index}, Floor {int(reason_row.get('floor', 0))}: "
+                    f"{int(reason_row.get('port_count', 0))} port(s) - "
+                    f"{_text(reason_row.get('reason'))}"
+                )
+                c.setFont("Helvetica", 7)
+                c.setFillColor(colors.HexColor("#52616c"))
+                c.drawString(table_x, y, reason_text[:155])
+                y -= 4.5 * mm
+            recommended_changes = list(
+                plan.get("recommended_zone_changes", []) or []
+            )
+            for change in recommended_changes:
+                kind = (
+                    "DERs"
+                    if change.get("kind") == "distributed_equipment_room"
+                    else "comms rooms"
+                )
+                change_text = (
+                    f"Option {option_index} verified alteration: "
+                    f"{_text(change.get('zone_name'))} - increase maximum {kind} "
+                    f"from {int(change.get('current_limit', 0))} "
+                    f"to {int(change.get('suggested_limit', 0))}."
+                )
+                c.setFont("Helvetica-Bold", 7)
+                c.setFillColor(colors.HexColor("#176b3a"))
+                c.drawString(table_x, y, change_text[:155])
+                y -= 4.5 * mm
+
+    changed_plans = [
+        (index, plan)
+        for index, plan in enumerate(plans, 1)
+        if plan.get("recommended_zone_changes")
+        and int(plan.get("unassigned_port_count", 0) or 0) <= 0
+    ]
+    if changed_plans:
+        c.setFont("Helvetica-Bold", 8)
+        c.setFillColor(colors.HexColor("#176b3a"))
+        c.drawString(table_x, y, "Zone alterations included in satisfactory plans")
+        y -= 5 * mm
+        for option_index, plan in changed_plans:
+            for change in plan.get("recommended_zone_changes", []) or []:
+                kind = (
+                    "DERs"
+                    if change.get("kind") == "distributed_equipment_room"
+                    else "comms rooms"
+                )
+                change_text = (
+                    f"Option {option_index}: {_text(change.get('zone_name'))} - "
+                    f"maximum {kind} {int(change.get('current_limit', 0))} to "
+                    f"{int(change.get('suggested_limit', 0))}."
+                )
+                c.setFont("Helvetica", 7)
+                c.setFillColor(colors.HexColor("#52616c"))
+                c.drawString(table_x, y, change_text[:155])
+                y -= 4.5 * mm
+
+    y -= 2 * mm
     c.setFont("Helvetica-Bold", 10)
     c.setFillColor(colors.HexColor("#203746"))
     c.drawString(margin, y, "Per-zone availability used by each option")
@@ -350,7 +473,10 @@ def _draw_callout_box(
     colour,
     box_position,
     font_size=6.5,
+    label_override=None,
 ):
+    if label_override is not None:
+        label = str(label_override)
     box_x, box_y, box_width, box_height, rail = box_position
     c.saveState()
     c.setStrokeColor(colors.HexColor(colour))
@@ -398,6 +524,8 @@ def _draw_zone(
     draw_box=True,
     draw_label=True,
     callout_box=None,
+    label_override=None,
+    font_scale=1.0,
 ):
     left, bottom = transform(float(zone.get("min_x", 0.0)), float(zone.get("min_y", 0.0)))
     right, top = transform(float(zone.get("max_x", 0.0)), float(zone.get("max_y", 0.0)))
@@ -411,16 +539,8 @@ def _draw_zone(
         c.setDash(2 * mm, 1 * mm)
         c.rect(x, y, width, height, stroke=1, fill=1)
         c.setDash()
-    label = _zone_label(zone)
-    matching = [row for row in usage_rows if row.get("zone_id") == zone.get("id")]
-    usage = []
-    for row in matching:
-        kind = "DER" if row.get("kind") == "distributed_equipment_room" else "CR"
-        usage.append(f"{kind} +{int(row.get('proposed', 0))}")
-    if usage:
-        label += " | " + ", ".join(usage)
+    label = _zone_callout_text(zone, usage_rows)
     if draw_label:
-        label = label[:110]
         if callout_box is None:
             callout_box = (x + 5 * mm, top - 10 * mm, 60 * mm, 7 * mm, "top")
         _draw_callout_box(
@@ -430,6 +550,8 @@ def _draw_zone(
             label=label,
             colour="#2474a8",
             box_position=callout_box,
+            label_override=label_override,
+            font_size=6.5 * float(font_scale),
         )
     c.restoreState()
 
@@ -524,6 +646,18 @@ def _room_equipment_counts(room, planning_options):
     return switches, cabinets
 
 
+def _room_callout_text(room, planning_options=None):
+    is_der = room.get("kind") == "distributed_equipment_room"
+    switches, cabinets = _room_equipment_counts(room, planning_options)
+    switch_label = "switch" if switches == 1 else "switches"
+    cabinet_label = "rack cabinet" if cabinets == 1 else "rack cabinets"
+    return (
+        f"{'DER' if is_der else 'CR'} | {room.get('zone_name')} | "
+        f"{int(room.get('ports', 0))}/{int(room.get('port_limit', 0))} ports | "
+        f"{switches} {switch_label} | {cabinets} {cabinet_label}"
+    )[:130]
+
+
 def _draw_room_label_callout(
     c,
     room,
@@ -531,20 +665,15 @@ def _draw_room_label_callout(
     *,
     planning_options=None,
     callout_box=None,
+    label_override=None,
+    font_scale=1.0,
 ):
     anchor_x, anchor_y = transform(
         float(room.get("x", 0.0)), float(room.get("y", 0.0))
     )
     is_der = room.get("kind") == "distributed_equipment_room"
     colour = "#f39c12" if is_der else "#0b7a5c"
-    switches, cabinets = _room_equipment_counts(room, planning_options)
-    switch_label = "switch" if switches == 1 else "switches"
-    cabinet_label = "rack cabinet" if cabinets == 1 else "rack cabinets"
-    label = (
-        f"{'DER' if is_der else 'CR'} | {room.get('zone_name')} | "
-        f"{int(room.get('ports', 0))}/{int(room.get('port_limit', 0))} ports | "
-        f"{switches} {switch_label} | {cabinets} {cabinet_label}"
-    )[:130]
+    label = _room_callout_text(room, planning_options)
     if callout_box is None:
         callout_box = (
             anchor_x + 5 * mm,
@@ -560,7 +689,8 @@ def _draw_room_label_callout(
         label=label,
         colour=colour,
         box_position=callout_box,
-        font_size=6.2,
+        font_size=6.2 * float(font_scale),
+        label_override=label_override,
     )
 
 
@@ -573,6 +703,8 @@ def _draw_max_distance_callout(
     max_distance=0.0,
     fallback=False,
     callout_box=None,
+    label_override=None,
+    font_scale=1.0,
 ):
     if point:
         anchor_x, anchor_y = transform(
@@ -607,7 +739,8 @@ def _draw_max_distance_callout(
         label=callout,
         colour=colour,
         box_position=callout_box,
-        font_size=6.2,
+        font_size=6.2 * float(font_scale),
+        label_override=label_override,
     )
 
 
@@ -644,7 +777,7 @@ def _draw_sheet_title_block(
     c.setFont("Helvetica", 7.5)
     c.drawString(x + 4 * mm, y + 6 * mm, f"{floor_name} (Floor {floor})")
 
-    comms, ders, assigned, ports, unassigned = counts
+    comms, ders, assigned, ports, unassigned, unassigned_ports = counts
     key_x = x + split + 4 * mm
     legend = [
         ("#0b7a5c", "CR / route", "circle"),
@@ -674,7 +807,7 @@ def _draw_sheet_title_block(
     rows = [
         ("ROOMS", f"{comms} CR / {ders} DER"),
         ("DEMAND", f"{assigned} points / {ports} ports"),
-        ("UNASSIGNED", str(unassigned)),
+        ("UNASSIGNED", f"{unassigned} points / {unassigned_ports} ports"),
         ("SCALE", f"1:{scale} on {paper_size}"),
         ("SOURCE", Path(source_drawing).name if source_drawing else "No mapped DXF"),
         ("SHEET", f"{page_number} of {page_count}"),
@@ -704,7 +837,15 @@ def export_zone_design_options_pdf(
     scale: int = 100,
     floor_scope="all",
     revision_number: int = 0,
+    studio_settings=None,
+    layout_manifest=None,
+    preview_background=False,
 ) -> str:
+    from pdf_report_annotations import draw_pdf_studio_annotations
+
+    studio_settings = dict(studio_settings or {})
+    if layout_manifest is not None:
+        layout_manifest.clear()
     paper_size = _text(paper_size).upper()
     if paper_size not in PAPER_SIZES:
         raise ValueError(f"Unsupported paper size: {paper_size}")
@@ -829,23 +970,28 @@ def export_zone_design_options_pdf(
     project_name = _text(data.get("project", {}).get("name")) or (
         Path(source_path).stem if source_path else "Cable Routing Project"
     )
-    page_count = 1 + len(sheet_payloads)
-    _draw_cover(
-        pdf,
-        page_size,
-        project_name=project_name,
-        plans=plans,
-        strategy_names=strategy_names,
-        planning_options=planning_options,
-        room_port_limits=room_port_limits,
-        paper_size=paper_size,
-        scale=scale,
-        floor_scope=floor_scope,
-        revision_number=int(revision_number or 0),
-    )
-    pdf.showPage()
+    show_cover = _studio_enabled(studio_settings, "show_cover", True)
+    page_count = int(show_cover) + len(sheet_payloads)
+    if show_cover:
+        _draw_cover(
+            pdf,
+            page_size,
+            project_name=project_name,
+            plans=plans,
+            strategy_names=strategy_names,
+            planning_options=planning_options,
+            room_port_limits=room_port_limits,
+            paper_size=paper_size,
+            scale=scale,
+            floor_scope=floor_scope,
+            revision_number=int(revision_number or 0),
+        )
+        if not preview_background:
+            draw_pdf_studio_annotations(pdf, 0, studio_settings)
+        pdf.showPage()
 
-    for sheet_index, payload in enumerate(sheet_payloads, 2):
+    for sheet_offset, payload in enumerate(sheet_payloads):
+        sheet_index = sheet_offset + 1 + int(show_cover)
         (
             option_number, plan, floor, dxf_path, entities, floor_zones,
             suggestions, bounds, graph,
@@ -873,17 +1019,19 @@ def export_zone_design_options_pdf(
         clip.rect(drawing_left, drawing_bottom, drawing_width, drawing_height)
         pdf.saveState()
         pdf.clipPath(clip, stroke=0, fill=0)
-        for zone in floor_zones:
-            _draw_zone(
-                pdf,
-                zone,
-                transform,
-                plan.get("zone_usage", []),
-                draw_box=True,
-                draw_label=False,
-            )
+        if _studio_enabled(studio_settings, "show_zone_boundaries", True):
+            for zone in floor_zones:
+                _draw_zone(
+                    pdf,
+                    zone,
+                    transform,
+                    plan.get("zone_usage", []),
+                    draw_box=True,
+                    draw_label=False,
+                )
         _draw_dxf(pdf, entities, transform)
-        _draw_routing_graph(pdf, graph, transform)
+        if _studio_enabled(studio_settings, "show_routing_graph", True):
+            _draw_routing_graph(pdf, graph, transform)
         room_maxima = {}
         for room in suggestions:
             maximum = ("", 0.0, False)
@@ -912,7 +1060,10 @@ def export_zone_design_options_pdf(
             if int(point.get("floor", 0)) != floor or point_name in drawn_points:
                 continue
             status = "unassigned" if point_name in explicitly_unassigned else "other"
-            _draw_data_point(pdf, point, transform, status=status)
+            if status != "other" or _studio_enabled(
+                studio_settings, "show_other_data_points", True
+            ):
+                _draw_data_point(pdf, point, transform, status=status)
 
         frame_right = drawing_left + drawing_width
         frame_top = drawing_bottom + drawing_height
@@ -979,6 +1130,15 @@ def export_zone_design_options_pdf(
             callout_records.append(
                 {
                     "key": ("zone", zone_index),
+                    "studio_key": (
+                        f"option:{option_number}:floor:{floor}:zone:"
+                        f"{_text(zone.get('id')) or zone_index}"
+                    ),
+                    "kind": "zone",
+                    "label": _zone_callout_text(
+                        zone, plan.get("zone_usage", [])
+                    ),
+                    "colour": "#2474a8",
                     "anchor_x": anchor_x,
                     "anchor_y": anchor_y,
                     "rectangle": placement_rectangle,
@@ -997,6 +1157,16 @@ def export_zone_design_options_pdf(
             callout_records.append(
                 {
                     "key": ("room_label", room_index),
+                    "studio_key": (
+                        f"option:{option_number}:floor:{floor}:room:{room_index}:label"
+                    ),
+                    "kind": "room",
+                    "label": _room_callout_text(room, planning_options),
+                    "colour": (
+                        "#f39c12"
+                        if room.get("kind") == "distributed_equipment_room"
+                        else "#0b7a5c"
+                    ),
                     "anchor_x": room_x,
                     "anchor_y": room_y,
                     "rectangle": placement_rectangle,
@@ -1016,6 +1186,21 @@ def export_zone_design_options_pdf(
             callout_records.append(
                 {
                     "key": ("room_max", room_index),
+                    "studio_key": (
+                        f"option:{option_number}:floor:{floor}:room:{room_index}:maximum"
+                    ),
+                    "kind": "maximum",
+                    "label": (
+                        f"MAX {_text(point.get('name'))}: {max_distance:.2f} m"
+                        + (" (fallback)" if max_fallback else "")
+                        if point
+                        else "MAX: no assigned points"
+                    ),
+                    "colour": (
+                        "#f39c12"
+                        if room.get("kind") == "distributed_equipment_room"
+                        else "#0b7a5c"
+                    ),
                     "anchor_x": anchor_x,
                     "anchor_y": anchor_y,
                     "rectangle": point_rectangle,
@@ -1071,7 +1256,29 @@ def export_zone_design_options_pdf(
             selected = None
             non_dxf_fallback = None
             tested = set()
-            for side in ordered_sides(record):
+            callout_override = _studio_callout(
+                studio_settings, record["studio_key"]
+            )
+            if all(
+                name in callout_override
+                for name in ("x_pt", "y_pt", "width_pt", "height_pt")
+            ):
+                override_width = max(18 * mm, float(callout_override["width_pt"]))
+                override_height = max(5 * mm, float(callout_override["height_pt"]))
+                selected = (
+                    min(
+                        max(float(callout_override["x_pt"]), drawing_left + 1 * mm),
+                        frame_right - override_width - 1 * mm,
+                    ),
+                    min(
+                        max(float(callout_override["y_pt"]), drawing_bottom + 1 * mm),
+                        frame_top - override_height - 1 * mm,
+                    ),
+                    override_width,
+                    override_height,
+                    str(callout_override.get("rail", record["side"])),
+                )
+            for side in ([] if selected is not None else ordered_sides(record)):
                 base = desired_callout_box(
                     record["anchor_x"],
                     record["anchor_y"],
@@ -1122,37 +1329,90 @@ def export_zone_design_options_pdf(
                     "Callouts do not fit outside the DXF background at the "
                     f"selected {paper_size} 1:{scale} layout."
                 )
-            callout_slots[record["key"]] = selected
-            placed_boxes.append(selected)
+            default_visible = _studio_enabled(
+                studio_settings,
+                {
+                    "zone": "show_zone_callouts",
+                    "room": "show_room_callouts",
+                    "maximum": "show_max_distance_callouts",
+                }[record["kind"]],
+                True,
+            )
+            visible = bool(callout_override.get("visible", default_visible))
+            callout_slots[record["key"]] = {
+                "box": selected,
+                "visible": visible,
+                "label": str(callout_override.get("text", record["label"])),
+                "font_scale": max(
+                    0.5, min(2.5, float(studio_settings.get("font_scale", 1.0) or 1.0))
+                ),
+            }
+            if visible:
+                placed_boxes.append(selected)
+            if layout_manifest is not None:
+                layout_manifest.append(
+                    {
+                        "page": int(sheet_index - 1),
+                        "page_number": int(sheet_index),
+                        "page_width_pt": float(page_width),
+                        "page_height_pt": float(page_height),
+                        "key": record["studio_key"],
+                        "kind": record["kind"],
+                        "text": str(callout_override.get("text", record["label"])),
+                        "colour": record["colour"],
+                        "x_pt": float(selected[0]),
+                        "y_pt": float(selected[1]),
+                        "width_pt": float(selected[2]),
+                        "height_pt": float(selected[3]),
+                        "rail": str(selected[4]),
+                        "anchor_x_pt": float(record["anchor_x"]),
+                        "anchor_y_pt": float(record["anchor_y"]),
+                        "visible": visible,
+                        "option_number": int(option_number),
+                        "floor": int(floor),
+                    }
+                )
 
         for zone_index, zone in enumerate(floor_zones):
-            _draw_zone(
-                pdf,
-                zone,
-                transform,
-                plan.get("zone_usage", []),
-                draw_box=False,
-                draw_label=True,
-                callout_box=callout_slots.get(("zone", zone_index)),
-            )
+            slot = callout_slots.get(("zone", zone_index), {})
+            if slot.get("visible", False) and not preview_background:
+                _draw_zone(
+                    pdf,
+                    zone,
+                    transform,
+                    plan.get("zone_usage", []),
+                    draw_box=False,
+                    draw_label=True,
+                    callout_box=slot.get("box"),
+                    label_override=slot.get("label"),
+                    font_scale=slot.get("font_scale", 1.0),
+                )
         for room_index, room in enumerate(suggestions):
-            _draw_room_label_callout(
-                pdf,
-                room,
-                transform,
-                planning_options=planning_options,
-                callout_box=callout_slots.get(("room_label", room_index)),
-            )
+            label_slot = callout_slots.get(("room_label", room_index), {})
+            if label_slot.get("visible", False) and not preview_background:
+                _draw_room_label_callout(
+                    pdf,
+                    room,
+                    transform,
+                    planning_options=planning_options,
+                    callout_box=label_slot.get("box"),
+                    label_override=label_slot.get("label"),
+                    font_scale=label_slot.get("font_scale", 1.0),
+                )
             max_name, max_distance, max_fallback = room_maxima[id(room)]
-            _draw_max_distance_callout(
-                pdf,
-                room,
-                points.get(max_name),
-                transform,
-                max_distance=max_distance,
-                fallback=max_fallback,
-                callout_box=callout_slots.get(("room_max", room_index)),
-            )
+            maximum_slot = callout_slots.get(("room_max", room_index), {})
+            if maximum_slot.get("visible", False) and not preview_background:
+                _draw_max_distance_callout(
+                    pdf,
+                    room,
+                    points.get(max_name),
+                    transform,
+                    max_distance=max_distance,
+                    fallback=max_fallback,
+                    callout_box=maximum_slot.get("box"),
+                    label_override=maximum_slot.get("label"),
+                    font_scale=maximum_slot.get("font_scale", 1.0),
+                )
         pdf.restoreState()
 
         floor_name = _floor_name(data, floor, dxf_path)
@@ -1164,21 +1424,26 @@ def export_zone_design_options_pdf(
             page_height - 9 * mm,
             f"OPTION {option_number} - {strategy.upper()} - {floor_name.upper()}",
         )
-        _draw_sheet_title_block(
-            pdf,
-            page_size,
-            project_name=project_name,
-            option_number=option_number,
-            strategy_name=strategy,
-            floor_name=floor_name,
-            floor=floor,
-            counts=_option_counts(plan),
-            paper_size=paper_size,
-            scale=scale,
-            source_drawing=dxf_path,
-            page_number=sheet_index,
-            page_count=page_count,
-        )
+        if _studio_enabled(studio_settings, "show_title_block", True):
+            _draw_sheet_title_block(
+                pdf,
+                page_size,
+                project_name=project_name,
+                option_number=option_number,
+                strategy_name=strategy,
+                floor_name=floor_name,
+                floor=floor,
+                counts=_option_counts(plan),
+                paper_size=paper_size,
+                scale=scale,
+                source_drawing=dxf_path,
+                page_number=sheet_index,
+                page_count=page_count,
+            )
+        if not preview_background:
+            draw_pdf_studio_annotations(
+                pdf, int(sheet_index - 1), studio_settings
+            )
         pdf.showPage()
 
     pdf.save()

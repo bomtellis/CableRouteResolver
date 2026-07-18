@@ -341,6 +341,11 @@ def _draw_comms_rooms(
     cabinet_counts: Dict[Tuple[int, str], int],
     port_counts: Dict[Tuple[int, str], int],
     switch_counts: Dict[Tuple[int, str], int],
+    *,
+    page_index: int = 0,
+    page_label: str = "",
+    layout_manifest=None,
+    preview_background: bool = False,
 ) -> None:
     rooms = [
         row
@@ -361,7 +366,6 @@ def _draw_comms_rooms(
         c.setLineWidth(0.5 * mm)
         c.circle(x, y, 3.2 * mm, stroke=1, fill=1)
         c.setStrokeColor(colors.HexColor("#007a5e"))
-        c.line(x + 3.2 * mm, y + 3.2 * mm, x + 8 * mm, y + 8 * mm)
         label = name
         detail = f"Cabinets: {count} | Data ports: {ports} | Switches: {switches}"
         c.setFont("Helvetica-Bold", 7.5)
@@ -369,6 +373,30 @@ def _draw_comms_rooms(
             stringWidth(label, "Helvetica-Bold", 7.5),
             stringWidth(detail, "Helvetica", 6.5),
         )
+        callout = {
+            "key": f"floor-plan-room:{int(floor)}:{name}",
+            "page": int(page_index),
+            "page_label": str(page_label or f"Floor {floor}"),
+            "kind": "equipment_room",
+            "name": f"{name} - Floor {floor}",
+            "floor": int(floor),
+            "x_pt": x + 7 * mm,
+            "y_pt": y + 3.8 * mm,
+            "width_pt": label_width + 4 * mm,
+            "height_pt": 8.5 * mm,
+            "anchor_x_pt": x,
+            "anchor_y_pt": y,
+            "colour": "#007a5e",
+            "line_width_pt": 0.85,
+            "font_size_pt": 6.5,
+            "text": f"{label}\n{detail}",
+            "visible": True,
+        }
+        if layout_manifest is not None:
+            layout_manifest.append(callout)
+        if preview_background:
+            continue
+        c.line(x + 3.2 * mm, y + 3.2 * mm, x + 8 * mm, y + 8 * mm)
         c.setFillColor(colors.white)
         c.roundRect(
             x + 7 * mm,
@@ -449,7 +477,11 @@ def export_floor_plans_pdf(
     paper_size: str = "A1",
     scale: int = 100,
     revision_number: int = 0,
+    layout_manifest=None,
+    preview_background: bool = False,
 ) -> str:
+    if layout_manifest is not None:
+        layout_manifest.clear()
     paper_size = _text(paper_size).upper()
     if paper_size not in FLOOR_PLAN_PAPER_SIZES:
         raise ValueError(f"Unsupported paper size: {paper_size}")
@@ -573,6 +605,10 @@ def export_floor_plans_pdf(
             cabinet_counts,
             port_counts,
             switch_counts,
+            page_index=page_number - 1,
+            page_label=f"Floor {floor}",
+            layout_manifest=layout_manifest,
+            preview_background=preview_background,
         )
         pdf.restoreState()
 

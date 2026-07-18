@@ -344,6 +344,12 @@ class GpuDxfGraphView(_ViewBase):
         self.show_edges = True
         self.show_nodes = True
         self.show_data_points = True
+        self.show_unconnected_data_points_only = False
+        self.unconnected_data_point_names: set[str] = set()
+        self.show_routing_unconnected_data_points_only = False
+        self.routing_unconnected_data_point_names: set[str] = set()
+        self.hide_connected_data_points = False
+        self.connected_data_point_names: set[str] = set()
         self.show_locations = True
         self.show_comms_rooms = True
         self.show_placement_zones = True
@@ -993,6 +999,12 @@ class GpuDxfGraphView(_ViewBase):
         show_edges: Optional[bool] = None,
         show_nodes: Optional[bool] = None,
         show_data_points: Optional[bool] = None,
+        show_unconnected_data_points_only: Optional[bool] = None,
+        unconnected_data_point_names: Optional[Sequence[str]] = None,
+        show_routing_unconnected_data_points_only: Optional[bool] = None,
+        routing_unconnected_data_point_names: Optional[Sequence[str]] = None,
+        hide_connected_data_points: Optional[bool] = None,
+        connected_data_point_names: Optional[Sequence[str]] = None,
         show_locations: Optional[bool] = None,
         show_comms_rooms: Optional[bool] = None,
         show_placement_zones: Optional[bool] = None,
@@ -1023,6 +1035,37 @@ class GpuDxfGraphView(_ViewBase):
         assign("show_edges", show_edges, DirtyLayer.EDGES)
         assign("show_nodes", show_nodes, DirtyLayer.OBJECTS)
         assign("show_data_points", show_data_points, DirtyLayer.OBJECTS)
+        assign(
+            "show_unconnected_data_points_only",
+            show_unconnected_data_points_only,
+            DirtyLayer.OBJECTS,
+        )
+        assign(
+            "show_routing_unconnected_data_points_only",
+            show_routing_unconnected_data_points_only,
+            DirtyLayer.OBJECTS,
+        )
+        assign(
+            "hide_connected_data_points",
+            hide_connected_data_points,
+            DirtyLayer.OBJECTS,
+        )
+
+        def assign_names(attr: str, values: Optional[Sequence[str]]) -> None:
+            nonlocal changes
+            if values is None:
+                return
+            new_value = {str(value).strip() for value in values if str(value).strip()}
+            if getattr(self, attr) != new_value:
+                setattr(self, attr, new_value)
+                changes |= DirtyLayer.OBJECTS
+
+        assign_names("unconnected_data_point_names", unconnected_data_point_names)
+        assign_names(
+            "routing_unconnected_data_point_names",
+            routing_unconnected_data_point_names,
+        )
+        assign_names("connected_data_point_names", connected_data_point_names)
         assign("show_locations", show_locations, DirtyLayer.OBJECTS)
         assign("show_comms_rooms", show_comms_rooms, DirtyLayer.OBJECTS)
         assign("show_placement_zones", show_placement_zones, DirtyLayer.OBJECTS)
@@ -1254,6 +1297,38 @@ class GpuDxfGraphView(_ViewBase):
         best_dist = radius_world
         snapshot = self._ensure_frame_snapshot()
         for name, point in snapshot.floor_points.items():
+            kind = str(point.get("kind", "")).strip()
+            if kind == "corridor_node" and not self.show_nodes:
+                continue
+            if kind == "data_point":
+                if not self.show_data_points:
+                    continue
+                if (
+                    self.show_unconnected_data_points_only
+                    and str(name) not in self.unconnected_data_point_names
+                ):
+                    continue
+                if (
+                    self.show_routing_unconnected_data_points_only
+                    and str(name) not in self.routing_unconnected_data_point_names
+                ):
+                    continue
+                if (
+                    self.hide_connected_data_points
+                    and str(name) in self.connected_data_point_names
+                ):
+                    continue
+            if kind == "comms_room" and not self.show_comms_rooms:
+                continue
+            if kind in {
+                "location",
+                "distributed_equipment_room",
+                "mer",
+                "main_equipment_room",
+                "polan",
+                "polan_location",
+            } and not self.show_locations:
+                continue
             d = math.hypot(float(point.get("x", 0.0)) - x, float(point.get("y", 0.0)) - y)
             if d <= best_dist:
                 best_dist = d
@@ -2002,6 +2077,24 @@ class GpuDxfGraphView(_ViewBase):
                 continue
             if kind == "data_point" and not self.show_data_points:
                 continue
+            if (
+                kind == "data_point"
+                and self.show_unconnected_data_points_only
+                and str(name) not in self.unconnected_data_point_names
+            ):
+                continue
+            if (
+                kind == "data_point"
+                and self.show_routing_unconnected_data_points_only
+                and str(name) not in self.routing_unconnected_data_point_names
+            ):
+                continue
+            if (
+                kind == "data_point"
+                and self.hide_connected_data_points
+                and str(name) in self.connected_data_point_names
+            ):
+                continue
             if kind == "comms_room" and not self.show_comms_rooms:
                 continue
             if kind in {"location", "distributed_equipment_room", "mer", "main_equipment_room", "polan", "polan_location"} and not self.show_locations:
@@ -2023,7 +2116,13 @@ class GpuDxfGraphView(_ViewBase):
                 painter.drawRect(QRectF(pos.x() - r, pos.y() - r, r * 2.0, r * 2.0))
                 label_color = QColor("#ffe8a3")
             elif kind == "data_point":
-                self._draw_diamond(painter, pos, 0.45, QColor("#b07cff"), QColor("#ffffff") if selected else QColor("#d5bbff"))
+                self._draw_diamond(
+                    painter,
+                    pos,
+                    0.45,
+                    QColor("#b07cff"),
+                    QColor("#ffffff") if selected else QColor("#d5bbff"),
+                )
                 label_color = QColor("#eadcff")
             else:
                 self._draw_diamond(painter, pos, 0.5, QColor("#ff7b72"), QColor("#ffffff") if selected else QColor("#ffb3ae"))

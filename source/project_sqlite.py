@@ -283,6 +283,8 @@ class SQLiteProjectFile:
             "building": "building settings",
             "departments": "departments",
             "room_types": "room types",
+            "room_type_asset_review": "room type asset review",
+            "room_type_asset_rfi": "room type asset RFI list",
             "room_type_scenario_groups": "room type scenario groups",
             "asset_scenario_groups": "asset scenario groups",
             "room_type_asset_scenarios": "room type asset scenarios",

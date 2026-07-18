@@ -818,6 +818,27 @@ def _poe_power_for_asset(asset: dict, settings: dict) -> float:
     )
 
 
+def _normalised_room_type_asset_rows(room_type: dict) -> List[dict]:
+    """Return current and legacy room-type asset rows with quantities."""
+
+    rows: List[dict] = []
+    seen: set[str] = set()
+    for row in room_type.get("assets", []) or []:
+        if not isinstance(row, dict):
+            continue
+        asset_id = _text(row.get("asset_id") or row.get("id"))
+        if not asset_id:
+            continue
+        rows.append({"asset_id": asset_id, "qty": max(1, _int(row.get("qty"), 1))})
+        seen.add(asset_id)
+    for value in room_type.get("asset_ids", []) or []:
+        asset_id = _text(value)
+        if asset_id and asset_id not in seen:
+            rows.append({"asset_id": asset_id, "qty": 1})
+            seen.add(asset_id)
+    return rows
+
+
 def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]:
     """Expand room-type data into individual physical network-port demand."""
 
@@ -863,14 +884,23 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
         templates: List[Tuple[str, str, float, float, float, float, float]] = []
 
         if room_type:
-            for room_asset in room_type.get("assets", []):
+            for room_asset in _normalised_room_type_asset_rows(room_type):
                 if not isinstance(room_asset, dict):
                     continue
                 asset_id = _text(room_asset.get("asset_id"))
                 asset = assets.get(asset_id, {})
                 asset_name = _text(asset.get("name")) or asset_id or "Generic endpoint"
                 quantity = max(0, _int(room_asset.get("qty"), 1))
-                data_points_per_asset = max(0, _int(asset.get("data_points"), 1))
+                data_points_per_asset = max(
+                    0,
+                    _int(
+                        asset.get(
+                            "data_points",
+                            asset.get("data_points_each", asset.get("cables", 1)),
+                        ),
+                        1,
+                    ),
+                )
                 power = _poe_power_for_asset(asset, settings)
                 divisor = max(1, data_points_per_asset)
                 north_south, east_west, combined_bandwidth = _traffic_components(
@@ -1647,8 +1677,20 @@ def _next_identifier(existing: set[str], prefix: str) -> str:
 
 
 def _clear_previous_auto_design(data: dict) -> None:
+    preserve_equipment_rooms = bool(
+        data.get("network_settings", {}).get(
+            "prevent_additional_equipment_rooms", False
+        )
+    )
+
     def generated_location(item: dict) -> bool:
         if not isinstance(item, dict):
+            return False
+        is_equipment_room = _text(item.get("kind")).lower() in {
+            "comms_room",
+            "distributed_equipment_room",
+        }
+        if preserve_equipment_rooms and is_equipment_room:
             return False
         if bool(item.get("auto_network_location")):
             return True
@@ -1664,6 +1706,13 @@ def _clear_previous_auto_design(data: dict) -> None:
         _text(item.get("name"))
         for item in data.get("locations", [])
         if generated_location(item) and _text(item.get("name"))
+    }
+    retained_location_names = {
+        _text(item.get("name"))
+        for item in data.get("locations", [])
+        if isinstance(item, dict)
+        and _text(item.get("name"))
+        and not generated_location(item)
     }
     removed_instance_ids = {
         _text(item.get("id"))
@@ -1706,11 +1755,22 @@ def _clear_previous_auto_design(data: dict) -> None:
         if not generated_location(item)
     ]
     corridors = data.setdefault("corridors", {})
+    def retain_corridor_edge(item: dict) -> bool:
+        if not isinstance(item, dict):
+            return False
+        planner_owned = bool(item.get("auto_network_edge")) or (
+            _text(item.get("edge_role")) == "der_overflow_adjacency"
+        )
+        if not planner_owned:
+            return True
+        return bool(
+            preserve_equipment_rooms
+            and _text(item.get("from")) in retained_location_names
+            and _text(item.get("to")) in retained_location_names
+        )
+
     corridors["edges"] = [
-        item
-        for item in corridors.get("edges", [])
-        if not bool(item.get("auto_network_edge"))
-        and _text(item.get("edge_role")) != "der_overflow_adjacency"
+        item for item in corridors.get("edges", []) if retain_corridor_edge(item)
     ]
     data["network_redundancy_groups"] = [
         item
@@ -3250,10 +3310,28 @@ class DesignBuilder:
         self.graph._add_point(name, location, "polan")
         return location
 
-    def add_der_overflow_location(self, parent: dict, overflow_index: int) -> dict:
+    def add_der_overflow_location(
+        self,
+        parent: dict,
+        overflow_index: int,
+        required_switches: int = 0,
+    ) -> dict:
         """Create one adjacent two-switch DER node for planner overflow."""
 
         parent_name = _text(parent.get("name"))
+        if bool(self.settings.get("prevent_additional_equipment_rooms", False)):
+            raise NetworkPlanningError(
+                f"{parent_name} requires an additional distributed equipment "
+                "room, but the planner is configured to use existing DERs and "
+                "comms rooms only. Add a room manually or disable that planning option.",
+                code="additional_equipment_rooms_disabled",
+                details={
+                    "location_name": parent_name,
+                    "parent_location_name": parent_name,
+                    "maximum_switches": 2,
+                    "required_switches": max(3, int(required_switches or 0)),
+                },
+            )
         overflow_index = max(2, int(overflow_index or 2))
         base_name = f"{parent_name}-{overflow_index}"
         name = base_name
@@ -6421,7 +6499,11 @@ def _traditional_design(
             ):
                 der_location_index += 1
                 active_room = builder.add_der_overflow_location(
-                    room, der_location_index
+                    room,
+                    der_location_index,
+                    required_switches=(
+                        der_location_switch_count + member_count
+                    ),
                 )
                 active_room_name = _text(active_room.get("name"))
                 der_location_switch_count = 0
@@ -10857,6 +10939,7 @@ def generate_network_design(
     settings.setdefault("auto_planner_max_workers", 0)
     settings.setdefault("auto_planner_parallel_threshold", 4)
     settings.setdefault("auto_add_switches_for_bandwidth", True)
+    settings.setdefault("prevent_additional_equipment_rooms", False)
     settings.setdefault("ignore_link_bandwidth_errors", False)
     settings.setdefault("auto_planner_resolution_overrides", {})
     spare_fraction = (

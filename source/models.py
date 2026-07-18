@@ -24,6 +24,10 @@ DEFAULT_JSON = {
     "departments": [],
     "room_types": [],
     "room_type_asset_review": {},
+    "room_type_asset_rfi": {
+        "queries": [],
+        "history": [],
+    },
     "room_type_scenario_groups": [],
     "asset_scenario_groups": [],
     "room_type_asset_scenarios": [],
@@ -114,6 +118,17 @@ class JsonStore:
         if not isinstance(self.data.get("room_type_asset_review"), dict):
             self.data["room_type_asset_review"] = {}
         self.data.setdefault("room_type_asset_review", {})
+        rfi_state = self.data.setdefault("room_type_asset_rfi", {})
+        if not isinstance(rfi_state, dict):
+            rfi_state = {}
+            self.data["room_type_asset_rfi"] = rfi_state
+        for key in ("queries", "history"):
+            if not isinstance(rfi_state.get(key), list):
+                rfi_state[key] = []
+            else:
+                rfi_state[key] = [
+                    dict(item) for item in rfi_state[key] if isinstance(item, dict)
+                ]
         self.data.setdefault("room_type_scenario_groups", [])
         self.data.setdefault("asset_scenario_groups", [])
         self.data.setdefault("room_type_asset_scenarios", [])
@@ -228,7 +243,12 @@ class JsonStore:
             asset.setdefault("id", "")
             asset.setdefault("name", asset.get("id", ""))
             asset.setdefault("qty", 1)
-            asset["data_points"] = int(asset.get("data_points", 1))
+            asset["data_points"] = int(
+                asset.get(
+                    "data_points",
+                    asset.get("data_points_each", asset.get("cables", 1)),
+                )
+            )
             asset.setdefault("connection_type", asset.get("type_of_connection", "wired"))
             asset.setdefault("category_id", asset.get("category", ""))
             asset.setdefault("ADB_Code", asset.get("adb_code", ""))
@@ -2212,7 +2232,7 @@ class JsonStore:
 
             room_type_id = str(point.get("room_type_id", "") or "").strip()
             if room_type_id:
-                point["qty"] = self.room_type_cable_qty(room_type_id)
+                point["qty"] = self.data_point_required_port_count(point)
             return max(0, int(point.get("qty", 1) or 0))
 
         return 1

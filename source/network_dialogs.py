@@ -2722,6 +2722,18 @@ class AutoPlannerSetupWizard(QWizard):
             float(self.settings.get("spare_capacity_percent", 15.0) or 0.0)
         )
         design_form.addRow("Spare port, PoE and traffic capacity", self.spare_spin)
+        self.prevent_additional_rooms_check = QCheckBox(
+            "Use existing DERs and comms rooms only"
+        )
+        self.prevent_additional_rooms_check.setChecked(
+            bool(self.settings.get("prevent_additional_equipment_rooms", False))
+        )
+        self.prevent_additional_rooms_check.setToolTip(
+            "Prevents the automatic planner from creating additional distributed "
+            "equipment rooms or comms rooms. Planning stops with a capacity "
+            "diagnostic if the existing rooms cannot satisfy demand."
+        )
+        design_form.addRow("", self.prevent_additional_rooms_check)
         self.layer_estimate_button = QPushButton("Estimate layer switch quantities")
         self.layer_estimate_button.clicked.connect(self._refresh_layer_estimate)
         design_form.addRow("", self.layer_estimate_button)
@@ -3354,6 +3366,9 @@ class AutoPlannerSetupWizard(QWizard):
         settings["redundant_core"] = bool(self.redundant_check.isChecked())
         settings["independent_link_count"] = int(self.link_count_spin.value())
         settings["spare_capacity_percent"] = float(self.spare_spin.value())
+        settings["prevent_additional_equipment_rooms"] = bool(
+            self.prevent_additional_rooms_check.isChecked()
+        )
         settings["access_stacking_enabled"] = bool(
             self.access_stacking_check.isChecked()
         )
@@ -3398,6 +3413,9 @@ class AutoPlannerSetupWizard(QWizard):
             _text(self.access_stack_topology_combo.currentData()) or "ring"
         )
         settings["spare_capacity_percent"] = float(self.spare_spin.value())
+        settings["prevent_additional_equipment_rooms"] = bool(
+            self.prevent_additional_rooms_check.isChecked()
+        )
         settings["rack_deployment_model"] = (
             _text(self.rack_model_combo.currentData()) or "end_of_row"
         )
@@ -3711,6 +3729,17 @@ class NetworkPlannerDialog(QDialog):
             "switch cannot form a sufficiently large same-speed uplink bundle."
         )
 
+        self.prevent_additional_rooms_check = QCheckBox(
+            "Prevent the automatic planner from creating additional DERs or comms rooms"
+        )
+        self.prevent_additional_rooms_check.setChecked(
+            bool(settings.get("prevent_additional_equipment_rooms", False))
+        )
+        self.prevent_additional_rooms_check.setToolTip(
+            "Reuse existing DERs and comms rooms only. If their capacity is "
+            "insufficient, the planner stops and reports the affected location."
+        )
+
         self.ignore_link_bandwidth_check = QCheckBox(
             "Allow best-effort links that do not meet calculated bandwidth"
         )
@@ -3807,6 +3836,7 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("", self.olt_failover_check)
         settings_layout.addRow("", self.auto_connect_manual_check)
         settings_layout.addRow("", self.auto_add_bandwidth_switches_check)
+        settings_layout.addRow("", self.prevent_additional_rooms_check)
         settings_layout.addRow("", self.ignore_link_bandwidth_check)
         settings_layout.addRow("", self.clear_planner_overrides_button)
         settings_layout.addRow("", self.auto_design_button)
@@ -4858,6 +4888,9 @@ class NetworkPlannerDialog(QDialog):
         settings["auto_add_switches_for_bandwidth"] = bool(
             self.auto_add_bandwidth_switches_check.isChecked()
         )
+        settings["prevent_additional_equipment_rooms"] = bool(
+            self.prevent_additional_rooms_check.isChecked()
+        )
         settings["ignore_link_bandwidth_errors"] = bool(
             self.ignore_link_bandwidth_check.isChecked()
         )
@@ -5071,6 +5104,9 @@ class NetworkPlannerDialog(QDialog):
         )
         self.spare_capacity_spin.setValue(
             float(settings.get("spare_capacity_percent", 15.0) or 0.0)
+        )
+        self.prevent_additional_rooms_check.setChecked(
+            bool(settings.get("prevent_additional_equipment_rooms", False))
         )
         self.default_rack_size_spin.setValue(
             max(1, int(settings.get("default_rack_size_u", 42) or 42))

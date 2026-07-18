@@ -1033,6 +1033,7 @@ class SuggestRoomsFromZonesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Suggest Equipment Rooms from Zones")
         self.result = None
+        self.current_floor = int(current_floor)
 
         layout = QVBoxLayout(self)
         intro = QLabel(
@@ -1100,6 +1101,24 @@ class SuggestRoomsFromZonesDialog(QDialog):
         )
         self.create_connections_check.setChecked(True)
 
+        self.enforce_comms_room_limits_check = QCheckBox(
+            "Enforce comms-room zone limits (do not increase them)"
+        )
+        self.enforce_comms_room_limits_check.setChecked(True)
+        self.enforce_comms_room_limits_check.setToolTip(
+            "Keeps every configured comms-room zone limit unchanged. Any demand "
+            "that cannot be covered within those limits remains reported as a shortfall."
+        )
+
+        self.enforce_der_limits_check = QCheckBox(
+            "Enforce DER zone limits (do not increase them)"
+        )
+        self.enforce_der_limits_check.setChecked(True)
+        self.enforce_der_limits_check.setToolTip(
+            "Keeps every configured DER zone limit unchanged. Any demand that "
+            "cannot be covered within those limits remains reported as a shortfall."
+        )
+
         form.addRow("Generation scope", self.ignore_other_floors_check)
         form.addRow("Cable length limit", self.max_distance_spin)
         form.addRow(
@@ -1116,15 +1135,22 @@ class SuggestRoomsFromZonesDialog(QDialog):
             QLabel("1 slim wall cabinet, maximum 2 switches"),
         )
         form.addRow("Floor restriction", self.same_floor_check)
+        form.addRow("Comms-room limits", self.enforce_comms_room_limits_check)
+        form.addRow("DER limits", self.enforce_der_limits_check)
         form.addRow("Connections", self.create_connections_check)
 
         note = QLabel(
             "Candidate zones within the cable limit are assessed. The design options "
-            "compare routing and room-allocation outcomes. A DER is only considered "
-            "when an available comms-room option cannot serve the demand within the "
-            "cable limit. Per-zone room limits include rooms already "
-            "placed in that zone. Any "
+            "compare the shortest routes, maximum comms-room utilisation, and "
+            "maximum DER utilisation. A fourth option opens the permitted comms-room "
+            "allowance first, then uses DERs for the remaining demand. Per-zone room "
+            "limits include rooms already placed in that zone. Comms-room and DER "
+            "limits can be enforced independently; clear a limit option only when "
+            "the planner may suggest verified increases for that room type. Any "
             "room-type assets and their declared data ports are included in demand. "
+            "Current-floor generation excludes every other floor from the displayed "
+            "planning counts. The same-floor route restriction alone still assesses "
+            "all selected floors, but reports satisfaction separately for each floor. "
             "Any data ports left without a connection will be listed after the "
             "suggestion is applied."
         )
@@ -1142,6 +1168,7 @@ class SuggestRoomsFromZonesDialog(QDialog):
             "scope": (
                 "current" if self.ignore_other_floors_check.isChecked() else "all"
             ),
+            "scope_floor": int(self.current_floor),
             "ignore_other_floors": bool(
                 self.ignore_other_floors_check.isChecked()
             ),
@@ -1153,6 +1180,10 @@ class SuggestRoomsFromZonesDialog(QDialog):
             ),
             "der_max_switches": 2,
             "same_floor_only": bool(self.same_floor_check.isChecked()),
+            "enforce_comms_room_limits": bool(
+                self.enforce_comms_room_limits_check.isChecked()
+            ),
+            "enforce_der_limits": bool(self.enforce_der_limits_check.isChecked()),
             "create_connections": bool(self.create_connections_check.isChecked()),
         }
         super().accept()
@@ -3312,7 +3343,7 @@ class RoomTypesEditorWindow(QMainWindow):
             self.table.selectRow(len(self.items) - 1)
 
 
-class RoomTypeAssetReviewWizard(QDialog):
+class _BaseRoomTypeAssetReviewWizard(QDialog):
     """Step through room types and mark their assigned assets as reviewed."""
 
     def __init__(
@@ -3422,7 +3453,10 @@ class RoomTypeAssetReviewWizard(QDialog):
         self._populate_sidebar()
         if self.room_types:
             first_uncomplete = self._find_next_uncomplete(-1, wrap=True)
-            self.room_list.setCurrentRow(first_uncomplete if first_uncomplete is not None else 0)
+            first_room = self._display_row_for_original_index(self._display_order[0])
+            self.room_list.setCurrentRow(
+                first_uncomplete if first_uncomplete is not None else first_room
+            )
         else:
             self._refresh_detail()
 
@@ -3518,7 +3552,10 @@ class RoomTypeAssetReviewWizard(QDialog):
         item = self.room_list.item(row)
         if item is None:
             return
-        target_index = int(item.data(Qt.UserRole))
+        try:
+            target_index = int(item.data(Qt.UserRole))
+        except (TypeError, ValueError):
+            return
         if self._dirty:
             self._apply_changes()
         self.current_index = target_index
@@ -3763,7 +3800,11 @@ class RoomTypeAssetReviewWizard(QDialog):
         self._populate_sidebar()
         for row in range(self.room_list.count()):
             item = self.room_list.item(row)
-            if item and int(item.data(Qt.UserRole)) == current_original:
+            try:
+                original_index = int(item.data(Qt.UserRole)) if item else -1
+            except (TypeError, ValueError):
+                continue
+            if original_index == current_original:
                 self.room_list.setCurrentRow(row)
                 break
         self._refresh_detail()
@@ -3798,7 +3839,11 @@ class RoomTypeAssetReviewWizard(QDialog):
     def _display_row_for_original_index(self, original_index):
         for row in range(self.room_list.count()):
             item = self.room_list.item(row)
-            if item and int(item.data(Qt.UserRole)) == original_index:
+            try:
+                item_index = int(item.data(Qt.UserRole)) if item else -1
+            except (TypeError, ValueError):
+                continue
+            if item_index == original_index:
                 return row
         return -1
 
@@ -3807,18 +3852,33 @@ class RoomTypeAssetReviewWizard(QDialog):
             return
         if self._dirty:
             self._apply_changes()
-        row = self.room_list.currentRow()
-        self.room_list.setCurrentRow((row - 1) % self.room_list.count())
+        selectable_rows = [
+            row
+            for row in range(self.room_list.count())
+            if self.room_list.item(row).data(Qt.UserRole) is not None
+        ]
+        if not selectable_rows:
+            return
+        current_row = self.room_list.currentRow()
+        try:
+            current_position = selectable_rows.index(current_row)
+        except ValueError:
+            current_position = 0
+        self.room_list.setCurrentRow(selectable_rows[(current_position - 1) % len(selectable_rows)])
 
     def _find_next_uncomplete(self, start_original_index, wrap=True):
         if not self.room_types:
             return None
-        display_indices = [
-            int(self.room_list.item(row).data(Qt.UserRole))
-            for row in range(self.room_list.count())
-        ]
-        if not display_indices:
+        display_rooms = []
+        for row in range(self.room_list.count()):
+            value = self.room_list.item(row).data(Qt.UserRole)
+            try:
+                display_rooms.append((row, int(value)))
+            except (TypeError, ValueError):
+                continue
+        if not display_rooms:
             return None
+        display_indices = [original_index for _row, original_index in display_rooms]
         try:
             start_display = display_indices.index(start_original_index)
         except ValueError:
@@ -3826,11 +3886,11 @@ class RoomTypeAssetReviewWizard(QDialog):
         candidates = list(range(start_display + 1, len(display_indices)))
         if wrap:
             candidates.extend(range(0, start_display + 1))
-        for display_row in candidates:
-            original_index = display_indices[display_row]
+        for display_position in candidates:
+            actual_row, original_index = display_rooms[display_position]
             room_type_id = self._room_id(self.room_types[original_index])
             if not self._is_complete(room_type_id):
-                return display_row
+                return actual_row
         return None
 
     def _next_uncomplete(self):
@@ -3845,6 +3905,633 @@ class RoomTypeAssetReviewWizard(QDialog):
             )
             return
         self.room_list.setCurrentRow(next_row)
+
+
+class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
+    """Asset review workflow with recoverable room and asset RFI tracking."""
+
+    def __init__(
+        self,
+        parent,
+        room_types,
+        assets_by_id=None,
+        asset_categories_by_id=None,
+        review_state=None,
+        rfi_state=None,
+        on_state_changed=None,
+        on_assignments_changed=None,
+        on_rfi_changed=None,
+        on_export_rfi=None,
+    ):
+        self.rfi_state = deepcopy(rfi_state or {"queries": [], "history": []})
+        if not isinstance(self.rfi_state, dict):
+            self.rfi_state = {"queries": [], "history": []}
+        self.rfi_state.setdefault("queries", [])
+        self.rfi_state.setdefault("history", [])
+        self.on_rfi_changed = on_rfi_changed
+        self.on_export_rfi = on_export_rfi
+        self._rfi_ui_ready = False
+        super().__init__(
+            parent,
+            room_types,
+            assets_by_id=assets_by_id,
+            asset_categories_by_id=asset_categories_by_id,
+            review_state=review_state,
+            on_state_changed=on_state_changed,
+            on_assignments_changed=on_assignments_changed,
+        )
+        self.setWindowTitle("Room Type Asset Review and RFI")
+        self.resize(1380, 760)
+        self.room_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.asset_table.setColumnCount(10)
+        self.asset_table.setHorizontalHeaderLabels(
+            [
+                "Asset ID",
+                "Description",
+                "Category",
+                "Group",
+                "ADB_Code",
+                "Qty",
+                "Data points each",
+                "Total",
+                "Open RFIs",
+                "RFI queries",
+            ]
+        )
+        self.asset_table.setColumnWidth(8, 120)
+        self.asset_table.setColumnWidth(9, 320)
+
+        action_row = QHBoxLayout()
+        self.add_asset_button = QPushButton("Add Asset...")
+        self.remove_asset_button = QPushButton("Remove Asset...")
+        self.query_button = QPushButton("Add Asset RFI...")
+        self.resolve_query_button = QPushButton("Resolve Asset RFI...")
+        self.room_query_button = QPushButton("Add Room RFI for Selected...")
+        self.resolve_room_query_button = QPushButton("Resolve Room RFI...")
+        self.export_rfi_button = QPushButton("Export RFI PDF...")
+        self.add_asset_button.clicked.connect(self._add_asset)
+        self.remove_asset_button.clicked.connect(self._remove_selected_asset)
+        self.query_button.clicked.connect(self._raise_asset_query)
+        self.resolve_query_button.clicked.connect(self._resolve_asset_query)
+        self.room_query_button.clicked.connect(self._raise_room_query)
+        self.resolve_room_query_button.clicked.connect(self._resolve_room_query)
+        self.export_rfi_button.clicked.connect(self._export_rfi)
+        for widget in (
+            self.add_asset_button,
+            self.remove_asset_button,
+            self.query_button,
+            self.resolve_query_button,
+            self.room_query_button,
+            self.resolve_room_query_button,
+            self.copy_button,
+        ):
+            action_row.addWidget(widget)
+        action_row.addStretch(1)
+        action_row.addWidget(self.export_rfi_button)
+        self.layout().insertLayout(2, action_row)
+        self._rfi_ui_ready = True
+        self._sync_sidebar_current()
+
+    def _queries(self):
+        values = self.rfi_state.get("queries", [])
+        return values if isinstance(values, list) else []
+
+    def _outstanding_queries(self, room_type_id, asset_id):
+        matches = [
+            item
+            for item in self._queries()
+            if isinstance(item, dict)
+            and self._text(item.get("room_type_id")) == room_type_id
+            and self._text(item.get("asset_id")) == asset_id
+            and self._text(item.get("status") or "outstanding").casefold()
+            != "resolved"
+        ]
+        return sorted(
+            matches,
+            key=lambda item: self._natural_key(self._text(item.get("id"))),
+        )
+
+    def _room_has_outstanding_queries(self, room_type_id):
+        return any(
+            isinstance(item, dict)
+            and self._text(item.get("room_type_id")) == room_type_id
+            and self._text(item.get("status") or "outstanding").casefold()
+            != "resolved"
+            for item in self._queries()
+        )
+
+    def _next_rfi_id(self):
+        highest = 0
+        for item in self._queries():
+            match = re.search(r"(\d+)$", self._text(item.get("id")))
+            if match:
+                highest = max(highest, int(match.group(1)))
+        return f"RFI-{highest + 1:04d}"
+
+    def _append_rfi_history(
+        self,
+        action,
+        *,
+        room_type,
+        asset_id="",
+        asset_name="",
+        note="",
+        rfi_id="",
+    ):
+        self.rfi_state.setdefault("history", []).append(
+            {
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "action": self._text(action),
+                "rfi_id": self._text(rfi_id),
+                "room_type_id": self._room_id(room_type),
+                "room_type_name": self._text(room_type.get("name")),
+                "asset_id": self._text(asset_id),
+                "asset_name": self._text(asset_name),
+                "note": self._text(note),
+            }
+        )
+
+    def _emit_rfi_changed(self):
+        if self.on_rfi_changed:
+            self.on_rfi_changed(deepcopy(self.rfi_state))
+
+    def _required_reason(self, title, prompt, initial=""):
+        value = self._text(initial)
+        while True:
+            value, accepted = QInputDialog.getMultiLineText(
+                self, title, prompt, value
+            )
+            if not accepted:
+                return ""
+            value = self._text(value)
+            if value:
+                return value
+            QMessageBox.information(
+                self, title, "A reason is required for the RFI audit history."
+            )
+
+    def _selected_asset_metadata(self):
+        row = self.asset_table.currentRow()
+        return next(
+            (
+                item
+                for item in self._asset_row_widgets
+                if int(item.get("row", -1)) == row
+            ),
+            None,
+        )
+
+    def _selected_room_types(self):
+        selected = []
+        seen = set()
+        for item in self.room_list.selectedItems():
+            try:
+                index = int(item.data(Qt.UserRole))
+            except (TypeError, ValueError):
+                continue
+            if index not in seen and 0 <= index < len(self.room_types):
+                selected.append(self.room_types[index])
+                seen.add(index)
+        return selected or ([self._current_room_type()] if self._current_room_type() else [])
+
+    def _populate_sidebar(self):
+        self.room_list.blockSignals(True)
+        try:
+            self.room_list.clear()
+            indexed = list(enumerate(self.room_types))
+            indexed.sort(
+                key=lambda item: (
+                    self._natural_key(item[1].get("name")),
+                    self._natural_key(item[1].get("id")),
+                )
+            )
+            with_assets = [
+                item for item in indexed if self._room_asset_rows(item[1])
+            ]
+            without_assets = [
+                item for item in indexed if not self._room_asset_rows(item[1])
+            ]
+            self._display_order = [
+                index
+                for group in (with_assets, without_assets)
+                for index, _room_type in group
+            ]
+            for heading, group in (
+                ("ROOM TYPES WITH ASSETS", with_assets),
+                ("ROOM TYPES WITHOUT ASSETS", without_assets),
+            ):
+                header = QListWidgetItem(f"{heading} ({len(group)})")
+                header.setFlags(Qt.ItemFlag.NoItemFlags)
+                self.room_list.addItem(header)
+                for original_index, room_type in group:
+                    room_type_id = self._room_id(room_type)
+                    name = self._text(room_type.get("name")) or room_type_id or "Room type"
+                    prefix = "✓ " if self._is_complete(room_type_id) else "  "
+                    label = (
+                        f"{prefix}{room_type_id} - {name}"
+                        if room_type_id
+                        else f"{prefix}{name}"
+                    )
+                    if self._room_has_outstanding_queries(room_type_id):
+                        label += "  [RFI]"
+                    item = QListWidgetItem(label)
+                    item.setData(Qt.UserRole, original_index)
+                    self.room_list.addItem(item)
+        finally:
+            self.room_list.blockSignals(False)
+
+    def _refresh_detail(self):
+        super()._refresh_detail()
+        if not self._rfi_ui_ready:
+            return
+        room_type = self._current_room_type()
+        if not room_type:
+            for button in (
+                self.add_asset_button,
+                self.remove_asset_button,
+                self.query_button,
+                self.resolve_query_button,
+                self.room_query_button,
+                self.resolve_room_query_button,
+            ):
+                button.setEnabled(False)
+            self.export_rfi_button.setEnabled(callable(self.on_export_rfi))
+            return
+        room_type_id = self._room_id(room_type)
+        room_queries = self._outstanding_queries(room_type_id, "")
+        if room_queries:
+            details = "\n".join(
+                f"Room RFI {self._text(item.get('id'))}: {self._text(item.get('reason'))}"
+                for item in room_queries
+            )
+            self.status_label.setText(
+                self.status_label.text()
+                + f"\nOpen room RFIs: {len(room_queries)}\n"
+                + details
+            )
+            self.status_label.setWordWrap(True)
+        for metadata in self._asset_row_widgets:
+            row = int(metadata["row"])
+            outstanding = self._outstanding_queries(
+                room_type_id, self._text(metadata.get("asset_id"))
+            )
+            rfi_ids = (
+                f"{len(outstanding)} open\n"
+                + "\n".join(self._text(item.get("id")) for item in outstanding)
+                if outstanding
+                else ""
+            )
+            reasons = "\n".join(
+                f"{self._text(item.get('id'))}: {self._text(item.get('reason'))}"
+                for item in outstanding
+            )
+            self.asset_table.setItem(row, 8, QTableWidgetItem(rfi_ids))
+            self.asset_table.setItem(row, 9, QTableWidgetItem(reasons))
+            if outstanding:
+                self.asset_table.item(row, 8).setBackground(Qt.GlobalColor.yellow)
+                self.asset_table.item(row, 9).setBackground(Qt.GlobalColor.yellow)
+        if not self._asset_row_widgets and self.asset_table.rowCount():
+            self.asset_table.clearSpans()
+            self.asset_table.setSpan(0, 0, 1, 10)
+        self.add_asset_button.setEnabled(bool(self.assets_by_id))
+        self.remove_asset_button.setEnabled(bool(self._asset_row_widgets))
+        self.query_button.setEnabled(bool(self._asset_row_widgets))
+        self.resolve_query_button.setEnabled(bool(self._asset_row_widgets))
+        self.room_query_button.setEnabled(True)
+        self.resolve_room_query_button.setEnabled(bool(room_queries))
+        self.export_rfi_button.setEnabled(callable(self.on_export_rfi))
+        self.asset_table.resizeRowsToContents()
+
+    def _add_asset(self):
+        if self._dirty:
+            self._apply_changes()
+        room_type = self._current_room_type()
+        if not room_type:
+            return
+        assigned = {row["asset_id"] for row in self._room_asset_rows(room_type)}
+        choices = [
+            (asset_id, f"{asset_id} - {self._text(asset.get('name')) or '(unnamed asset)'}")
+            for asset_id, asset in sorted(
+                self.assets_by_id.items(),
+                key=lambda item: (
+                    self._natural_key(item[1].get("name")),
+                    self._natural_key(item[0]),
+                ),
+            )
+            if asset_id not in assigned
+        ]
+        if not choices:
+            QMessageBox.information(
+                self, "Add Asset", "All configured assets are already assigned."
+            )
+            return
+        label, accepted = QInputDialog.getItem(
+            self, "Add Asset", "Asset", [row[1] for row in choices], 0, False
+        )
+        if not accepted:
+            return
+        asset_id = dict((display, key) for key, display in choices).get(label, "")
+        asset = self.assets_by_id.get(asset_id, {})
+        reason = self._required_reason(
+            "Add Asset",
+            f"Why is {asset_id} being added to {self._room_option_label(room_type)}?",
+        )
+        if not asset_id or not reason:
+            return
+        rows = self._room_asset_rows(room_type) + [{"asset_id": asset_id, "qty": 1}]
+        rows.sort(key=lambda row: self._natural_key(row["asset_id"]))
+        room_type["assets"] = rows
+        room_type["asset_ids"] = [row["asset_id"] for row in rows]
+        room_type_id = self._room_id(room_type)
+        self.review_state.pop(room_type_id, None)
+        if self.on_assignments_changed:
+            self.on_assignments_changed(room_type_id, rows, {})
+        self._append_rfi_history(
+            "asset_added",
+            room_type=room_type,
+            asset_id=asset_id,
+            asset_name=asset.get("name", ""),
+            note=reason,
+        )
+        self._emit_rfi_changed()
+        self._emit_state_changed()
+        self._sync_sidebar_current()
+
+    def _remove_selected_asset(self):
+        metadata = self._selected_asset_metadata()
+        room_type = self._current_room_type()
+        if not metadata or not room_type:
+            QMessageBox.information(self, "Remove Asset", "Select an asset row first.")
+            return
+        asset_id = self._text(metadata.get("asset_id"))
+        asset = self.assets_by_id.get(asset_id, {})
+        if QMessageBox.question(
+            self,
+            "Remove Asset",
+            f"Remove {asset_id} from {self._room_option_label(room_type)}?",
+        ) != QMessageBox.Yes:
+            return
+        reason = self._required_reason(
+            "Remove Asset", "Record why this asset is being removed."
+        )
+        if not reason:
+            return
+        rows, ports = self._current_assignment_values()
+        rows = [row for row in rows if row["asset_id"] != asset_id]
+        room_type["assets"] = rows
+        room_type["asset_ids"] = [row["asset_id"] for row in rows]
+        room_type_id = self._room_id(room_type)
+        self.review_state.pop(room_type_id, None)
+        if self.on_assignments_changed:
+            self.on_assignments_changed(room_type_id, rows, ports)
+        self._append_rfi_history(
+            "asset_removed",
+            room_type=room_type,
+            asset_id=asset_id,
+            asset_name=asset.get("name", ""),
+            note=reason,
+        )
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        for query in self._outstanding_queries(room_type_id, asset_id):
+            query.update(
+                status="resolved",
+                resolution=reason,
+                resolved_at=timestamp,
+                updated_at=timestamp,
+            )
+            self._append_rfi_history(
+                "query_resolved",
+                room_type=room_type,
+                asset_id=asset_id,
+                asset_name=asset.get("name", ""),
+                note=reason,
+                rfi_id=query.get("id", ""),
+            )
+        self._emit_rfi_changed()
+        self._emit_state_changed()
+        self._set_dirty(False)
+        self._sync_sidebar_current()
+
+    def _create_query(self, room_type, asset_id, reason):
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        asset = self.assets_by_id.get(asset_id, {})
+        query = {
+            "id": self._next_rfi_id(),
+            "room_type_id": self._room_id(room_type),
+            "room_type_name": self._text(room_type.get("name")),
+            "asset_id": self._text(asset_id),
+            "asset_name": self._text(asset.get("name")),
+            "reason": self._text(reason),
+            "status": "outstanding",
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "resolution": "",
+            "resolved_at": "",
+        }
+        self.rfi_state.setdefault("queries", []).append(query)
+        self._append_rfi_history(
+            "query_raised" if asset_id else "room_query_raised",
+            room_type=room_type,
+            asset_id=asset_id,
+            asset_name=asset.get("name", ""),
+            note=reason,
+            rfi_id=query["id"],
+        )
+        self.review_state.pop(self._room_id(room_type), None)
+        return query
+
+    def _raise_asset_query(self):
+        metadata = self._selected_asset_metadata()
+        room_type = self._current_room_type()
+        if not metadata or not room_type:
+            QMessageBox.information(
+                self, "Room Type Asset RFI", "Select an asset row first."
+            )
+            return
+        reason = self._required_reason(
+            "Room Type Asset RFI", "Enter the query reason for this asset."
+        )
+        if reason:
+            self._create_query(room_type, self._text(metadata.get("asset_id")), reason)
+            self._emit_rfi_changed()
+            self._emit_state_changed()
+            self._sync_sidebar_current()
+
+    def _raise_room_query(self):
+        room_types = self._selected_room_types()
+        if not room_types:
+            return
+        reason = self._required_reason(
+            "Room Type RFI",
+            f"Enter the room-level query reason for {len(room_types)} selected room type(s).",
+        )
+        if reason:
+            for room_type in room_types:
+                self._create_query(room_type, "", reason)
+            self._emit_rfi_changed()
+            self._emit_state_changed()
+            self._sync_sidebar_current()
+
+    def _choose_outstanding_query(self, room_type_id, asset_id, title):
+        matches = self._outstanding_queries(room_type_id, asset_id)
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        labels = [
+            f"{self._text(item.get('id'))} - {self._text(item.get('reason'))}"
+            for item in matches
+        ]
+        selected, accepted = QInputDialog.getItem(
+            self,
+            title,
+            f"Select one of {len(matches)} open RFIs to resolve",
+            labels,
+            0,
+            False,
+        )
+        return matches[labels.index(selected)] if accepted and selected in labels else None
+
+    def _resolve_query(self, asset_id, title):
+        room_type = self._current_room_type()
+        if not room_type:
+            return
+        query = self._choose_outstanding_query(
+            self._room_id(room_type), asset_id, title
+        )
+        if not query:
+            QMessageBox.information(self, title, "No outstanding RFI was found.")
+            return
+        resolution = self._required_reason(
+            title, "Describe the decision or change that resolves this RFI."
+        )
+        if not resolution:
+            return
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        query.update(
+            status="resolved",
+            resolution=resolution,
+            resolved_at=timestamp,
+            updated_at=timestamp,
+        )
+        asset = self.assets_by_id.get(asset_id, {})
+        self._append_rfi_history(
+            "query_resolved" if asset_id else "room_query_resolved",
+            room_type=room_type,
+            asset_id=asset_id,
+            asset_name=asset.get("name", ""),
+            note=resolution,
+            rfi_id=query.get("id", ""),
+        )
+        self._emit_rfi_changed()
+        self._sync_sidebar_current()
+
+    def _resolve_asset_query(self):
+        metadata = self._selected_asset_metadata()
+        if not metadata:
+            QMessageBox.information(
+                self, "Resolve Asset RFI", "Select an asset row first."
+            )
+            return
+        self._resolve_query(self._text(metadata.get("asset_id")), "Resolve Asset RFI")
+
+    def _resolve_room_query(self):
+        self._resolve_query("", "Resolve Room RFI")
+
+    def _export_rfi(self):
+        if self._dirty:
+            self._apply_changes()
+        if self.on_export_rfi:
+            self.on_export_rfi()
+
+    def _copy_assets_between_room_types(self):
+        if self._dirty:
+            self._apply_changes()
+        if len(self.room_types) < 2:
+            QMessageBox.information(
+                self,
+                "Copy Room Type Assets",
+                "At least two room types are required before assets can be copied.",
+            )
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Copy Room Type Assets")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        layout.addLayout(form)
+        source_combo = QComboBox()
+        target_combo = QComboBox()
+        for index, room_type in enumerate(self.room_types):
+            label = self._room_option_label(room_type)
+            source_combo.addItem(label, index)
+            target_combo.addItem(label, index)
+        source_combo.setCurrentIndex(max(0, source_combo.findData(self.current_index)))
+        if target_combo.count() > 1:
+            target_combo.setCurrentIndex(
+                1 if target_combo.currentData() == self.current_index else 0
+            )
+        form.addRow("Copy from", source_combo)
+        form.addRow("Copy to", target_combo)
+        note = QLabel(
+            "This replaces the target room type's assigned assets and records the reason in the RFI audit history."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        source_index = int(source_combo.currentData())
+        target_index = int(target_combo.currentData())
+        if source_index == target_index:
+            QMessageBox.information(
+                self, "Copy Room Type Assets", "Choose two different room types."
+            )
+            return
+        reason = self._required_reason(
+            "Copy Room Type Assets",
+            "Record why the target room type assignments are being replaced.",
+        )
+        if not reason:
+            return
+        copied = self._copy_asset_assignments(
+            source_index, target_index, reason=reason
+        )
+        QMessageBox.information(
+            self,
+            "Copy Room Type Assets",
+            f"Copied {copied} asset assignment(s) to "
+            f"{self._room_option_label(self.room_types[target_index])}.",
+        )
+
+    def _copy_asset_assignments(
+        self, source_index, target_index, reason="Copied from another room type."
+    ):
+        copied = super()._copy_asset_assignments(source_index, target_index)
+        if copied and 0 <= target_index < len(self.room_types):
+            self._append_rfi_history(
+                "assignments_replaced",
+                room_type=self.room_types[target_index],
+                note=reason,
+            )
+            self._emit_rfi_changed()
+        return copied
+
+    def _apply_changes(self):
+        changed = bool(self._dirty)
+        room_type = self._current_room_type()
+        super()._apply_changes()
+        if changed and room_type:
+            self._append_rfi_history(
+                "assignment_values_updated",
+                room_type=room_type,
+                note="Asset quantities or data points were updated in the review.",
+            )
+            self._emit_rfi_changed()
 
 
 class ScenarioGroupManagerDialog(QDialog):

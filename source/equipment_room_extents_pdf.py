@@ -157,7 +157,16 @@ def _draw_polylines(c, polylines, transform, colour, width_mm, dash=None):
     c.restoreState()
 
 
-def _draw_maximum_tag(c, payload, transform):
+def _draw_maximum_tag(
+    c,
+    payload,
+    transform,
+    *,
+    page_index=0,
+    page_label="",
+    layout_manifest=None,
+    preview_background=False,
+):
     point = payload.get("current_max_point")
     target = _text(payload.get("current_max_target"))
     distance = float(payload.get("current_max_distance_m", 0.0) or 0.0)
@@ -170,9 +179,33 @@ def _draw_maximum_tag(c, payload, transform):
     c.setFillColor(colors.HexColor("#f39c12"))
     c.setLineWidth(0.45 * mm)
     c.circle(x, y, 2.2 * mm, stroke=1, fill=1)
-    c.line(x + 2.2 * mm, y + 2.2 * mm, leader_x, leader_y)
     label = f"MAX CURRENT: {target} - {distance:.2f} m"
     width = max(48 * mm, c.stringWidth(label, "Helvetica-Bold", 7) + 5 * mm)
+    callout = {
+        "key": f"room-extents-maximum:{int(page_index)}:{_text(payload.get('name'))}:{target}",
+        "page": int(page_index),
+        "page_label": str(page_label or _text(payload.get("name"))),
+        "kind": "maximum_distance",
+        "name": f"Maximum distance - {_text(payload.get('name'))}",
+        "floor": int(payload.get("floor", 0) or 0),
+        "x_pt": leader_x,
+        "y_pt": leader_y - 3.5 * mm,
+        "width_pt": width,
+        "height_pt": 7 * mm,
+        "anchor_x_pt": x,
+        "anchor_y_pt": y,
+        "colour": "#d35400",
+        "line_width_pt": 1.2,
+        "font_size_pt": 7.0,
+        "text": label,
+        "visible": True,
+    }
+    if layout_manifest is not None:
+        layout_manifest.append(callout)
+    if preview_background:
+        c.restoreState()
+        return
+    c.line(x + 2.2 * mm, y + 2.2 * mm, leader_x, leader_y)
     c.setFillColor(colors.white)
     c.roundRect(leader_x, leader_y - 3.5 * mm, width, 7 * mm, 1 * mm, stroke=1, fill=1)
     c.setFillColor(colors.HexColor("#7c2d12"))
@@ -204,6 +237,10 @@ def _draw_room_tag(
     cabinet_count,
     switch_count,
     reserved_boxes=(),
+    page_index=0,
+    page_label="",
+    layout_manifest=None,
+    preview_background=False,
 ):
     """Tag only the selected equipment room with its capacity summary."""
     room_name = _text(payload.get("name")) or "Equipment room"
@@ -257,6 +294,30 @@ def _draw_room_tag(
             best_overlap_count = overlap_count
     box_x, box_y, box_right, box_top = selected or best
 
+    callout = {
+        "key": f"room-extents-room:{int(page_index)}:{room_name}",
+        "page": int(page_index),
+        "page_label": str(page_label or room_name),
+        "kind": "equipment_room",
+        "name": f"{room_name} capacity",
+        "floor": int(payload.get("floor", 0) or 0),
+        "x_pt": box_x,
+        "y_pt": box_y,
+        "width_pt": width,
+        "height_pt": height,
+        "anchor_x_pt": anchor_x,
+        "anchor_y_pt": anchor_y,
+        "colour": "#0b6b50",
+        "line_width_pt": 1.1,
+        "font_size_pt": 6.5,
+        "text": f"{title}\n{summary}",
+        "visible": True,
+    }
+    if layout_manifest is not None:
+        layout_manifest.append(callout)
+    if preview_background:
+        return callout
+
     attach_x = min(max(anchor_x, box_x), box_right)
     attach_y = min(max(anchor_y, box_y), box_top)
     c.saveState()
@@ -271,6 +332,7 @@ def _draw_room_tag(
     c.setFont("Helvetica", 6.5)
     c.drawString(box_x + 3 * mm, box_y + 2.5 * mm, summary)
     c.restoreState()
+    return callout
 
 
 def _draw_data_point_callouts(
@@ -519,7 +581,11 @@ def export_equipment_room_extents_pdf(
     paper_size: str = "A1",
     scale: int = 100,
     revision_number: int = 0,
+    layout_manifest=None,
+    preview_background: bool = False,
 ) -> str:
+    if layout_manifest is not None:
+        layout_manifest.clear()
     paper_size = _text(paper_size).upper()
     if paper_size not in PAPER_SIZES:
         raise ValueError(f"Unsupported paper size: {paper_size}")
@@ -668,8 +734,20 @@ def export_equipment_room_extents_pdf(
             cabinet_count=cabinet_count,
             switch_count=switch_count,
             reserved_boxes=[_maximum_tag_bounds(pdf, payload, transform)],
+            page_index=sheet_number - 1,
+            page_label=f"{room_name} - Floor {floor}",
+            layout_manifest=layout_manifest,
+            preview_background=preview_background,
         )
-        _draw_maximum_tag(pdf, payload, transform)
+        _draw_maximum_tag(
+            pdf,
+            payload,
+            transform,
+            page_index=sheet_number - 1,
+            page_label=f"{room_name} - Floor {floor}",
+            layout_manifest=layout_manifest,
+            preview_background=preview_background,
+        )
         pdf.restoreState()
 
         floor_name = _floor_name(data, floor, dxf_path)

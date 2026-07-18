@@ -258,6 +258,7 @@ NETWORK_DEFAULTS = {
         "tor_allow_adjacent_cabinet_uplinks": True,
         "auto_connect_new_manual_devices": True,
         "auto_add_switches_for_bandwidth": True,
+        "prevent_additional_equipment_rooms": False,
         "ignore_link_bandwidth_errors": False,
         "auto_planner_resolution_overrides": {},
         "spare_capacity_percent": 15.0,
@@ -740,6 +741,7 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("tor_allow_adjacent_cabinet_uplinks", True)
     settings.setdefault("auto_connect_new_manual_devices", True)
     settings.setdefault("auto_add_switches_for_bandwidth", True)
+    settings.setdefault("prevent_additional_equipment_rooms", False)
     settings.setdefault("ignore_link_bandwidth_errors", False)
     settings.setdefault("auto_planner_resolution_overrides", {})
     settings.setdefault("spare_capacity_percent", 15.0)
