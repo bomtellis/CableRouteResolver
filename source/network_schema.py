@@ -1137,6 +1137,24 @@ def ensure_network_schema(data: dict) -> dict:
         endpoint_asset["usage_profile_id"] = _text(
             endpoint_asset.get("usage_profile_id")
         )
+        endpoint_asset["north_south_concurrency_factor"] = min(
+            1.0,
+            max(
+                0.0,
+                _as_float(
+                    endpoint_asset.get("north_south_concurrency_factor"), 1.0
+                ),
+            ),
+        )
+        endpoint_asset["east_west_concurrency_factor"] = min(
+            1.0,
+            max(
+                0.0,
+                _as_float(
+                    endpoint_asset.get("east_west_concurrency_factor"), 1.0
+                ),
+            ),
+        )
         endpoint_asset["expected_north_south_bandwidth_mbps"] = north_south
         endpoint_asset["expected_east_west_bandwidth_mbps"] = east_west
         endpoint_asset["expected_bandwidth_mbps"] = round(
@@ -1165,6 +1183,20 @@ def ensure_network_schema(data: dict) -> dict:
         profile["east_west_bandwidth_mbps"] = max(
             0.0, _as_float(profile.get("east_west_bandwidth_mbps"))
         )
+        profile["north_south_concurrency_factor"] = min(
+            1.0,
+            max(
+                0.0,
+                _as_float(profile.get("north_south_concurrency_factor"), 1.0),
+            ),
+        )
+        profile["east_west_concurrency_factor"] = min(
+            1.0,
+            max(
+                0.0,
+                _as_float(profile.get("east_west_concurrency_factor"), 1.0),
+            ),
+        )
         profile["expected_packet_rate_pps"] = max(
             0.0, _as_float(profile.get("expected_packet_rate_pps"))
         )
@@ -1174,7 +1206,22 @@ def ensure_network_schema(data: dict) -> dict:
         normalised_profiles.append(profile)
     for default_profile in DEFAULT_NETWORK_USAGE_PROFILES:
         if _text(default_profile.get("id")) not in usage_profile_ids:
-            normalised_profiles.append(deepcopy(default_profile))
+            profile = deepcopy(default_profile)
+            profile["north_south_concurrency_factor"] = min(
+                1.0,
+                max(
+                    0.0,
+                    _as_float(profile.get("north_south_concurrency_factor"), 1.0),
+                ),
+            )
+            profile["east_west_concurrency_factor"] = min(
+                1.0,
+                max(
+                    0.0,
+                    _as_float(profile.get("east_west_concurrency_factor"), 1.0),
+                ),
+            )
+            normalised_profiles.append(profile)
     data["network_usage_profiles"] = normalised_profiles
 
     for asset in data["network_assets"]:
@@ -1340,6 +1387,20 @@ def ensure_network_schema(data: dict) -> dict:
             or "expected_east_west_bandwidth_mbps" in asset
         )
         asset["usage_profile_id"] = _text(asset.get("usage_profile_id"))
+        asset["north_south_concurrency_factor"] = min(
+            1.0,
+            max(
+                0.0,
+                _as_float(asset.get("north_south_concurrency_factor"), 1.0),
+            ),
+        )
+        asset["east_west_concurrency_factor"] = min(
+            1.0,
+            max(
+                0.0,
+                _as_float(asset.get("east_west_concurrency_factor"), 1.0),
+            ),
+        )
         asset["expected_north_south_bandwidth_mbps"] = max(
             0.0,
             _as_float(
@@ -1701,6 +1762,20 @@ def ensure_network_schema(data: dict) -> dict:
         )
         instance["expected_east_west_bandwidth_mbps"] = max(
             0.0, _as_float(instance.get("expected_east_west_bandwidth_mbps"), 0.0)
+        )
+        instance["north_south_concurrency_factor"] = min(
+            1.0,
+            max(
+                0.0,
+                _as_float(instance.get("north_south_concurrency_factor"), 1.0),
+            ),
+        )
+        instance["east_west_concurrency_factor"] = min(
+            1.0,
+            max(
+                0.0,
+                _as_float(instance.get("east_west_concurrency_factor"), 1.0),
+            ),
         )
         instance["expected_bandwidth_mbps"] = round(
             instance["expected_north_south_bandwidth_mbps"]

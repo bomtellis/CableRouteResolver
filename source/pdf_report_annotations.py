@@ -89,12 +89,12 @@ def page_callouts(callout_manifest, settings, page_index):
         row["width_pt"] = (
             fitted_width
             if auto_fit
-            else max(float(row.get("width_pt", 1.0) or 1.0), fitted_width)
+            else max(18.0, float(row.get("width_pt", fitted_width) or fitted_width))
         )
         row["height_pt"] = (
             fitted_height
             if auto_fit
-            else max(float(row.get("height_pt", 1.0) or 1.0), fitted_height)
+            else max(5.0, float(row.get("height_pt", fitted_height) or fitted_height))
         )
         if auto_fit:
             if str(row.get("rail", "")) == "left":
@@ -152,7 +152,16 @@ def fitted_generated_callout_size(text, font_size=7.0):
 
 
 def _draw_wrapped_text(
-    c, text, x, y, width, height, font_size, colour, font_name="Helvetica"
+    c,
+    text,
+    x,
+    y,
+    width,
+    height,
+    font_size,
+    colour,
+    font_name="Helvetica",
+    wrap_text=True,
 ):
     lines = str(text or "").splitlines() or [""]
     fitted = max(4.0, float(font_size))
@@ -160,6 +169,12 @@ def _draw_wrapped_text(
     c.setFont(font_name, fitted)
     top = y + height - fitted - 2.0
     for source_line in lines:
+        if not wrap_text:
+            if top < y + 1.0:
+                return
+            c.drawString(x + 2.0, top, source_line)
+            top -= fitted * 1.25
+            continue
         words = source_line.split() or [""]
         line = ""
         for word in words:
@@ -246,6 +261,9 @@ def _draw_generated_callout(c, row):
     c.drawPath(path, stroke=1, fill=0)
     c.setFillColor(colors.white)
     c.rect(x, y, width, height, stroke=1, fill=1)
+    clip = c.beginPath()
+    clip.rect(x, y, width, height)
+    c.clipPath(clip, stroke=0, fill=0)
     _draw_wrapped_text(
         c,
         row.get("text", ""),
@@ -256,6 +274,7 @@ def _draw_generated_callout(c, row):
         font_size,
         colour,
         font_name="Helvetica-Bold",
+        wrap_text=bool(row.get("wrap_text", True)),
     )
     c.restoreState()
 

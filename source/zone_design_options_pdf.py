@@ -1273,6 +1273,7 @@ def export_zone_design_options_pdf(
 
         callout_slots = {}
         placed_boxes = []
+        placed_leader_segments = []
 
         def overlaps(first, second):
             margin = 1.5 * mm
@@ -1295,6 +1296,122 @@ def export_zone_design_options_pdf(
                     return True
             return False
 
+        def point_in_box(point, box, margin=0.0):
+            return (
+                box[0] - margin <= point[0] <= box[0] + box[2] + margin
+                and box[1] - margin <= point[1] <= box[1] + box[3] + margin
+            )
+
+        def segments_intersect(first, second, margin=0.0):
+            """Return whether two leader segments meet, including near misses."""
+            (ax, ay), (bx, by) = first
+            (cx, cy), (dx, dy) = second
+
+            def orientation(px, py, qx, qy, rx, ry):
+                return (qy - py) * (rx - qx) - (qx - px) * (ry - qy)
+
+            def on_segment(px, py, qx, qy, rx, ry):
+                return (
+                    min(px, rx) - margin <= qx <= max(px, rx) + margin
+                    and min(py, ry) - margin <= qy <= max(py, ry) + margin
+                )
+
+            o1 = orientation(ax, ay, bx, by, cx, cy)
+            o2 = orientation(ax, ay, bx, by, dx, dy)
+            o3 = orientation(cx, cy, dx, dy, ax, ay)
+            o4 = orientation(cx, cy, dx, dy, bx, by)
+            tolerance = max(0.001, margin)
+            if (o1 > tolerance) != (o2 > tolerance) and (
+                (o3 > tolerance) != (o4 > tolerance)
+            ):
+                return True
+            return (
+                abs(o1) <= tolerance and on_segment(ax, ay, cx, cy, bx, by)
+                or abs(o2) <= tolerance and on_segment(ax, ay, dx, dy, bx, by)
+                or abs(o3) <= tolerance and on_segment(cx, cy, ax, ay, dx, dy)
+                or abs(o4) <= tolerance and on_segment(cx, cy, bx, by, dx, dy)
+            )
+
+        def segment_hits_box(segment, box, margin=0.9 * mm):
+            expanded = (
+                box[0] - margin,
+                box[1] - margin,
+                box[2] + margin * 2.0,
+                box[3] + margin * 2.0,
+            )
+            if point_in_box(segment[0], expanded) or point_in_box(segment[1], expanded):
+                return True
+            left, bottom = expanded[0], expanded[1]
+            right, top = left + expanded[2], bottom + expanded[3]
+            edges = (
+                ((left, bottom), (right, bottom)),
+                ((right, bottom), (right, top)),
+                ((right, top), (left, top)),
+                ((left, top), (left, bottom)),
+            )
+            return any(segments_intersect(segment, edge) for edge in edges)
+
+        def leader_segments(record, box, routes=None):
+            x, y, width, height = box[:4]
+            result = []
+            route_rows = [route for route in (routes or []) if isinstance(route, dict)]
+            if not route_rows:
+                route_rows = [{
+                    "anchor_x_pt": record["anchor_x"],
+                    "anchor_y_pt": record["anchor_y"],
+                    "points_pt": [],
+                }]
+            for route in route_rows:
+                anchor = (
+                    float(route.get("anchor_x_pt", record["anchor_x"])),
+                    float(route.get("anchor_y_pt", record["anchor_y"])),
+                )
+                points = [
+                    (float(point[0]), float(point[1]))
+                    for point in route.get("points_pt", []) or []
+                    if isinstance(point, (list, tuple)) and len(point) >= 2
+                ]
+                reference = points[-1] if points else anchor
+                centre_x, centre_y = x + width / 2.0, y + height / 2.0
+                dx, dy = centre_x - reference[0], centre_y - reference[1]
+                if abs(dx) > abs(dy):
+                    attach = (
+                        x if dx >= 0 else x + width,
+                        min(max(reference[1], y), y + height),
+                    )
+                    elbow = (attach[0], anchor[1])
+                else:
+                    attach = (
+                        min(max(reference[0], x), x + width),
+                        y if dy >= 0 else y + height,
+                    )
+                    elbow = (anchor[0], attach[1])
+                vertices = [anchor] + (points if points else [elbow]) + [attach]
+                result.extend(
+                    (vertices[index], vertices[index + 1])
+                    for index in range(len(vertices) - 1)
+                    if vertices[index] != vertices[index + 1]
+                )
+            return result
+
+        def placement_conflicts(record, candidate, routes):
+            segments = leader_segments(record, candidate, routes)
+            box_leader_hits = sum(
+                segment_hits_box(segment, candidate)
+                for segment in placed_leader_segments
+            )
+            leader_box_hits = sum(
+                segment_hits_box(segment, box)
+                for segment in segments
+                for box in placed_boxes
+            )
+            leader_crossings = sum(
+                segments_intersect(segment, other, 0.35 * mm)
+                for segment in segments
+                for other in placed_leader_segments
+            )
+            return box_leader_hits + leader_box_hits + leader_crossings, segments
+
         def ordered_sides(record):
             left, bottom, right, top = record["rectangle"]
             distances = {
@@ -1315,10 +1432,22 @@ def export_zone_design_options_pdf(
         for record in callout_records:
             selected = None
             non_dxf_fallback = None
+            fallback_score = None
             tested = set()
             callout_override = _studio_callout(
                 studio_settings, record["studio_key"]
             )
+            planned_leaders = deepcopy(callout_override.get("leaders_pt", []) or [])
+            if not planned_leaders:
+                leader_points = deepcopy(
+                    callout_override.get("leader_points_pt", []) or []
+                )
+                if leader_points:
+                    planned_leaders = [{
+                        "anchor_x_pt": float(record["anchor_x"]),
+                        "anchor_y_pt": float(record["anchor_y"]),
+                        "points_pt": leader_points,
+                    }]
             if all(
                 name in callout_override
                 for name in ("x_pt", "y_pt", "width_pt", "height_pt")
@@ -1373,11 +1502,17 @@ def export_zone_design_options_pdf(
                     tested.add(candidate_key)
                     if overlaps_dxf(candidate):
                         continue
-                    if non_dxf_fallback is None:
-                        non_dxf_fallback = candidate
-                    if not any(
+                    box_conflicts = sum(
                         overlaps(candidate, other) for other in placed_boxes
-                    ):
+                    )
+                    route_conflicts, _segments = placement_conflicts(
+                        record, candidate, planned_leaders
+                    )
+                    conflict_score = box_conflicts + route_conflicts
+                    if fallback_score is None or conflict_score < fallback_score:
+                        non_dxf_fallback = candidate
+                        fallback_score = conflict_score
+                    if conflict_score == 0:
                         selected = candidate
                         break
                 if selected is not None:
@@ -1401,7 +1536,7 @@ def export_zone_design_options_pdf(
             visible = bool(callout_override.get("visible", default_visible)) and not bool(
                 callout_override.get("joined_into_key")
             )
-            leaders = deepcopy(callout_override.get("leaders_pt", []) or [])
+            leaders = planned_leaders
             if not leaders:
                 leader_points = deepcopy(
                     callout_override.get("leader_points_pt", []) or []
@@ -1425,6 +1560,9 @@ def export_zone_design_options_pdf(
             }
             if visible:
                 placed_boxes.append(selected)
+                placed_leader_segments.extend(
+                    leader_segments(record, selected, leaders)
+                )
             if layout_manifest is not None:
                 layout_manifest.append(
                     {

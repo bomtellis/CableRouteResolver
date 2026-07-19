@@ -12,7 +12,7 @@ from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
-from itertools import count
+from itertools import combinations_with_replacement, count
 import hashlib
 import math
 import os
@@ -20,7 +20,9 @@ import re
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from network_schema import (
+    CATALYST_9600_LINE_CARDS,
     PLUGGABLE_OPTIC_PORT_TYPES,
+    catalyst_9600_port_definitions,
     compatible_port_speeds,
     default_port_speeds,
     ensure_network_schema,
@@ -221,6 +223,27 @@ def _traffic_components(record: dict, settings: Optional[dict] = None) -> Tuple[
     return north_south, east_west, north_south + east_west
 
 
+def _traffic_concurrency_factors(record: dict) -> Tuple[float, float]:
+    """Return directional busy-hour concurrency as bounded multipliers.
+
+    Factors belong to traffic-producing endpoint assets. Generated instances,
+    assignments and connections already carry diversified demand, so callers
+    should apply these multipliers only while creating endpoint demand.
+    """
+
+    record = record if isinstance(record, dict) else {}
+    return (
+        min(
+            1.0,
+            max(0.0, _float(record.get("north_south_concurrency_factor"), 1.0)),
+        ),
+        min(
+            1.0,
+            max(0.0, _float(record.get("east_west_concurrency_factor"), 1.0)),
+        ),
+    )
+
+
 def _set_directional_traffic(record: dict, north_south: float, east_west: float) -> None:
     north_south = max(0.0, float(north_south or 0.0))
     east_west = max(0.0, float(east_west or 0.0))
@@ -304,6 +327,9 @@ class RoutingGraph:
             data.get("building", {}).get("floor_height_m"), 4.0
         )
         self._trees: Dict[str, Tuple[Dict[str, float], Dict[str, str]]] = {}
+        self._floor_trees: Dict[
+            Tuple[str, int], Tuple[Dict[str, float], Dict[str, str]]
+        ] = {}
         self._build()
 
     def _add_point(self, name: str, payload: dict, kind: str) -> None:
@@ -521,6 +547,65 @@ class RoutingGraph:
             if a and b:
                 return _distance(a, b, self.floor_height_m), [source, destination]
             return 0.0, [source, destination]
+        path = [destination]
+        node = destination
+        guard = 0
+        while node != source and guard < len(self.points) + 1:
+            node = parents.get(node, source)
+            path.append(node)
+            guard += 1
+        path.reverse()
+        return float(distances[destination]), path
+
+    def route_on_floor(
+        self, source: str, destination: str, floor: int
+    ) -> Tuple[float, List[str]]:
+        """Route without using nodes or transitions on another floor."""
+        source = _text(source)
+        destination = _text(destination)
+        floor = _int(floor)
+        if not source or not destination:
+            return 0.0, []
+        if any(
+            _int(self.points.get(name, {}).get("floor")) != floor
+            for name in (source, destination)
+        ):
+            raise NetworkPlanningError(
+                f"{source} and {destination} are not both on floor {floor}.",
+                code="same_floor_assignment",
+                details={
+                    "from_name": source,
+                    "to_name": destination,
+                    "required_floor": floor,
+                },
+            )
+        key = (source, floor)
+        if key not in self._floor_trees:
+            allowed = {
+                name
+                for name, point in self.points.items()
+                if _int(point.get("floor")) == floor
+            }
+            floor_graph = {
+                name: [
+                    (neighbour, weight)
+                    for neighbour, weight in self.graph.get(name, [])
+                    if neighbour in allowed
+                ]
+                for name in allowed
+            }
+            self._floor_trees[key] = _dijkstra_tree(floor_graph, source)
+        distances, parents = self._floor_trees[key]
+        if destination not in distances:
+            raise NetworkPlanningError(
+                f"No floor-{floor} routing path connects {source} to {destination}.",
+                code="same_floor_route_unavailable",
+                details={
+                    "from_name": source,
+                    "to_name": destination,
+                    "required_floor": floor,
+                },
+            )
         path = [destination]
         node = destination
         guard = 0
@@ -871,11 +956,27 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
         for item in data.get("departments", [])
         if isinstance(item, dict) and _text(item.get("id"))
     }
-    existing_sources = {
-        _text(item.get("to")): _text(item.get("from"))
-        for item in data.get("connections", [])
-        if isinstance(item, dict) and _text(item.get("to")) and _text(item.get("from"))
+    room_names = {
+        _text(item.get("name"))
+        for item in data.get("locations", [])
+        if isinstance(item, dict)
+        and _text(item.get("kind")).lower()
+        in {"comms_room", "distributed_equipment_room", "mer"}
+        and _text(item.get("name"))
     }
+    existing_sources = {}
+    for item in data.get("connections", []):
+        if not isinstance(item, dict):
+            continue
+        from_name = _text(item.get("from"))
+        to_name = _text(item.get("to"))
+        # Only Routing-tab equipment-room connections define endpoint
+        # ownership. Generated switch-to-endpoint connections must not replace
+        # that source when a completed network is regenerated.
+        if from_name in room_names and to_name:
+            existing_sources[to_name] = from_name
+        elif to_name in room_names and from_name:
+            existing_sources[from_name] = to_name
 
     warnings: List[str] = []
     results: List[EndpointDemand] = []
@@ -920,12 +1021,15 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
                 )
                 power = _poe_power_for_asset(asset, settings)
                 divisor = max(1, data_points_per_asset)
-                north_south, east_west, combined_bandwidth = _traffic_components(
+                north_south, east_west, _combined_bandwidth = _traffic_components(
                     asset, settings
                 )
-                north_south_per_port = north_south / divisor
-                east_west_per_port = east_west / divisor
-                bandwidth_per_port = combined_bandwidth / divisor
+                north_south_factor, east_west_factor = (
+                    _traffic_concurrency_factors(asset)
+                )
+                north_south_per_port = north_south * north_south_factor / divisor
+                east_west_per_port = east_west * east_west_factor / divisor
+                bandwidth_per_port = north_south_per_port + east_west_per_port
                 packets_per_port = max(
                     0.0,
                     _float(
@@ -1078,12 +1182,20 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
             "expected_bandwidth_mbps",
             "expected_north_south_bandwidth_mbps",
             "expected_east_west_bandwidth_mbps",
+            "north_south_concurrency_factor",
+            "east_west_concurrency_factor",
         ):
             if field_name in instance:
                 source_traffic[field_name] = instance.get(field_name)
         north_south, east_west, bandwidth = _traffic_components(
             source_traffic, settings
         )
+        north_south_factor, east_west_factor = _traffic_concurrency_factors(
+            source_traffic
+        )
+        north_south *= north_south_factor
+        east_west *= east_west_factor
+        bandwidth = north_south + east_west
         packets = max(
             0.0,
             _float(
@@ -1950,7 +2062,10 @@ class DesignBuilder:
 
     def _expanded_ports(self, instance: dict) -> List[dict]:
         asset = self._asset_for_instance(instance)
-        rows = [row for row in asset.get("port_definitions", []) if isinstance(row, dict) and _int(row.get("port_count")) > 0]
+        configured_rows = instance.get("port_definitions")
+        if not isinstance(configured_rows, list) or not configured_rows:
+            configured_rows = asset.get("port_definitions", [])
+        rows = [row for row in configured_rows if isinstance(row, dict) and _int(row.get("port_count")) > 0]
         result: List[dict] = []
         counters: Dict[str, int] = defaultdict(int)
         for row in rows:
@@ -2365,7 +2480,8 @@ class DesignBuilder:
                         "asset_id": _text(asset.get("id")),
                         "name": _text(asset.get("name")) or _text(asset.get("id")),
                         **capability,
-                        "meets_required": capability["capacity_mbps"] + 1e-9
+                        "meets_required": capability["capacity_mbps"] > 0
+                        and capability["capacity_mbps"] + 1e-9
                         >= max(0.0, float(required_bandwidth_mbps or 0.0)),
                     }
                 )
@@ -2384,7 +2500,8 @@ class DesignBuilder:
                         "asset_id": _text(asset.get("id")),
                         "name": _text(asset.get("name")) or _text(asset.get("id")),
                         **capability,
-                        "meets_required": capability["capacity_mbps"] + 1e-9
+                        "meets_required": capability["capacity_mbps"] > 0
+                        and capability["capacity_mbps"] + 1e-9
                         >= max(0.0, float(required_bandwidth_mbps or 0.0)),
                     }
                 )
@@ -4042,11 +4159,14 @@ def _asset_layer_downlink_port_capacity(asset: dict) -> int:
     access link.
     """
 
+    # Uplink/downlink are logical roles on modern switching interfaces. Count
+    # both pools for layer sizing; the allocator will record when a declared
+    # role is reconfigured for the selected connection.
     downlinks = sum(
         max(0, _int(row.get("port_count")))
         for row in asset.get("port_definitions", [])
         if isinstance(row, dict)
-        and _text(row.get("port_use")).lower() == "downlink"
+        and _text(row.get("port_use")).lower() in {"downlink", "uplink"}
         and _text(row.get("port_type")).lower()
         in PLUGGABLE_OPTIC_PORT_TYPES | {"lc", "sc", "mpo", "pon"}
     )
@@ -4059,6 +4179,134 @@ def _layer_capacity_candidates(candidates: Sequence[dict]) -> List[dict]:
         for asset in candidates
         if _asset_layer_downlink_port_capacity(asset) > 0
     ]
+
+
+def _representative_layer_targets(targets: Sequence[dict]) -> List[dict]:
+    """Keep the highest-demand instance of each installed port inventory."""
+    representatives = {}
+    for target in targets:
+        key = (
+            _text(target.get("asset_id")),
+            tuple(
+                (
+                    _text(row.get("port_type")),
+                    _text(row.get("port_use")),
+                    _int(row.get("port_count")),
+                    tuple(normalise_port_speeds(row.get("supported_speeds_mbps"))),
+                )
+                for row in target.get("port_definitions", []) or []
+                if isinstance(row, dict)
+            ),
+        )
+        existing = representatives.get(key)
+        if existing is None or _float(
+            target.get("expected_bandwidth_mbps")
+        ) > _float(existing.get("expected_bandwidth_mbps")):
+            representatives[key] = target
+    return list(representatives.values())
+
+
+def _modular_layer_configuration_candidates(
+    builder: DesignBuilder, candidates: Sequence[dict], targets: Sequence[dict]
+) -> List[dict]:
+    """Expand a modular chassis into viable installed line-card populations.
+
+    Access/aggregation demand is already known when this is called. The later
+    compatibility and capacity passes therefore select a card population from
+    real downstream port speeds instead of accepting the library's example
+    chassis configuration as fixed hardware.
+    """
+
+    result = []
+    for asset in candidates:
+        if not bool(asset.get("modular_chassis", False)):
+            result.append(asset)
+            continue
+        modules = [
+            dict(row)
+            for row in asset.get("chassis_modules", []) or []
+            if isinstance(row, dict)
+        ]
+        model_identity = " ".join(
+            (
+                _text(asset.get("manufacturer")),
+                _text(asset.get("model")),
+                _text(asset.get("name")),
+            )
+        ).upper()
+        if not (
+            "C9606R" in model_identity or "CATALYST 9600" in model_identity
+        ):
+            # Other modular platforms retain their declared module inventory
+            # until they expose an editable line-card catalogue in the schema.
+            result.append(asset)
+            continue
+        supervisor_rows = [
+            row for row in modules if _text(row.get("module_type")) == "supervisor"
+        ]
+        line_slots = (1, 2, 5, 6)
+        demanded_speeds = {40000, 100000}
+        for target in _representative_layer_targets(targets):
+            target_asset = builder._asset_for_instance(target)
+            for row in target.get("port_definitions", []) or target_asset.get(
+                "port_definitions", []
+            ) or []:
+                if isinstance(row, dict) and (
+                    _text(row.get("medium")).lower() == "fibre"
+                    or _text(row.get("port_type")).lower()
+                    in PLUGGABLE_OPTIC_PORT_TYPES | {"lc", "sc", "mpo"}
+                ):
+                    demanded_speeds.update(
+                        normalise_port_speeds(row.get("supported_speeds_mbps"))
+                    )
+        card_vectors = {}
+        for model, groups in CATALYST_9600_LINE_CARDS.items():
+            card_vectors[model] = tuple(
+                sum(count for _port_type, count, _use, speeds in groups if speed in speeds)
+                for speed in sorted(demanded_speeds)
+            )
+        models = []
+        for model, vector in card_vectors.items():
+            dominated = any(
+                other != model
+                and all(left <= right for left, right in zip(vector, other_vector))
+                and any(left < right for left, right in zip(vector, other_vector))
+                for other, other_vector in card_vectors.items()
+            )
+            if not dominated and any(vector):
+                models.append(model)
+        models.sort()
+        for card_models in combinations_with_replacement(models, len(line_slots)):
+            configured_modules = [dict(row) for row in supervisor_rows]
+            configured_modules.extend(
+                {
+                    "slot": slot,
+                    "module_type": "line_card",
+                    "model": model,
+                }
+                for slot, model in zip(line_slots, card_models)
+            )
+            configured_modules.sort(key=lambda row: _int(row.get("slot")))
+            port_definitions = catalyst_9600_port_definitions(configured_modules)
+            port_count = sum(
+                max(0, _int(row.get("port_count")))
+                for row in port_definitions
+            )
+            if port_count <= 0:
+                continue
+            result.append(
+                {
+                    **asset,
+                    "number_of_ports": port_count,
+                    "port_definitions": port_definitions,
+                    "chassis_modules": configured_modules,
+                    "_planner_chassis_modules": configured_modules,
+                    "_planner_port_definitions": port_definitions,
+                    "_planner_modular_configuration": True,
+                    "_planner_line_card_models": list(card_models),
+                }
+            )
+    return result
 
 
 def _peer_ports_per_layer_device(device_count: int, links_per_pair: int) -> int:
@@ -4194,6 +4442,14 @@ def _candidate_bundle_members_for_target(
         "asset_id": _text(source_asset.get("id")),
         "network_layer": "core",
         "design_role": "core_switch",
+        "port_definitions": deepcopy(
+            source_asset.get("_planner_port_definitions")
+            or source_asset.get("port_definitions", [])
+        ),
+        "chassis_modules": deepcopy(
+            source_asset.get("_planner_chassis_modules")
+            or source_asset.get("chassis_modules", [])
+        ),
     }
     info = builder.connection_bundle_capabilities(
         target,
@@ -4242,19 +4498,20 @@ def _compatible_layer_candidates(
     targets: Sequence[dict],
     label: str,
 ) -> List[dict]:
+    representative_targets = _representative_layer_targets(targets)
     rows = [
         asset
         for asset in candidates
         if all(
             _candidate_bundle_members_for_target(builder, target, asset)
             is not None
-            for target in targets
+            for target in representative_targets
         )
     ]
     if rows or not targets:
         return rows or list(candidates)
     worst = max(
-        targets,
+        representative_targets,
         key=lambda target: max(
             0.0, _float(target.get("expected_bandwidth_mbps"))
         ),
@@ -4281,6 +4538,110 @@ def _compatible_layer_candidates(
             ),
         },
     )
+
+
+def _speed_compatible_layer_capacity_candidates(
+    builder: DesignBuilder,
+    candidates: Sequence[dict],
+    targets: Sequence[dict],
+) -> List[dict]:
+    """Size layer devices from the ports compatible with every target type.
+
+    A modular core can have many free cages while its 10 Gb/s subset is already
+    exhausted. Using the total cage count made the sizing pass select two cores
+    and the later allocator fail part-way through the access layer. The
+    conservative common capacity below keeps sizing and allocation aligned.
+    """
+
+    result = []
+    representative_targets = _representative_layer_targets(targets)
+    for asset in candidates:
+        total_capacity = _asset_layer_downlink_port_capacity(asset)
+        if total_capacity <= 0:
+            continue
+        fake_source = {
+            "id": f"__LAYER-CAPACITY-{_text(asset.get('id'))}",
+            "asset_id": _text(asset.get("id")),
+            "network_layer": "core",
+            "design_role": "core_switch",
+            "port_definitions": deepcopy(
+                asset.get("_planner_port_definitions")
+                or asset.get("port_definitions", [])
+            ),
+            "chassis_modules": deepcopy(
+                asset.get("_planner_chassis_modules")
+                or asset.get("chassis_modules", [])
+            ),
+        }
+        target_capacities = []
+        for target in representative_targets:
+            info = builder.connection_bundle_capabilities(
+                target,
+                "Uplink-1",
+                fake_source,
+                "Downlink-1",
+                "fibre",
+                0,
+            )
+            required = max(0.0, _float(target.get("expected_bandwidth_mbps")))
+            compatible_counts = []
+            for capability in info.get("capabilities", []):
+                speed = max(0, _int(capability.get("speed_mbps")))
+                max_members = max(0, _int(capability.get("max_members")))
+                required_members = (
+                    max(1, int(math.ceil(required / float(speed) - 1e-12)))
+                    if required > 0.0 and speed > 0
+                    else 1
+                )
+                if speed > 0 and required_members <= max_members:
+                    compatible_counts.append(
+                        len(capability.get("right_rows", []) or [])
+                    )
+            if info.get("transparent_pair") is not None:
+                compatible_counts.append(1)
+            target_capacities.append(max(compatible_counts, default=0))
+        compatible_capacity = (
+            min(target_capacities) if target_capacities else total_capacity
+        )
+        if compatible_capacity > 0:
+            result.append(
+                {
+                    **asset,
+                    "number_of_ports": min(total_capacity, compatible_capacity),
+                    "_planner_total_layer_port_capacity": total_capacity,
+                    "_planner_speed_compatible_port_capacity": compatible_capacity,
+                }
+            )
+    # A modular catalogue can yield many card populations with the same usable
+    # downstream capacity.  They are equivalent to the capacity optimiser, but
+    # retaining every permutation makes its Pareto search grow needlessly.  Keep
+    # the most versatile physical population for each useful capacity point.
+    compact: List[dict] = []
+    modular_by_capacity = {}
+    for asset in result:
+        if not bool(asset.get("_planner_modular_configuration", False)):
+            compact.append(asset)
+            continue
+        key = (
+            _text(asset.get("id")),
+            max(0, _int(asset.get("number_of_ports"))),
+        )
+        existing = modular_by_capacity.get(key)
+        score = (
+            max(0, _int(asset.get("_planner_total_layer_port_capacity"))),
+            tuple(_text(model) for model in asset.get("_planner_line_card_models", [])),
+        )
+        existing_score = (
+            max(0, _int(existing.get("_planner_total_layer_port_capacity"))),
+            tuple(
+                _text(model)
+                for model in existing.get("_planner_line_card_models", [])
+            ),
+        ) if existing is not None else None
+        if existing is None or score > existing_score:
+            modular_by_capacity[key] = asset
+    compact.extend(modular_by_capacity.values())
+    return compact
 
 
 def _layer_bundle_port_demands(
@@ -4376,6 +4737,17 @@ def _build_layer_instances(
             rack_deployment_model=rack_model,
             rack_function=rack_function,
             aggregation_rack_mode=(aggregation_mode if layer == "aggregation" else ""),
+            modular_chassis_configuration_auto=bool(
+                asset.get("_planner_modular_configuration", False)
+            ),
+            chassis_modules=deepcopy(
+                asset.get("_planner_chassis_modules")
+                or asset.get("chassis_modules", [])
+            ),
+            port_definitions=deepcopy(
+                asset.get("_planner_port_definitions")
+                or asset.get("port_definitions", [])
+            ),
         )
         rack_next_u[rack_name] += rack_u
         instances.append(instance)
@@ -4931,10 +5303,15 @@ def _build_traditional_layer_topology(
             _int(core_access.get("minimum_distinct_sources"), 1),
             2 if core_peer is not None else 1,
         )
+        core_candidates = _modular_layer_configuration_candidates(
+            builder, core_candidates, access_switches
+        )
         core_candidates = _compatible_layer_candidates(
             builder, core_candidates, access_switches, "core switch"
         )
-        core_candidates = _layer_capacity_candidates(core_candidates)
+        core_candidates = _speed_compatible_layer_capacity_candidates(
+            builder, core_candidates, access_switches
+        )
         core_access_bundles = _layer_bundle_port_demands(
             builder,
             access_switches,
@@ -4993,10 +5370,15 @@ def _build_traditional_layer_topology(
         raise NetworkPlanningError(
             "No aggregation/distribution switch asset is available for the three-tier topology."
         )
+    aggregation_candidates = _modular_layer_configuration_candidates(
+        builder, aggregation_candidates, access_switches
+    )
     aggregation_candidates = _compatible_layer_candidates(
         builder, aggregation_candidates, access_switches, "aggregation switch"
     )
-    aggregation_candidates = _layer_capacity_candidates(aggregation_candidates)
+    aggregation_candidates = _speed_compatible_layer_capacity_candidates(
+        builder, aggregation_candidates, access_switches
+    )
     aggregation_access_bundles = _layer_bundle_port_demands(
         builder,
         access_switches,
@@ -5052,10 +5434,15 @@ def _build_traditional_layer_topology(
             per_aggregation_packets, 3
         )
 
+    core_candidates = _modular_layer_configuration_candidates(
+        builder, core_candidates, aggregations
+    )
     core_candidates = _compatible_layer_candidates(
         builder, core_candidates, aggregations, "core switch"
     )
-    core_candidates = _layer_capacity_candidates(core_candidates)
+    core_candidates = _speed_compatible_layer_capacity_candidates(
+        builder, core_candidates, aggregations
+    )
     core_aggregation_bundles = _layer_bundle_port_demands(
         builder,
         aggregations,
@@ -6151,6 +6538,17 @@ def _traditional_design(
     max_copper_m = max(
         1.0, _float(builder.settings.get("traditional_max_copper_m"), 90.0)
     )
+    same_floor_only = bool(
+        builder.settings.get("auto_planner_same_floor_only", False)
+    )
+
+    def endpoint_route(room: dict, endpoint: EndpointDemand):
+        room_name = _text(room.get("name"))
+        if same_floor_only:
+            return builder.graph.route_on_floor(
+                room_name, endpoint.name, endpoint.floor
+            )
+        return builder.graph.route(room_name, endpoint.name)
 
     # Keep each department/floor together by choosing its dominant established comms-room route.
     grouped: Dict[Tuple[str, int], List[EndpointDemand]] = defaultdict(list)
@@ -6161,7 +6559,11 @@ def _traditional_design(
     for _, group in grouped.items():
         weighted_sources: Dict[str, int] = defaultdict(int)
         for endpoint in group:
-            if endpoint.existing_comms_room in room_map:
+            existing = room_map.get(endpoint.existing_comms_room)
+            if existing is not None and (
+                not same_floor_only
+                or _int(existing.get("floor")) == endpoint.floor
+            ):
                 weighted_sources[endpoint.existing_comms_room] += endpoint.port_count
         if weighted_sources:
             weighted_primary = {
@@ -6180,31 +6582,61 @@ def _traditional_design(
                 "y": sum(item.y * item.port_count for item in group)
                 / max(1, sum(item.port_count for item in group)),
             }
-            dominant = _nearest_location(centre, primary_comms_rooms or comms_rooms)
+            eligible_rooms = primary_comms_rooms or comms_rooms
+            if same_floor_only:
+                eligible_rooms = [
+                    room
+                    for room in eligible_rooms
+                    if _int(room.get("floor")) == group[0].floor
+                ]
+            dominant = _nearest_location(centre, eligible_rooms)
         for endpoint in group:
-            # The graph planner may deliberately spread a department across
-            # several DERs. Preserve that explicit assignment instead of
-            # collapsing every endpoint back onto the group's dominant DER,
-            # which would strand the other rooms and manufacture a suffixed
-            # overflow DER later in this pass.
+            # A direct Routing-tab room connection is authoritative. Preserve
+            # both comms-room and DER assignments made by the graph/zone
+            # planner rather than regrouping them onto a departmental room.
             existing_room = room_map.get(_text(endpoint.existing_comms_room))
-            selected = (
-                existing_room
-                if existing_room is not None
-                and _is_distributed_equipment_room(existing_room)
-                else dominant
-            )
-            if selected is not None:
-                route_length, _ = builder.graph.route(
-                    _text(selected.get("name")), endpoint.name
+            if (
+                existing_room is not None
+                and same_floor_only
+                and _int(existing_room.get("floor")) != endpoint.floor
+            ):
+                raise NetworkPlanningError(
+                    f"The existing connection for {endpoint.name} uses "
+                    f"{_text(existing_room.get('name'))} on another floor while "
+                    "same-floor-only planning is enabled.",
+                    code="same_floor_assignment",
+                    details={
+                        "location_name": _text(existing_room.get("name")),
+                        "endpoint_name": endpoint.name,
+                        "endpoint_floor": endpoint.floor,
+                        "location_floor": _int(existing_room.get("floor")),
+                    },
                 )
+            selected = existing_room or dominant
+            if selected is not None:
+                route_length, _ = endpoint_route(selected, endpoint)
                 route_length += endpoint.extension_distance_m
                 if route_length > max_copper_m:
+                    if existing_room is not None:
+                        builder.warnings.append(
+                            f"Preserved the existing Routing-tab connection from "
+                            f"{_text(existing_room.get('name'))} to {endpoint.name}; "
+                            f"its calculated route is {route_length:.2f} m against "
+                            f"the configured {max_copper_m:.2f} m copper limit."
+                        )
+                        endpoint_room[endpoint.name] = selected
+                        continue
                     reachable = []
                     for candidate in comms_rooms:
-                        candidate_length, _ = builder.graph.route(
-                            _text(candidate.get("name")), endpoint.name
-                        )
+                        if (
+                            same_floor_only
+                            and _int(candidate.get("floor")) != endpoint.floor
+                        ):
+                            continue
+                        try:
+                            candidate_length, _ = endpoint_route(candidate, endpoint)
+                        except NetworkPlanningError:
+                            continue
                         candidate_length += endpoint.extension_distance_m
                         if candidate_length <= max_copper_m:
                             reachable.append((candidate, candidate_length))
@@ -6220,7 +6652,14 @@ def _traditional_design(
                             ),
                         )[0]
                     else:
-                        selected = _nearest_location(endpoint, comms_rooms)
+                        fallback_rooms = comms_rooms
+                        if same_floor_only:
+                            fallback_rooms = [
+                                room
+                                for room in comms_rooms
+                                if _int(room.get("floor")) == endpoint.floor
+                            ]
+                        selected = _nearest_location(endpoint, fallback_rooms)
             if selected is None:
                 raise NetworkPlanningError(
                     f"No comms room could be selected for {endpoint.name}."
@@ -6278,9 +6717,14 @@ def _traditional_design(
                 if endpoint is None:
                     continue
                 try:
-                    route_length, _path = builder.graph.route(
-                        candidate_name, endpoint_name
-                    )
+                    if same_floor_only:
+                        route_length, _path = builder.graph.route_on_floor(
+                            candidate_name, endpoint_name, endpoint.floor
+                        )
+                    else:
+                        route_length, _path = builder.graph.route(
+                            candidate_name, endpoint_name
+                        )
                 except NetworkPlanningError:
                     reachable = False
                     break
@@ -6939,9 +7383,15 @@ def _traditional_design(
                 group_assignments, start=1
             ):
                 for port_number, item in enumerate(assigned, start=1):
-                    length_m, path = builder.graph.route(
-                        active_room_name, item.endpoint_name
-                    )
+                    endpoint = endpoint_by_name.get(item.endpoint_name)
+                    if same_floor_only and endpoint is not None:
+                        length_m, path = builder.graph.route_on_floor(
+                            active_room_name, item.endpoint_name, endpoint.floor
+                        )
+                    else:
+                        length_m, path = builder.graph.route(
+                            active_room_name, item.endpoint_name
+                        )
                     length_m += item.extension_distance_m
                     physical_port = item.selected_network_port or str(port_number)
                     builder.add_assignment(
@@ -8205,6 +8655,70 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
         row for row in builder.instances
         if _text(row.get("design_role")) == "core_switch"
     ]
+    if cores:
+        link_compatible_routers = []
+        edge_alternatives = []
+        paired_cores = [
+            cores[index % len(cores)]
+            for index in range(required_router_count)
+        ]
+        for asset in router_candidates:
+            capacities = []
+            for core in paired_cores:
+                fake_router = {
+                    "id": f"__EDGE-CAPACITY-{_text(asset.get('id'))}",
+                    "asset_id": _text(asset.get("id")),
+                    "network_layer": "edge",
+                    "design_role": "edge_router",
+                }
+                info = builder.connection_bundle_capabilities(
+                    fake_router,
+                    "Downlink-LAN-1",
+                    core,
+                    "Downlink-Edge-1",
+                    "fibre",
+                    0,
+                )
+                capacities.append(
+                    max(
+                        (
+                            _int(row.get("capacity_mbps"))
+                            for row in info.get("capabilities", [])
+                        ),
+                        default=0,
+                    )
+                )
+            compatible_capacity = min(capacities, default=0)
+            edge_alternatives.append(
+                {
+                    "asset_id": _text(asset.get("id")),
+                    "name": _text(asset.get("name")) or _text(asset.get("id")),
+                    "capacity_mbps": compatible_capacity,
+                    "meets_required": compatible_capacity + 1e-9
+                    >= required_edge_bandwidth,
+                }
+            )
+            if compatible_capacity + 1e-9 >= required_edge_bandwidth:
+                link_compatible_routers.append(asset)
+        if link_compatible_routers:
+            router_candidates = link_compatible_routers
+        elif not ignore_bandwidth_shortfall:
+            maximum_capacity = max(
+                (row["capacity_mbps"] for row in edge_alternatives), default=0
+            )
+            raise NetworkPlanningError(
+                "No configured edge router or firewall has a speed-compatible "
+                f"core-facing bundle for {required_edge_bandwidth:.3f} Mbps.",
+                code="edge_core_link_capacity",
+                details={
+                    "required_bandwidth_mbps": required_edge_bandwidth,
+                    "max_compatible_capacity_mbps": maximum_capacity,
+                    "shortfall_mbps": max(
+                        0.0, required_edge_bandwidth - maximum_capacity
+                    ),
+                    "edge_alternatives": edge_alternatives,
+                },
+            )
     locations_by_name = {
         _text(row.get("name")): row
         for row in builder.data.get("locations", [])
@@ -8558,13 +9072,16 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         builder.settings.get("tor_keep_final_connections_in_cabinet", True)
     )
     tor_local_fibre = rack_model == "top_of_rack" and keep_tor_final_local
+    tor_allow_adjacent = bool(
+        builder.settings.get("tor_allow_adjacent_cabinet_uplinks", True)
+    )
 
     def panel_pool_key(instance: dict) -> Optional[Tuple[int, str, str]]:
         """Pool panels by strategy: location for EoR, cabinet for ToR."""
         key = rack_key(instance)
         if key is None:
             return None
-        if tor_local_fibre:
+        if tor_local_fibre and not tor_allow_adjacent:
             return key
         return key[0], key[1], ""
 
@@ -8640,14 +9157,11 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         connectorised_breakout = cable_core_count >= mpo_threshold
         termination_mode = "connectorised" if connectorised_breakout else default_mode
         rear_connector = planned_mpo_connector if termination_mode == "connectorised" else "splice"
-        # A connectorised MPO/MTP trunk keeps unused fibres on the rear trunk;
-        # only fibres actually patched into service consume front LC/SC adapter
-        # positions.  Spliced cables still present every installed core at the
-        # front.  This prevents large trunks from creating many almost-empty
-        # modular panels while preserving their full cable-core metadata.
-        connector_positions = (
-            active_positions if connectorised_breakout else full_breakout_positions
-        )
+        # Front-panel occupancy represents live LC/SC connections, not dark
+        # spare cores in the fixed cable.  Spare cores remain designated on the
+        # physical cable and can be terminated later without making apparently
+        # unconnected panel ports look occupied today.
+        connector_positions = active_positions
         connection_plan[logical_id] = {
             "used_cores": used_cores,
             "cable_core_count": cable_core_count,
@@ -8817,7 +9331,7 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         prefer_nearby_panel = tor_local_fibre
         max_preferred_distance = (
             1
-            if bool(builder.settings.get("tor_allow_adjacent_cabinet_uplinks", True))
+            if tor_allow_adjacent
             else 0
         )
 
@@ -8829,7 +9343,7 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
             rows.sort(
                 key=lambda panel: (
                     cabinet_distance(_text(panel.get("rack_name")), rack[2]),
-                    _int(panel.get("termination_count")),
+                    -_int(panel.get("termination_count")),
                     _text(panel.get("name")),
                 )
             )
@@ -9019,7 +9533,7 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
 
         def access_cassette_key(instance: dict) -> str:
             return (
-                _text(instance.get("id"))
+                "access-uplinks"
                 if _text(instance.get("design_role")) == "access_switch"
                 else ""
             )
@@ -11210,6 +11724,7 @@ def generate_network_design(
     settings.setdefault("auto_planner_parallel_threshold", 4)
     settings.setdefault("auto_add_switches_for_bandwidth", True)
     settings.setdefault("auto_planner_connected_data_points_only", False)
+    settings.setdefault("auto_planner_same_floor_only", False)
     settings.setdefault("prevent_additional_equipment_rooms", False)
     settings.setdefault("ignore_link_bandwidth_errors", False)
     settings.setdefault("auto_planner_resolution_overrides", {})
@@ -11415,6 +11930,9 @@ def generate_network_design(
         "connected_data_points_only": bool(
             settings.get("auto_planner_connected_data_points_only", False)
         ),
+        "same_floor_only": bool(
+            settings.get("auto_planner_same_floor_only", False)
+        ),
         "ignore_link_bandwidth_errors": bool(
             settings.get("ignore_link_bandwidth_errors", False)
         ),
@@ -11464,6 +11982,17 @@ def generate_network_design(
         "route_workers_used": route_workers_used,
         "endpoint_assignments": len(builder.assignments),
         "component_counts": dict(sorted(role_counts.items())),
+        "modular_chassis_configurations": [
+            {
+                "instance_id": _text(instance.get("id")),
+                "name": _text(instance.get("name")),
+                "asset_id": _text(instance.get("asset_id")),
+                "network_layer": _text(instance.get("network_layer")),
+                "chassis_modules": deepcopy(instance.get("chassis_modules", [])),
+            }
+            for instance in builder.instances
+            if bool(instance.get("modular_chassis_configuration_auto", False))
+        ],
         "estimated_copper_length_m": round(builder.total_copper_m, 3),
         "estimated_fibre_length_m": round(builder.total_fibre_m, 3),
         "physical_fibre_cables": physical_fibre_summary.get("cable_count", 0),

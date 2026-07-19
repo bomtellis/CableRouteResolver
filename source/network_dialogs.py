@@ -556,6 +556,50 @@ class NetworkAssetEditorDialog(QDialog):
             "Traffic expected between internal devices, servers, controllers, NVRs and local services."
         )
 
+        self.north_south_concurrency_spin = QDoubleSpinBox()
+        self.north_south_concurrency_spin.setRange(0.0, 100.0)
+        self.north_south_concurrency_spin.setDecimals(1)
+        self.north_south_concurrency_spin.setSuffix(" %")
+        self.north_south_concurrency_spin.setValue(
+            100.0
+            * min(
+                1.0,
+                max(
+                    0.0,
+                    float(
+                        self.asset.get("north_south_concurrency_factor", 1.0)
+                        or 0.0
+                    ),
+                ),
+            )
+        )
+        self.north_south_concurrency_spin.setToolTip(
+            "Percentage of north-south device traffic expected concurrently "
+            "during the design busy hour."
+        )
+
+        self.east_west_concurrency_spin = QDoubleSpinBox()
+        self.east_west_concurrency_spin.setRange(0.0, 100.0)
+        self.east_west_concurrency_spin.setDecimals(1)
+        self.east_west_concurrency_spin.setSuffix(" %")
+        self.east_west_concurrency_spin.setValue(
+            100.0
+            * min(
+                1.0,
+                max(
+                    0.0,
+                    float(
+                        self.asset.get("east_west_concurrency_factor", 1.0)
+                        or 0.0
+                    ),
+                ),
+            )
+        )
+        self.east_west_concurrency_spin.setToolTip(
+            "Percentage of east-west device traffic expected concurrently "
+            "during the design busy hour."
+        )
+
         self.expected_packet_rate_spin = QDoubleSpinBox()
         self.expected_packet_rate_spin.setRange(0.0, 1_000_000_000_000.0)
         self.expected_packet_rate_spin.setDecimals(1)
@@ -773,7 +817,9 @@ class NetworkAssetEditorDialog(QDialog):
         capacity_form.addRow("Switching / routing bandwidth", self.bandwidth_capacity_spin)
         capacity_form.addRow("Packet forwarding throughput", self.packet_throughput_spin)
         capacity_form.addRow("North-south device traffic", self.expected_north_south_spin)
+        capacity_form.addRow("North-south concurrency", self.north_south_concurrency_spin)
         capacity_form.addRow("East-west device traffic", self.expected_east_west_spin)
+        capacity_form.addRow("East-west concurrency", self.east_west_concurrency_spin)
         capacity_form.addRow("Expected device packet rate", self.expected_packet_rate_spin)
         capacity_form.addRow("Stacking", self.supports_stacking_check)
         capacity_form.addRow("Maximum stack members", self.max_stack_members_spin)
@@ -1187,6 +1233,12 @@ class NetworkAssetEditorDialog(QDialog):
             ),
             "expected_east_west_bandwidth_mbps": float(
                 self.expected_east_west_spin.value()
+            ),
+            "north_south_concurrency_factor": round(
+                float(self.north_south_concurrency_spin.value()) / 100.0, 6
+            ),
+            "east_west_concurrency_factor": round(
+                float(self.east_west_concurrency_spin.value()) / 100.0, 6
             ),
             "expected_bandwidth_mbps": float(
                 self.expected_north_south_spin.value()
@@ -2248,6 +2300,16 @@ class PlanningResolutionDialog(QDialog):
             and int(self.details.get("free_from_port_count", 0) or 0) > 0
             and int(self.details.get("free_to_port_count", 0) or 0) == 0
         )
+        upstream_speed_pool_exhausted = (
+            error_code == "link_capacity"
+            and from_role in {"access", "access_switch"}
+            and int(self.details.get("free_from_port_count", 0) or 0) > 0
+            and int(self.details.get("free_to_port_count", 0) or 0) > 0
+            and float(
+                self.details.get("max_compatible_capacity_mbps", 0.0) or 0.0
+            )
+            <= 0.0
+        )
         if error_code in {
             "location_cabinet_limit",
             "slim_wall_cabinet_capacity",
@@ -2270,13 +2332,20 @@ class PlanningResolutionDialog(QDialog):
                 "Place another DER adjacent to the existing DER and connect it automatically (recommended)",
                 "add_adjacent_der",
             )
-        if upstream_ports_exhausted and self.details.get("upstream_alternatives"):
+        if (
+            upstream_ports_exhausted or upstream_speed_pool_exhausted
+        ) and self.details.get("upstream_alternatives"):
             self.action_combo.addItem(
-                "Use a core/aggregation model with more downlink ports (recommended)",
+                (
+                    "Use a core/aggregation model with more compatible-speed ports (recommended)"
+                    if upstream_speed_pool_exhausted
+                    else "Use a core/aggregation model with more downlink ports (recommended)"
+                ),
                 "select_upstream_asset",
             )
         if (
             not upstream_ports_exhausted
+            and not upstream_speed_pool_exhausted
             and location
             and error_code != "access_stack_spare_capacity"
             and (
@@ -2835,7 +2904,19 @@ class AutoPlannerSetupWizard(QWizard):
             "Size and generate the network using only data points that already have "
             "a connection on the Routing tab. Unconnected placed data points are ignored."
         )
+
         design_form.addRow("", self.connected_data_points_only_check)
+        self.same_floor_only_check = QCheckBox(
+            "Keep endpoint assignments and cable routes on the same floor"
+        )
+        self.same_floor_only_check.setChecked(
+            bool(self.settings.get("auto_planner_same_floor_only", False))
+        )
+        self.same_floor_only_check.setToolTip(
+            "Preserve the zone planner's same-floor rule. Existing cross-floor "
+            "assignments are reported instead of being silently reassigned."
+        )
+        design_form.addRow("", self.same_floor_only_check)
         self.prevent_additional_rooms_check = QCheckBox(
             "Use existing DERs and comms rooms only"
         )
@@ -3489,6 +3570,9 @@ class AutoPlannerSetupWizard(QWizard):
         settings["auto_planner_connected_data_points_only"] = bool(
             self.connected_data_points_only_check.isChecked()
         )
+        settings["auto_planner_same_floor_only"] = bool(
+            self.same_floor_only_check.isChecked()
+        )
         settings["prevent_additional_equipment_rooms"] = bool(
             self.prevent_additional_rooms_check.isChecked()
         )
@@ -3538,6 +3622,9 @@ class AutoPlannerSetupWizard(QWizard):
         settings["spare_capacity_percent"] = float(self.spare_spin.value())
         settings["auto_planner_connected_data_points_only"] = bool(
             self.connected_data_points_only_check.isChecked()
+        )
+        settings["auto_planner_same_floor_only"] = bool(
+            self.same_floor_only_check.isChecked()
         )
         settings["prevent_additional_equipment_rooms"] = bool(
             self.prevent_additional_rooms_check.isChecked()
@@ -3866,6 +3953,17 @@ class NetworkPlannerDialog(QDialog):
             "a connection on the Routing tab. Unconnected placed data points are ignored."
         )
 
+        self.same_floor_only_check = QCheckBox(
+            "Keep endpoint assignments and cable routes on the same floor"
+        )
+        self.same_floor_only_check.setChecked(
+            bool(settings.get("auto_planner_same_floor_only", False))
+        )
+        self.same_floor_only_check.setToolTip(
+            "Use the same hard floor restriction as zone-based design. The "
+            "planner will not select a room or route through nodes on another floor."
+        )
+
         self.prevent_additional_rooms_check = QCheckBox(
             "Prevent the automatic planner from creating additional DERs or comms rooms"
         )
@@ -3974,6 +4072,7 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("", self.auto_connect_manual_check)
         settings_layout.addRow("", self.auto_add_bandwidth_switches_check)
         settings_layout.addRow("", self.connected_data_points_only_check)
+        settings_layout.addRow("", self.same_floor_only_check)
         settings_layout.addRow("", self.prevent_additional_rooms_check)
         settings_layout.addRow("", self.ignore_link_bandwidth_check)
         settings_layout.addRow("", self.clear_planner_overrides_button)
@@ -4110,7 +4209,9 @@ class NetworkPlannerDialog(QDialog):
                 "Bandwidth Gbps",
                 "Packet Mpps",
                 "North-south Mbps",
+                "NS concurrency %",
                 "East-west Mbps",
+                "EW concurrency %",
                 "Expected pps",
                 "Rack U",
                 "Switch U",
@@ -4207,7 +4308,8 @@ class NetworkPlannerDialog(QDialog):
         endpoint_traffic_info = QLabel(
             "North-south traffic reaches routers, WAN, cloud or internet links. East-west "
             "traffic remains within the site switching fabric. For assets with multiple "
-            "data ports, the planner apportions both values across those ports. "
+            "data ports, the planner apportions both values across those ports. Directional "
+            "concurrency controls the busy-hour percentage applied before demand is summed. "
             "Profiles can be applied in bulk to project endpoint assets and wireless "
             "network-asset models."
         )
@@ -4226,7 +4328,9 @@ class NetworkPlannerDialog(QDialog):
             self.usage_profile_combo.addItem(
                 f"{_text(profile.get('name'))} — "
                 f"NS {float(profile.get('north_south_bandwidth_mbps', 0.0) or 0.0):g} Mbps / "
-                f"EW {float(profile.get('east_west_bandwidth_mbps', 0.0) or 0.0):g} Mbps",
+                f"{100.0 * float(profile.get('north_south_concurrency_factor', 1.0) or 0.0):g}% concurrent; "
+                f"EW {float(profile.get('east_west_bandwidth_mbps', 0.0) or 0.0):g} Mbps / "
+                f"{100.0 * float(profile.get('east_west_concurrency_factor', 1.0) or 0.0):g}% concurrent",
                 _text(profile.get("id")),
             )
         self.apply_usage_profile_button = QPushButton("Apply profile to selected assets")
@@ -4235,11 +4339,12 @@ class NetworkPlannerDialog(QDialog):
         profile_row.addWidget(self.usage_profile_combo, 1)
         profile_row.addWidget(self.apply_usage_profile_button)
         endpoint_traffic_layout.addLayout(profile_row)
-        self.endpoint_traffic_table = QTableWidget(0, 7)
+        self.endpoint_traffic_table = QTableWidget(0, 9)
         self.endpoint_traffic_table.setHorizontalHeaderLabels(
             [
                 "Asset ID", "Asset name", "Data ports", "Usage profile",
-                "North-south Mbps", "East-west Mbps", "Expected packet rate pps",
+                "North-south Mbps", "NS concurrency %", "East-west Mbps",
+                "EW concurrency %", "Expected packet rate pps",
             ]
         )
         self.endpoint_traffic_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -4251,6 +4356,8 @@ class NetworkPlannerDialog(QDialog):
         self.endpoint_traffic_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.endpoint_traffic_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.endpoint_traffic_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.endpoint_traffic_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        self.endpoint_traffic_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeToContents)
         self.endpoint_traffic_table.itemChanged.connect(self._endpoint_traffic_changed)
         endpoint_traffic_layout.addWidget(self.endpoint_traffic_table, 1)
         self.tabs.addTab(self.endpoint_traffic_tab, "Endpoint Traffic")
@@ -4695,7 +4802,9 @@ class NetworkPlannerDialog(QDialog):
                      item.get("poe_budget_w", 0), item.get("bandwidth_capacity_gbps", 0),
                      item.get("packet_throughput_mpps", 0),
                      item.get("expected_north_south_bandwidth_mbps", item.get("expected_bandwidth_mbps", 0)),
+                     round(100.0 * float(item.get("north_south_concurrency_factor", 1.0) or 0.0), 3),
                      item.get("expected_east_west_bandwidth_mbps", 0),
+                     round(100.0 * float(item.get("east_west_concurrency_factor", 1.0) or 0.0), 3),
                      item.get("expected_packet_rate_pps", 0), item.get("rack_units", 0),
                      item.get("switch_rack_unit_allowance", 0), item.get("olt_units_per_rack_unit", 1)]
                     for _sort, _label_sort, _name, _id, _source, item, group_label in entries
@@ -4889,11 +4998,33 @@ class NetworkPlannerDialog(QDialog):
                         or 0.0
                     ),
                 ),
+                100.0
+                * min(
+                    1.0,
+                    max(
+                        0.0,
+                        float(
+                            asset.get("north_south_concurrency_factor", 1.0)
+                            or 0.0
+                        ),
+                    ),
+                ),
                 max(
                     0.0,
                     float(
                         asset.get("expected_east_west_bandwidth_mbps", 0.0)
                         or 0.0
+                    ),
+                ),
+                100.0
+                * min(
+                    1.0,
+                    max(
+                        0.0,
+                        float(
+                            asset.get("east_west_concurrency_factor", 1.0)
+                            or 0.0
+                        ),
                     ),
                 ),
                 max(
@@ -4911,7 +5042,7 @@ class NetworkPlannerDialog(QDialog):
         table.blockSignals(False)
 
     def _endpoint_traffic_changed(self, item: QTableWidgetItem) -> None:
-        if item.column() not in {4, 5, 6}:
+        if item.column() not in {4, 5, 6, 7, 8}:
             return
         id_item = self.endpoint_traffic_table.item(item.row(), 0)
         key = id_item.data(Qt.UserRole) if id_item else ""
@@ -4922,13 +5053,17 @@ class NetworkPlannerDialog(QDialog):
             value = max(0.0, float(item.text()))
         except (TypeError, ValueError):
             value = 0.0
+        if item.column() in {5, 7}:
+            value = min(100.0, value)
         field = {
             4: "expected_north_south_bandwidth_mbps",
-            5: "expected_east_west_bandwidth_mbps",
-            6: "expected_packet_rate_pps",
+            5: "north_south_concurrency_factor",
+            6: "expected_east_west_bandwidth_mbps",
+            7: "east_west_concurrency_factor",
+            8: "expected_packet_rate_pps",
         }[item.column()]
-        asset[field] = value
-        if item.column() in {4, 5}:
+        asset[field] = value / 100.0 if item.column() in {5, 7} else value
+        if item.column() in {4, 6}:
             asset["expected_bandwidth_mbps"] = round(
                 max(
                     0.0,
@@ -4948,6 +5083,7 @@ class NetworkPlannerDialog(QDialog):
                 ),
                 6,
             )
+        if item.column() in {4, 5, 6, 7}:
             asset["usage_profile_id"] = ""
             profile_item = self.endpoint_traffic_table.item(item.row(), 3)
             if profile_item is not None:
@@ -4995,9 +5131,25 @@ class NetworkPlannerDialog(QDialog):
                 0.0,
                 float(profile.get("east_west_bandwidth_mbps", 0.0) or 0.0),
             )
+            north_south_factor = min(
+                1.0,
+                max(
+                    0.0,
+                    float(profile.get("north_south_concurrency_factor", 1.0) or 0.0),
+                ),
+            )
+            east_west_factor = min(
+                1.0,
+                max(
+                    0.0,
+                    float(profile.get("east_west_concurrency_factor", 1.0) or 0.0),
+                ),
+            )
             asset["usage_profile_id"] = profile_id
             asset["expected_north_south_bandwidth_mbps"] = north_south
             asset["expected_east_west_bandwidth_mbps"] = east_west
+            asset["north_south_concurrency_factor"] = north_south_factor
+            asset["east_west_concurrency_factor"] = east_west_factor
             asset["expected_bandwidth_mbps"] = round(
                 north_south + east_west, 6
             )
@@ -5024,6 +5176,8 @@ class NetworkPlannerDialog(QDialog):
                     instance["usage_profile_id"] = profile_id
                     instance["expected_north_south_bandwidth_mbps"] = north_south
                     instance["expected_east_west_bandwidth_mbps"] = east_west
+                    instance["north_south_concurrency_factor"] = north_south_factor
+                    instance["east_west_concurrency_factor"] = east_west_factor
                     instance["expected_bandwidth_mbps"] = round(
                         north_south + east_west, 6
                     )
@@ -5271,6 +5425,9 @@ class NetworkPlannerDialog(QDialog):
         settings["auto_planner_connected_data_points_only"] = bool(
             self.connected_data_points_only_check.isChecked()
         )
+        settings["auto_planner_same_floor_only"] = bool(
+            self.same_floor_only_check.isChecked()
+        )
         settings["prevent_additional_equipment_rooms"] = bool(
             self.prevent_additional_rooms_check.isChecked()
         )
@@ -5341,6 +5498,12 @@ class NetworkPlannerDialog(QDialog):
                 if summary.get("connected_data_points_only", False)
                 else "All placed data points"
             ),
+            "Endpoint floor restriction: "
+            + (
+                "Same-floor rooms and routes only"
+                if summary.get("same_floor_only", False)
+                else "Cross-floor assignments permitted"
+            ),
             f"Auto-add switches for bandwidth: {'Yes' if summary.get('auto_add_switches_for_bandwidth', True) else 'No'}",
             f"Bandwidth shortfall override: {'Enabled' if summary.get('ignore_link_bandwidth_errors', False) else 'Disabled'}",
             f"Estimated copper: {summary.get('estimated_copper_length_m', 0)} m",
@@ -5352,6 +5515,21 @@ class NetworkPlannerDialog(QDialog):
         ]
         for role, quantity in (summary.get("component_counts", {}) or {}).items():
             lines.append(f"  {role}: {quantity}")
+        modular_configurations = (
+            summary.get("modular_chassis_configurations", []) or []
+        )
+        if modular_configurations:
+            lines.extend(["", "Demand-configured modular chassis:"])
+            for configuration in modular_configurations:
+                line_cards = [
+                    f"slot {module.get('slot')}: {_text(module.get('model'))}"
+                    for module in configuration.get("chassis_modules", []) or []
+                    if _text(module.get("module_type")) == "line_card"
+                ]
+                lines.append(
+                    f"  {_text(configuration.get('name'))}: "
+                    + (", ".join(line_cards) if line_cards else "no line cards")
+                )
         layer_rules = summary.get("layer_connection_rules", []) or []
         if layer_rules:
             lines.extend(["", "Layer connection rules:"])
@@ -5496,6 +5674,9 @@ class NetworkPlannerDialog(QDialog):
         )
         self.connected_data_points_only_check.setChecked(
             bool(settings.get("auto_planner_connected_data_points_only", False))
+        )
+        self.same_floor_only_check.setChecked(
+            bool(settings.get("auto_planner_same_floor_only", False))
         )
         self.prevent_additional_rooms_check.setChecked(
             bool(settings.get("prevent_additional_equipment_rooms", False))

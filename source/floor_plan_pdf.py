@@ -439,6 +439,68 @@ def _draw_comms_rooms(
         in {"comms_room", "mer", "distributed_equipment_room"}
         and int(row.get("floor", 0) or 0) == floor
     ]
+    placed_boxes = []
+    placed_leaders = []
+    page_width, page_height = c._pagesize
+
+    def box_overlaps(first, second, margin=1.2 * mm):
+        return not (
+            first[2] + margin <= second[0]
+            or second[2] + margin <= first[0]
+            or first[3] + margin <= second[1]
+            or second[3] + margin <= first[1]
+        )
+
+    def leader_for(anchor, box):
+        left, bottom, right, top = box
+        centre_x, centre_y = (left + right) / 2.0, (bottom + top) / 2.0
+        dx, dy = centre_x - anchor[0], centre_y - anchor[1]
+        if abs(dx) > abs(dy):
+            attach = (
+                left if dx >= 0 else right,
+                min(max(anchor[1], bottom), top),
+            )
+            elbow = (attach[0], anchor[1])
+        else:
+            attach = (
+                min(max(anchor[0], left), right),
+                bottom if dy >= 0 else top,
+            )
+            elbow = (anchor[0], attach[1])
+        return [segment for segment in ((anchor, elbow), (elbow, attach)) if segment[0] != segment[1]]
+
+    def segment_hits_box(segment, box, margin=0.8 * mm):
+        (x1, y1), (x2, y2) = segment
+        left, bottom, right, top = (
+            box[0] - margin,
+            box[1] - margin,
+            box[2] + margin,
+            box[3] + margin,
+        )
+        if abs(x1 - x2) < 0.01:
+            return left <= x1 <= right and max(min(y1, y2), bottom) <= min(max(y1, y2), top)
+        if abs(y1 - y2) < 0.01:
+            return bottom <= y1 <= top and max(min(x1, x2), left) <= min(max(x1, x2), right)
+        return False
+
+    def leaders_cross(first, second, margin=0.5 * mm):
+        (ax, ay), (bx, by) = first
+        (cx, cy), (dx, dy) = second
+        first_vertical = abs(ax - bx) < 0.01
+        second_vertical = abs(cx - dx) < 0.01
+        if first_vertical != second_vertical:
+            vertical = first if first_vertical else second
+            horizontal = second if first_vertical else first
+            vx = vertical[0][0]
+            hy = horizontal[0][1]
+            return (
+                min(vertical[0][1], vertical[1][1]) - margin <= hy <= max(vertical[0][1], vertical[1][1]) + margin
+                and min(horizontal[0][0], horizontal[1][0]) - margin <= vx <= max(horizontal[0][0], horizontal[1][0]) + margin
+            )
+        if first_vertical:
+            return abs(ax - cx) <= margin and max(min(ay, by), min(cy, dy)) <= min(max(ay, by), max(cy, dy)) + margin
+        return abs(ay - cy) <= margin and max(min(ax, bx), min(cx, dx)) <= min(max(ax, bx), max(cx, dx)) + margin
+
     for room in rooms:
         name = _text(room.get("name")) or "Comms room"
         x, y = transform(float(room.get("x", 0.0)), float(room.get("y", 0.0)))
@@ -452,11 +514,64 @@ def _draw_comms_rooms(
         c.setStrokeColor(colors.HexColor("#007a5e"))
         label = name
         detail = f"Cabinets: {count} | Data ports: {ports} | Switches: {switches}"
-        c.setFont("Helvetica-Bold", 7.5)
+        c.setFont("Helvetica-Bold", 9.0)
         label_width = max(
-            stringWidth(label, "Helvetica-Bold", 7.5),
-            stringWidth(detail, "Helvetica-Bold", 6.5),
+            stringWidth(label, "Helvetica-Bold", 9.0),
+            stringWidth(detail, "Helvetica-Bold", 9.0),
         )
+        width = label_width + 4 * mm
+        height = 10.5 * mm
+        gap = 7 * mm
+        anchor = (x, y)
+        bases = (
+            (x + gap, y - height / 2.0, "vertical"),
+            (x - width - gap, y - height / 2.0, "vertical"),
+            (x - width / 2.0, y + gap, "horizontal"),
+            (x - width / 2.0, y - height - gap, "horizontal"),
+        )
+        selected = None
+        best = None
+        best_score = None
+        tested = set()
+        for base_x, base_y, shift_axis in bases:
+            for attempt in range(31):
+                offset_index = 0 if attempt == 0 else ((attempt + 1) // 2) * (1 if attempt % 2 else -1)
+                box_x = base_x + (offset_index * 10 * mm if shift_axis == "horizontal" else 0.0)
+                box_y = base_y + (offset_index * 10 * mm if shift_axis == "vertical" else 0.0)
+                box_x = min(max(box_x, 8 * mm), page_width - width - 8 * mm)
+                box_y = min(max(box_y, 18 * mm), page_height - height - 8 * mm)
+                box = (box_x, box_y, box_x + width, box_y + height)
+                key = tuple(round(value, 2) for value in box)
+                if key in tested:
+                    continue
+                tested.add(key)
+                leaders = leader_for(anchor, box)
+                score = sum(box_overlaps(box, other) for other in placed_boxes)
+                score += sum(
+                    segment_hits_box(segment, other)
+                    for segment in leaders
+                    for other in placed_boxes
+                )
+                score += sum(
+                    segment_hits_box(segment, box)
+                    for segment in placed_leaders
+                )
+                score += sum(
+                    leaders_cross(segment, other)
+                    for segment in leaders
+                    for other in placed_leaders
+                )
+                if best_score is None or score < best_score:
+                    best, best_score = (box, leaders), score
+                if score == 0:
+                    selected = (box, leaders)
+                    break
+            if selected is not None:
+                break
+        box, leader_segments = selected or best
+        box_x, box_y, box_right, box_top = box
+        placed_boxes.append(box)
+        placed_leaders.extend(leader_segments)
         callout = {
             "key": f"floor-plan-room:{int(floor)}:{name}",
             "page": int(page_index),
@@ -465,15 +580,16 @@ def _draw_comms_rooms(
             "name": f"{name} - Floor {floor}",
             "location_name": name,
             "floor": int(floor),
-            "x_pt": x + 7 * mm,
-            "y_pt": y + 3.8 * mm,
-            "width_pt": label_width + 4 * mm,
-            "height_pt": 8.5 * mm,
+            "x_pt": box_x,
+            "y_pt": box_y,
+            "width_pt": width,
+            "height_pt": height,
             "anchor_x_pt": x,
             "anchor_y_pt": y,
             "colour": "#007a5e",
             "line_width_pt": 0.85,
-            "font_size_pt": 6.5,
+            "font_size_pt": 9.0,
+            "wrap_text": True,
             "text": f"{label}\n{detail}",
             "visible": True,
         }
@@ -481,22 +597,23 @@ def _draw_comms_rooms(
             layout_manifest.append(callout)
         if preview_background:
             continue
-        c.line(x + 3.2 * mm, y + 3.2 * mm, x + 8 * mm, y + 8 * mm)
+        for segment in leader_segments:
+            c.line(segment[0][0], segment[0][1], segment[1][0], segment[1][1])
         c.setFillColor(colors.white)
         c.roundRect(
-            x + 7 * mm,
-            y + 3.8 * mm,
-            label_width + 4 * mm,
-            8.5 * mm,
+            box_x,
+            box_y,
+            width,
+            height,
             1.2 * mm,
             stroke=0,
             fill=1,
         )
         c.setFillColor(colors.HexColor("#0f1720"))
-        c.drawString(x + 9 * mm, y + 8.8 * mm, label)
-        c.setFont("Helvetica", 6.5)
+        c.drawString(box_x + 2 * mm, box_y + 6.2 * mm, label)
+        c.setFont("Helvetica", 9.0)
         c.setFillColor(colors.HexColor("#33434f"))
-        c.drawString(x + 9 * mm, y + 5.4 * mm, detail)
+        c.drawString(box_x + 2 * mm, box_y + 1.8 * mm, detail)
 
 
 def _draw_key(

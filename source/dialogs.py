@@ -94,6 +94,13 @@ def _safe_int(value, default=0):
             return int(default)
 
 
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 class PointEditorDialog(QDialog):
     def __init__(self, parent, title, point_name, point):
         super().__init__(parent)
@@ -1862,6 +1869,52 @@ class AssetEditorDialog(QDialog):
 
         self.data_points_spin.setValue(data_points)
 
+        self.north_south_concurrency_spin = QDoubleSpinBox()
+        self.north_south_concurrency_spin.setRange(0.0, 100.0)
+        self.north_south_concurrency_spin.setDecimals(1)
+        self.north_south_concurrency_spin.setSuffix(" %")
+        self.north_south_concurrency_spin.setValue(
+            100.0
+            * max(
+                0.0,
+                min(
+                    1.0,
+                    _safe_float(
+                        self.seed.get("north_south_concurrency_factor", 1.0)
+                        or 0.0,
+                        1.0,
+                    ),
+                ),
+            )
+        )
+        self.north_south_concurrency_spin.setToolTip(
+            "Percentage of this asset's north-south traffic expected to be active "
+            "concurrently during the design busy hour."
+        )
+
+        self.east_west_concurrency_spin = QDoubleSpinBox()
+        self.east_west_concurrency_spin.setRange(0.0, 100.0)
+        self.east_west_concurrency_spin.setDecimals(1)
+        self.east_west_concurrency_spin.setSuffix(" %")
+        self.east_west_concurrency_spin.setValue(
+            100.0
+            * max(
+                0.0,
+                min(
+                    1.0,
+                    _safe_float(
+                        self.seed.get("east_west_concurrency_factor", 1.0)
+                        or 0.0,
+                        1.0,
+                    ),
+                ),
+            )
+        )
+        self.east_west_concurrency_spin.setToolTip(
+            "Percentage of this asset's east-west traffic expected to be active "
+            "concurrently during the design busy hour."
+        )
+
         self.connection_type_combo = QComboBox()
         self.connection_type_combo.addItems(["wired", "wireless"])
         self.connection_type_combo.setCurrentText(
@@ -1888,6 +1941,8 @@ class AssetEditorDialog(QDialog):
         form.addRow("Category", self.category_combo)
         form.addRow("Quantity", self.qty_spin)
         form.addRow("Data points per item", self.data_points_spin)
+        form.addRow("North-south concurrency", self.north_south_concurrency_spin)
+        form.addRow("East-west concurrency", self.east_west_concurrency_spin)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -1906,6 +1961,7 @@ class AssetEditorDialog(QDialog):
 
             capability_keywords = _capability_keywords_text(self.capability_keywords_edit.toPlainText())
             self.result = {
+                **self.seed,
                 "id": asset_id,
                 "name": name,
                 "ADB_Code": self.adb_code_edit.text().strip(),
@@ -1917,6 +1973,12 @@ class AssetEditorDialog(QDialog):
                 "category_id": str(self.category_combo.currentData() or "").strip(),
                 "qty": int(self.qty_spin.value()),
                 "data_points": int(self.data_points_spin.value()),
+                "north_south_concurrency_factor": round(
+                    float(self.north_south_concurrency_spin.value()) / 100.0, 6
+                ),
+                "east_west_concurrency_factor": round(
+                    float(self.east_west_concurrency_spin.value()) / 100.0, 6
+                ),
             }
             super().accept()
         except Exception as exc:

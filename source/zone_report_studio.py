@@ -20,6 +20,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QShortcut,
+    QTextOption,
 )
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
@@ -40,6 +41,7 @@ from PySide6.QtWidgets import (
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
+    QGraphicsTextItem,
     QGraphicsView,
     QGroupBox,
     QHBoxLayout,
@@ -219,7 +221,7 @@ class _SnippetResizeHandle(QGraphicsRectItem):
         self.setZValue(20)
         self.setAcceptedMouseButtons(Qt.LeftButton)
         self.setCursor(self.CURSORS[self.edge])
-        self.setToolTip("Drag to resize this snippet")
+        self.setToolTip("Drag to resize")
 
     def mousePressEvent(self, event):
         if self.owner.is_locked():
@@ -332,11 +334,13 @@ class _CalloutItem(QGraphicsRectItem):
             self.record["width_pt"] = fitted_width
             self.record["height_pt"] = fitted_height
         else:
+            # User-sized callouts are allowed to be narrower than their original
+            # unwrapped text. The editor and PDF renderer wrap within this box.
             self.record["width_pt"] = max(
-                float(self.record.get("width_pt", 1.0) or 1.0), fitted_width
+                18.0, float(self.record.get("width_pt", fitted_width) or fitted_width)
             )
             self.record["height_pt"] = max(
-                float(self.record.get("height_pt", 1.0) or 1.0), fitted_height
+                5.0, float(self.record.get("height_pt", fitted_height) or fitted_height)
             )
         self.scale = float(scale)
         self.page_height_pt = float(page_height_pt)
@@ -366,14 +370,17 @@ class _CalloutItem(QGraphicsRectItem):
         self.leader_handles = []
         self.leader_anchor_handles = []
         self._positioning_leader_handles = False
-        self.text_item = QGraphicsSimpleTextItem(self)
-        self.text_item.setBrush(QBrush(colour))
-        font = QFont("Arial", 9)
-        font.setBold(True)
-        self.text_item.setFont(font)
+        self.resize_handles = []
+        self._positioning_resize_handles = False
+        self._resizing_from_handle = False
+        self.text_item = QGraphicsTextItem(self)
+        self.text_item.setDefaultTextColor(colour)
+        self.text_item.document().setDocumentMargin(0.0)
+        self._update_text_font()
         self.set_text(str(record.get("text", "")))
         self.set_callout_visible(bool(record.get("visible", True)))
         self._rebuild_leader_handles()
+        self._rebuild_resize_handles()
         self._update_leader()
         self.set_locked(bool(record.get("locked", False)))
 
@@ -386,6 +393,9 @@ class _CalloutItem(QGraphicsRectItem):
         self.setCursor(Qt.ArrowCursor if locked else Qt.SizeAllCursor)
         for handle in self.leader_handles + self.leader_anchor_handles:
             handle.setFlag(QGraphicsItem.ItemIsMovable, not bool(locked))
+            handle.setVisible(self.isSelected() and not bool(locked))
+        for handle in self.resize_handles:
+            handle.setFlag(QGraphicsItem.ItemIsMovable, False)
             handle.setVisible(self.isSelected() and not bool(locked))
         self._update_tooltip()
 
@@ -400,28 +410,73 @@ class _CalloutItem(QGraphicsRectItem):
         )
 
     def _notify_changed(self):
+        if bool(self.record.get("wrap_text", True)):
+            width_pt = self.rect().width() / max(0.01, self.scale)
+            height_pt = self.rect().height() / max(0.01, self.scale)
+            required_height = self.required_wrapped_height_points()
+            if required_height > height_pt + 0.1:
+                self.set_size_points(width_pt, required_height)
         self.sync_record()
         if self.moved_callback is not None:
             self.moved_callback()
 
     def set_text(self, value):
         self.record["text"] = str(value)
-        self.text_item.setText(str(value))
+        self.text_item.setPlainText(str(value))
+        self._fit_text()
+
+    def _update_text_font(self):
+        font = QFont("Arial")
+        font.setPixelSize(max(4, round(
+            float(self.record.get("font_size_pt", 9.0) or 9.0) * self.scale
+        )))
+        font.setBold(True)
+        self.text_item.setFont(font)
+
+    def set_font_size(self, font_size_pt):
+        self.record["font_size_pt"] = max(4.0, float(font_size_pt))
+        self._update_text_font()
+        self._fit_text()
+
+    def set_wrap_text(self, enabled):
+        self.record["wrap_text"] = bool(enabled)
         self._fit_text()
 
     def _fit_text(self):
         self.text_item.setScale(1.0)
-        bounds = self.text_item.boundingRect()
         available = max(10.0, self.rect().width() - 12.0)
         available_height = max(6.0, self.rect().height() - 4.0)
-        factor = min(
-            1.0,
-            available / max(1.0, bounds.width()),
-            available_height / max(1.0, bounds.height()),
+        option = self.text_item.document().defaultTextOption()
+        wrap_text = bool(self.record.get("wrap_text", True))
+        option.setWrapMode(
+            QTextOption.WrapAtWordBoundaryOrAnywhere
+            if wrap_text
+            else QTextOption.NoWrap
+        )
+        self.text_item.document().setDefaultTextOption(option)
+        self.text_item.setTextWidth(available if wrap_text else -1.0)
+        bounds = self.text_item.boundingRect()
+        factor = (
+            1.0
+            if wrap_text
+            else min(
+                1.0,
+                available / max(1.0, bounds.width()),
+                available_height / max(1.0, bounds.height()),
+            )
         )
         self.text_item.setScale(factor)
         fitted_height = bounds.height() * factor
         self.text_item.setPos(6.0, max(2.0, (self.rect().height() - fitted_height) / 2.0))
+
+    def required_wrapped_height_points(self):
+        if not bool(self.record.get("wrap_text", True)):
+            return 5.0
+        self._fit_text()
+        return max(
+            5.0,
+            (self.text_item.boundingRect().height() + 4.0) / max(0.01, self.scale),
+        )
 
     def set_size_points(self, width_pt, height_pt):
         self.setRect(
@@ -432,6 +487,69 @@ class _CalloutItem(QGraphicsRectItem):
         )
         self._fit_text()
         self._update_leader()
+        self._position_resize_handles()
+
+    def _rebuild_resize_handles(self):
+        for handle in self.resize_handles:
+            if handle.scene() is not None:
+                handle.scene().removeItem(handle)
+            handle.setParentItem(None)
+        self.resize_handles = [
+            _SnippetResizeHandle(self, edge)
+            for edge in ("nw", "n", "ne", "e", "se", "s", "sw", "w")
+        ]
+        self._position_resize_handles()
+
+    def _position_resize_handles(self):
+        if not hasattr(self, "resize_handles"):
+            return
+        self._positioning_resize_handles = True
+        try:
+            width, height = self.rect().width(), self.rect().height()
+            points = {
+                "nw": (0.0, 0.0), "n": (width / 2.0, 0.0), "ne": (width, 0.0),
+                "e": (width, height / 2.0), "se": (width, height),
+                "s": (width / 2.0, height), "sw": (0.0, height),
+                "w": (0.0, height / 2.0),
+            }
+            for handle in self.resize_handles:
+                handle.setPos(*points[handle.edge])
+                handle.setVisible(self.isSelected() and not self.is_locked())
+        finally:
+            self._positioning_resize_handles = False
+
+    def _snippet_resize_handle_moved(self, _edge, _point):
+        # Resize handles use immutable press-time geometry in
+        # _resize_snippet_from_drag; their own child position is only visual.
+        return
+
+    def _resize_snippet_from_drag(self, edge, start_pos, start_size, delta):
+        if self.is_locked():
+            return
+        minimum_width = max(36.0, 18.0 * self.scale)
+        minimum_height = max(18.0, 5.0 * self.scale)
+        start_width, start_height = start_size
+        left, top = float(start_pos.x()), float(start_pos.y())
+        right, bottom = left + start_width, top + start_height
+        dx, dy = float(delta.x()), float(delta.y())
+        if "w" in edge:
+            left = min(left + dx, right - minimum_width)
+        if "e" in edge:
+            right = max(right + dx, left + minimum_width)
+        if "n" in edge:
+            top = min(top + dy, bottom - minimum_height)
+        if "s" in edge:
+            bottom = max(bottom + dy, top + minimum_height)
+        self.setPos(left, top)
+        self.setRect(0.0, 0.0, right - left, bottom - top)
+        self.record["auto_fit_text"] = False
+        self.record["x_pt"] = left / self.scale
+        self.record["y_pt"] = self.page_height_pt - bottom / self.scale
+        self.record["width_pt"] = (right - left) / self.scale
+        self.record["height_pt"] = (bottom - top) / self.scale
+        self._fit_text()
+        self._update_leader()
+        self._position_resize_handles()
 
     def set_callout_visible(self, visible):
         self.record["visible"] = bool(visible)
@@ -709,6 +827,7 @@ class _CalloutItem(QGraphicsRectItem):
             self, "leader_handles"
         ):
             self._position_leader_handles()
+            self._position_resize_handles()
         return result
 
     def mouseReleaseEvent(self, event):
@@ -770,6 +889,8 @@ class _AnnotationItem(QGraphicsRectItem):
         self.shape_item = QGraphicsPathItem(self)
         self.image_item = QGraphicsPixmapItem(self)
         self.text_item = QGraphicsSimpleTextItem(self)
+        self.wrapped_text_item = QGraphicsTextItem(self)
+        self.wrapped_text_item.document().setDocumentMargin(0.0)
         self.scale_item = QGraphicsSimpleTextItem(self)
         self.details_item = QGraphicsSimpleTextItem(self)
         self.leader_handles = []
@@ -816,10 +937,14 @@ class _AnnotationItem(QGraphicsRectItem):
         self.panel_item.setVisible(False)
         self.panel_item.setPath(QPainterPath())
         self.text_item.setBrush(QBrush(colour))
+        self.text_item.setVisible(True)
+        self.wrapped_text_item.setDefaultTextColor(colour)
+        self.wrapped_text_item.setVisible(False)
         self.scale_item.setBrush(QBrush(colour))
         self.details_item.setBrush(QBrush(QColor("#334155")))
         font = QFont("Arial", max(6, int(float(self.record.get("font_size_pt", 9)))))
         self.text_item.setFont(font)
+        self.wrapped_text_item.setFont(font)
         scale_font = QFont("Arial", max(5, int(float(self.record.get("font_size_pt", 9))) - 2))
         self.scale_item.setFont(scale_font)
         detail_font = QFont("Arial", max(5, int(float(self.record.get("font_size_pt", 9)) - 2)))
@@ -880,7 +1005,7 @@ class _AnnotationItem(QGraphicsRectItem):
             path.moveTo(anchor_x, anchor_y)
             path.lineTo(attach_x, anchor_y)
             path.lineTo(attach_x, attach_y)
-            self._set_text()
+            self._set_wrapped_text()
         elif kind == "page_reference":
             path.addRoundedRect(0.0, 0.0, width, height, 5.0, 5.0)
             self.shape_item.setBrush(QBrush(QColor("#eff6ff")))
@@ -1018,7 +1143,7 @@ class _AnnotationItem(QGraphicsRectItem):
                 handle.scene().removeItem(handle)
             handle.setParentItem(None)
         self.resize_handles = []
-        if self.record.get("type") != "network_snippet":
+        if self.record.get("type") not in {"network_snippet", "callout"}:
             return
         self.resize_handles = [
             _SnippetResizeHandle(self, edge)
@@ -1190,12 +1315,27 @@ class _AnnotationItem(QGraphicsRectItem):
         self._redraw()
 
     def _set_text(self):
+        self.wrapped_text_item.setVisible(False)
+        self.text_item.setVisible(True)
         self.text_item.setScale(1.0)
         self.text_item.setText(str(self.record.get("text", "")))
         self.text_item.setPos(4.0, 3.0)
         bounds = self.text_item.boundingRect()
         available = max(10.0, self.rect().width() - 8.0)
         self.text_item.setScale(min(1.0, available / max(1.0, bounds.width())))
+
+    def _set_wrapped_text(self):
+        self.text_item.setVisible(False)
+        self.wrapped_text_item.setVisible(True)
+        self.wrapped_text_item.setScale(1.0)
+        self.wrapped_text_item.setPlainText(str(self.record.get("text", "")))
+        available_width = max(10.0, self.rect().width() - 8.0)
+        available_height = max(8.0, self.rect().height() - 6.0)
+        self.wrapped_text_item.setTextWidth(available_width)
+        bounds = self.wrapped_text_item.boundingRect()
+        factor = min(1.0, available_height / max(1.0, bounds.height()))
+        self.wrapped_text_item.setScale(factor)
+        self.wrapped_text_item.setPos(4.0, 3.0)
 
     def sync_record(self):
         old_x = float(self.record.get("x_pt", 0.0))
@@ -2017,14 +2157,24 @@ class PdfReportStudioDialog(QDialog):
         callout_layout.addWidget(self.callout_visible)
         size_form = QFormLayout()
         self.callout_width = QDoubleSpinBox()
-        self.callout_width.setRange(18.0, 250.0)
+        self.callout_width.setRange(18.0, 2000.0)
         self.callout_width.setSuffix(" pt")
         self.callout_height = QDoubleSpinBox()
-        self.callout_height.setRange(5.0, 100.0)
+        self.callout_height.setRange(5.0, 2000.0)
         self.callout_height.setSuffix(" pt")
+        self.callout_font_size = QDoubleSpinBox()
+        self.callout_font_size.setRange(4.0, 36.0)
+        self.callout_font_size.setDecimals(1)
+        self.callout_font_size.setSuffix(" pt")
+        self.callout_wrap_text = QCheckBox("Wrap text to callout width")
+        self.callout_wrap_text.setToolTip(
+            "Break long generated-callout lines when they no longer fit the callout width."
+        )
         size_form.addRow("Width", self.callout_width)
         size_form.addRow("Height", self.callout_height)
+        size_form.addRow("Text size", self.callout_font_size)
         callout_layout.addLayout(size_form)
+        callout_layout.addWidget(self.callout_wrap_text)
         self.apply_callout_button = QPushButton("Apply callout changes")
         self.apply_callout_button.clicked.connect(self._apply_callout_changes)
         callout_layout.addWidget(self.apply_callout_button)
@@ -2341,6 +2491,7 @@ class PdfReportStudioDialog(QDialog):
         name_edit = QLineEdit(str(source.get("name", "Custom network snippet")))
         view_combo = QComboBox()
         view_combo.addItem("Room topology", "topology")
+        view_combo.addItem("Comms room power requirements", "power_summary")
         view_combo.addItem("Cabinet elevation", "cabinet")
         view_combo.addItem("All cabinets elevation", "cabinet_all")
         view_combo.addItem("Scaled room floor layout", "room_layout")
@@ -2660,7 +2811,7 @@ class PdfReportStudioDialog(QDialog):
         dialog.resize(720, 560)
         layout = QVBoxLayout(dialog)
         help_label = QLabel(
-            "Select one or more room plans, rotatable cutaways, topology, or cabinet views. Each snippet is linked to its room marker and can be moved, resized, exported as PNG, or given movable leader bends after placement."
+            "Select one or more room plans, rotatable cutaways, topology, power summaries, or cabinet views. Each snippet is linked to its room marker and can be moved, resized, exported as PNG, or given movable leader bends after placement."
         )
         help_label.setWordWrap(True); layout.addWidget(help_label)
         source_list = QListWidget(); source_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -2781,6 +2932,7 @@ class PdfReportStudioDialog(QDialog):
                     "cabinet_all": "builtin-all-cabinets-elevation",
                     "room_layout": "builtin-room-floor-layout",
                     "room_cutaway": "builtin-room-cutaway",
+                    "power_summary": "builtin-room-power-summary",
                 }.get(str(spec.get("view_type", "")), "builtin-room-topology")
                 template = templates.get(builtin_id, {})
             self._place_network_snippet(
@@ -2913,6 +3065,8 @@ class PdfReportStudioDialog(QDialog):
                 "visible": bool(record.get("visible", True)),
                 "locked": bool(record.get("locked", False)),
                 "auto_fit_text": bool(record.get("auto_fit_text", False)),
+                "font_size_pt": float(record.get("font_size_pt", 9.0) or 9.0),
+                "wrap_text": bool(record.get("wrap_text", True)),
             }
             leader_points = record.get("leader_points_pt", []) or []
             if leader_points:
@@ -2954,7 +3108,16 @@ class PdfReportStudioDialog(QDialog):
             return
         item.set_text(self.callout_text.toPlainText().strip())
         item.set_callout_visible(self.callout_visible.isChecked())
-        item.set_size_points(self.callout_width.value(), self.callout_height.value())
+        item.record["auto_fit_text"] = False
+        item.set_font_size(self.callout_font_size.value())
+        item.set_wrap_text(self.callout_wrap_text.isChecked())
+        width = self.callout_width.value()
+        height = self.callout_height.value()
+        item.set_size_points(width, height)
+        if self.callout_wrap_text.isChecked():
+            height = max(height, item.required_wrapped_height_points())
+            item.set_size_points(width, height)
+            self.callout_height.setValue(height)
         item.sync_record()
 
     def refresh_preview(self, *_signal_args, collect_current=True):
@@ -3196,6 +3359,9 @@ class PdfReportStudioDialog(QDialog):
 
     def _annotation_item_changed(self):
         self._save_current_page_callouts()
+        # Keep the property editor in step with handle drags. Otherwise a later
+        # refresh/export can reapply the width and height from before the resize.
+        self._selection_changed()
         self._update_overlap_status()
 
     def annotation_mouse_press(self, event, scene_point):
@@ -3711,6 +3877,8 @@ class PdfReportStudioDialog(QDialog):
             self.callout_visible,
             self.callout_width,
             self.callout_height,
+            self.callout_font_size,
+            self.callout_wrap_text,
             self.apply_callout_button,
             self.add_leader_bend_button,
             self.remove_leader_bend_button,
@@ -3741,6 +3909,12 @@ class PdfReportStudioDialog(QDialog):
             self.callout_visible.setChecked(bool(item.record.get("visible", True)))
             self.callout_width.setValue(float(item.record["width_pt"]))
             self.callout_height.setValue(float(item.record["height_pt"]))
+            self.callout_font_size.setValue(
+                float(item.record.get("font_size_pt", 9.0) or 9.0)
+            )
+            self.callout_wrap_text.setChecked(
+                bool(item.record.get("wrap_text", True))
+            )
             if item.is_locked() and not self.callout_name.text().endswith("(locked)"):
                 self.callout_name.setText(self.callout_name.text() + " (locked)")
         has_leader_bends = bool(
@@ -4232,19 +4406,24 @@ class PdfReportStudioDialog(QDialog):
 
     def release_preview(self):
         """Release Qt's file handle before the caller removes preview files."""
+        if self._releasing_preview:
+            return
         self._releasing_preview = True
         self.detail_render_timer.stop()
         self._property_item = None
-        # Detach the view first so it cannot schedule a paint against graphics
-        # items while QGraphicsScene.clear() destroys their native Qt objects.
-        if self.view is not None:
-            self.view.setScene(None)
-        self.scene.blockSignals(True)
-        self.scene.clear()
-        self.scene.blockSignals(False)
-        self.callout_items = []
-        self.annotation_items = []
-        self.background_item = None
+        self.hide()
+        # Do not manually clear this QGraphicsScene. Snippet resize and leader
+        # handles are C++ child items with Python owner references; destroying
+        # that mixed ownership tree piecemeal can corrupt the Windows heap. Drop
+        # only the large raster allocations here and let QObject deferred
+        # deletion destroy the complete dialog tree in its native ownership order.
+        if self.background_item is not None:
+            self.background_item.setPixmap(QPixmap())
+        for item in self.annotation_items:
+            if getattr(item, "record", {}).get("type") != "network_snippet":
+                continue
+            item.image_item.setPixmap(QPixmap())
+            item._snippet_pixmap = QPixmap()
         self._network_snippet_png_cache.clear()
         self.network_data = {}
         self._undo_stack.clear()
@@ -4264,6 +4443,8 @@ class PdfReportStudioDialog(QDialog):
             except OSError:
                 pass
             self._composed_preview_path = ""
+        self.setParent(None)
+        self.deleteLater()
 
 
 ZoneDesignReportStudioDialog = PdfReportStudioDialog

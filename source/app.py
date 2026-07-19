@@ -7636,12 +7636,18 @@ class CableRouteEditor(QMainWindow):
         if not path.lower().endswith(".pdf"):
             path += ".pdf"
 
+        from uuid import uuid4
+
+        destination_path = Path(path)
+        temporary_output_path = destination_path.with_name(
+            f".{destination_path.stem}_zone_export_{uuid4().hex}.pdf"
+        )
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            output_path = export_zone_design_options_pdf(
+            export_zone_design_options_pdf(
                 self.store.data,
                 design_options,
-                path,
+                str(temporary_output_path),
                 strategy_names=strategy_names,
                 planning_options=planning_options,
                 room_port_limits=room_port_limits,
@@ -7652,6 +7658,8 @@ class CableRouteEditor(QMainWindow):
                 revision_number=self.latest_project_revision_number(),
                 studio_settings=studio_settings,
             )
+            os.replace(str(temporary_output_path), str(destination_path))
+            output_path = str(destination_path)
         except ImportError as exc:
             QMessageBox.critical(
                 self,
@@ -7664,6 +7672,11 @@ class CableRouteEditor(QMainWindow):
             return False
         finally:
             QApplication.restoreOverrideCursor()
+            if temporary_output_path.exists():
+                try:
+                    temporary_output_path.unlink()
+                except OSError:
+                    pass
 
         self.store.data["zone_design_options_pdf_settings"] = {
             **dict(pdf_options),
@@ -8174,6 +8187,12 @@ class CableRouteEditor(QMainWindow):
             return
 
         self.push_undo_state("Suggest equipment rooms from placement zones")
+        # Carry the zone planner's routing contract into automatic network
+        # design so a later network pass cannot silently move endpoints across
+        # floors or route through a transition on another level.
+        self.store.data.setdefault("network_settings", {})[
+            "auto_planner_same_floor_only"
+        ] = bool(options["same_floor_only"])
         for change in recommended_changes:
             zone = self._placement_zone_by_id(change["zone_id"])
             if zone is None:

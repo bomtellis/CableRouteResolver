@@ -69,6 +69,16 @@ NETWORK_SNIPPET_VARIABLE_NAMES = (
     "door_width_mm",
     "door_wall",
     "layout_status",
+    "equipment_power_w",
+    "poe_load_w",
+    "poe_budget_w",
+    "total_power_requirement_w",
+    "spare_capacity_percent",
+    "recommended_power_capacity_w",
+    "ups_capacity_w",
+    "ups_headroom_w",
+    "power_feed_count",
+    "power_status",
 )
 
 DEFAULT_NETWORK_SNIPPET_TEMPLATES = [
@@ -113,6 +123,21 @@ DEFAULT_NETWORK_SNIPPET_TEMPLATES = [
         ],
         "width_pt": 250.0,
         "height_pt": 165.0,
+        "scale_denominator": 0,
+        "builtin": True,
+    },
+    {
+        "id": "builtin-room-power-summary",
+        "name": "Comms room power requirements",
+        "view_type": "power_summary",
+        "title_template": "{room_type} power requirements - {location_name} - Floor {floor}",
+        "callout_templates": [
+            "Estimated demand: {total_power_requirement_w} W | {recommended_power_capacity_w} W including {spare_capacity_percent}% spare",
+            "Equipment: {equipment_power_w} W | PoE endpoints: {poe_load_w} W / {poe_budget_w} W budget",
+            "UPS-backed capacity: {ups_capacity_w} W | {power_status}",
+        ],
+        "width_pt": 300.0,
+        "height_pt": 210.0,
         "scale_denominator": 0,
         "builtin": True,
     },
@@ -171,6 +196,13 @@ def _integer(value, default=0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _number(value, default=0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _room_type_label(kind: str) -> str:
@@ -331,6 +363,18 @@ def network_report_snippet_catalog(
                 "title": f"{room_type} topology - {location} - Floor {floor}",
             }
         )
+        result.append(
+            {
+                "id": f"power-summary:{floor}:{location}",
+                "view_type": "power_summary",
+                "floor": floor,
+                "location_name": location,
+                "rack_name": "",
+                "rack_names": rack_names,
+                "room_type": room_type,
+                "title": f"{room_type} power requirements - {location} - Floor {floor}",
+            }
+        )
         if rack_names:
             result.append(
                 {
@@ -357,6 +401,139 @@ def network_report_snippet_catalog(
                 }
             )
     return result
+
+
+def network_room_power_summary(data: dict, snippet: dict) -> dict:
+    """Return rated equipment and assigned PoE demand for one comms room."""
+
+    floor = _integer(snippet.get("floor"))
+    location = _text(snippet.get("location_name"))
+    assets = {
+        _text(row.get("id")): row
+        for row in data.get("network_assets", []) or []
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    instances = [
+        row
+        for row in data.get("network_asset_instances", []) or []
+        if isinstance(row, dict)
+        and _integer(row.get("floor")) == floor
+        and _text(row.get("location_name")) == location
+    ]
+    instance_ids = {_text(row.get("id")) for row in instances}
+    poe_by_instance: Dict[str, float] = {}
+    for assignment in data.get("network_endpoint_assignments", []) or []:
+        if not isinstance(assignment, dict):
+            continue
+        instance_id = _text(assignment.get("network_instance_id"))
+        if instance_id in instance_ids:
+            poe_by_instance[instance_id] = poe_by_instance.get(instance_id, 0.0) + max(
+                0.0, _number(assignment.get("poe_power_w"))
+            )
+
+    rack_rows: Dict[str, dict] = {}
+    equipment_power = 0.0
+    poe_budget = 0.0
+    poe_load = 0.0
+    ups_capacity = 0.0
+    feed_labels = set()
+    for instance in instances:
+        instance_id = _text(instance.get("id"))
+        asset = assets.get(_text(instance.get("asset_id")), {})
+        asset_type = _text(asset.get("asset_type")).lower()
+        members = (
+            max(1, _integer(instance.get("stack_member_count"), 1))
+            if bool(instance.get("logical_stack"))
+            else 1
+        )
+        base_power = max(0.0, _number(asset.get("power_input_w"))) * members
+        instance_poe_budget = max(0.0, _number(asset.get("poe_budget_w"))) * members
+        instance_poe_load = max(0.0, poe_by_instance.get(instance_id, 0.0))
+        equipment_power += base_power
+        poe_budget += instance_poe_budget
+        poe_load += instance_poe_load
+        if asset_type == "ups" or (
+            asset_type == "power_device" and bool(asset.get("ups_backed_source", False))
+        ):
+            ups_capacity += max(
+                0.0,
+                _number(
+                    asset.get(
+                        "power_capacity_w",
+                        asset.get("rated_power_w", asset.get("output_capacity_w", 0.0)),
+                    )
+                ),
+            ) * members
+        for field in ("power_feed", "ups_source"):
+            value = _text(instance.get(field))
+            if value:
+                feed_labels.add(value)
+        rack_name = _text(instance.get("rack_name")) or "Unracked"
+        rack_row = rack_rows.setdefault(
+            rack_name,
+            {
+                "rack_name": rack_name,
+                "device_count": 0,
+                "equipment_power_w": 0.0,
+                "poe_load_w": 0.0,
+                "poe_budget_w": 0.0,
+            },
+        )
+        rack_row["device_count"] += members
+        rack_row["equipment_power_w"] += base_power
+        rack_row["poe_load_w"] += instance_poe_load
+        rack_row["poe_budget_w"] += instance_poe_budget
+
+    instance_by_id = {_text(row.get("id")): row for row in instances}
+    for connection in data.get("network_power_connections", []) or []:
+        if not isinstance(connection, dict):
+            continue
+        target_id = _text(connection.get("to_instance_id"))
+        if target_id not in instance_by_id:
+            continue
+        label = _text(connection.get("feed_label")) or _text(connection.get("from_instance_id"))
+        if label:
+            feed_labels.add(label)
+
+    spare_percent = max(
+        0.0,
+        _number((data.get("network_settings", {}) or {}).get("spare_capacity_percent"), 15.0),
+    )
+    total_requirement = equipment_power + poe_load
+    recommended_capacity = total_requirement * (1.0 + spare_percent / 100.0)
+    ups_headroom = ups_capacity - total_requirement
+    if total_requirement <= 0.001:
+        status = "No rated power demand is modelled"
+    elif ups_capacity <= 0.001:
+        status = "UPS-backed capacity is not modelled"
+    elif ups_capacity + 0.001 >= recommended_capacity:
+        status = "UPS capacity meets the spare-capacity target"
+    elif ups_capacity + 0.001 >= total_requirement:
+        status = "UPS covers current demand but not the spare target"
+    else:
+        status = f"UPS capacity shortfall: {total_requirement - ups_capacity:.1f} W"
+
+    rows = []
+    for row in sorted(rack_rows.values(), key=lambda value: value["rack_name"].casefold()):
+        rows.append(
+            {
+                **row,
+                "total_power_w": row["equipment_power_w"] + row["poe_load_w"],
+            }
+        )
+    return {
+        "equipment_power_w": round(equipment_power, 1),
+        "poe_load_w": round(poe_load, 1),
+        "poe_budget_w": round(poe_budget, 1),
+        "total_power_requirement_w": round(total_requirement, 1),
+        "spare_capacity_percent": round(spare_percent, 1),
+        "recommended_power_capacity_w": round(recommended_capacity, 1),
+        "ups_capacity_w": round(ups_capacity, 1),
+        "ups_headroom_w": round(ups_headroom, 1),
+        "power_feed_count": len(feed_labels),
+        "power_status": status,
+        "rack_rows": rows,
+    }
 
 
 def network_report_snippet_variables(data: dict, snippet: dict) -> dict:
@@ -436,6 +613,7 @@ def network_report_snippet_variables(data: dict, snippet: dict) -> dict:
     room_width_mm = float(layout.get("room_width_mm", 0.0) or 0.0)
     room_depth_mm = float(layout.get("room_depth_mm", 0.0) or 0.0)
     warnings = room_layout_compliance(layout) if layout else []
+    power = network_room_power_summary(data, snippet)
     return {
         "project_name": _text(data.get("project_name") or data.get("name")),
         "room_type": _text(snippet.get("room_type")) or "Comms room",
@@ -461,6 +639,21 @@ def network_report_snippet_variables(data: dict, snippet: dict) -> dict:
         "door_width_mm": int(round(float(layout.get("door_width_mm", 900.0) or 900.0))),
         "door_wall": _text(layout.get("door_wall") or "south").title(),
         "layout_status": "NON-CONFORMANT - " + "; ".join(warnings[:3]) if warnings else "Conforms to configured clearances",
+        **{
+            key: power[key]
+            for key in (
+                "equipment_power_w",
+                "poe_load_w",
+                "poe_budget_w",
+                "total_power_requirement_w",
+                "spare_capacity_percent",
+                "recommended_power_capacity_w",
+                "ups_capacity_w",
+                "ups_headroom_w",
+                "power_feed_count",
+                "power_status",
+            )
+        },
     }
 
 
@@ -1219,6 +1412,154 @@ def cabinet_snippet_physical_size_mm(data: dict, snippet: dict) -> Tuple[float, 
     return 600.0 * rack_count, capacity_u * 44.45 + 180.0
 
 
+def render_network_power_summary_png(
+    data: dict,
+    snippet: dict,
+    pixel_width: int = 1600,
+) -> bytes:
+    """Render a room power-demand card with a per-cabinet breakdown."""
+
+    summary = network_room_power_summary(data, snippet)
+    rows = summary["rack_rows"] or [
+        {
+            "rack_name": "No installed equipment",
+            "device_count": 0,
+            "equipment_power_w": 0.0,
+            "poe_load_w": 0.0,
+            "total_power_w": 0.0,
+        }
+    ]
+    width = max(900, int(pixel_width))
+    row_height = 70
+    height = max(700, 500 + row_height * len(rows))
+    image = QImage(width, height, QImage.Format_ARGB32_Premultiplied)
+    image.fill(QColor("#f8fafc"))
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.TextAntialiasing, True)
+    family = _ensure_room_drawing_font()
+
+    def font(pixel_size, bold=False):
+        value = QFont(family)
+        value.setPixelSize(int(pixel_size))
+        value.setBold(bool(bold))
+        return value
+
+    margin = 46.0
+    painter.setPen(QPen(QColor("#0f172a")))
+    painter.setFont(font(34, True))
+    title = (
+        f"{_text(snippet.get('room_type')) or 'Comms room'} power requirements - "
+        f"{_text(snippet.get('location_name'))} - Floor {_integer(snippet.get('floor'))}"
+    )
+    painter.drawText(QRectF(margin, 28, width - margin * 2, 48), Qt.AlignLeft | Qt.AlignVCenter, title)
+    painter.setFont(font(20))
+    painter.setPen(QPen(QColor("#475569")))
+    painter.drawText(
+        QRectF(margin, 78, width - margin * 2, 34),
+        Qt.AlignLeft | Qt.AlignVCenter,
+        "Rated installed equipment plus assigned endpoint PoE demand",
+    )
+
+    cards = [
+        ("EQUIPMENT", summary["equipment_power_w"], "#176b87"),
+        ("POE ENDPOINTS", summary["poe_load_w"], "#7c3aed"),
+        ("TOTAL DEMAND", summary["total_power_requirement_w"], "#0b6b50"),
+        ("WITH SPARE", summary["recommended_power_capacity_w"], "#b45309"),
+    ]
+    gap = 18.0
+    card_y = 132.0
+    card_h = 128.0
+    card_w = (width - margin * 2 - gap * 3) / 4.0
+    for index, (label, watts, colour) in enumerate(cards):
+        x = margin + index * (card_w + gap)
+        painter.setPen(QPen(QColor("#cbd5e1"), 2))
+        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.drawRoundedRect(QRectF(x, card_y, card_w, card_h), 12, 12)
+        painter.setPen(QPen(QColor(colour)))
+        painter.setFont(font(18, True))
+        painter.drawText(QRectF(x + 18, card_y + 14, card_w - 36, 28), Qt.AlignLeft | Qt.AlignVCenter, label)
+        painter.setFont(font(36, True))
+        painter.drawText(
+            QRectF(x + 18, card_y + 48, card_w - 36, 52),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            f"{float(watts):,.1f} W",
+        )
+
+    status_ok = summary["ups_capacity_w"] >= summary["recommended_power_capacity_w"] > 0
+    status_colour = QColor("#dcfce7" if status_ok else "#fff7ed")
+    status_pen = QColor("#166534" if status_ok else "#9a3412")
+    painter.setPen(QPen(status_pen, 2))
+    painter.setBrush(QBrush(status_colour))
+    painter.drawRoundedRect(QRectF(margin, 280, width - margin * 2, 82), 10, 10)
+    painter.setPen(QPen(status_pen))
+    painter.setFont(font(21, True))
+    painter.drawText(
+        QRectF(margin + 18, 292, width - margin * 2 - 36, 28),
+        Qt.AlignLeft | Qt.AlignVCenter,
+        summary["power_status"],
+    )
+    painter.setFont(font(18))
+    painter.drawText(
+        QRectF(margin + 18, 324, width - margin * 2 - 36, 25),
+        Qt.AlignLeft | Qt.AlignVCenter,
+        f"UPS-backed capacity: {summary['ups_capacity_w']:,.1f} W | "
+        f"PoE budget: {summary['poe_budget_w']:,.1f} W | "
+        f"Modelled feeds: {summary['power_feed_count']}",
+    )
+
+    table_y = 394.0
+    columns = [
+        ("CABINET", 0.00, 0.34, Qt.AlignLeft),
+        ("DEVICES", 0.34, 0.13, Qt.AlignRight),
+        ("EQUIPMENT", 0.47, 0.18, Qt.AlignRight),
+        ("POE LOAD", 0.65, 0.17, Qt.AlignRight),
+        ("TOTAL", 0.82, 0.18, Qt.AlignRight),
+    ]
+    table_width = width - margin * 2
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QBrush(QColor("#0f3b4c")))
+    painter.drawRoundedRect(QRectF(margin, table_y, table_width, 54), 8, 8)
+    painter.setFont(font(17, True))
+    painter.setPen(QPen(QColor("#ffffff")))
+    for label, start, span, alignment in columns:
+        painter.drawText(
+            QRectF(margin + start * table_width + 14, table_y, span * table_width - 28, 54),
+            alignment | Qt.AlignVCenter,
+            label,
+        )
+    painter.setFont(font(18))
+    for index, row in enumerate(rows):
+        y = table_y + 54 + index * row_height
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor("#ffffff" if index % 2 == 0 else "#f1f5f9")))
+        painter.drawRect(QRectF(margin, y, table_width, row_height))
+        values = [
+            str(row["rack_name"]),
+            str(row["device_count"]),
+            f"{row['equipment_power_w']:,.1f} W",
+            f"{row['poe_load_w']:,.1f} W",
+            f"{row['total_power_w']:,.1f} W",
+        ]
+        painter.setPen(QPen(QColor("#1e293b")))
+        for value, (_label, start, span, alignment) in zip(values, columns):
+            painter.drawText(
+                QRectF(margin + start * table_width + 14, y, span * table_width - 28, row_height),
+                alignment | Qt.AlignVCenter,
+                value,
+            )
+    painter.setPen(QPen(QColor("#64748b")))
+    painter.setFont(font(15))
+    painter.drawText(
+        QRectF(margin, height - 48, width - margin * 2, 28),
+        Qt.AlignLeft | Qt.AlignVCenter,
+        f"Recommended capacity includes the configured {summary['spare_capacity_percent']:g}% spare allowance. "
+        "Values depend on asset power ratings and assigned PoE loads.",
+    )
+    painter.end()
+    return _encode_png(image)
+
+
 def render_network_report_snippet_png(
     data: dict,
     snippet: dict,
@@ -1227,6 +1568,8 @@ def render_network_report_snippet_png(
 ) -> bytes:
     """Render the same topology/rack scene used by Network Topology as PNG bytes."""
 
+    if _text(snippet.get("view_type")).lower() == "power_summary":
+        return render_network_power_summary_png(data, snippet, pixel_width=pixel_width)
     return render_network_report_snippets_png(
         data,
         [snippet],
@@ -1243,6 +1586,19 @@ def render_network_report_snippets_png(
     progress_callback=None,
 ) -> List[bytes]:
     """Render several topology snippets while reusing one prepared topology scene."""
+
+    if all(
+        _text(snippet.get("view_type")).lower() == "power_summary"
+        for snippet in snippets
+    ):
+        rendered = []
+        for index, snippet in enumerate(snippets):
+            if progress_callback is not None and progress_callback(index, snippet) is False:
+                break
+            rendered.append(
+                render_network_power_summary_png(data, snippet, pixel_width=pixel_width)
+            )
+        return rendered
 
     from network_topology import NetworkTopologyDialog
 
@@ -1273,6 +1629,8 @@ def _render_network_report_snippet_from_dialog(
     pixel_width: int,
     pixel_height: int,
 ) -> bytes:
+    if _text(snippet.get("view_type")).lower() == "power_summary":
+        return render_network_power_summary_png(data=dialog.data, snippet=snippet, pixel_width=pixel_width)
     dialog.search_edit.blockSignals(True)
     dialog.search_edit.clear()
     dialog.search_edit.blockSignals(False)

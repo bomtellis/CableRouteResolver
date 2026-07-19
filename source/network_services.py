@@ -658,32 +658,68 @@ def _sync_direct_fibre_cables(data: dict, cables: List[dict], demands: Sequence[
     created: List[dict] = []
     assets = {_text(row.get("id")): row for row in data.get("network_assets", []) if isinstance(row, dict)}
     instances = {_text(row.get("id")): row for row in data.get("network_asset_instances", []) if isinstance(row, dict)}
-    for demand in sorted(demands, key=lambda row: row["id"]):
-        declared_cores = max(demand["used_cores"], _int(demand.get("cable_core_count"), demand["used_cores"]))
-        required = max(declared_cores, int(math.ceil(demand["used_cores"] * (1.0 + spare))))
-        target_asset = assets.get(_text(instances.get(demand["to_instance_id"], {}).get("asset_id")), {})
+    grouped: Dict[Tuple[object, ...], List[dict]] = defaultdict(list)
+    for demand in demands:
+        route_path = tuple(_text(value) for value in demand.get("route_path", []) if _text(value))
+        route_key: Tuple[object, ...]
+        if len(route_path) >= 2:
+            route_key = ("route", route_path)
+        else:
+            # Without a routed path, only consolidate circuits between the same
+            # physical endpoints so unrelated fallback lengths cannot be merged.
+            route_key = (
+                "endpoints",
+                _text(demand.get("from_instance_id")),
+                _text(demand.get("to_instance_id")),
+                round(max(0.0, _float(demand.get("length_m"))), 3),
+            )
+        grouped[
+            route_key
+            + (
+                _text(demand.get("redundancy_role")).lower(),
+                _text(demand.get("from_termination_method")).lower(),
+                _text(demand.get("to_termination_method")).lower(),
+                _text(demand.get("from_connector_type")).lower(),
+                _text(demand.get("to_connector_type")).lower(),
+                bool(demand.get("connectorised_breakout", False)),
+            )
+        ].append(demand)
+
+    for group in sorted(grouped.values(), key=lambda rows: min(row["id"] for row in rows)):
+        group = sorted(group, key=lambda row: row["id"])
+        first_demand = group[0]
+        used_cores = sum(max(1, _int(row.get("used_cores"), 1)) for row in group)
+        # A declared larger cable is a minimum for the shared run, not a reason
+        # to install that same spare allowance once per logical circuit.
+        declared_cores = max(
+            [used_cores]
+            + [
+                max(1, _int(row.get("cable_core_count"), row.get("used_cores", 1)))
+                for row in group
+            ]
+        )
+        required = max(declared_cores, int(math.ceil(used_cores * (1.0 + spare))))
+        target_asset = assets.get(_text(instances.get(first_demand["to_instance_id"], {}).get("asset_id")), {})
         target_is_splitter = _text(target_asset.get("asset_type")) == "fibre_splitter"
-        from_method = _text(demand.get("from_termination_method")) or "connectorised"
-        to_method = _text(demand.get("to_termination_method"))
+        from_method = _text(first_demand.get("from_termination_method")) or "connectorised"
+        to_method = _text(first_demand.get("to_termination_method"))
         if not to_method:
             to_method = _text(planning.get("splitter_termination_method")) if target_is_splitter else "connectorised"
         cable, _allocation = _new_fibre_cable(
-            data, cables, [demand], demand["route_path"], "direct", preferred, required,
-            from_instance_id=demand["from_instance_id"], from_port=demand["from_port"],
-            to_instance_id=demand["to_instance_id"], to_port=demand["to_port"],
+            data, cables, group, first_demand["route_path"], "direct", preferred, required,
+            from_instance_id=first_demand["from_instance_id"], from_port=first_demand["from_port"],
+            to_instance_id=first_demand["to_instance_id"], to_port=first_demand["to_port"],
             from_method=from_method, to_method=to_method or "connectorised",
         )
-        cable["connectorised_breakout"] = bool(demand.get("connectorised_breakout", False))
-        cable["from_connector_type"] = _text(demand.get("from_connector_type"))
-        cable["to_connector_type"] = _text(demand.get("to_connector_type"))
-        cable["from_panel_termination_allocations"] = list(demand.get("from_panel_termination_allocations", []))
-        cable["to_panel_termination_allocations"] = list(demand.get("to_panel_termination_allocations", []))
+        cable["connectorised_breakout"] = bool(first_demand.get("connectorised_breakout", False))
+        cable["from_connector_type"] = _text(first_demand.get("from_connector_type"))
+        cable["to_connector_type"] = _text(first_demand.get("to_connector_type"))
         _apply_cable_panel_metadata(
             data,
             cable,
-            [demand],
-            include_from=bool(demand.get("from_panel_termination_allocations")),
-            include_to=bool(demand.get("to_panel_termination_allocations")),
+            group,
+            include_from=any(row.get("from_panel_termination_allocations") for row in group),
+            include_to=any(row.get("to_panel_termination_allocations") for row in group),
             mpo_threshold=mpo_threshold,
             mpo_connector=mpo_connector,
         )
