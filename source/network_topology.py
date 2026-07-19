@@ -5111,8 +5111,14 @@ class NetworkTopologyDialog(QDialog):
         key = self.rack_focus
         if key is None:
             return visible
-        floor, location, _selected_rack = key
-        visible.extend(self._rack_nodes_by_location.get((floor, location), []))
+        floor, location, selected_rack = key
+        room_nodes = self._rack_nodes_by_location.get((floor, location), [])
+        visible.extend(
+            node_id
+            for node_id in room_nodes
+            if selected_rack == "__all__"
+            or _text(self.model.nodes[node_id].instance.get("rack_name")) == selected_rack
+        )
         visible.sort(
             key=lambda node_id: (
                 _text(self.model.nodes[node_id].instance.get("rack_name")),
@@ -6057,8 +6063,12 @@ class NetworkTopologyDialog(QDialog):
         key = self.rack_focus
         if key is None:
             return positions
-        floor, location, _selected_rack = key
-        rack_names = self._rack_names_for_location(floor, location)
+        floor, location, selected_rack = key
+        rack_names = (
+            [selected_rack]
+            if selected_rack != "__all__"
+            else self._rack_names_for_location(floor, location)
+        )
         rack_left_start = self.RACK_LEFT_START
         rack_width = self.RACK_WIDTH
         rack_gap = self.RACK_GAP
@@ -6460,7 +6470,7 @@ class NetworkTopologyDialog(QDialog):
         if self.rack_focus is not None:
             floor, location, rack_name = self.rack_focus
             valid_racks = self._rack_names_for_location(floor, location)
-            if rack_name not in valid_racks:
+            if rack_name != "__all__" and rack_name not in valid_racks:
                 self.rack_focus = None
                 self.switch_port_focus = None
         visible_ids = self._collect_visible()
@@ -7180,7 +7190,11 @@ class NetworkTopologyDialog(QDialog):
         if key is None:
             return
         floor, location, selected_rack = key
-        rack_names = self._rack_names_for_location(floor, location)
+        rack_names = (
+            [selected_rack]
+            if selected_rack != "__all__"
+            else self._rack_names_for_location(floor, location)
+        )
         if not rack_names:
             return
         rack_left_start = self.RACK_LEFT_START

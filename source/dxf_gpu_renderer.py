@@ -2103,7 +2103,18 @@ class GpuDxfGraphView(_ViewBase):
             pos = self.world_to_scene(float(point.get("x", 0.0)), float(point.get("y", 0.0)))
             selected = str(name) == str(self.selected_point_name) or str(name) in self.selected_template_names
             outline = QPen(QColor("#ffffff") if selected else QColor("transparent"), 0.0)
-            if kind in {"location", "comms_room"}:
+            is_der = kind == "distributed_equipment_room" or (
+                kind == "location" and str(name).upper().startswith("DER")
+            )
+            if is_der:
+                self._draw_der(
+                    painter,
+                    pos,
+                    QColor("#35a7ff"),
+                    QColor("#ffffff") if selected else QColor("#9edcff"),
+                )
+                label_color = QColor("#bfe8ff")
+            elif kind in {"location", "comms_room"}:
                 painter.setPen(outline)
                 painter.setBrush(QBrush(QColor("#18c37e")))
                 r = 0.3
@@ -2310,6 +2321,25 @@ class GpuDxfGraphView(_ViewBase):
         arm = 0.34
         painter.drawLine(QPointF(pos.x() - arm, pos.y()), QPointF(pos.x() + arm, pos.y()))
         painter.drawLine(QPointF(pos.x(), pos.y() - arm), QPointF(pos.x(), pos.y() + arm))
+
+    @staticmethod
+    def _draw_der(painter: QPainter, pos: QPointF, fill: QColor, outline: QColor) -> None:
+        """Draw a two-compartment cabinet so DERs cannot be mistaken for transitions."""
+        half_width = 0.48
+        half_height = 0.38
+        rect = QRectF(
+            pos.x() - half_width,
+            pos.y() - half_height,
+            half_width * 2.0,
+            half_height * 2.0,
+        )
+        painter.setBrush(QBrush(fill))
+        painter.setPen(QPen(outline, 0.08))
+        painter.drawRoundedRect(rect, 0.1, 0.1)
+        painter.drawLine(
+            QPointF(pos.x() - half_width + 0.1, pos.y()),
+            QPointF(pos.x() + half_width - 0.1, pos.y()),
+        )
 
     @staticmethod
     def _draw_diamond(painter: QPainter, pos: QPointF, radius: float, fill: QColor, outline: QColor) -> None:

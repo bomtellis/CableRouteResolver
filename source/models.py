@@ -47,6 +47,9 @@ DEFAULT_JSON = {
         "paper_size": "A1",
         "scale": 100,
     },
+    "pdf_report_studio_settings": {},
+    "network_pdf_snippet_templates": [],
+    "pdf_report_page_templates": [],
     "connections": [],
     "route_profiles": {
         "default": {

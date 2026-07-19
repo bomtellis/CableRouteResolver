@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import heapq
 import math
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Sequence
@@ -474,6 +475,7 @@ def _draw_callout_box(
     box_position,
     font_size=6.5,
     label_override=None,
+    leaders=None,
 ):
     if label_override is not None:
         label = str(label_override)
@@ -489,29 +491,78 @@ def _draw_callout_box(
         attach_x, attach_y = box_x + box_width, box_y + box_height / 2.0
     else:
         attach_x, attach_y = box_x, box_y + box_height / 2.0
+    leader_routes = [route for route in (leaders or []) if isinstance(route, dict)]
+    if not leader_routes:
+        leader_routes = [
+            {
+                "anchor_x_pt": anchor_x,
+                "anchor_y_pt": anchor_y,
+                "points_pt": [],
+            }
+        ]
     leader = c.beginPath()
-    leader.moveTo(anchor_x, anchor_y)
-    if rail in {"above", "below", "top", "bottom"}:
-        leader.lineTo(anchor_x, attach_y)
-    else:
-        leader.lineTo(attach_x, anchor_y)
-    leader.lineTo(attach_x, attach_y)
+    for route in leader_routes:
+        route_anchor_x = float(route.get("anchor_x_pt", anchor_x))
+        route_anchor_y = float(route.get("anchor_y_pt", anchor_y))
+        points = [
+            (float(point[0]), float(point[1]))
+            for point in route.get("points_pt", []) or []
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+        reference_x, reference_y = points[-1] if points else (
+            route_anchor_x,
+            route_anchor_y,
+        )
+        centre_x, centre_y = box_x + box_width / 2.0, box_y + box_height / 2.0
+        dx, dy = centre_x - reference_x, centre_y - reference_y
+        if abs(dx) > abs(dy):
+            route_attach_x = box_x if dx >= 0 else box_x + box_width
+            route_attach_y = min(max(reference_y, box_y), box_y + box_height)
+            route_rail = "right" if dx >= 0 else "left"
+        else:
+            route_attach_x = min(max(reference_x, box_x), box_x + box_width)
+            route_attach_y = box_y if dy >= 0 else box_y + box_height
+            route_rail = "above" if dy >= 0 else "below"
+        leader.moveTo(route_anchor_x, route_anchor_y)
+        if points:
+            for point in points:
+                leader.lineTo(*point)
+        elif route_rail in {"above", "below"}:
+            leader.lineTo(route_anchor_x, route_attach_y)
+        else:
+            leader.lineTo(route_attach_x, route_anchor_y)
+        leader.lineTo(route_attach_x, route_attach_y)
     c.drawPath(leader, stroke=1, fill=0)
     c.rect(box_x, box_y, box_width, box_height, stroke=1, fill=0)
     usable_width = max(1.0, box_width - 4 * mm)
     fitted_size = float(font_size)
-    while fitted_size > 4.2 and c.stringWidth(
-        label, "Helvetica-Bold", fitted_size
-    ) > usable_width:
+
+    def wrapped_lines(size):
+        result = []
+        for source_line in str(label or "").splitlines() or [""]:
+            words = source_line.split() or [""]
+            current = ""
+            for word in words:
+                candidate = (current + " " + word).strip()
+                if current and c.stringWidth(candidate, "Helvetica-Bold", size) > usable_width:
+                    result.append(current)
+                    current = word
+                else:
+                    current = candidate
+            result.append(current)
+        return result
+
+    lines = wrapped_lines(fitted_size)
+    while fitted_size > 4.2 and len(lines) * fitted_size * 1.2 > box_height - 2.0:
         fitted_size -= 0.25
-    while label and c.stringWidth(
-        label, "Helvetica-Bold", fitted_size
-    ) > usable_width:
-        label = label[:-4].rstrip() + "..." if len(label) > 4 else ""
+        lines = wrapped_lines(fitted_size)
     c.setFont("Helvetica-Bold", fitted_size)
     c.setFillColor(colors.HexColor(colour))
-    text_y = box_y + (box_height - fitted_size) / 2.0 + 1.0
-    c.drawString(box_x + 2 * mm, text_y, label)
+    line_height = fitted_size * 1.2
+    text_y = box_y + (box_height + len(lines) * line_height) / 2.0 - fitted_size
+    for line in lines:
+        c.drawString(box_x + 2 * mm, text_y, line)
+        text_y -= line_height
     c.restoreState()
 
 
@@ -526,6 +577,7 @@ def _draw_zone(
     callout_box=None,
     label_override=None,
     font_scale=1.0,
+    callout_leaders=None,
 ):
     left, bottom = transform(float(zone.get("min_x", 0.0)), float(zone.get("min_y", 0.0)))
     right, top = transform(float(zone.get("max_x", 0.0)), float(zone.get("max_y", 0.0)))
@@ -552,6 +604,7 @@ def _draw_zone(
             box_position=callout_box,
             label_override=label_override,
             font_size=6.5 * float(font_scale),
+            leaders=callout_leaders,
         )
     c.restoreState()
 
@@ -655,7 +708,7 @@ def _room_callout_text(room, planning_options=None):
         f"{'DER' if is_der else 'CR'} | {room.get('zone_name')} | "
         f"{int(room.get('ports', 0))}/{int(room.get('port_limit', 0))} ports | "
         f"{switches} {switch_label} | {cabinets} {cabinet_label}"
-    )[:130]
+    )
 
 
 def _draw_room_label_callout(
@@ -667,6 +720,7 @@ def _draw_room_label_callout(
     callout_box=None,
     label_override=None,
     font_scale=1.0,
+    callout_leaders=None,
 ):
     anchor_x, anchor_y = transform(
         float(room.get("x", 0.0)), float(room.get("y", 0.0))
@@ -691,6 +745,7 @@ def _draw_room_label_callout(
         box_position=callout_box,
         font_size=6.2 * float(font_scale),
         label_override=label_override,
+        leaders=callout_leaders,
     )
 
 
@@ -705,6 +760,7 @@ def _draw_max_distance_callout(
     callout_box=None,
     label_override=None,
     font_scale=1.0,
+    callout_leaders=None,
 ):
     if point:
         anchor_x, anchor_y = transform(
@@ -741,6 +797,7 @@ def _draw_max_distance_callout(
         box_position=callout_box,
         font_size=6.2 * float(font_scale),
         label_override=label_override,
+        leaders=callout_leaders,
     )
 
 
@@ -841,7 +898,7 @@ def export_zone_design_options_pdf(
     layout_manifest=None,
     preview_background=False,
 ) -> str:
-    from pdf_report_annotations import draw_pdf_studio_annotations
+    from pdf_report_annotations import add_pdf_studio_page_reference_links, draw_pdf_studio_annotations
 
     studio_settings = dict(studio_settings or {})
     if layout_manifest is not None:
@@ -972,6 +1029,9 @@ def export_zone_design_options_pdf(
     )
     show_cover = _studio_enabled(studio_settings, "show_cover", True)
     page_count = int(show_cover) + len(sheet_payloads)
+    total_page_count = page_count + len(
+        [row for row in studio_settings.get("extra_pages", []) or [] if isinstance(row, dict)]
+    )
     if show_cover:
         _draw_cover(
             pdf,
@@ -1338,7 +1398,22 @@ def export_zone_design_options_pdf(
                 }[record["kind"]],
                 True,
             )
-            visible = bool(callout_override.get("visible", default_visible))
+            visible = bool(callout_override.get("visible", default_visible)) and not bool(
+                callout_override.get("joined_into_key")
+            )
+            leaders = deepcopy(callout_override.get("leaders_pt", []) or [])
+            if not leaders:
+                leader_points = deepcopy(
+                    callout_override.get("leader_points_pt", []) or []
+                )
+                if leader_points:
+                    leaders = [
+                        {
+                            "anchor_x_pt": float(record["anchor_x"]),
+                            "anchor_y_pt": float(record["anchor_y"]),
+                            "points_pt": leader_points,
+                        }
+                    ]
             callout_slots[record["key"]] = {
                 "box": selected,
                 "visible": visible,
@@ -1346,6 +1421,7 @@ def export_zone_design_options_pdf(
                 "font_scale": max(
                     0.5, min(2.5, float(studio_settings.get("font_scale", 1.0) or 1.0))
                 ),
+                "leaders": leaders,
             }
             if visible:
                 placed_boxes.append(selected)
@@ -1386,6 +1462,7 @@ def export_zone_design_options_pdf(
                     callout_box=slot.get("box"),
                     label_override=slot.get("label"),
                     font_scale=slot.get("font_scale", 1.0),
+                    callout_leaders=slot.get("leaders"),
                 )
         for room_index, room in enumerate(suggestions):
             label_slot = callout_slots.get(("room_label", room_index), {})
@@ -1398,6 +1475,7 @@ def export_zone_design_options_pdf(
                     callout_box=label_slot.get("box"),
                     label_override=label_slot.get("label"),
                     font_scale=label_slot.get("font_scale", 1.0),
+                    callout_leaders=label_slot.get("leaders"),
                 )
             max_name, max_distance, max_fallback = room_maxima[id(room)]
             maximum_slot = callout_slots.get(("room_max", room_index), {})
@@ -1412,6 +1490,7 @@ def export_zone_design_options_pdf(
                     callout_box=maximum_slot.get("box"),
                     label_override=maximum_slot.get("label"),
                     font_scale=maximum_slot.get("font_scale", 1.0),
+                    callout_leaders=maximum_slot.get("leaders"),
                 )
         pdf.restoreState()
 
@@ -1438,7 +1517,7 @@ def export_zone_design_options_pdf(
                 scale=scale,
                 source_drawing=dxf_path,
                 page_number=sheet_index,
-                page_count=page_count,
+                page_count=total_page_count,
             )
         if not preview_background:
             draw_pdf_studio_annotations(
@@ -1446,5 +1525,22 @@ def export_zone_design_options_pdf(
             )
         pdf.showPage()
 
+    if not preview_background:
+        for extra_offset, extra_page in enumerate(studio_settings.get("extra_pages", []) or []):
+            if not isinstance(extra_page, dict):
+                continue
+            extra_size = (
+                max(72.0, float(extra_page.get("width_pt", page_size[0]) or page_size[0])),
+                max(72.0, float(extra_page.get("height_pt", page_size[1]) or page_size[1])),
+            )
+            pdf.setPageSize(extra_size)
+            draw_pdf_studio_annotations(pdf, page_count + extra_offset, studio_settings)
+            pdf.showPage()
+
     pdf.save()
+    if not preview_background and any(
+        isinstance(row, dict) and row.get("type") == "page_reference"
+        for row in studio_settings.get("annotations", []) or []
+    ):
+        add_pdf_studio_page_reference_links(destination, destination, studio_settings)
     return str(destination)

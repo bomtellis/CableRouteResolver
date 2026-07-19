@@ -44,7 +44,12 @@ def _floor_dxf_paths(data: dict) -> Dict[int, str]:
 
 def model_floors(data: dict) -> List[int]:
     floors = set(_floor_dxf_paths(data))
-    for section in ("locations", "data_points", "departments"):
+    for section in (
+        "locations",
+        "data_points",
+        "departments",
+        "equipment_room_placement_zones",
+    ):
         for row in data.get(section, []):
             if isinstance(row, dict):
                 try:
@@ -236,7 +241,13 @@ def _entity_bounds(entities: Sequence[dict]) -> List[Tuple[float, float, float, 
     return result
 
 
-def _content_bounds(data: dict, floor: int, entities: Sequence[dict]):
+def _content_bounds(
+    data: dict,
+    floor: int,
+    entities: Sequence[dict],
+    *,
+    include_placement_zones: bool = False,
+):
     bounds = _entity_bounds(entities)
     for row in _floor_points(data, floor).values():
         try:
@@ -244,6 +255,21 @@ def _content_bounds(data: dict, floor: int, entities: Sequence[dict]):
         except (TypeError, ValueError):
             continue
         bounds.append((x, y, x, y))
+    if include_placement_zones:
+        for zone in data.get("equipment_room_placement_zones", []):
+            if not isinstance(zone, dict) or int(zone.get("floor", 0) or 0) != floor:
+                continue
+            try:
+                bounds.append(
+                    (
+                        float(zone.get("min_x", 0.0)),
+                        float(zone.get("min_y", 0.0)),
+                        float(zone.get("max_x", 0.0)),
+                        float(zone.get("max_y", 0.0)),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
     if not bounds:
         return None
     return (
@@ -333,6 +359,64 @@ def _draw_corridors(c: canvas.Canvas, data: dict, floor: int, transform) -> None
     c.restoreState()
 
 
+def _draw_placement_zones(
+    c: canvas.Canvas, data: dict, floor: int, transform
+) -> None:
+    zones = [
+        zone
+        for zone in data.get("equipment_room_placement_zones", [])
+        if isinstance(zone, dict) and int(zone.get("floor", 0) or 0) == floor
+    ]
+    for zone in zones:
+        try:
+            left, bottom = transform(
+                float(zone.get("min_x", 0.0)), float(zone.get("min_y", 0.0))
+            )
+            right, top = transform(
+                float(zone.get("max_x", 0.0)), float(zone.get("max_y", 0.0))
+            )
+        except (TypeError, ValueError):
+            continue
+        left, right = sorted((left, right))
+        bottom, top = sorted((bottom, top))
+        allow_comms = bool(zone.get("allow_comms_room", False))
+        allow_der = bool(zone.get("allow_distributed_equipment_room", False))
+        colour = "#2563eb" if allow_comms and allow_der else (
+            "#047857" if allow_comms else "#7c3aed"
+        )
+        c.saveState()
+        c.setStrokeColor(colors.HexColor(colour))
+        c.setFillColor(colors.HexColor("#dbeafe"))
+        if hasattr(c, "setFillAlpha"):
+            c.setFillAlpha(0.24)
+        c.setLineWidth(0.55 * mm)
+        c.setDash(2.2 * mm, 1.1 * mm)
+        c.rect(left, bottom, right - left, top - bottom, stroke=1, fill=1)
+        if hasattr(c, "setFillAlpha"):
+            c.setFillAlpha(1.0)
+        c.setDash()
+        name = _text(zone.get("name")) or _text(zone.get("id")) or "Placement zone"
+        required_ports = max(0, int(zone.get("required_ports", 0) or 0))
+        comms_limit = max(0, int(zone.get("max_comms_rooms", 0) or 0))
+        der_limit = max(
+            0, int(zone.get("max_distributed_equipment_rooms", 0) or 0)
+        )
+        room_types = "Comms + DER" if allow_comms and allow_der else (
+            "Comms" if allow_comms else "DER"
+        )
+        details = f"{room_types} | Limits {comms_limit} CR / {der_limit} DER"
+        if required_ports:
+            details += f" | {required_ports} ports"
+        label_x = left + 1.5 * mm
+        label_y = top - 3.5 * mm
+        c.setFillColor(colors.HexColor(colour))
+        c.setFont("Helvetica-Bold", 7.2)
+        c.drawString(label_x, label_y, name[:72])
+        c.setFont("Helvetica", 6.2)
+        c.drawString(label_x, label_y - 3.0 * mm, details[:100])
+        c.restoreState()
+
+
 def _draw_comms_rooms(
     c: canvas.Canvas,
     data: dict,
@@ -371,7 +455,7 @@ def _draw_comms_rooms(
         c.setFont("Helvetica-Bold", 7.5)
         label_width = max(
             stringWidth(label, "Helvetica-Bold", 7.5),
-            stringWidth(detail, "Helvetica", 6.5),
+            stringWidth(detail, "Helvetica-Bold", 6.5),
         )
         callout = {
             "key": f"floor-plan-room:{int(floor)}:{name}",
@@ -379,6 +463,7 @@ def _draw_comms_rooms(
             "page_label": str(page_label or f"Floor {floor}"),
             "kind": "equipment_room",
             "name": f"{name} - Floor {floor}",
+            "location_name": name,
             "floor": int(floor),
             "x_pt": x + 7 * mm,
             "y_pt": y + 3.8 * mm,
@@ -427,6 +512,7 @@ def _draw_key(
     source_drawing: str,
     page_number: int,
     page_count: int,
+    include_placement_zones: bool = False,
 ) -> None:
     width, _height = page_size
     x, y, h = 12 * mm, 8 * mm, 25 * mm
@@ -441,9 +527,19 @@ def _draw_key(
     c.setFont("Helvetica-Bold", 13)
     c.drawString(x + 4 * mm, y + 15.5 * mm, project_name[:70])
     c.setFont("Helvetica-Bold", 9)
-    c.drawString(x + 4 * mm, y + 8.5 * mm, f"Floor {floor} - Cable routing floor plan")
+    sheet_title = (
+        "Equipment room placement zones"
+        if include_placement_zones
+        else "Cable routing floor plan"
+    )
+    c.drawString(x + 4 * mm, y + 8.5 * mm, f"Floor {floor} - {sheet_title}")
     c.setFont("Helvetica", 7)
-    c.drawString(x + 4 * mm, y + 3.5 * mm, "Green markers identify comms rooms and installed cabinet totals.")
+    note = (
+        "Dashed blue, green and purple areas identify permitted equipment-room zones."
+        if include_placement_zones
+        else "Green markers identify comms rooms and installed cabinet totals."
+    )
+    c.drawString(x + 4 * mm, y + 3.5 * mm, note)
 
     key_x = x + title_w + 4 * mm
     column = (w - title_w - 8 * mm) / 3.0
@@ -479,6 +575,8 @@ def export_floor_plans_pdf(
     revision_number: int = 0,
     layout_manifest=None,
     preview_background: bool = False,
+    include_placement_zones: bool = False,
+    floors: Iterable[int] | None = None,
 ) -> str:
     if layout_manifest is not None:
         layout_manifest.clear()
@@ -488,9 +586,24 @@ def export_floor_plans_pdf(
     scale = int(scale)
     if scale <= 0:
         raise ValueError("Drawing scale must be greater than zero.")
-    floors = model_floors(data)
-    if not floors:
+    available_floors = model_floors(data)
+    if not available_floors:
         raise ValueError("No floors are present in the model.")
+    if floors is None:
+        selected_floors = available_floors
+    else:
+        requested = {int(floor) for floor in floors}
+        selected_floors = [
+            floor for floor in available_floors if floor in requested
+        ]
+        unavailable = sorted(requested.difference(available_floors))
+        if unavailable:
+            raise ValueError(
+                "Selected floor(s) are not present in the model: "
+                + ", ".join(str(floor) for floor in unavailable)
+            )
+    if not selected_floors:
+        raise ValueError("Select at least one floor to export.")
 
     page_size = FLOOR_PLAN_PAPER_SIZES[paper_size]
     page_width, page_height = page_size
@@ -506,7 +619,7 @@ def export_floor_plans_pdf(
     floor_payloads = []
     fit_failures = []
 
-    for floor in floors:
+    for floor in selected_floors:
         dxf_path = dxf_paths.get(floor, "")
         entities: List[dict] = []
         if dxf_path:
@@ -514,7 +627,12 @@ def export_floor_plans_pdf(
             if not path.exists():
                 raise FileNotFoundError(f"Floor {floor} DXF does not exist: {path}")
             entities = list(DXFScene.load_content(str(path)).get("entities", []))
-        bounds = _content_bounds(data, floor, entities)
+        bounds = _content_bounds(
+            data,
+            floor,
+            entities,
+            include_placement_zones=include_placement_zones,
+        )
         if bounds is None:
             bounds = (0.0, 0.0, 1.0, 1.0)
         min_x, min_y, max_x, max_y = bounds
@@ -563,7 +681,10 @@ def export_floor_plans_pdf(
     for page_number, (floor, dxf_path, entities, bounds) in enumerate(
         floor_payloads, start=1
     ):
-        pdf.setTitle(f"{project_name} - Floor plans")
+        pdf.setTitle(
+            f"{project_name} - "
+            f"{'Equipment room placement zones' if include_placement_zones else 'Floor plans'}"
+        )
         pdf.setAuthor("CableRouteResolver")
         pdf.setSubject(f"Scaled floor drawings at 1:{scale}")
         pdf.setFillColor(colors.white)
@@ -596,6 +717,8 @@ def export_floor_plans_pdf(
         pdf.saveState()
         pdf.clipPath(clip, stroke=0, fill=0)
         _draw_dxf(pdf, entities, transform)
+        if include_placement_zones:
+            _draw_placement_zones(pdf, data, floor, transform)
         _draw_corridors(pdf, data, floor, transform)
         _draw_comms_rooms(
             pdf,
@@ -627,6 +750,7 @@ def export_floor_plans_pdf(
             source_drawing=dxf_path,
             page_number=page_number,
             page_count=len(floor_payloads),
+            include_placement_zones=include_placement_zones,
         )
         pdf.showPage()
 

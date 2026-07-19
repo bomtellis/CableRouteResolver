@@ -5,6 +5,7 @@ import math
 from typing import Any
 import time
 from copy import deepcopy
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QItemSelectionModel, QSortFilterProxyModel
 from PySide6.QtWidgets import (
@@ -35,6 +36,12 @@ from PySide6.QtWidgets import (
     QMenu,
     QCompleter,
     QFileDialog,
+)
+from asset_library_io import (
+    AssetPackError,
+    merge_asset_rows,
+    read_asset_pack,
+    write_asset_pack,
 )
 
 
@@ -827,6 +834,7 @@ class PlacementZoneEditorDialog(QDialog):
         self.setWindowTitle("Equipment Room Placement Zone")
         self.result = None
         seed = dict(seed or {})
+        self.seed = seed
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -917,6 +925,7 @@ class PlacementZoneEditorDialog(QDialog):
             )
             return
         self.result = {
+            **self.seed,
             "id": zone_id,
             "name": self.name_edit.text().strip() or zone_id,
             "floor": int(self.floor_spin.value()),
@@ -928,6 +937,114 @@ class PlacementZoneEditorDialog(QDialog):
             "allow_distributed_equipment_room": self.allow_der_check.isChecked(),
             "max_comms_rooms": int(self.max_comms_rooms_spin.value()),
             "max_distributed_equipment_rooms": int(self.max_der_rooms_spin.value()),
+        }
+        super().accept()
+
+
+class SuggestPlacementZonesDialog(QDialog):
+    """Collect constraints for demand-led placement-zone generation."""
+
+    def __init__(self, parent=None, current_floor=0, switch_capacity=None):
+        super().__init__(parent)
+        self.setWindowTitle("Suggest Equipment Room Placement Zones")
+        self.result = None
+        self.current_floor = int(current_floor)
+        switch_capacity = dict(switch_capacity or {})
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Create placement zones at usable corridor positions so every "
+            "unconnected data-port demand can be served within the cable limit."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.current_floor_only_check = QCheckBox(
+            f"Suggest zones for floor {self.current_floor} only"
+        )
+        self.current_floor_only_check.setChecked(False)
+
+        self.max_distance_spin = QDoubleSpinBox()
+        self.max_distance_spin.setRange(0.1, 100000.0)
+        self.max_distance_spin.setDecimals(2)
+        self.max_distance_spin.setValue(90.0)
+        self.max_distance_spin.setSuffix(" m")
+
+        self.zone_width_spin = QDoubleSpinBox()
+        self.zone_width_spin.setRange(0.5, 1000.0)
+        self.zone_width_spin.setDecimals(2)
+        self.zone_width_spin.setValue(4.0)
+        self.zone_width_spin.setSuffix(" m")
+        self.zone_depth_spin = QDoubleSpinBox()
+        self.zone_depth_spin.setRange(0.5, 1000.0)
+        self.zone_depth_spin.setDecimals(2)
+        self.zone_depth_spin.setValue(4.0)
+        self.zone_depth_spin.setSuffix(" m")
+
+        ports_per_switch = max(1, int(switch_capacity.get("ports", 48) or 48))
+        switches_per_cabinet = max(
+            1,
+            int(switch_capacity.get("switches_per_full_cabinet", 1) or 1),
+        )
+        self.comms_cabinets_spin = QSpinBox()
+        self.comms_cabinets_spin.setRange(1, 100)
+        self.comms_cabinets_spin.setValue(1)
+        self.ports_per_switch = ports_per_switch
+        self.switches_per_cabinet = switches_per_cabinet
+
+        self.replace_previous_check = QCheckBox(
+            "Replace zones created by an earlier suggestion"
+        )
+        self.replace_previous_check.setChecked(True)
+
+        form.addRow("Floor scope", self.current_floor_only_check)
+        form.addRow("Maximum cable length", self.max_distance_spin)
+        form.addRow("Suggested zone width", self.zone_width_spin)
+        form.addRow("Suggested zone depth", self.zone_depth_spin)
+        form.addRow("Cabinets per comms room", self.comms_cabinets_spin)
+        form.addRow(
+            "Configured access switch",
+            QLabel(
+                f"{ports_per_switch} ports; {switches_per_cabinet} switch(es) "
+                "per full cabinet"
+            ),
+        )
+        form.addRow("Existing suggestions", self.replace_previous_check)
+
+        note = QLabel(
+            "Each proposed zone permits both comms rooms and DERs. Its independent "
+            "room limits are calculated from the assigned port requirement, using "
+            "the configured full-cabinet switch capacity and two switches per DER. "
+            "Manual zones are retained and the combined list opens for review before saving."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Build Suggestions")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(610, 390)
+
+    def accept(self):
+        comms_capacity = (
+            self.ports_per_switch
+            * self.switches_per_cabinet
+            * int(self.comms_cabinets_spin.value())
+        )
+        self.result = {
+            "current_floor_only": bool(self.current_floor_only_check.isChecked()),
+            "scope_floor": self.current_floor,
+            "max_distance_m": float(self.max_distance_spin.value()),
+            "zone_width_m": float(self.zone_width_spin.value()),
+            "zone_depth_m": float(self.zone_depth_spin.value()),
+            "comms_room_port_capacity": max(1, int(comms_capacity)),
+            "der_port_capacity": max(1, int(self.ports_per_switch * 2)),
+            "replace_previous": bool(self.replace_previous_check.isChecked()),
         }
         super().accept()
 
@@ -2324,6 +2441,8 @@ class AssetsEditorWindow(QMainWindow):
         items,
         on_save,
         category_options=None,
+        category_items=None,
+        on_save_categories=None,
         deployment_summary=None,
         deployment_locations=None,
         on_navigate_to_room=None,
@@ -2334,6 +2453,7 @@ class AssetsEditorWindow(QMainWindow):
         self.resize(1380, 560)
         self.items = [dict(item) for item in items]
         self.on_save = on_save
+        self.on_save_categories = on_save_categories
         self.deployment_summary = dict(deployment_summary or {})
         self.deployment_locations = dict(deployment_locations or {})
         self.on_navigate_to_room = on_navigate_to_room
@@ -2344,6 +2464,15 @@ class AssetsEditorWindow(QMainWindow):
         layout = QVBoxLayout(central)
 
         self.category_options = list(category_options or [])
+        self.category_items = [
+            dict(item) for item in (category_items or []) if isinstance(item, dict)
+        ]
+        if not self.category_items:
+            self.category_items = [
+                {"id": str(category_id), "name": str(name)}
+                for category_id, name in self.category_options
+            ]
+        self.categories_changed = False
         self.categories_by_id = {category_id: name for category_id, name in self.category_options}
 
         search_row = QHBoxLayout()
@@ -2393,18 +2522,27 @@ class AssetsEditorWindow(QMainWindow):
         add_btn = QPushButton("Add")
         edit_btn = QPushButton("Edit")
         delete_btn = QPushButton("Delete selected")
+        import_btn = QPushButton("Import asset pack...")
+        export_selected_btn = QPushButton("Export selected...")
+        export_all_btn = QPushButton("Export library...")
         capability_btn = QPushButton("Capability overlap")
         save_btn = QPushButton("Save")
 
         add_btn.clicked.connect(self.add_asset)
         edit_btn.clicked.connect(self.edit_asset)
         delete_btn.clicked.connect(self.delete_assets)
+        import_btn.clicked.connect(self.import_assets)
+        export_selected_btn.clicked.connect(self.export_selected_assets)
+        export_all_btn.clicked.connect(self.export_asset_library)
         capability_btn.clicked.connect(self.show_capability_overlap)
         save_btn.clicked.connect(self.save)
 
         row.addWidget(add_btn)
         row.addWidget(edit_btn)
         row.addWidget(delete_btn)
+        row.addWidget(import_btn)
+        row.addWidget(export_selected_btn)
+        row.addWidget(export_all_btn)
         row.addStretch(1)
         row.addWidget(capability_btn)
         row.addWidget(save_btn)
@@ -2654,6 +2792,153 @@ class AssetsEditorWindow(QMainWindow):
         if callable(self.on_show_capability_overlap):
             self.on_show_capability_overlap()
 
+    def _export_asset_rows(self, rows, title):
+        if not rows:
+            QMessageBox.information(
+                self, "Export assets", "Select at least one asset to export."
+            )
+            return
+        selected_category_ids = {
+            str(row.get("category_id", row.get("category", "")) or "").strip()
+            for row in rows
+            if isinstance(row, dict)
+        }
+        related_categories = [
+            dict(category)
+            for category in self.category_items
+            if str(category.get("id", "") or "").strip()
+            in selected_category_ids
+        ]
+        default_name = (
+            f"{str(rows[0].get('id', 'asset')).strip()}.asset-pack.json"
+            if len(rows) == 1
+            else "asset-library.asset-pack.json"
+        )
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            title,
+            default_name,
+            "Asset packs (*.asset-pack.json *.json)",
+        )
+        if not path:
+            return
+        try:
+            write_asset_pack(
+                path,
+                "assets",
+                rows,
+                name=(
+                    str(rows[0].get("name", "")).strip()
+                    if len(rows) == 1
+                    else "Project Asset Library"
+                ),
+                related={"asset_categories": related_categories},
+            )
+        except (OSError, AssetPackError) as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Export complete",
+            f"Exported {len(rows)} asset(s) to:\n{path}",
+        )
+
+    def export_selected_assets(self):
+        selected = sorted(
+            {index.row() for index in self.table.selectionModel().selectedRows()}
+        )
+        rows = [self.items[index] for index in selected if 0 <= index < len(self.items)]
+        self._export_asset_rows(rows, "Export selected assets")
+
+    def export_asset_library(self):
+        self._export_asset_rows(self.items, "Export Project Asset Library")
+
+    def import_assets(self):
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Import Asset Pack",
+            str(Path(__file__).resolve().parent.parent / "asset_packs"),
+            "Asset packs (*.asset-pack.json *.json)",
+        )
+        if not path:
+            return
+        try:
+            payload = read_asset_pack(path, "assets")
+        except AssetPackError as exc:
+            QMessageBox.critical(self, "Import failed", str(exc))
+            return
+
+        existing_ids = {
+            str(row.get("id", "") or "").strip()
+            for row in self.items
+            if isinstance(row, dict) and str(row.get("id", "") or "").strip()
+        }
+        incoming_ids = {
+            str(row.get("id", "") or "").strip()
+            for row in payload.get("assets", [])
+        }
+        duplicate_ids = sorted(existing_ids & incoming_ids)
+        replace_existing = False
+        if duplicate_ids:
+            answer = QMessageBox.question(
+                self,
+                "Existing assets",
+                f"{len(duplicate_ids)} asset ID(s) already exist.\n\n"
+                "Yes: replace existing definitions\n"
+                "No: keep existing definitions and import only new assets\n"
+                "Cancel: do not import",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.No,
+            )
+            if answer == QMessageBox.Cancel:
+                return
+            replace_existing = answer == QMessageBox.Yes
+
+        merged, result = merge_asset_rows(
+            self.items,
+            payload.get("assets", []),
+            replace_existing=replace_existing,
+        )
+        self.items = merged
+
+        imported_categories = payload.get("related", {}).get(
+            "asset_categories", []
+        )
+        if isinstance(imported_categories, list):
+            category_positions = {
+                str(row.get("id", "") or "").strip(): index
+                for index, row in enumerate(self.category_items)
+                if isinstance(row, dict) and str(row.get("id", "") or "").strip()
+            }
+            for source in imported_categories:
+                if not isinstance(source, dict):
+                    continue
+                category_id = str(source.get("id", "") or "").strip()
+                if not category_id:
+                    continue
+                if category_id not in category_positions:
+                    category_positions[category_id] = len(self.category_items)
+                    self.category_items.append(dict(source))
+                    self.categories_changed = True
+            self.category_options = [
+                (
+                    str(row.get("id", "") or "").strip(),
+                    str(row.get("name", row.get("id", "")) or "").strip(),
+                )
+                for row in self.category_items
+                if isinstance(row, dict) and str(row.get("id", "") or "").strip()
+            ]
+            self.categories_by_id = dict(self.category_options)
+
+        self._refresh_table()
+        QMessageBox.information(
+            self,
+            "Import complete",
+            f"Added: {result['added']}\n"
+            f"Replaced: {result['replaced']}\n"
+            f"Skipped: {result['skipped']}",
+        )
+
     def _show_context_menu(self, pos):
         row = self.table.rowAt(pos.y())
         if row >= 0:
@@ -2682,6 +2967,8 @@ class AssetsEditorWindow(QMainWindow):
             self.delete_assets()
 
     def save(self):
+        if self.categories_changed and callable(self.on_save_categories):
+            self.on_save_categories(self.category_items)
         self.on_save(self.items)
         self.close()
 

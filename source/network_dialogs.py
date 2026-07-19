@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import pickle
+from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import Qt
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
@@ -55,6 +57,25 @@ NETWORK_ASSET_TYPES = [
     ("other", "Other"),
 ]
 
+NETWORK_ASSET_GROUP_OPTIONS = [
+    ("router", "Router / edge security"),
+    ("core", "Core"),
+    ("aggregation", "Aggregation / distribution"),
+    ("access", "Access"),
+    ("switching", "Other switching"),
+    ("wireless", "Wireless devices"),
+    ("optical", "Optical network"),
+    ("patching", "Patch panels"),
+    ("power", "Power"),
+    ("cable_management", "Cable management"),
+    ("external", "External networks"),
+    ("other", "Other"),
+]
+NETWORK_ASSET_GROUP_LABELS = dict(NETWORK_ASSET_GROUP_OPTIONS)
+NETWORK_ASSET_GROUP_ORDER = {
+    value: index for index, (value, _label) in enumerate(NETWORK_ASSET_GROUP_OPTIONS)
+}
+
 CONNECTION_MEDIA = ["copper", "fibre", "wireless", "virtual", "stacking", "none"]
 CONNECTION_ROLES = ["input", "output", "uplink"]
 PATCH_PANEL_TYPES = ["", "copper", "fibre"]
@@ -72,6 +93,7 @@ from network_auto_planner import (
     NetworkPlanningError,
     auto_connect_manual_devices,
     auto_connect_pending_imported_wireless_devices,
+    der_graph_inventory_signature,
     estimate_network_switch_counts,
     generate_network_design,
 )
@@ -94,7 +116,14 @@ from network_schema import (
     normalise_layer_connection_rules,
     normalise_manufacturer_preferences,
     normalise_port_speeds,
+    network_asset_group,
     port_speed_label,
+)
+from asset_library_io import (
+    AssetPackError,
+    merge_asset_rows,
+    read_asset_pack,
+    write_asset_pack,
 )
 
 
@@ -286,6 +315,17 @@ class NetworkAssetEditorDialog(QDialog):
         self.name_edit = QLineEdit(_text(self.asset.get("name")))
         self.asset_type_combo = _combo_with_data(
             NETWORK_ASSET_TYPES, _text(self.asset.get("asset_type")) or "network_switch"
+        )
+        group_source = {
+            **self.asset,
+            "asset_type": _text(self.asset.get("asset_type")) or "network_switch",
+        }
+        self.asset_group_combo = _combo_with_data(
+            NETWORK_ASSET_GROUP_OPTIONS, network_asset_group(group_source)
+        )
+        self.asset_group_combo.setToolTip(
+            "Groups models in the Asset Library. Core, aggregation and access "
+            "groups also identify the intended layer for switch models."
         )
         self.manufacturer_edit = QLineEdit(_text(self.asset.get("manufacturer")))
         self.model_edit = QLineEdit(_text(self.asset.get("model")))
@@ -629,6 +669,9 @@ class NetworkAssetEditorDialog(QDialog):
         self.rack_units_spin.setRange(0, 100)
         self.rack_units_spin.setSuffix("U")
         self.rack_units_spin.setValue(int(self.asset.get("rack_units", 1) or 0))
+        self.physical_width_spin = QDoubleSpinBox(); self.physical_width_spin.setRange(0, 5000); self.physical_width_spin.setDecimals(1); self.physical_width_spin.setSuffix(" mm"); self.physical_width_spin.setValue(float(self.asset.get("physical_width_mm", 0.0) or 0.0))
+        self.physical_depth_spin = QDoubleSpinBox(); self.physical_depth_spin.setRange(0, 5000); self.physical_depth_spin.setDecimals(1); self.physical_depth_spin.setSuffix(" mm"); self.physical_depth_spin.setValue(float(self.asset.get("physical_depth_mm", 0.0) or 0.0))
+        self.physical_height_spin = QDoubleSpinBox(); self.physical_height_spin.setRange(0, 5000); self.physical_height_spin.setDecimals(1); self.physical_height_spin.setSuffix(" mm"); self.physical_height_spin.setValue(float(self.asset.get("physical_height_mm", 0.0) or 0.0))
 
         self.switch_rack_allowance_spin = QSpinBox()
         self.switch_rack_allowance_spin.setRange(0, 100)
@@ -700,6 +743,7 @@ class NetworkAssetEditorDialog(QDialog):
         general_form.addRow("Asset ID", self.id_edit)
         general_form.addRow("Name", self.name_edit)
         general_form.addRow("Asset type", self.asset_type_combo)
+        general_form.addRow("Asset group", self.asset_group_combo)
         general_form.addRow("Manufacturer", self.manufacturer_edit)
         general_form.addRow("Model", self.model_edit)
         general_form.addRow("Wireless device category", self.wireless_category_combo)
@@ -734,6 +778,9 @@ class NetworkAssetEditorDialog(QDialog):
         capacity_form.addRow("Stacking", self.supports_stacking_check)
         capacity_form.addRow("Maximum stack members", self.max_stack_members_spin)
         capacity_form.addRow("Rack spaces", self.rack_units_spin)
+        capacity_form.addRow("Physical width", self.physical_width_spin)
+        capacity_form.addRow("Physical depth", self.physical_depth_spin)
+        capacity_form.addRow("Physical height", self.physical_height_spin)
         capacity_form.addRow("Switch rack allowance", self.switch_rack_allowance_spin)
         capacity_form.addRow("OLT units per rack unit", self.olt_units_per_u_spin)
 
@@ -961,6 +1008,7 @@ class NetworkAssetEditorDialog(QDialog):
         asset_id = self.id_edit.text().strip()
         name = self.name_edit.text().strip()
         asset_type = _text(self.asset_type_combo.currentData())
+        asset_group = _text(self.asset_group_combo.currentData()) or "other"
         if not asset_id:
             QMessageBox.critical(self, "Invalid asset", "Asset ID is required.")
             return
@@ -1086,6 +1134,16 @@ class NetworkAssetEditorDialog(QDialog):
             "id": asset_id,
             "name": name,
             "asset_type": asset_type,
+            "asset_group": asset_group,
+            "network_layer": (
+                asset_group
+                if asset_type == "network_switch"
+                and asset_group in {"core", "aggregation", "access"}
+                else ""
+                if asset_type == "network_switch" and asset_group == "switching"
+                else _text(self.asset.get("network_layer"))
+                or ("edge" if asset_type in {"network_router", "firewall"} else "")
+            ),
             "manufacturer": self.manufacturer_edit.text().strip(),
             "model": self.model_edit.text().strip(),
             "patch_panel_type": (
@@ -1164,6 +1222,9 @@ class NetworkAssetEditorDialog(QDialog):
             "output_connection_type": self.output_type_combo.currentText().strip(),
             "uplink_connection_type": self.uplink_type_combo.currentText().strip(),
             "rack_units": int(self.rack_units_spin.value()),
+            "physical_width_mm": float(self.physical_width_spin.value()),
+            "physical_depth_mm": float(self.physical_depth_spin.value()),
+            "physical_height_mm": float(self.physical_height_spin.value()),
             "switch_rack_unit_allowance": (
                 int(self.switch_rack_allowance_spin.value())
                 if asset_type == "network_switch"
@@ -1862,6 +1923,16 @@ class _CrudTab(QWidget):
     def __init__(self, headers: Sequence[str], parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
+        self.notice_label = QLabel()
+        self.notice_label.setWordWrap(True)
+        self.notice_label.setStyleSheet(
+            "QLabel { background: #fff4cc; border: 1px solid #d6a700; "
+            "border-radius: 3px; color: #4d3a00; padding: 7px; }"
+        )
+        self.notice_label.hide()
+        layout.addWidget(self.notice_label)
+        self.filter_layout = QHBoxLayout()
+        layout.addLayout(self.filter_layout)
         self.table = QTableWidget(0, len(headers))
         self.table.setHorizontalHeaderLabels(list(headers))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1872,6 +1943,7 @@ class _CrudTab(QWidget):
         self.table.doubleClicked.connect(lambda _index: self.edit_requested())
         layout.addWidget(self.table, 1)
         row = QHBoxLayout()
+        self.button_layout = row
         layout.addLayout(row)
         self.add_button = QPushButton("Add")
         self.edit_button = QPushButton("Edit")
@@ -1886,21 +1958,40 @@ class _CrudTab(QWidget):
         selection_model = self.table.selectionModel()
         if selection_model is None:
             return []
-        return sorted({index.row() for index in selection_model.selectedRows()})
+        rows = set()
+        for index in selection_model.selectedRows():
+            item = self.table.item(index.row(), 0)
+            source_row = item.data(Qt.UserRole) if item is not None else None
+            rows.add(index.row() if source_row is None else int(source_row))
+        return sorted(rows)
 
     def selected_row(self) -> int:
         rows = self.selected_rows()
         return rows[0] if rows else -1
 
-    def set_rows(self, rows: Sequence[Sequence[object]]) -> None:
+    def set_rows(
+        self,
+        rows: Sequence[Sequence[object]],
+        source_indices: Optional[Sequence[int]] = None,
+    ) -> None:
         self.table.setRowCount(len(rows))
         for row_index, values in enumerate(rows):
+            source_index = (
+                int(source_indices[row_index])
+                if source_indices is not None and row_index < len(source_indices)
+                else row_index
+            )
             for column_index, value in enumerate(values):
-                self.table.setItem(
-                    row_index,
-                    column_index,
-                    QTableWidgetItem(str(value if value is not None else "")),
-                )
+                item = QTableWidgetItem(str(value if value is not None else ""))
+                item.setData(Qt.UserRole, source_index)
+                self.table.setItem(row_index, column_index, item)
+
+    def display_row_for_source_index(self, source_index: int) -> int:
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and item.data(Qt.UserRole) == source_index:
+                return row
+        return -1
 
 
 _PLANNER_MUTABLE_KEYS = (
@@ -2296,8 +2387,9 @@ class PlanningResolutionDialog(QDialog):
                 1, int(self.details.get("remaining_panel_count", 1) or 1)
             )
             additional_ders[parent_location] = max(
-                0, int(additional_ders.get(parent_location, 0) or 0)
-            ) + requested
+                max(0, int(additional_ders.get(parent_location, 0) or 0)),
+                requested,
+            )
             switch_asset_id = _text(self.details.get("switch_asset_id"))
             if switch_asset_id:
                 additional_der_assets[parent_location] = switch_asset_id
@@ -2306,6 +2398,9 @@ class PlanningResolutionDialog(QDialog):
                 int(self.details.get("suggested_device_count", 0) or 0),
             )
             settings["auto_add_switches_for_bandwidth"] = True
+            settings["der_expansion_inventory_signature"] = (
+                der_graph_inventory_signature(self.data)
+            )
         elif action == "select_access_asset":
             asset_id = _text(self.asset_combo.currentData())
             if not asset_id or not location:
@@ -2606,8 +2701,9 @@ class PlanningResolutionSequenceDialog(QDialog):
                     1, int(issue.get("remaining_panel_count", 1) or 1)
                 )
                 additional_ders[parent_location] = max(
-                    0, int(additional_ders.get(parent_location, 0) or 0)
-                ) + requested
+                    max(0, int(additional_ders.get(parent_location, 0) or 0)),
+                    requested,
+                )
                 asset_id = _text(issue.get("switch_asset_id"))
                 if asset_id:
                     additional_assets[parent_location] = asset_id
@@ -2616,6 +2712,9 @@ class PlanningResolutionSequenceDialog(QDialog):
                     int(issue.get("suggested_device_count", 0) or 0),
                 )
             settings["auto_add_switches_for_bandwidth"] = True
+            settings["der_expansion_inventory_signature"] = (
+                der_graph_inventory_signature(self.data)
+            )
         else:
             spare_modes = overrides.setdefault("spare_capacity_mode_by_location", {})
             if not isinstance(spare_modes, dict):
@@ -2722,6 +2821,21 @@ class AutoPlannerSetupWizard(QWizard):
             float(self.settings.get("spare_capacity_percent", 15.0) or 0.0)
         )
         design_form.addRow("Spare port, PoE and traffic capacity", self.spare_spin)
+        self.connected_data_points_only_check = QCheckBox(
+            "Only account for data points with current connections"
+        )
+        self.connected_data_points_only_check.setChecked(
+            bool(
+                self.settings.get(
+                    "auto_planner_connected_data_points_only", False
+                )
+            )
+        )
+        self.connected_data_points_only_check.setToolTip(
+            "Size and generate the network using only data points that already have "
+            "a connection on the Routing tab. Unconnected placed data points are ignored."
+        )
+        design_form.addRow("", self.connected_data_points_only_check)
         self.prevent_additional_rooms_check = QCheckBox(
             "Use existing DERs and comms rooms only"
         )
@@ -3176,6 +3290,12 @@ class AutoPlannerSetupWizard(QWizard):
             [
                 f"Rack size: {self.rack_size_spin.value()}U",
                 f"Spare capacity: {self.spare_spin.value():.1f}%",
+                "Endpoint demand: "
+                + (
+                    "Current Routing-tab connections only"
+                    if self.connected_data_points_only_check.isChecked()
+                    else "All placed data points"
+                ),
                 f"External services: {len(enabled_external)} enabled",
                 *[
                     f"  {row.get('name')}: {float(row.get('bandwidth_mbps', 0.0) or 0.0):.3f} Mbps, "
@@ -3366,6 +3486,9 @@ class AutoPlannerSetupWizard(QWizard):
         settings["redundant_core"] = bool(self.redundant_check.isChecked())
         settings["independent_link_count"] = int(self.link_count_spin.value())
         settings["spare_capacity_percent"] = float(self.spare_spin.value())
+        settings["auto_planner_connected_data_points_only"] = bool(
+            self.connected_data_points_only_check.isChecked()
+        )
         settings["prevent_additional_equipment_rooms"] = bool(
             self.prevent_additional_rooms_check.isChecked()
         )
@@ -3413,6 +3536,9 @@ class AutoPlannerSetupWizard(QWizard):
             _text(self.access_stack_topology_combo.currentData()) or "ring"
         )
         settings["spare_capacity_percent"] = float(self.spare_spin.value())
+        settings["auto_planner_connected_data_points_only"] = bool(
+            self.connected_data_points_only_check.isChecked()
+        )
         settings["prevent_additional_equipment_rooms"] = bool(
             self.prevent_additional_rooms_check.isChecked()
         )
@@ -3729,6 +3855,17 @@ class NetworkPlannerDialog(QDialog):
             "switch cannot form a sufficiently large same-speed uplink bundle."
         )
 
+        self.connected_data_points_only_check = QCheckBox(
+            "Only account for data points with current connections"
+        )
+        self.connected_data_points_only_check.setChecked(
+            bool(settings.get("auto_planner_connected_data_points_only", False))
+        )
+        self.connected_data_points_only_check.setToolTip(
+            "Size and generate the network using only data points that already have "
+            "a connection on the Routing tab. Unconnected placed data points are ignored."
+        )
+
         self.prevent_additional_rooms_check = QCheckBox(
             "Prevent the automatic planner from creating additional DERs or comms rooms"
         )
@@ -3836,6 +3973,7 @@ class NetworkPlannerDialog(QDialog):
         settings_layout.addRow("", self.olt_failover_check)
         settings_layout.addRow("", self.auto_connect_manual_check)
         settings_layout.addRow("", self.auto_add_bandwidth_switches_check)
+        settings_layout.addRow("", self.connected_data_points_only_check)
         settings_layout.addRow("", self.prevent_additional_rooms_check)
         settings_layout.addRow("", self.ignore_link_bandwidth_check)
         settings_layout.addRow("", self.clear_planner_overrides_button)
@@ -3959,6 +4097,7 @@ class NetworkPlannerDialog(QDialog):
             [
                 "ID",
                 "Name",
+                "Asset group",
                 "Type",
                 "Ports",
                 "In",
@@ -3977,6 +4116,22 @@ class NetworkPlannerDialog(QDialog):
                 "Switch U",
                 "OLT units/U",
             ]
+        )
+        self.assets_tab.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.asset_group_by_combo = QComboBox()
+        self.asset_group_by_combo.addItem("Network type / role", "type")
+        self.asset_group_by_combo.addItem("Manufacturer", "manufacturer")
+        self.asset_group_filter_combo = QComboBox()
+        self.asset_group_filter_combo.setMinimumContentsLength(24)
+        self.assets_tab.filter_layout.addWidget(QLabel("Group by"))
+        self.assets_tab.filter_layout.addWidget(self.asset_group_by_combo)
+        self.assets_tab.filter_layout.addWidget(QLabel("Show"))
+        self.assets_tab.filter_layout.addWidget(self.asset_group_filter_combo, 1)
+        self.asset_group_by_combo.currentIndexChanged.connect(
+            self._network_asset_grouping_changed
+        )
+        self.asset_group_filter_combo.currentIndexChanged.connect(
+            self._network_asset_filter_changed
         )
         self.instances_tab = _CrudTab(
             [
@@ -4137,6 +4292,21 @@ class NetworkPlannerDialog(QDialog):
         self.assets_tab.edit_button.clicked.connect(self.edit_asset)
         self.assets_tab.delete_button.clicked.connect(self.delete_asset)
         self.assets_tab.edit_requested = self.edit_asset
+        self.import_assets_button = QPushButton("Import asset pack...")
+        self.export_selected_assets_button = QPushButton("Export selected...")
+        self.export_all_assets_button = QPushButton("Export library...")
+        self.import_assets_button.clicked.connect(self.import_network_assets)
+        self.export_selected_assets_button.clicked.connect(
+            self.export_selected_network_assets
+        )
+        self.export_all_assets_button.clicked.connect(
+            self.export_network_asset_library
+        )
+        self.assets_tab.button_layout.insertWidget(3, self.import_assets_button)
+        self.assets_tab.button_layout.insertWidget(
+            4, self.export_selected_assets_button
+        )
+        self.assets_tab.button_layout.insertWidget(5, self.export_all_assets_button)
 
         self.instances_tab.add_button.clicked.connect(self.add_instance)
         self.instances_tab.edit_button.clicked.connect(self.edit_instance)
@@ -4298,6 +4468,203 @@ class NetworkPlannerDialog(QDialog):
         else:
             self._refresh_current_tab()
 
+    def _network_asset_group_details(self, asset: dict) -> Tuple[str, str, object]:
+        mode = _text(self.asset_group_by_combo.currentData()) or "type"
+        if mode == "manufacturer":
+            label = _text(asset.get("manufacturer")) or "Unspecified manufacturer"
+            return label.casefold(), label, label.casefold()
+        group = network_asset_group(asset)
+        label = NETWORK_ASSET_GROUP_LABELS.get(group, "Other")
+        return group, label, NETWORK_ASSET_GROUP_ORDER.get(group, 999)
+
+    def _refresh_network_asset_filter_options(self) -> None:
+        combo = self.asset_group_filter_combo
+        previous = combo.currentData()
+        mode = _text(self.asset_group_by_combo.currentData()) or "type"
+        groups = {}
+        for asset in self._items("network_assets"):
+            key, label, sort_key = self._network_asset_group_details(asset)
+            groups.setdefault(key, (label, sort_key))
+        ordered = sorted(
+            groups.items(), key=lambda row: (row[1][1], row[1][0].casefold())
+        )
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(
+            "All network types / roles" if mode == "type" else "All manufacturers",
+            "",
+        )
+        for key, (label, _sort_key) in ordered:
+            combo.addItem(label, key)
+        index = combo.findData(previous)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+        self.assets_tab.table.horizontalHeaderItem(2).setText(
+            "Asset group" if mode == "type" else "Manufacturer"
+        )
+
+    def _network_asset_grouping_changed(self, *_args) -> None:
+        self._refresh_network_asset_filter_options()
+        self._refresh_tab(self.assets_tab)
+
+    def _network_asset_filter_changed(self, *_args) -> None:
+        self._refresh_tab(self.assets_tab)
+
+    @staticmethod
+    def _planning_error_asset_focus(error: NetworkPlanningError) -> dict:
+        """Return exact asset IDs and fallback layer/type hints from a fault."""
+        details = dict(getattr(error, "details", {}) or {})
+        asset_ids = set()
+        role_hints = set()
+
+        for key, value in details.items():
+            key_text = _text(key).lower()
+            if key_text.endswith("asset_id"):
+                asset_id = _text(value)
+                if asset_id:
+                    asset_ids.add(asset_id)
+            if key_text.endswith("alternatives") and isinstance(value, list):
+                for row in value:
+                    if not isinstance(row, dict):
+                        continue
+                    asset_id = _text(row.get("asset_id"))
+                    if asset_id:
+                        asset_ids.add(asset_id)
+
+        for key in ("from_role", "to_role", "asset_role", "network_layer"):
+            value = _text(details.get(key)).lower()
+            if value:
+                role_hints.add(value)
+
+        scope = _text(details.get("capacity_scope")).lower()
+        label = _text(details.get("label")).lower()
+        error_code = _text(getattr(error, "code", "")).lower()
+        combined = " ".join([scope, label, error_code, *sorted(role_hints)])
+        if "access" in combined:
+            role_hints.add("access")
+        if "aggregation" in combined or "distribution" in combined:
+            role_hints.add("aggregation")
+        if "core" in combined or "upstream" in combined:
+            role_hints.add("core")
+        if "edge_router" in combined or "external_north_south" in combined:
+            role_hints.add("edge_router")
+        if "ont" in combined:
+            role_hints.add("ont")
+        if "olt" in combined:
+            role_hints.add("olt")
+
+        return {
+            "asset_ids": asset_ids,
+            "role_hints": role_hints,
+            "error_code": error_code or "planning constraint",
+        }
+
+    @staticmethod
+    def _asset_matches_planning_roles(asset: dict, role_hints: set) -> bool:
+        asset_type = _text(asset.get("asset_type")).lower()
+        layer = _text(
+            asset.get("network_layer") or asset.get("design_layer")
+        ).lower()
+        name = _text(asset.get("name")).lower()
+        output_type = _text(asset.get("output_connection_type")).lower()
+        for role in role_hints:
+            role = _text(role).lower()
+            if role in {"access", "access_switch"} and (
+                asset_type == "network_switch"
+                and (
+                    layer == "access"
+                    or output_type == "copper"
+                    or "access" in name
+                )
+            ):
+                return True
+            if role in {"aggregation", "aggregation_switch", "distribution"} and (
+                asset_type == "network_switch"
+                and (
+                    layer in {"aggregation", "distribution"}
+                    or "aggregation" in name
+                    or "distribution" in name
+                )
+            ):
+                return True
+            if role in {"core", "core_switch", "upstream"} and (
+                asset_type == "network_switch"
+                and (layer == "core" or "core" in name)
+            ):
+                return True
+            if role == "edge_router" and asset_type in {
+                "network_router", "firewall"
+            }:
+                return True
+            if role in {"ont", "optical_network_terminal"} and asset_type == "optical_network_terminal":
+                return True
+            if role in {"olt", "optical_line_terminal"} and asset_type == "optical_line_terminal":
+                return True
+        return False
+
+    def _focus_assets_for_planning_error(self, error: NetworkPlanningError) -> None:
+        """Highlight and select Asset Library rows implicated by a planner fault."""
+        focus = self._planning_error_asset_focus(error)
+        assets = self._items("network_assets")
+        exact_rows = [
+            index
+            for index, asset in enumerate(assets)
+            if _text(asset.get("id")) in focus["asset_ids"]
+        ]
+        matched_rows = list(exact_rows)
+        if not matched_rows:
+            matched_rows = [
+                index
+                for index, asset in enumerate(assets)
+                if self._asset_matches_planning_roles(asset, focus["role_hints"])
+            ]
+
+        if self.asset_group_filter_combo.currentIndex() > 0:
+            self.asset_group_filter_combo.blockSignals(True)
+            self.asset_group_filter_combo.setCurrentIndex(0)
+            self.asset_group_filter_combo.blockSignals(False)
+            self._refresh_tab(self.assets_tab)
+
+        table = self.assets_tab.table
+        table.clearSelection()
+        display_rows = [
+            self.assets_tab.display_row_for_source_index(source_row)
+            for source_row in matched_rows
+        ]
+        display_rows = [row for row in display_rows if row >= 0]
+        for row in display_rows:
+            for column in range(table.columnCount()):
+                item = table.item(row, column)
+                if item is None:
+                    continue
+                item.setBackground(Qt.GlobalColor.yellow)
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+
+        if display_rows:
+            first_item = table.item(display_rows[0], 0)
+            if first_item is not None:
+                table.setCurrentItem(first_item)
+                table.scrollToItem(first_item, QAbstractItemView.PositionAtCenter)
+            for row in display_rows:
+                for column in range(table.columnCount()):
+                    item = table.item(row, column)
+                    if item is not None:
+                        item.setSelected(True)
+            match_kind = "exact model" if exact_rows else "relevant model type"
+            self.assets_tab.notice_label.setText(
+                f"Planner review: highlighted {len(display_rows)} {match_kind} "
+                f"row(s) involved in {focus['error_code']}. Double-click a row to edit it."
+            )
+        else:
+            self.assets_tab.notice_label.setText(
+                "Planner review: the fault did not identify a model currently present "
+                "in the Asset Library. The full library is shown so the missing or "
+                "incompatible model can be added or corrected."
+            )
+        self.assets_tab.notice_label.show()
+
     def _refresh_current_tab(self, *_args) -> None:
         widget = self.tabs.currentWidget()
         if widget in self._dirty_tabs:
@@ -4308,20 +4675,33 @@ class NetworkPlannerDialog(QDialog):
         if not key:
             return
         if key == "assets":
-            self.assets_tab.set_rows([
-                [item.get("id", ""), item.get("name", ""), item.get("asset_type", ""),
-                 item.get("number_of_ports", 0), item.get("connections_in", 0),
-                 item.get("connections_out", 0), item.get("uplink_ports", 0),
-                 "Yes" if item.get("supports_stacking", False) else "No",
-                 item.get("max_stack_members", 1), item.get("power_input_w", 0),
-                 item.get("poe_budget_w", 0), item.get("bandwidth_capacity_gbps", 0),
-                 item.get("packet_throughput_mpps", 0),
-                 item.get("expected_north_south_bandwidth_mbps", item.get("expected_bandwidth_mbps", 0)),
-                 item.get("expected_east_west_bandwidth_mbps", 0),
-                 item.get("expected_packet_rate_pps", 0), item.get("rack_units", 0),
-                 item.get("switch_rack_unit_allowance", 0), item.get("olt_units_per_rack_unit", 1)]
-                for item in self._items("network_assets")
-            ])
+            self._refresh_network_asset_filter_options()
+            selected_group = _text(self.asset_group_filter_combo.currentData())
+            entries = []
+            for source_index, item in enumerate(self._items("network_assets")):
+                group_key, group_label, group_sort = self._network_asset_group_details(item)
+                if selected_group and group_key != selected_group:
+                    continue
+                entries.append((group_sort, group_label.casefold(), _text(item.get("name")).casefold(), _text(item.get("id")), source_index, item, group_label))
+            entries.sort(key=lambda row: row[:5])
+            self.assets_tab.set_rows(
+                [
+                    [item.get("id", ""), item.get("name", ""), group_label,
+                     item.get("asset_type", ""), item.get("number_of_ports", 0),
+                     item.get("connections_in", 0), item.get("connections_out", 0),
+                     item.get("uplink_ports", 0),
+                     "Yes" if item.get("supports_stacking", False) else "No",
+                     item.get("max_stack_members", 1), item.get("power_input_w", 0),
+                     item.get("poe_budget_w", 0), item.get("bandwidth_capacity_gbps", 0),
+                     item.get("packet_throughput_mpps", 0),
+                     item.get("expected_north_south_bandwidth_mbps", item.get("expected_bandwidth_mbps", 0)),
+                     item.get("expected_east_west_bandwidth_mbps", 0),
+                     item.get("expected_packet_rate_pps", 0), item.get("rack_units", 0),
+                     item.get("switch_rack_unit_allowance", 0), item.get("olt_units_per_rack_unit", 1)]
+                    for _sort, _label_sort, _name, _id, _source, item, group_label in entries
+                ],
+                source_indices=[entry[4] for entry in entries],
+            )
         elif key == "endpoint_traffic":
             self._refresh_endpoint_traffic_table()
         elif key == "instances":
@@ -4888,6 +5268,9 @@ class NetworkPlannerDialog(QDialog):
         settings["auto_add_switches_for_bandwidth"] = bool(
             self.auto_add_bandwidth_switches_check.isChecked()
         )
+        settings["auto_planner_connected_data_points_only"] = bool(
+            self.connected_data_points_only_check.isChecked()
+        )
         settings["prevent_additional_equipment_rooms"] = bool(
             self.prevent_additional_rooms_check.isChecked()
         )
@@ -4952,6 +5335,12 @@ class NetworkPlannerDialog(QDialog):
             f"Installed endpoint bandwidth capacity: {summary.get('installed_bandwidth_capacity_mbps', 0)} Mbps",
             f"Installed endpoint packet capacity: {summary.get('installed_packet_throughput_pps', 0)} pps",
             f"Spare capacity: {summary.get('spare_capacity_percent', 0)}%",
+            "Endpoint demand source: "
+            + (
+                "Current Routing-tab connections only"
+                if summary.get("connected_data_points_only", False)
+                else "All placed data points"
+            ),
             f"Auto-add switches for bandwidth: {'Yes' if summary.get('auto_add_switches_for_bandwidth', True) else 'No'}",
             f"Bandwidth shortfall override: {'Enabled' if summary.get('ignore_link_bandwidth_errors', False) else 'Disabled'}",
             f"Estimated copper: {summary.get('estimated_copper_length_m', 0)} m",
@@ -5104,6 +5493,9 @@ class NetworkPlannerDialog(QDialog):
         )
         self.spare_capacity_spin.setValue(
             float(settings.get("spare_capacity_percent", 15.0) or 0.0)
+        )
+        self.connected_data_points_only_check.setChecked(
+            bool(settings.get("auto_planner_connected_data_points_only", False))
         )
         self.prevent_additional_rooms_check.setChecked(
             bool(settings.get("prevent_additional_equipment_rooms", False))
@@ -5290,6 +5682,7 @@ class NetworkPlannerDialog(QDialog):
                     progress.close()
                     self.tabs.setCurrentWidget(self.assets_tab)
                     self.refresh_tables()
+                    self._focus_assets_for_planning_error(planning_error)
                     return
                 if resolution.selected_action == "review_location":
                     progress.close()
@@ -5434,6 +5827,125 @@ class NetworkPlannerDialog(QDialog):
                 if index >= 0:
                     mode_combo.setCurrentIndex(index)
         self.accept()
+
+    def _export_network_asset_rows(self, rows: Sequence[dict], title: str) -> None:
+        if not rows:
+            QMessageBox.information(
+                self, "Export network assets", "Select at least one asset to export."
+            )
+            return
+        default_name = (
+            f"{_text(rows[0].get('id'))}.asset-pack.json"
+            if len(rows) == 1
+            else "network-asset-library.asset-pack.json"
+        )
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            title,
+            default_name,
+            "Asset packs (*.asset-pack.json *.json)",
+        )
+        if not path:
+            return
+        try:
+            write_asset_pack(
+                path,
+                "network_assets",
+                rows,
+                name=(
+                    _text(rows[0].get("name"))
+                    if len(rows) == 1
+                    else "Network Asset Library"
+                ),
+            )
+        except (OSError, AssetPackError) as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Export complete",
+            f"Exported {len(rows)} network asset(s) to:\n{path}",
+        )
+
+    def export_selected_network_assets(self) -> None:
+        assets = self._items("network_assets")
+        rows = [
+            assets[index]
+            for index in self.assets_tab.selected_rows()
+            if 0 <= index < len(assets)
+        ]
+        self._export_network_asset_rows(rows, "Export selected network assets")
+
+    def export_network_asset_library(self) -> None:
+        self._export_network_asset_rows(
+            self._items("network_assets"), "Export Network Asset Library"
+        )
+
+    def import_network_assets(self) -> None:
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Import Network Asset Pack",
+            str(Path(__file__).resolve().parent.parent / "asset_packs"),
+            "Asset packs (*.asset-pack.json *.json)",
+        )
+        if not path:
+            return
+        try:
+            payload = read_asset_pack(path, "network_assets")
+        except AssetPackError as exc:
+            QMessageBox.critical(self, "Import failed", str(exc))
+            return
+
+        existing_ids = {
+            _text(row.get("id"))
+            for row in self._items("network_assets")
+            if isinstance(row, dict) and _text(row.get("id"))
+        }
+        duplicate_ids = sorted(
+            existing_ids
+            & {_text(row.get("id")) for row in payload.get("assets", [])}
+        )
+        replace_existing = False
+        if duplicate_ids:
+            answer = QMessageBox.question(
+                self,
+                "Existing network assets",
+                f"{len(duplicate_ids)} asset ID(s) already exist.\n\n"
+                "Yes: replace existing definitions\n"
+                "No: keep existing definitions and import only new assets\n"
+                "Cancel: do not import",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.No,
+            )
+            if answer == QMessageBox.Cancel:
+                return
+            replace_existing = answer == QMessageBox.Yes
+
+        merged, result = merge_asset_rows(
+            self._items("network_assets"),
+            payload.get("assets", []),
+            replace_existing=replace_existing,
+        )
+        self.data["network_assets"] = merged
+        self.tabs.setCurrentWidget(self.assets_tab)
+        self.asset_group_filter_combo.blockSignals(True)
+        self.asset_group_filter_combo.setCurrentIndex(0)
+        self.asset_group_filter_combo.blockSignals(False)
+        self.refresh_tables()
+        imported_ids = set(result.get("imported_ids", []))
+        self.assets_tab.table.clearSelection()
+        for source_row, asset in enumerate(merged):
+            if _text(asset.get("id")) in imported_ids:
+                display_row = self.assets_tab.display_row_for_source_index(source_row)
+                if display_row >= 0:
+                    self.assets_tab.table.selectRow(display_row)
+        QMessageBox.information(
+            self,
+            "Import complete",
+            f"Added: {result['added']}\n"
+            f"Replaced: {result['replaced']}\n"
+            f"Skipped: {result['skipped']}",
+        )
 
     def add_asset(self) -> None:
         dialog = NetworkAssetEditorDialog(

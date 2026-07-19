@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
 from itertools import count
+import hashlib
 import math
 import os
 import re
@@ -843,6 +844,18 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
     """Expand room-type data into individual physical network-port demand."""
 
     settings = data.setdefault("network_settings", {})
+    connected_data_points_only = bool(
+        settings.get("auto_planner_connected_data_points_only", False)
+    )
+    connected_point_names: Set[str] = set()
+    if connected_data_points_only:
+        for connection in data.get("connections", []):
+            if not isinstance(connection, dict):
+                continue
+            for field_name in ("from", "to"):
+                point_name = _text(connection.get(field_name))
+                if point_name:
+                    connected_point_names.add(point_name)
     room_types = {
         _text(item.get("id")): item
         for item in data.get("room_types", [])
@@ -867,12 +880,16 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
     warnings: List[str] = []
     results: List[EndpointDemand] = []
     missing_room_types: set[str] = set()
+    skipped_unconnected_points = 0
 
     for point in data.get("data_points", []):
         if not isinstance(point, dict):
             continue
         name = _text(point.get("name"))
         if not name:
+            continue
+        if connected_data_points_only and name not in connected_point_names:
+            skipped_unconnected_points += 1
             continue
         department_ids = [
             _text(value) for value in point.get("department_ids", []) if _text(value)
@@ -1118,6 +1135,11 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
         warnings.append(
             "Missing room-type definitions for: "
             + ", ".join(sorted(missing_room_types))
+        )
+    if connected_data_points_only and skipped_unconnected_points:
+        warnings.append(
+            f"Connected-data-points-only mode ignored {skipped_unconnected_points} "
+            "data point(s) without a current Routing-tab connection."
         )
     return results, warnings
 
@@ -2029,13 +2051,16 @@ class DesignBuilder:
         if not reserved:
             return {}
         counts: Dict[int, int] = defaultdict(int)
+        compatible_uses = {wanted_use}
+        if wanted_use in {"uplink", "downlink"}:
+            compatible_uses = {"uplink", "downlink"}
         for row in self._expanded_ports(instance):
             name = _text(row.get("name"))
             if name not in reserved:
                 continue
             if _text(row.get("medium")) != medium:
                 continue
-            if wanted_use and _text(row.get("port_use")).lower() != wanted_use:
+            if wanted_use and _text(row.get("port_use")).lower() not in compatible_uses:
                 continue
             member = self._stack_member_number_from_port(name)
             if member > 0:
@@ -2079,7 +2104,12 @@ class DesignBuilder:
         medium: str,
         fallback_use: str,
     ) -> List[dict]:
-        """Return free ports ordered by the requested name and intended use."""
+        """Return free ports ordered by requested name and logical use.
+
+        Switch-facing uplink and downlink labels describe the intended role, not
+        an electrical direction. Treat them as a reconfigurable pool while still
+        preferring the port's declared use and enforcing medium/speed compatibility.
+        """
 
         instance_id = _text(instance.get("id"))
         expanded = self._expanded_ports(instance)
@@ -2101,6 +2131,11 @@ class DesignBuilder:
                 }
             ]
         wanted = self._requested_use(requested, fallback_use)
+        compatible_uses = [wanted]
+        if wanted == "uplink":
+            compatible_uses.append("downlink")
+        elif wanted == "downlink":
+            compatible_uses.append("uplink")
         requested_lower = _text(requested).lower()
         exact_rows = [
             row
@@ -2109,8 +2144,9 @@ class DesignBuilder:
         ]
         preferred_rows = [
             row
+            for compatible_use in compatible_uses
             for row in rows
-            if _text(row.get("port_use")).lower() == wanted
+            if _text(row.get("port_use")).lower() == compatible_use
         ]
         if preferred_rows:
             exact_ids = {id(row) for row in exact_rows}
@@ -2152,19 +2188,22 @@ class DesignBuilder:
             instance: dict, rows: Sequence[dict], requested: str, fallback: str
         ) -> int:
             wanted = self._requested_use(requested, fallback)
+            compatible_uses = {wanted}
+            if wanted in {"uplink", "downlink"}:
+                compatible_uses = {"uplink", "downlink"}
             expanded = [
                 row
                 for row in self._expanded_ports(instance)
                 if _text(row.get("medium")) == medium
             ]
             if any(
-                _text(row.get("port_use")).lower() == wanted
+                _text(row.get("port_use")).lower() in compatible_uses
                 for row in expanded
             ):
                 return sum(
                     1
                     for row in rows
-                    if _text(row.get("port_use")).lower() == wanted
+                    if _text(row.get("port_use")).lower() in compatible_uses
                 )
             return len(rows)
 
@@ -2940,6 +2979,9 @@ class DesignBuilder:
     def add_connection(self, from_instance: dict, from_port: str, to_instance: dict, to_port: str, medium: str, route_source: str = "", route_destination: str = "", **extra) -> dict:
         generate_patch_leads = bool(extra.pop("generate_patch_leads", True))
         requested_speed = max(0, _int(extra.pop("link_speed_mbps", 0)))
+        minimum_link_capacity = max(
+            0.0, _float(extra.pop("minimum_link_capacity_mbps", 0.0))
+        )
         physical_connection = bool(extra.get("physical_connection"))
         parent_logical_id = _text(extra.get("parent_logical_connection_id"))
         explicit_bandwidth = extra.get("expected_bandwidth_mbps", None)
@@ -2983,6 +3025,7 @@ class DesignBuilder:
                 _float(to_instance.get("expected_packet_rate_pps")),
             )
         )
+        capacity_requirement = max(required_bandwidth, minimum_link_capacity)
 
         if physical_connection:
             selected_from = self._port_definition(from_instance, from_port, medium, self._requested_use(from_port, "uplink"))
@@ -3000,7 +3043,7 @@ class DesignBuilder:
                 to_port,
                 medium,
                 requested_speed,
-                required_bandwidth,
+                capacity_requirement,
             )
 
         member_count = len(selected_pairs)
@@ -3017,6 +3060,10 @@ class DesignBuilder:
         for member_index, (selected_from, selected_to) in enumerate(selected_pairs, start=1):
             selected_from_port = _text(selected_from.get("name"))
             selected_to_port = _text(selected_to.get("name"))
+            configured_from_use = self._requested_use(from_port, "uplink")
+            configured_to_use = self._requested_use(to_port, "input")
+            declared_from_use = _text(selected_from.get("port_use")).lower()
+            declared_to_use = _text(selected_to.get("port_use")).lower()
             connection_id = _next_identifier(self.connection_ids, "AUTO-NC-")
             connection = {
                 "id": connection_id, "from_instance_id": _text(from_instance.get("id")), "from_port": selected_from_port,
@@ -3032,6 +3079,21 @@ class DesignBuilder:
                 ),
                 "expected_bandwidth_mbps": round(
                     required_bandwidth / member_count, 6
+                ),
+                "minimum_link_capacity_mbps": round(capacity_requirement, 6),
+                "from_configured_port_use": configured_from_use,
+                "to_configured_port_use": configured_to_use,
+                "from_declared_port_use": declared_from_use,
+                "to_declared_port_use": declared_to_use,
+                "from_port_reconfigured": (
+                    configured_from_use in {"uplink", "downlink"}
+                    and declared_from_use in {"uplink", "downlink"}
+                    and configured_from_use != declared_from_use
+                ),
+                "to_port_reconfigured": (
+                    configured_to_use in {"uplink", "downlink"}
+                    and declared_to_use in {"uplink", "downlink"}
+                    and configured_to_use != declared_to_use
                 ),
                 "notes": "Automatically generated network topology connection.", "auto_generated": True, **extra,
             }
@@ -3105,7 +3167,7 @@ class DesignBuilder:
                 f"Created {lag_id} between {from_name} and {to_name} using "
                 f"{member_count} × {port_speed_label(link_speed)} ports "
                 f"({port_speed_label(aggregate_capacity)} aggregate) for "
-                f"{required_bandwidth:.3f} Mbps required traffic."
+                f"{capacity_requirement:.3f} Mbps required capacity."
             )
         return created[0]
 
@@ -3750,6 +3812,67 @@ def _is_distributed_equipment_room(location: dict) -> bool:
         _text(location.get("kind")).lower() == "distributed_equipment_room"
         or _text(location.get("name")).upper().startswith("DER")
     )
+
+
+def der_graph_inventory_signature(data: dict) -> str:
+    """Fingerprint graph-planned DER rooms and their endpoint assignments."""
+
+    der_names = {
+        _text(location.get("name"))
+        for location in data.get("locations", [])
+        if isinstance(location, dict)
+        and _is_distributed_equipment_room(location)
+        and not bool(location.get("auto_network_location"))
+        and _text(location.get("name"))
+    }
+    room_rows = sorted(
+        f"{_text(location.get('name'))}@{_int(location.get('floor'))}"
+        for location in data.get("locations", [])
+        if isinstance(location, dict)
+        and _text(location.get("name")) in der_names
+    )
+    assignment_rows = sorted(
+        f"{_text(connection.get('from'))}>{_text(connection.get('to'))}"
+        for connection in data.get("connections", [])
+        if isinstance(connection, dict)
+        and _text(connection.get("from")) in der_names
+        and _text(connection.get("to"))
+    )
+    payload = "\n".join(room_rows + ["--assignments--"] + assignment_rows)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _discard_stale_der_expansion_overrides(data: dict) -> List[str]:
+    """Drop network overflow choices made against an older graph DER layout."""
+
+    settings = data.setdefault("network_settings", {})
+    overrides = settings.get("auto_planner_resolution_overrides", {})
+    if not isinstance(overrides, dict):
+        return []
+    additional = overrides.get("additional_der_by_location", {})
+    if not isinstance(additional, dict) or not additional:
+        settings["der_expansion_inventory_signature"] = der_graph_inventory_signature(
+            data
+        )
+        return []
+    current_signature = der_graph_inventory_signature(data)
+    stored_signature = _text(settings.get("der_expansion_inventory_signature"))
+    if stored_signature == current_signature:
+        return []
+    affected = sorted(_text(name) for name in additional if _text(name))
+    minimum = overrides.get("minimum_access_switches_by_location", {})
+    assets = overrides.get("additional_der_asset_by_location", {})
+    for name in affected:
+        if isinstance(minimum, dict):
+            minimum.pop(name, None)
+        if isinstance(assets, dict):
+            assets.pop(name, None)
+    overrides["additional_der_by_location"] = {}
+    settings["der_expansion_inventory_signature"] = current_signature
+    return [
+        "Discarded stale adjacent-DER planner overrides after the graph DER "
+        f"inventory or assignments changed ({len(affected)} location(s))."
+    ]
 
 
 def _nearest_location(
@@ -6059,7 +6182,18 @@ def _traditional_design(
             }
             dominant = _nearest_location(centre, primary_comms_rooms or comms_rooms)
         for endpoint in group:
-            selected = dominant
+            # The graph planner may deliberately spread a department across
+            # several DERs. Preserve that explicit assignment instead of
+            # collapsing every endpoint back onto the group's dominant DER,
+            # which would strand the other rooms and manufacture a suffixed
+            # overflow DER later in this pass.
+            existing_room = room_map.get(_text(endpoint.existing_comms_room))
+            selected = (
+                existing_room
+                if existing_room is not None
+                and _is_distributed_equipment_room(existing_room)
+                else dominant
+            )
             if selected is not None:
                 route_length, _ = builder.graph.route(
                     _text(selected.get("name")), endpoint.name
@@ -6098,6 +6232,84 @@ def _traditional_design(
         room_ports[_text(endpoint_room[endpoint.name].get("name"))].extend(
             endpoint.ports
         )
+
+    endpoint_by_name = {endpoint.name: endpoint for endpoint in endpoints}
+    # DERs already created by the graph planner do not use the network
+    # planner's ``-2``/``-3`` overflow naming convention. Keep every existing,
+    # DER in a shared two-switch-capacity pool so physical rooms are exhausted
+    # before another location is generated.
+    existing_der_pool = [
+        room
+        for room in comms_rooms
+        if _is_distributed_equipment_room(room)
+    ]
+    der_switch_slots_used: Dict[str, int] = defaultdict(int)
+    processed_der_names: set[str] = set()
+
+    def claim_existing_der(
+        parent: dict,
+        group_assignments: Sequence[Sequence[PortDemand]],
+        required_switch_slots: int,
+    ) -> Optional[dict]:
+        endpoint_names = {
+            item.endpoint_name
+            for assignments in group_assignments
+            for item in assignments
+        }
+        candidates = []
+        required_switch_slots = max(1, int(required_switch_slots or 1))
+        for candidate in existing_der_pool:
+            candidate_name = _text(candidate.get("name"))
+            used_slots = max(0, int(der_switch_slots_used.get(candidate_name, 0)))
+            if (
+                not candidate_name
+                or candidate_name == _text(parent.get("name"))
+                or used_slots + required_switch_slots > 2
+                or (
+                    candidate_name in room_ports
+                    and candidate_name not in processed_der_names
+                )
+            ):
+                continue
+            route_lengths = []
+            reachable = True
+            for endpoint_name in endpoint_names:
+                endpoint = endpoint_by_name.get(endpoint_name)
+                if endpoint is None:
+                    continue
+                try:
+                    route_length, _path = builder.graph.route(
+                        candidate_name, endpoint_name
+                    )
+                except NetworkPlanningError:
+                    reachable = False
+                    break
+                route_length += endpoint.extension_distance_m
+                if route_length > max_copper_m + 1e-9:
+                    reachable = False
+                    break
+                route_lengths.append(route_length)
+            if reachable:
+                candidates.append(
+                    (
+                        0
+                        if _int(candidate.get("floor")) == _int(parent.get("floor"))
+                        else 1,
+                        -used_slots,
+                        max(route_lengths, default=0.0),
+                        candidate_name,
+                        candidate,
+                    )
+                )
+        if not candidates:
+            return None
+        _floor_rank, _used_rank, _distance, candidate_name, selected = min(candidates)
+        builder.warnings.append(
+            f"{_text(parent.get('name'))} requires another DER switch position; "
+            f"reused capacity in existing distributed equipment room {candidate_name} before "
+            "creating an additional location."
+        )
+        return selected
 
     switch_candidates = _candidate_assets(
         builder.data,
@@ -6179,7 +6391,15 @@ def _traditional_design(
 
     access_switches: List[dict] = []
     unresolved_spare_capacity_issues: List[dict] = []
-    for room_name in sorted(room_ports):
+    room_order = sorted(
+        room_ports,
+        key=lambda name: (
+            0 if _is_distributed_equipment_room(room_map[name]) else 1,
+            len(room_ports[name]) if _is_distributed_equipment_room(room_map[name]) else 0,
+            name,
+        ),
+    )
+    for room_name in room_order:
         room = room_map[room_name]
         port_items = room_ports[room_name]
         room_candidates = _filter_asset_override(
@@ -6275,6 +6495,13 @@ def _traditional_design(
             **stack_plan_kwargs,
             "max_switches_per_cabinet": max_switches_per_cabinet,
         }
+        if is_distributed_equipment_room:
+            # Keep DER switch units independently placeable. A two-member
+            # logical stack cannot be split across two existing DERs that each
+            # have one free slot, which caused the planner to create another
+            # room while usable physical capacity still existed.
+            room_stack_plan_kwargs["stacking_enabled"] = False
+            room_stack_plan_kwargs["configured_max_stack_members"] = 1
 
         def access_mix(local_spare_fraction: float) -> List[dict]:
             selected = _minimum_asset_mix(
@@ -6498,18 +6725,42 @@ def _traditional_design(
                 and der_location_switch_count + member_count > 2
             ):
                 der_location_index += 1
-                active_room = builder.add_der_overflow_location(
+                active_room = claim_existing_der(
+                    room, group_assignments, member_count
+                ) or builder.add_der_overflow_location(
                     room,
                     der_location_index,
-                    required_switches=(
-                        der_location_switch_count + member_count
-                    ),
+                    required_switches=der_location_switch_count + member_count,
                 )
                 active_room_name = _text(active_room.get("name"))
-                der_location_switch_count = 0
+                der_location_switch_count = max(
+                    0, int(der_switch_slots_used.get(active_room_name, 0))
+                )
                 rack_index = 1
-                next_rack_u = 1
-                rack_switch_count = 0
+                existing_room_switches = [
+                    instance
+                    for instance in builder.instances
+                    if _text(instance.get("design_role")) == "access_switch"
+                    and _text(instance.get("location_name")) == active_room_name
+                ]
+                next_rack_u = max(
+                    [
+                        _int(instance.get("rack_start_u"), 1)
+                        + max(
+                            1,
+                            _int(
+                                instance.get("tor_reserved_bundle_u"),
+                                _rack_units_for_asset(
+                                    builder._asset_for_instance(instance), 1
+                                ),
+                            ),
+                        )
+                        for instance in existing_room_switches
+                    ]
+                    or [1]
+                )
+                rack_switch_count = der_location_switch_count
+                switch_number = max(switch_number, der_location_switch_count + 1)
                 spare_rack_started = False
             is_stack = member_count > 1
             stack_topology = _text(
@@ -6711,8 +6962,15 @@ def _traditional_design(
             next_rack_u += reserved_bundle_u if rack_deployment_model == "top_of_rack" else rack_u
             rack_switch_count += member_count
             der_location_switch_count += member_count
+            if _is_distributed_equipment_room(active_room):
+                der_switch_slots_used[active_room_name] = (
+                    der_location_switch_count
+                )
             if is_stack:
                 stack_number += 1
+
+        if is_distributed_equipment_room:
+            processed_der_names.add(room_name)
 
     if unresolved_spare_capacity_issues:
         locations = [
@@ -8045,13 +8303,17 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
             group_id = f"AUTO-EDGE-CORE-{index + 1}"
             builder.add_connection(
                 router,
-                "LAN-1",
+                f"Downlink-LAN-{index + 1}",
                 core,
-                f"Edge-{index + 1}",
+                f"Downlink-Edge-{index + 1}",
                 "fibre",
                 _text(router.get("route_anchor")),
                 _text(core.get("route_anchor")) or _text(core.get("location_name")),
                 connection_role="output",
+                logical_link_role="trusted_edge_to_core_transit",
+                layer3_transit_recommended=True,
+                dedicated_transit_vlan_recommended=True,
+                security_boundary="trusted",
                 redundancy_role="primary" if index == 0 else "secondary",
                 protection_group=group_id if len(routers) > 1 else "",
                 standby=index > 0,
@@ -8060,6 +8322,7 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
                 expected_east_west_bandwidth_mbps=0.0,
                 expected_bandwidth_mbps=north_south_demand,
                 expected_packet_rate_pps=edge_packet_rate,
+                minimum_link_capacity_mbps=required_edge_bandwidth,
             )
     else:
         builder.warnings.append("Edge routers were generated without a core connection because no generated core switch exists.")
@@ -8087,6 +8350,7 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
         service_weight = service_weights[record_index - 1]
         service_traffic_share = north_south_demand * service_weight
         service_packet_share = edge_packet_rate * service_weight
+        service_capacity = max(0.0, _float(record.get("bandwidth_mbps")))
         desired_links = max(
             1,
             _int(record.get("required_links"), default_links if bool(record.get("redundant", True)) else 1),
@@ -8134,6 +8398,8 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
                 _text(demarcation.get("route_anchor")) or _text(demarcation.get("location_name")),
                 _text(router.get("route_anchor")) or _text(router.get("location_name")),
                 connection_role="uplink",
+                logical_link_role="untrusted_external_to_edge",
+                security_boundary="untrusted",
                 redundancy_role="primary" if link_index == 1 else "secondary",
                 protection_group=protection_group if desired_links > 1 else "",
                 standby=link_index > 1,
@@ -8143,6 +8409,9 @@ def _install_external_network_connections(builder: DesignBuilder, spare_fraction
                 expected_east_west_bandwidth_mbps=0.0,
                 expected_bandwidth_mbps=service_traffic_share,
                 expected_packet_rate_pps=service_packet_share,
+                minimum_link_capacity_mbps=max(
+                    service_traffic_share, service_capacity
+                ),
             )
             peer_ids.append(_text(router.get("id")))
             connection_ids.append(_text(connection.get("id")))
@@ -10907,6 +11176,7 @@ def generate_network_design(
 
     progress(2, "Validating network project data...")
     ensure_network_schema(data)
+    stale_der_override_warnings = _discard_stale_der_expansion_overrides(data)
     _clear_previous_auto_design(data)
     settings = data.setdefault("network_settings", {})
     technology_value = _text(technology or settings.get("technology") or "Traditional")
@@ -10939,6 +11209,7 @@ def generate_network_design(
     settings.setdefault("auto_planner_max_workers", 0)
     settings.setdefault("auto_planner_parallel_threshold", 4)
     settings.setdefault("auto_add_switches_for_bandwidth", True)
+    settings.setdefault("auto_planner_connected_data_points_only", False)
     settings.setdefault("prevent_additional_equipment_rooms", False)
     settings.setdefault("ignore_link_bandwidth_errors", False)
     settings.setdefault("auto_planner_resolution_overrides", {})
@@ -10949,12 +11220,19 @@ def generate_network_design(
     progress(10, "Calculating endpoint, bandwidth and PoE demand...")
     endpoints, warnings = build_endpoint_demands(data)
     if not endpoints:
+        if bool(settings.get("auto_planner_connected_data_points_only", False)):
+            raise NetworkPlanningError(
+                "No connected data-point port demand was found. Create Routing-tab "
+                "connections first, or turn off 'Only account for data points with "
+                "current connections' in the automatic planner."
+            )
         raise NetworkPlanningError(
             "No data-point port demand was found in the project."
         )
 
     builder = DesignBuilder(data, technology_value)
     builder.warnings.extend(warnings)
+    builder.warnings.extend(stale_der_override_warnings)
 
     # Shortest-path tree generation dominates large projects.  Precompute each
     # independent source tree in parallel before allocation and grouping begin.
@@ -10963,7 +11241,10 @@ def generate_network_design(
             _text(item.get("name"))
             for item in data.get("locations", [])
             if isinstance(item, dict)
-            and _text(item.get("kind")).lower() in {"comms_room", "mer"}
+            and (
+                _text(item.get("kind")).lower() in {"comms_room", "mer"}
+                or _is_distributed_equipment_room(item)
+            )
         }
     else:
         route_sources = {endpoint.name for endpoint in endpoints}
@@ -11130,6 +11411,9 @@ def generate_network_design(
         "spare_capacity_percent": round(spare_fraction * 100.0, 3),
         "auto_add_switches_for_bandwidth": bool(
             settings.get("auto_add_switches_for_bandwidth", True)
+        ),
+        "connected_data_points_only": bool(
+            settings.get("auto_planner_connected_data_points_only", False)
         ),
         "ignore_link_bandwidth_errors": bool(
             settings.get("ignore_link_bandwidth_errors", False)

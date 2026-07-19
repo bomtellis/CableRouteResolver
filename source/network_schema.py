@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional
 from network_services import FIBRE_COLOURS, build_fibre_cores, fibre_layer_defaults, set_core_status_from_splices
 
 
-NETWORK_SCHEMA_VERSION = 12
+NETWORK_SCHEMA_VERSION = 13
 
 # Cisco Catalyst 9600 line-card catalogue.  Port layouts and supervisor
 # compatibility are taken from the 2025 Catalyst 9600 Series data sheet.
@@ -258,6 +258,7 @@ NETWORK_DEFAULTS = {
         "tor_allow_adjacent_cabinet_uplinks": True,
         "auto_connect_new_manual_devices": True,
         "auto_add_switches_for_bandwidth": True,
+        "auto_planner_connected_data_points_only": False,
         "prevent_additional_equipment_rooms": False,
         "ignore_link_bandwidth_errors": False,
         "auto_planner_resolution_overrides": {},
@@ -326,6 +327,89 @@ NETWORK_ASSET_TYPES = {
     "external_network",
     "other",
 }
+
+NETWORK_ASSET_GROUPS = {
+    "router",
+    "core",
+    "aggregation",
+    "access",
+    "switching",
+    "wireless",
+    "optical",
+    "patching",
+    "power",
+    "cable_management",
+    "external",
+    "other",
+}
+
+
+def network_asset_group(asset: dict) -> str:
+    """Return a stable library group, including for older ungrouped assets."""
+
+    explicit = _text(asset.get("asset_group")).lower().replace("-", "_").replace(" ", "_")
+    explicit = {
+        "edge": "router",
+        "routing": "router",
+        "firewall": "router",
+        "security": "router",
+        "distribution": "aggregation",
+        "distribution_switch": "aggregation",
+        "aggregation_switch": "aggregation",
+        "core_switch": "core",
+        "access_switch": "access",
+        "wireless_device": "wireless",
+        "wireless_access_point": "wireless",
+        "patch_panel": "patching",
+        "optics": "optical",
+        "power_device": "power",
+        "external_network": "external",
+    }.get(explicit, explicit)
+    if explicit in NETWORK_ASSET_GROUPS:
+        return explicit
+
+    asset_type = _text(asset.get("asset_type")).lower()
+    layer = _text(asset.get("network_layer") or asset.get("design_layer")).lower()
+    layer = {
+        "distribution": "aggregation",
+        "distribution_switch": "aggregation",
+        "aggregation_switch": "aggregation",
+        "core_switch": "core",
+        "access_switch": "access",
+        "edge_router": "router",
+        "edge": "router",
+    }.get(layer, layer)
+    if asset_type == "network_switch":
+        if layer in {"core", "aggregation", "access"}:
+            return layer
+        name = _text(asset.get("name")).lower()
+        if "aggregation" in name or "distribution" in name:
+            return "aggregation"
+        if "core" in name:
+            return "core"
+        if "access" in name:
+            return "access"
+        return "switching"
+    if asset_type in {"network_router", "firewall"}:
+        return "router"
+    if asset_type in {"wireless_access_point", "wireless_device"}:
+        return "wireless"
+    if asset_type in {
+        "fibre_splitter",
+        "optical_line_terminal",
+        "optical_network_terminal",
+        "optical_transceiver",
+    }:
+        return "optical"
+    if asset_type == "patch_panel":
+        return "patching"
+    if asset_type in {"ups", "pdu", "power_device"}:
+        return "power"
+    if asset_type in {"cable_management", "cable_manager"}:
+        return "cable_management"
+    if asset_type in {"telco_pop", "external_network"}:
+        return "external"
+    return "other"
 
 NETWORK_MEDIA = {"copper", "fibre", "wireless", "virtual", "stacking", "none"}
 NETWORK_CONNECTION_ROLES = {"input", "output", "uplink"}
@@ -741,6 +825,7 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("tor_allow_adjacent_cabinet_uplinks", True)
     settings.setdefault("auto_connect_new_manual_devices", True)
     settings.setdefault("auto_add_switches_for_bandwidth", True)
+    settings.setdefault("auto_planner_connected_data_points_only", False)
     settings.setdefault("prevent_additional_equipment_rooms", False)
     settings.setdefault("ignore_link_bandwidth_errors", False)
     settings.setdefault("auto_planner_resolution_overrides", {})
@@ -1106,6 +1191,7 @@ def ensure_network_schema(data: dict) -> dict:
         asset["asset_type"] = (
             asset_type if asset_type in NETWORK_ASSET_TYPES else "other"
         )
+        asset["asset_group"] = network_asset_group(asset)
         wireless_category = _text(asset.get("wireless_device_category")).lower()
         if asset["asset_type"] == "wireless_access_point" and not wireless_category:
             wireless_category = "access_point"
@@ -1326,6 +1412,9 @@ def ensure_network_schema(data: dict) -> dict:
                 asset["chassis_modules"]
             )
         asset["rack_units"] = max(0, _as_int(asset.get("rack_units"), 1))
+        asset["physical_width_mm"] = max(0.0, _as_float(asset.get("physical_width_mm"), 0.0))
+        asset["physical_depth_mm"] = max(0.0, _as_float(asset.get("physical_depth_mm"), 0.0))
+        asset["physical_height_mm"] = max(0.0, _as_float(asset.get("physical_height_mm"), 0.0))
         asset["olt_units_per_rack_unit"] = max(
             1, _as_int(asset.get("olt_units_per_rack_unit"), 1)
         )
