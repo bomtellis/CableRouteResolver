@@ -52,6 +52,8 @@ from PySide6.QtWidgets import (
     QStyleOptionGraphicsItem,
     QSplitter,
     QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -4069,11 +4071,15 @@ class NetworkTopologyDialog(QDialog):
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
 
+        splitter.addWidget(self._build_feature_tree_panel())
         splitter.addWidget(self.view)
         splitter.addWidget(self._build_details_panel())
-        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
         details_width = min(330, max(260, int(self.width() * 0.22)))
-        splitter.setSizes([max(520, self.width() - details_width), details_width])
+        tree_width = min(280, max(220, int(self.width() * 0.18)))
+        splitter.setSizes(
+            [tree_width, max(420, self.width() - tree_width - details_width), details_width]
+        )
         root_layout.addWidget(splitter, 1)
 
         self.status_label = QLabel()
@@ -4116,12 +4122,6 @@ class NetworkTopologyDialog(QDialog):
         title.setFont(title_font)
         title.setStyleSheet("color: #212529; margin-right: 10px;")
         layout.addWidget(title)
-
-        self.breadcrumb_button = QPushButton("Topology")
-        self.breadcrumb_button.setToolTip("Return to the full topology")
-        self.breadcrumb_button.clicked.connect(self._exit_rack_view)
-        self.breadcrumb_button.hide()
-        layout.addWidget(self.breadcrumb_button)
 
         technology = _text(self.data.get("network_settings", {}).get("technology")) or "Traditional"
         summary = self.data.get("network_design_summary", {}) or {}
@@ -4185,7 +4185,11 @@ class NetworkTopologyDialog(QDialog):
         add_device_button.clicked.connect(
             lambda: self._add_device(
                 self.rack_focus[1] if self.rack_focus is not None else "",
-                self.rack_focus[2] if self.rack_focus is not None else "",
+                (
+                    self.rack_focus[2]
+                    if self.rack_focus is not None and self.rack_focus[2] != "__all__"
+                    else ""
+                ),
             )
         )
         layout.addWidget(add_device_button)
@@ -4256,6 +4260,312 @@ class NetworkTopologyDialog(QDialog):
         scroll.setMinimumHeight(max(64, header.sizeHint().height() + 18))
         scroll.setMaximumHeight(max(82, header.sizeHint().height() + 24))
         return scroll
+
+    def _build_feature_tree_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setMinimumWidth(210)
+        panel.setStyleSheet("background: #ffffff; border-right: 1px solid #dee2e6;")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(10, 12, 10, 10)
+        panel_layout.setSpacing(8)
+
+        heading = QLabel("Feature tree")
+        heading_font = QFont("Arial", 11)
+        heading_font.setBold(True)
+        heading.setFont(heading_font)
+        panel_layout.addWidget(heading)
+
+        hint = QLabel("Select a room, cabinet, device, or port")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #6c757d; font-size: 10px;")
+        panel_layout.addWidget(hint)
+
+        self.feature_tree = QTreeWidget()
+        self.feature_tree.setHeaderHidden(True)
+        self.feature_tree.setUniformRowHeights(True)
+        self.feature_tree.setAnimated(False)
+        self.feature_tree.setStyleSheet(
+            "QTreeWidget { border: 0; background: #ffffff; color: #212529; }"
+            "QTreeWidget::item { padding: 3px 2px; }"
+            "QTreeWidget::item:selected { background: #dbeafe; color: #084298; }"
+        )
+        self.feature_tree.itemSelectionChanged.connect(self._feature_tree_selection_changed)
+        panel_layout.addWidget(self.feature_tree, 1)
+        self._feature_tree_updating = False
+        self._feature_tree_items: Dict[Tuple[str, object], QTreeWidgetItem] = {}
+        self._rebuild_feature_tree()
+        return panel
+
+    def _feature_tree_item(
+        self,
+        parent: Optional[QTreeWidgetItem],
+        label: str,
+        kind: str,
+        payload=None,
+    ) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([label])
+        item.setData(0, Qt.UserRole, kind)
+        item.setData(0, Qt.UserRole + 1, payload)
+        if parent is None:
+            self.feature_tree.addTopLevelItem(item)
+        else:
+            parent.addChild(item)
+        try:
+            hash(payload)
+            self._feature_tree_items[(kind, payload)] = item
+        except TypeError:
+            pass
+        return item
+
+    def _rebuild_feature_tree(self) -> None:
+        if not hasattr(self, "feature_tree"):
+            return
+        expanded = {
+            (item.data(0, Qt.UserRole), item.data(0, Qt.UserRole + 1))
+            for item in self.feature_tree.findItems("*", Qt.MatchWildcard | Qt.MatchRecursive)
+            if item.isExpanded()
+        }
+        self._feature_tree_updating = True
+        self.feature_tree.clear()
+        self._feature_tree_items.clear()
+
+        root = self._feature_tree_item(None, "Network topology", "topology", "root")
+        root.setExpanded(True)
+        nodes_by_rack: Dict[Tuple[int, str, str], List[TopologyNode]] = defaultdict(list)
+        unracked_by_location: Dict[Tuple[int, str], List[TopologyNode]] = defaultdict(list)
+        location_keys: Set[Tuple[int, str]] = set(self._rack_names_cache)
+        for location in self.data.get("locations", []):
+            if not isinstance(location, dict) or not _text(location.get("name")):
+                continue
+            kind = _text(location.get("kind")).lower()
+            name = _text(location.get("name"))
+            if kind in {
+                "mer",
+                "comms_room",
+                "distributed_equipment_room",
+                "polan",
+            } or name.upper().startswith(("MER", "DER")):
+                location_keys.add((_int(location.get("floor")), name))
+        for node in self.model.nodes.values():
+            if node.pseudo or node.asset_type == "rack_cabinet":
+                continue
+            location_key = (node.floor, node.location_name)
+            location_keys.add(location_key)
+            rack_name = _text(node.instance.get("rack_name"))
+            if rack_name:
+                nodes_by_rack[(node.floor, node.location_name, rack_name)].append(node)
+            else:
+                unracked_by_location[location_key].append(node)
+
+        floors: Dict[int, List[Tuple[int, str]]] = defaultdict(list)
+        for location_key in location_keys:
+            floors[location_key[0]].append(location_key)
+        for floor in sorted(floors):
+            floor_item = self._feature_tree_item(root, f"Floor {floor}", "floor", floor)
+            for _floor, location in sorted(floors[floor], key=lambda value: value[1].lower()):
+                location_label = location or "Unassigned location"
+                location_item = self._feature_tree_item(
+                    floor_item, location_label, "location", (floor, location)
+                )
+                rack_names = self._rack_names_for_location(floor, location)
+                if rack_names:
+                    self._feature_tree_item(
+                        location_item,
+                        f"All cabinets ({len(rack_names)})",
+                        "room",
+                        (floor, location),
+                    )
+                for rack_name in rack_names:
+                    rack_item = self._feature_tree_item(
+                        location_item, rack_name, "rack", (floor, location, rack_name)
+                    )
+                    for node in sorted(
+                        nodes_by_rack.get((floor, location, rack_name), []),
+                        key=lambda value: (
+                            max(1, _int(value.instance.get("rack_start_u"), 1)),
+                            value.name.lower(),
+                        ),
+                    ):
+                        self._append_feature_device(rack_item, node)
+                unracked = unracked_by_location.get((floor, location), [])
+                if unracked:
+                    unracked_item = self._feature_tree_item(
+                        location_item, "Unracked equipment", "group", (floor, location, "unracked")
+                    )
+                    for node in sorted(unracked, key=lambda value: value.name.lower()):
+                        self._append_feature_device(unracked_item, node)
+
+        for item in self.feature_tree.findItems("*", Qt.MatchWildcard | Qt.MatchRecursive):
+            key = (item.data(0, Qt.UserRole), item.data(0, Qt.UserRole + 1))
+            if key in expanded:
+                item.setExpanded(True)
+        self._feature_tree_updating = False
+        self._sync_feature_tree_selection()
+
+    def _append_feature_device(self, parent: QTreeWidgetItem, node: TopologyNode) -> None:
+        item = self._feature_tree_item(parent, node.name, "device", node.node_id)
+        if not self._supports_port_view(node):
+            return
+        ports = self._defined_ports(node)
+        ports_item = self._feature_tree_item(
+            item, f"Ports ({len(ports)})", "ports", node.node_id
+        )
+        for port in ports:
+            port_name = _text(port.get("name"))
+            if port_name:
+                self._feature_tree_item(
+                    ports_item, port_name, "port", (node.node_id, port_name)
+                )
+
+    def _feature_tree_selection_changed(self) -> None:
+        if self._feature_tree_updating:
+            return
+        selected = self.feature_tree.selectedItems()
+        if not selected:
+            return
+        item = selected[0]
+        kind = _text(item.data(0, Qt.UserRole))
+        payload = item.data(0, Qt.UserRole + 1)
+        if kind == "topology":
+            self.rack_focus = None
+            self.switch_port_focus = None
+            self.rebuild_scene(fit=True)
+            self._set_feature_tree_current("topology", "root")
+            return
+        if kind == "floor":
+            self.rack_focus = None
+            self.switch_port_focus = None
+            index = self.floor_combo.findData(_int(payload))
+            if index >= 0 and index != self.floor_combo.currentIndex():
+                self.floor_combo.setCurrentIndex(index)
+            else:
+                self.rebuild_scene(fit=True)
+            self._set_feature_tree_current("floor", _int(payload))
+            return
+        if kind in {"location", "group"}:
+            floor, location = payload[:2]
+            rack_names = self._rack_names_for_location(int(floor), _text(location))
+            self.switch_port_focus = None
+            if rack_names and kind == "location":
+                self.rack_focus = (int(floor), _text(location), "__all__")
+                self.rebuild_scene(fit=True)
+            else:
+                self.rack_focus = None
+                if self.floor_combo.currentIndex() != 0:
+                    self.floor_combo.setCurrentIndex(0)
+                else:
+                    self.rebuild_scene(fit=True)
+                matching = [
+                    node_id
+                    for node_id, node in self.visible_nodes.items()
+                    if not node.pseudo
+                    and node.floor == int(floor)
+                    and node.location_name == _text(location)
+                    and (kind != "group" or not _text(node.instance.get("rack_name")))
+                ]
+                self.scene.clearSelection()
+                for node_id in matching:
+                    target = self.node_items.get(node_id)
+                    if target is not None:
+                        target.setSelected(True)
+                if matching and matching[0] in self.node_items:
+                    self.view.centerOn(self.node_items[matching[0]])
+            self._set_feature_tree_current(kind, payload)
+            return
+        if kind in {"room", "rack"}:
+            floor, location = payload[:2]
+            self.rack_focus = (int(floor), _text(location), "__all__")
+            self.switch_port_focus = None
+            self.rebuild_scene(fit=True)
+            if kind == "rack":
+                rack_names = self._rack_names_for_location(int(floor), _text(location))
+                rack_name = _text(payload[2])
+                if rack_name in rack_names:
+                    index = rack_names.index(rack_name)
+                    capacity = self._rack_capacity_for_key((int(floor), _text(location), rack_name))
+                    self.view.centerOn(
+                        self.RACK_LEFT_START + index * (self.RACK_WIDTH + self.RACK_GAP) + self.RACK_WIDTH / 2.0,
+                        self.RACK_TOP + capacity * self.RACK_UNIT_PITCH / 2.0,
+                    )
+                self._set_feature_tree_current("rack", payload)
+            else:
+                self._set_feature_tree_current("room", payload)
+            return
+        if kind == "device":
+            self._navigate_feature_device(_text(payload))
+            return
+        if kind in {"ports", "port"}:
+            instance_id = _text(payload[0] if kind == "port" else payload)
+            node = self.model.nodes.get(instance_id)
+            if node is None or not self._supports_port_view(node):
+                return
+            key = self._rack_group_key(instance_id)
+            self.rack_focus = (
+                (key[0], key[1], "__all__") if key != (0, "", "") else None
+            )
+            self.switch_port_focus = instance_id
+            self.rebuild_scene(fit=True)
+            if kind == "port":
+                port_name = _text(payload[1])
+                port_node_id = next(
+                    (
+                        node_id
+                        for node_id, port_node in self._switch_port_nodes_by_id.items()
+                        if _text(port_node.details.get("parent_instance_id")) == instance_id
+                        and _text(port_node.details.get("port_name")) == port_name
+                    ),
+                    "",
+                )
+                if port_node_id:
+                    self._card_activated(port_node_id)
+                self._set_feature_tree_current("port", payload)
+
+    def _navigate_feature_device(self, node_id: str) -> None:
+        node = self.model.nodes.get(node_id)
+        if node is None:
+            return
+        key = self._rack_group_key(node_id)
+        self.switch_port_focus = None
+        self.rack_focus = (
+            (key[0], key[1], "__all__") if key != (0, "", "") else None
+        )
+        if self.rack_focus is None and self.floor_combo.currentIndex() != 0:
+            self.floor_combo.setCurrentIndex(0)
+        self.rebuild_scene(fit=True)
+        target = self.node_items.get(node_id)
+        if target is not None:
+            self.scene.clearSelection()
+            target.setSelected(True)
+            self.view.centerOn(target)
+            self._show_node_details(node_id)
+        self._set_feature_tree_current("device", node_id)
+
+    def _set_feature_tree_current(self, kind: str, payload) -> None:
+        item = self._feature_tree_items.get((kind, payload))
+        if item is None:
+            return
+        self._feature_tree_updating = True
+        self.feature_tree.setCurrentItem(item)
+        parent = item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        self.feature_tree.scrollToItem(item)
+        self._feature_tree_updating = False
+
+    def _sync_feature_tree_selection(self) -> None:
+        if not hasattr(self, "feature_tree"):
+            return
+        if self.switch_port_focus is not None:
+            key = ("ports", _text(self.switch_port_focus))
+        elif self.rack_focus is not None:
+            key = ("room", (self.rack_focus[0], self.rack_focus[1]))
+        else:
+            key = ("topology", "root")
+        item = self._feature_tree_items.get(key)
+        if item is None:
+            return
+        self._set_feature_tree_current(*key)
 
     def _build_details_panel(self) -> QWidget:
         panel = QWidget()
@@ -4395,9 +4705,12 @@ class NetworkTopologyDialog(QDialog):
         if node is None:
             return
         if port_name and self._supports_port_view(node):
-            self.rack_focus = self._switch_group_key(instance_id)
-            if self.rack_focus == (0, "", ""):
-                self.rack_focus = None
+            rack_key = self._switch_group_key(instance_id)
+            self.rack_focus = (
+                (rack_key[0], rack_key[1], "__all__")
+                if rack_key != (0, "", "")
+                else None
+            )
             self.switch_port_focus = instance_id
             self.rebuild_scene(fit=True)
             port_node_id = next(
@@ -4415,7 +4728,7 @@ class NetworkTopologyDialog(QDialog):
         key = self._rack_group_key(instance_id)
         self.switch_port_focus = None
         if key != (0, "", ""):
-            self.rack_focus = key
+            self.rack_focus = (key[0], key[1], "__all__")
         else:
             self.rack_focus = None
         self.rebuild_scene(fit=True)
@@ -6475,7 +6788,7 @@ class NetworkTopologyDialog(QDialog):
                 self.switch_port_focus = None
         visible_ids = self._collect_visible()
         positions = self._layout_visible(visible_ids)
-        self._update_breadcrumb()
+        self._update_view_navigation()
         self._visible_failover_bus_nodes = set()
         visible_cross_edges = (
             self._visible_cross_edges(positions)
@@ -6774,7 +7087,7 @@ class NetworkTopologyDialog(QDialog):
             return (
                 f"Rack view: {equipment_count:,} installed equipment items · drag to move and snap · "
                 "Shift/Ctrl-click or Shift/Ctrl-drag for multi-selection"
-                " · Red ports are occupied, green ports are free · Click a port for details · Double-click a switch for its port view · Use the breadcrumb to return · Drag to pan · Wheel to zoom"
+                " · Red ports are occupied, green ports are free · Click a port for details · Double-click a switch for its port view · Use the feature tree to navigate · Drag to pan · Wheel to zoom"
             )
         hidden_patch_panels = (
             sum(1 for node in self.model.nodes.values() if node.asset_type == "patch_panel")
@@ -8466,6 +8779,13 @@ class NetworkTopologyDialog(QDialog):
         if node is not None and node.pseudo and node.role == "switch_port":
             self._select_front_panel_port(node_id)
             self._show_node_details(node_id)
+            self._set_feature_tree_current(
+                "port",
+                (
+                    _text(node.details.get("parent_instance_id")),
+                    _text(node.details.get("port_name")),
+                ),
+            )
             return
         item = self.node_items.get(node_id)
         modified_selection = bool(
@@ -8477,6 +8797,7 @@ class NetworkTopologyDialog(QDialog):
             item.setSelected(True)
         self._select_front_panel_port("")
         self._show_node_details(node_id)
+        self._sync_feature_tree_to_node(node_id)
 
     def _select_front_panel_port(self, port_node_id: str) -> None:
         parent_id = ""
@@ -8499,6 +8820,7 @@ class NetworkTopologyDialog(QDialog):
         if self.rack_focus is not None and rack_items:
             item = rack_items[0]
             self._show_node_details(item.node.node_id)
+            self._sync_feature_tree_to_node(item.node.node_id)
             count = len(rack_items)
             if count > 1:
                 self.status_label.setText(
@@ -8510,51 +8832,38 @@ class NetworkTopologyDialog(QDialog):
         if isinstance(item, TopologyCardItem):
             self._select_front_panel_port("")
             self._show_node_details(item.node.node_id)
+            self._sync_feature_tree_to_node(item.node.node_id)
 
-    def _rack_label(self, key: Tuple[int, str, str]) -> str:
-        floor, location, rack = key
-        if location and rack:
-            return f"{location} / {rack}"
-        if rack:
-            return rack
-        if location:
-            return location
-        return f"Floor {floor}"
+    def _sync_feature_tree_to_node(self, node_id: str) -> None:
+        node = self._node_for(node_id)
+        if node is None or node.pseudo:
+            return
+        if node.asset_type == "rack_cabinet":
+            key = self._rack_group_key(node_id)
+            if key != (0, "", ""):
+                self._set_feature_tree_current("rack", key)
+            return
+        self._set_feature_tree_current("device", node.node_id)
 
-    def _update_breadcrumb(self) -> None:
+    def _update_view_navigation(self) -> None:
         if self.switch_port_focus is not None:
-            node = self.model.nodes.get(self.switch_port_focus)
-            label = node.name if node is not None else self.switch_port_focus
-            if self.rack_focus is not None:
-                self.breadcrumb_button.setText(f"Topology / {self._rack_label(self.rack_focus)} / {label} ports")
-            else:
-                self.breadcrumb_button.setText(f"Topology / {label} ports")
-            self.breadcrumb_button.show()
             self.delete_cabinet_button.hide()
             self.floor_combo.setEnabled(False)
             self.show_clients_check.setEnabled(False)
+            self._sync_feature_tree_selection()
             return
         if self.rack_focus is None:
-            self.breadcrumb_button.hide()
             self.delete_cabinet_button.hide()
             self.floor_combo.setEnabled(True)
             self.show_clients_check.setEnabled(True)
+            self._sync_feature_tree_selection()
             return
-        self.breadcrumb_button.setText(f"Topology / {self._rack_label(self.rack_focus)}")
-        self.breadcrumb_button.show()
-        self.delete_cabinet_button.show()
+        # The room-wide elevation has no single selected cabinet. Individual
+        # occupied cabinets can still be deleted from an equipment context menu.
+        self.delete_cabinet_button.setVisible(self.rack_focus[2] != "__all__")
         self.floor_combo.setEnabled(False)
         self.show_clients_check.setEnabled(False)
-
-    def _exit_rack_view(self) -> None:
-        if self.switch_port_focus is not None:
-            self.switch_port_focus = None
-            self.rebuild_scene(fit=True)
-            return
-        if self.rack_focus is None:
-            return
-        self.rack_focus = None
-        self.rebuild_scene(fit=True)
+        self._sync_feature_tree_selection()
 
     def _open_selected_rack_view(self) -> None:
         node_id = _text(self.rack_view_button.property("node_id"))
@@ -8562,16 +8871,15 @@ class NetworkTopologyDialog(QDialog):
         if key == (0, "", ""):
             return
         self.switch_port_focus = None
-        self.rack_focus = key
+        self.rack_focus = (key[0], key[1], "__all__")
         self.rebuild_scene(fit=True)
 
     def _open_location_group_rack_view(self, floor: int, location: str, rack: str) -> None:
         rack_names = self._rack_names_for_location(int(floor), _text(location))
-        selected_rack = _text(rack) or (rack_names[0] if rack_names else "")
-        if not selected_rack:
+        if not (_text(rack) or rack_names):
             return
         self.switch_port_focus = None
-        self.rack_focus = (int(floor), _text(location), selected_rack)
+        self.rack_focus = (int(floor), _text(location), "__all__")
         self.rebuild_scene(fit=True)
 
     def _open_selected_room_view(self) -> None:
@@ -8616,19 +8924,19 @@ class NetworkTopologyDialog(QDialog):
             if parent is not None:
                 key = self._switch_group_key(parent_id)
                 if key != (0, "", ""):
-                    self.rack_focus = key
+                    self.rack_focus = (key[0], key[1], "__all__")
                     self.rebuild_scene(fit=True)
                     return
         if node is not None and node.asset_type == "rack_cabinet":
             key = self._rack_group_key(node_id)
             if key != (0, "", ""):
-                self.rack_focus = key
+                self.rack_focus = (key[0], key[1], "__all__")
                 self.rebuild_scene(fit=True)
                 return
         if node is not None and node.asset_type == "network_switch":
             key = self._switch_group_key(node_id)
             if key != (0, "", ""):
-                self.rack_focus = key
+                self.rack_focus = (key[0], key[1], "__all__")
                 self.rebuild_scene(fit=True)
                 return
         self.toggle_branch(node_id)
@@ -8959,15 +9267,25 @@ class NetworkTopologyDialog(QDialog):
     def _add_cabinet(self) -> None:
         default_location = ""
         default_floor = 0
+        keep_room_view = self.rack_focus is not None
         if self.rack_focus is not None:
             default_floor, default_location, _rack = self.rack_focus
         else:
-            for item in self.scene.selectedItems():
-                node = getattr(item, "node", None)
-                if node is not None and not node.pseudo and node.location_name:
-                    default_location = node.location_name
-                    default_floor = node.floor
-                    break
+            selected_features = self.feature_tree.selectedItems()
+            if selected_features:
+                feature = selected_features[0]
+                feature_kind = _text(feature.data(0, Qt.UserRole))
+                feature_payload = feature.data(0, Qt.UserRole + 1)
+                if feature_kind in {"location", "group", "room", "rack"}:
+                    default_floor, default_location = feature_payload[:2]
+                    keep_room_view = True
+            if not default_location:
+                for item in self.scene.selectedItems():
+                    node = getattr(item, "node", None)
+                    if node is not None and not node.pseudo and node.location_name:
+                        default_location = node.location_name
+                        default_floor = node.floor
+                        break
         locations = [row for row in self.data.get("locations", []) if isinstance(row, dict) and _text(row.get("name"))]
         if not default_location and locations:
             preferred = next((row for row in locations if _text(row.get("kind")).lower() in {"mer", "comms_room", "polan"}), locations[0])
@@ -8992,12 +9310,16 @@ class NetworkTopologyDialog(QDialog):
             QMessageBox.critical(self, "Duplicate cabinet", "A cabinet with that name already exists at the selected location.")
             return
         self.data.setdefault("network_racks", []).append(result)
-        # An empty cabinet belongs in the topology immediately. Return to the
-        # topology overview rather than opening a blank rack elevation, then
-        # select the generated rack card so its location is obvious.
-        self.rack_focus = None
+        # When adding from a room feature or room-wide elevation, open/keep that
+        # elevation so the new empty cabinet appears immediately.
+        # Adding from the topology still selects the generated rack card there.
+        self.rack_focus = (
+            (_int(result.get("floor")), _text(result.get("location_name")), "__all__")
+            if keep_room_view
+            else None
+        )
         self.switch_port_focus = None
-        if self.floor_combo.currentIndex() != 0:
+        if not keep_room_view and self.floor_combo.currentIndex() != 0:
             self.floor_combo.setCurrentIndex(0)
         self._commit_changes()
         rack_record_id = _text(result.get("id"))
@@ -9020,7 +9342,7 @@ class NetworkTopologyDialog(QDialog):
             ),
             "",
         )
-        item = self.node_items.get(rack_node_id)
+        item = self.node_items.get(rack_node_id) if not keep_room_view else None
         if item is not None:
             self.scene.clearSelection()
             item.setSelected(True)
@@ -9028,11 +9350,16 @@ class NetworkTopologyDialog(QDialog):
             self.view.centerOn(item)
         self.status_label.setText(
             f"Added empty cabinet {rack_name} at {rack_location or f'Floor {rack_floor}'}. "
-            "Double-click the rack card to open its rack view."
+            + (
+                "The room rack view now shows the new cabinet."
+                if keep_room_view
+                else "Double-click the rack card to open its room rack view."
+            )
         )
 
     def _delete_cabinet(self, rack_key: Optional[Tuple[int, str, str]] = None) -> None:
         """Delete a cabinet from rack view while protecting or removing its contents."""
+        keep_room_view = bool(self.rack_focus is not None and self.rack_focus[2] == "__all__")
         key = rack_key or self.rack_focus
         if key is None:
             QMessageBox.information(self, "Delete cabinet", "Open a rack view before deleting a cabinet.")
@@ -9130,8 +9457,11 @@ class NetworkTopologyDialog(QDialog):
             and _text(row.get("rack_name"))
         )
         if remaining_names:
-            next_rack = sorted(remaining_names, key=str.lower)[0]
-            self.rack_focus = (int(floor), _text(location), next_rack)
+            self.rack_focus = (
+                (int(floor), _text(location), "__all__")
+                if keep_room_view
+                else (int(floor), _text(location), sorted(remaining_names, key=str.lower)[0])
+            )
         else:
             self.rack_focus = None
         self.switch_port_focus = None
@@ -9172,7 +9502,7 @@ class NetworkTopologyDialog(QDialog):
         key = self._rack_group_key(instance_id)
         self.switch_port_focus = None
         if key != (0, "", ""):
-            self.rack_focus = key
+            self.rack_focus = (key[0], key[1], "__all__")
             self._link_draft["stage"] = f"{side}_rack_device"
             self.rebuild_scene(fit=True)
             self.status_label.setText(f"Add link: select {side} device {instance_id} in the rack, then select its port")
@@ -9672,8 +10002,7 @@ class NetworkTopologyDialog(QDialog):
             rows[instance_id]["rack_name"] = plan["rack_name"]
             rows[instance_id]["rack_start_u"] = plan["start_u"]
 
-        anchor_plan = plans.get(anchor_id, plans[ids[0]])
-        self.rack_focus = (floor, location, anchor_plan["rack_name"])
+        self.rack_focus = (floor, location, "__all__")
         self._commit_changes(refresh=False)
         self.model = TopologyModel(self.data)
         self._floor_match_cache.clear()
@@ -9734,7 +10063,7 @@ class NetworkTopologyDialog(QDialog):
             action = menu.exec(screen_pos)
             key = self._rack_group_key(node_id)
             if action == open_rack and key != (0, "", ""):
-                self.rack_focus = key
+                self.rack_focus = (key[0], key[1], "__all__")
                 self.switch_port_focus = None
                 self.rebuild_scene(fit=True)
             elif action == add_equipment:
@@ -9944,6 +10273,7 @@ class NetworkTopologyDialog(QDialog):
             ensure_network_schema(self.data)
         self.model = TopologyModel(self.data, normalise=False)
         self._build_runtime_indexes()
+        self._rebuild_feature_tree()
         self._floor_match_cache.clear()
         self._logical_children_cache.clear()
         self._collapsed_edge_cache.clear()

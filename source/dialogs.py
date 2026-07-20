@@ -101,6 +101,25 @@ def _safe_float(value, default=0.0):
         return float(default)
 
 
+class CheckableListWidget(QListWidget):
+    """A checklist whose full item row toggles the item's check state."""
+
+    def mousePressEvent(self, event):
+        item = self.itemAt(event.position().toPoint())
+        if (
+            event.button() == Qt.LeftButton
+            and item is not None
+            and item.flags() & Qt.ItemIsEnabled
+            and item.flags() & Qt.ItemIsUserCheckable
+        ):
+            item.setCheckState(
+                Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+            )
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class PointEditorDialog(QDialog):
     def __init__(self, parent, title, point_name, point):
         super().__init__(parent)
@@ -219,7 +238,7 @@ class LocationEditorDialog(QDialog):
             "Maximum cable distance represented by the possible room extent."
         )
 
-        self.departments_list = QListWidget()
+        self.departments_list = CheckableListWidget()
         self.departments_list.setSelectionMode(QAbstractItemView.NoSelection)
         selected = {
             str(x).strip() for x in location.get("department_ids", []) if str(x).strip()
@@ -458,7 +477,7 @@ class BulkLocationPlacementDialog(QDialog):
             "Maximum cable distance used for comms-room and DER extent previews."
         )
 
-        self.departments_list = QListWidget()
+        self.departments_list = CheckableListWidget()
         self.departments_list.setSelectionMode(QAbstractItemView.NoSelection)
 
         for row in self.department_options:
@@ -735,7 +754,7 @@ class DataPointEditorDialog(QDialog):
             )
         )
 
-        self.departments_list = QListWidget()
+        self.departments_list = CheckableListWidget()
         self.departments_list.setSelectionMode(QAbstractItemView.NoSelection)
 
         selected = {
@@ -7229,7 +7248,7 @@ class DataPointBulkEditDialog(QDialog):
         )
         form.addRow("Room type", room_type_row)
 
-        self.departments_list = QListWidget()
+        self.departments_list = CheckableListWidget()
         self.departments_list.setSelectionMode(QAbstractItemView.NoSelection)
         common_departments = common_value("department_ids", [])
         if not isinstance(common_departments, list):
