@@ -6,6 +6,7 @@ import subprocess
 import csv
 import pickle
 import shutil
+import time
 import zlib
 
 import heapq
@@ -2754,7 +2755,156 @@ class CableRouteEditor(QMainWindow):
         self._room_type_asset_review_dialog.raise_()
         self._room_type_asset_review_dialog.activateWindow()
 
+    def _room_type_asset_quantities(self, room_type):
+        quantities = {}
+        if not isinstance(room_type, dict):
+            return quantities
+        rows = room_type.get("assets", []) or []
+        if rows:
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                asset_id = str(row.get("asset_id", row.get("id", "")) or "").strip()
+                if not asset_id:
+                    continue
+                try:
+                    quantity = max(1, int(row.get("qty", 1) or 1))
+                except (TypeError, ValueError):
+                    quantity = 1
+                quantities[asset_id] = quantity
+            return quantities
+        for asset_id in room_type.get("asset_ids", []) or []:
+            asset_id = str(asset_id or "").strip()
+            if asset_id:
+                quantities[asset_id] = 1
+        return quantities
+
+    def _asset_audit_label(self, asset_id):
+        asset_id = str(asset_id or "").strip()
+        asset = next(
+            (
+                item
+                for item in self.store.data.get("assets", []) or []
+                if isinstance(item, dict)
+                and str(item.get("id", "") or "").strip() == asset_id
+            ),
+            {},
+        )
+        name = str(asset.get("name", "") or "").strip()
+        return f"{asset_id} ({name})" if name else asset_id
+
+    def _room_type_asset_requesters(self, room_type):
+        requesters = {}
+        if not isinstance(room_type, dict):
+            return requesters
+        for row in room_type.get("assets", []) or []:
+            if not isinstance(row, dict):
+                continue
+            asset_id = str(row.get("asset_id", row.get("id", "")) or "").strip()
+            if asset_id:
+                requesters[asset_id] = str(row.get("requested_by", "") or "").strip()
+        return requesters
+
+    def _room_assignment_change_details(
+        self,
+        before_quantities,
+        after_quantities,
+        before_ports=None,
+        after_ports=None,
+        before_requesters=None,
+        after_requesters=None,
+    ):
+        details = []
+        before_ports = dict(before_ports or {})
+        after_ports = dict(after_ports or {})
+        before_requesters = dict(before_requesters or {})
+        after_requesters = dict(after_requesters or {})
+        asset_ids = sorted(
+            set(before_quantities) | set(after_quantities), key=str.casefold
+        )
+        for asset_id in asset_ids:
+            label = self._asset_audit_label(asset_id)
+            if asset_id not in before_quantities:
+                requester = after_requesters.get(asset_id, "")
+                detail = f"added asset {label} with quantity {after_quantities[asset_id]}"
+                if requester:
+                    detail += f", requested by '{requester}'"
+                details.append(detail)
+            elif asset_id not in after_quantities:
+                requester = before_requesters.get(asset_id, "")
+                detail = f"removed asset {label} (previous quantity {before_quantities[asset_id]}"
+                if requester:
+                    detail += f", requested by '{requester}'"
+                details.append(detail + ")")
+            elif before_quantities[asset_id] != after_quantities[asset_id]:
+                details.append(
+                    f"changed {label} quantity from {before_quantities[asset_id]} "
+                    f"to {after_quantities[asset_id]}"
+                )
+            if (
+                asset_id in after_ports
+                and asset_id in before_ports
+                and before_ports[asset_id] != after_ports[asset_id]
+            ):
+                details.append(
+                    f"changed {label} data points each from {before_ports[asset_id]} "
+                    f"to {after_ports[asset_id]}"
+                )
+            if (
+                asset_id in before_quantities
+                and asset_id in after_quantities
+                and before_requesters.get(asset_id, "")
+                != after_requesters.get(asset_id, "")
+            ):
+                details.append(
+                    f"changed {label} requested by from "
+                    f"'{before_requesters.get(asset_id, '') or '(blank)'}' to "
+                    f"'{after_requesters.get(asset_id, '') or '(blank)'}'"
+                )
+        return details
+
+    def _record_room_type_change(self, source, room_type_id, room_type_name, details):
+        details = [str(detail).strip() for detail in details if str(detail).strip()]
+        if not details:
+            return
+        identity = str(room_type_id or "").strip() or "(no ID)"
+        name = str(room_type_name or "").strip()
+        label = f"{identity} - {name}" if name and name != identity else identity
+        summary = f"Room type {label}: " + "; ".join(details)
+        self.store.record_revision_change(
+            source,
+            summary,
+            room_type_id=identity,
+            details=details,
+        )
+
+    def _append_room_type_audit_history(
+        self, action, room_type_id, room_type_name, details
+    ):
+        details = [str(detail).strip() for detail in details if str(detail).strip()]
+        if not details:
+            return
+        state = self.store.data.setdefault(
+            "room_type_asset_rfi", {"queries": [], "history": []}
+        )
+        history = state.setdefault("history", [])
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "action": str(action or "room_type_modified").strip(),
+            "rfi_id": "",
+            "room_type_id": str(room_type_id or "").strip(),
+            "room_type_name": str(room_type_name or "").strip(),
+            "asset_id": "",
+            "asset_name": "",
+            "note": "; ".join(details),
+        }
+        history.append(entry)
+        dialog = getattr(self, "_room_type_asset_review_dialog", None)
+        if dialog is not None and isinstance(getattr(dialog, "rfi_state", None), dict):
+            dialog.rfi_state.setdefault("history", []).append(deepcopy(entry))
+
     def _save_room_type_asset_review_state(self, review_state):
+        before = deepcopy(self.store.data.get("room_type_asset_review", {}))
         self.push_undo_state("Update room type asset review")
         valid_ids = {
             str(room_type.get("id", "") or "").strip()
@@ -2766,6 +2916,33 @@ class CableRouteEditor(QMainWindow):
             for room_type_id, record in (review_state or {}).items()
             if str(room_type_id).strip() in valid_ids and isinstance(record, dict)
         }
+        after = self.store.data["room_type_asset_review"]
+        room_types_by_id = {
+            str(item.get("id", "") or "").strip(): item
+            for item in self.store.data.get("room_types", []) or []
+            if isinstance(item, dict) and str(item.get("id", "") or "").strip()
+        }
+        for room_type_id in sorted(set(before) | set(after), key=str.casefold):
+            was_complete = bool(
+                before.get(room_type_id, {}).get("complete", False)
+                if isinstance(before.get(room_type_id), dict)
+                else False
+            )
+            is_complete = bool(
+                after.get(room_type_id, {}).get("complete", False)
+                if isinstance(after.get(room_type_id), dict)
+                else False
+            )
+            if was_complete == is_complete:
+                continue
+            room_type = room_types_by_id.get(room_type_id, {})
+            detail = "marked asset review complete" if is_complete else "cleared asset review completion"
+            self._record_room_type_change(
+                "Room Type Asset Review",
+                room_type_id,
+                room_type.get("name", ""),
+                [detail],
+            )
         completed = sum(
             1
             for record in self.store.data["room_type_asset_review"].values()
@@ -2777,7 +2954,6 @@ class CableRouteEditor(QMainWindow):
         room_type_id = str(room_type_id or "").strip()
         if not room_type_id:
             return
-        self.push_undo_state("Update room type asset assignments")
         room_type = next(
             (
                 item
@@ -2786,6 +2962,22 @@ class CableRouteEditor(QMainWindow):
             ),
             None,
         )
+        before_quantities = self._room_type_asset_quantities(room_type)
+        before_requesters = self._room_type_asset_requesters(room_type)
+        before_ports = {}
+        for asset in self.store.data.get("assets", []) or []:
+            if not isinstance(asset, dict):
+                continue
+            asset_id = str(asset.get("id", "") or "").strip()
+            if not asset_id:
+                continue
+            try:
+                before_ports[asset_id] = max(
+                    0, int(asset.get("data_points", 0) or 0)
+                )
+            except (TypeError, ValueError):
+                before_ports[asset_id] = 0
+        self.push_undo_state("Update room type asset assignments")
         if isinstance(room_type, dict):
             cleaned_rows = []
             for row in asset_rows or []:
@@ -2798,7 +2990,11 @@ class CableRouteEditor(QMainWindow):
                     qty = int(row.get("qty", 1) or 1)
                 except (TypeError, ValueError):
                     qty = 1
-                cleaned_rows.append({"asset_id": asset_id, "qty": max(1, qty)})
+                cleaned_row = {"asset_id": asset_id, "qty": max(1, qty)}
+                requested_by = str(row.get("requested_by", "") or "").strip()
+                if requested_by:
+                    cleaned_row["requested_by"] = requested_by
+                cleaned_rows.append(cleaned_row)
             room_type["assets"] = cleaned_rows
             room_type["asset_ids"] = [row["asset_id"] for row in cleaned_rows]
 
@@ -2819,6 +3015,30 @@ class CableRouteEditor(QMainWindow):
                 ports = 0
             asset["data_points"] = max(0, ports)
 
+        after_quantities = self._room_type_asset_quantities(room_type)
+        after_requesters = self._room_type_asset_requesters(room_type)
+        after_ports = dict(before_ports)
+        for asset_id, ports in ports_by_asset.items():
+            try:
+                after_ports[asset_id] = max(0, int(ports or 0))
+            except (TypeError, ValueError):
+                after_ports[asset_id] = 0
+        details = self._room_assignment_change_details(
+            before_quantities,
+            after_quantities,
+            before_ports,
+            after_ports,
+            before_requesters,
+            after_requesters,
+        )
+        if isinstance(room_type, dict):
+            self._record_room_type_change(
+                "Room Type Asset Review",
+                room_type_id,
+                room_type.get("name", ""),
+                details,
+            )
+
         review_state = self.store.data.get("room_type_asset_review", {})
         if isinstance(review_state, dict):
             review_state.pop(room_type_id, None)
@@ -2826,6 +3046,12 @@ class CableRouteEditor(QMainWindow):
         self.set_status(f"Updated asset quantities and data ports for room type {room_type_id}")
 
     def _save_room_type_asset_rfi_state(self, rfi_state):
+        old_state = self.store.data.get("room_type_asset_rfi", {})
+        old_history = (
+            list(old_state.get("history", []) or [])
+            if isinstance(old_state, dict)
+            else []
+        )
         self.push_undo_state("Update room type asset RFI list")
         state = rfi_state if isinstance(rfi_state, dict) else {}
         self.store.data["room_type_asset_rfi"] = {
@@ -2840,6 +3066,26 @@ class CableRouteEditor(QMainWindow):
                 if isinstance(item, dict)
             ],
         }
+        new_history = self.store.data["room_type_asset_rfi"]["history"]
+        appended = new_history[len(old_history):] if new_history[:len(old_history)] == old_history else []
+        for item in appended:
+            action = str(item.get("action", "audit updated") or "audit updated").replace("_", " ")
+            asset_id = str(item.get("asset_id", "") or "").strip()
+            asset_name = str(item.get("asset_name", "") or "").strip()
+            subject = f" for asset {asset_id} ({asset_name})" if asset_id and asset_name else (f" for asset {asset_id}" if asset_id else "")
+            rfi_id = str(item.get("rfi_id", "") or "").strip()
+            reason = str(item.get("note", "") or "").strip()
+            detail = action + subject
+            if rfi_id:
+                detail += f" [{rfi_id}]"
+            if reason:
+                detail += f": {reason}"
+            self._record_room_type_change(
+                "Room Type Asset Review Audit",
+                item.get("room_type_id", ""),
+                item.get("room_type_name", ""),
+                [detail],
+            )
         outstanding = sum(
             1
             for item in self.store.data["room_type_asset_rfi"]["queries"]
@@ -10941,7 +11187,37 @@ class CableRouteEditor(QMainWindow):
             asset_categories_by_id=asset_categories_by_id,
         )
 
+    def _room_type_editor_change_details(self, before, after):
+        details = []
+        before = before if isinstance(before, dict) else {}
+        after = after if isinstance(after, dict) else {}
+        ignored = {"id", "assets", "asset_ids"}
+        labels = {"name": "name", "scenario_group": "scenario group"}
+        for key in sorted((set(before) | set(after)) - ignored, key=str.casefold):
+            old_value = before.get(key, "")
+            new_value = after.get(key, "")
+            if old_value == new_value:
+                continue
+            field = labels.get(key, str(key).replace("_", " "))
+            old_text = str(old_value).strip() or "(blank)"
+            new_text = str(new_value).strip() or "(blank)"
+            details.append(f"changed {field} from '{old_text}' to '{new_text}'")
+        details.extend(
+            self._room_assignment_change_details(
+                self._room_type_asset_quantities(before),
+                self._room_type_asset_quantities(after),
+                before_requesters=self._room_type_asset_requesters(before),
+                after_requesters=self._room_type_asset_requesters(after),
+            )
+        )
+        return details
+
     def _save_room_types(self, items):
+        before_items = [
+            deepcopy(item)
+            for item in self.store.data.get("room_types", []) or []
+            if isinstance(item, dict)
+        ]
         self.push_undo_state("Save room types")
         self.store.data["room_types"] = items
         valid_room_type_ids = {str(room_type.get("id", "") or "").strip() for room_type in items if str(room_type.get("id", "") or "").strip()}
@@ -10962,6 +11238,63 @@ class CableRouteEditor(QMainWindow):
                 ]
 
         self.store.sync_all_room_type_quantities()
+
+        before_by_id = {
+            str(item.get("id", "") or "").strip(): item
+            for item in before_items
+            if str(item.get("id", "") or "").strip()
+        }
+        after_by_id = {
+            str(item.get("id", "") or "").strip(): item
+            for item in items
+            if isinstance(item, dict) and str(item.get("id", "") or "").strip()
+        }
+        for room_type_id in sorted(set(before_by_id) | set(after_by_id), key=str.casefold):
+            before = before_by_id.get(room_type_id)
+            after = after_by_id.get(room_type_id)
+            if before is None:
+                details = ["added room type"]
+                details.extend(
+                    self._room_assignment_change_details(
+                        {},
+                        self._room_type_asset_quantities(after),
+                        before_requesters={},
+                        after_requesters=self._room_type_asset_requesters(after),
+                    )
+                )
+                action = "room_type_added"
+                subject = after
+            elif after is None:
+                details = ["deleted room type"]
+                details.extend(
+                    self._room_assignment_change_details(
+                        self._room_type_asset_quantities(before),
+                        {},
+                        before_requesters=self._room_type_asset_requesters(before),
+                        after_requesters={},
+                    )
+                )
+                action = "room_type_deleted"
+                subject = before
+            else:
+                details = self._room_type_editor_change_details(before, after)
+                action = "room_type_modified"
+                subject = after
+            if not details:
+                continue
+            room_type_name = str(subject.get("name", "") or "").strip()
+            self._record_room_type_change(
+                "Room Type Editor",
+                room_type_id,
+                room_type_name,
+                details,
+            )
+            self._append_room_type_audit_history(
+                action,
+                room_type_id,
+                room_type_name,
+                details,
+            )
 
         self.set_status("Room types updated and data point quantities recalculated")
         self.refresh_canvas()
@@ -15891,12 +16224,18 @@ class CableRouteEditor(QMainWindow):
             return qty
         return current_qty + qty
 
-    def _normalise_room_asset_rows_for_save(self, rows_by_asset_id):
-        return [
-            {"asset_id": asset_id, "qty": max(1, int(qty or 1))}
-            for asset_id, qty in sorted(rows_by_asset_id.items(), key=lambda item: item[0].casefold())
-            if str(asset_id).strip() and int(qty or 0) > 0
-        ]
+    def _normalise_room_asset_rows_for_save(self, rows_by_asset_id, requested_by_asset_id=None):
+        requested_by_asset_id = dict(requested_by_asset_id or {})
+        rows = []
+        for asset_id, qty in sorted(rows_by_asset_id.items(), key=lambda item: item[0].casefold()):
+            if not str(asset_id).strip() or int(qty or 0) <= 0:
+                continue
+            row = {"asset_id": asset_id, "qty": max(1, int(qty or 1))}
+            requested_by = str(requested_by_asset_id.get(asset_id, "") or "").strip()
+            if requested_by:
+                row["requested_by"] = requested_by
+            rows.append(row)
+        return rows
 
     def apply_room_type_asset_scenarios(self, scenario_result):
         scenarios = [dict(item) for item in scenario_result.get("scenarios", []) or []]
@@ -15953,12 +16292,20 @@ class CableRouteEditor(QMainWindow):
                     for row in self.store.room_type_asset_rows(room_type)
                     if str(row.get("asset_id", "") or "").strip()
                 }
+                requested_by_asset_id = {
+                    str(row.get("asset_id", "") or "").strip(): str(
+                        row.get("requested_by", "") or ""
+                    ).strip()
+                    for row in self.store.room_type_asset_rows(room_type)
+                    if str(row.get("asset_id", "") or "").strip()
+                }
 
                 if scenario_type == "replacement":
                     for asset_id in asset_ids:
                         current_qty = int(rows_by_asset_id.get(asset_id, 0) or 0)
                         if current_qty > 0:
                             rows_by_asset_id.pop(asset_id, None)
+                            requested_by_asset_id.pop(asset_id, None)
                             removed += 1
 
                     for replacement_asset_id in replacement_asset_ids:
@@ -15979,7 +16326,9 @@ class CableRouteEditor(QMainWindow):
                             changed_existing += 1
                         rows_by_asset_id[asset_id] = new_qty
 
-                rows = self._normalise_room_asset_rows_for_save(rows_by_asset_id)
+                rows = self._normalise_room_asset_rows_for_save(
+                    rows_by_asset_id, requested_by_asset_id
+                )
                 room_type["assets"] = rows
                 room_type["asset_ids"] = [row["asset_id"] for row in rows]
                 updated_room_type_ids.add(room_type_id)
@@ -16306,6 +16655,8 @@ class CableRouteEditor(QMainWindow):
                 if not room_type_id:
                     continue
 
+                room_type = room_types_by_id.get(room_type_id)
+                existing_requesters = self._room_type_asset_requesters(room_type)
                 asset_rows = []
 
                 for header in asset_columns:
@@ -16330,14 +16681,11 @@ class CableRouteEditor(QMainWindow):
                     if qty <= 0:
                         continue
 
-                    asset_rows.append(
-                        {
-                            "asset_id": asset_id,
-                            "qty": qty,
-                        }
-                    )
-
-                room_type = room_types_by_id.get(room_type_id)
+                    asset_row = {"asset_id": asset_id, "qty": qty}
+                    requested_by = existing_requesters.get(asset_id, "")
+                    if requested_by:
+                        asset_row["requested_by"] = requested_by
+                    asset_rows.append(asset_row)
 
                 if room_type is None:
                     room_type = {

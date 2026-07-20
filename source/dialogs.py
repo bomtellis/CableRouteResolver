@@ -3103,7 +3103,7 @@ class RoomTypeEditorDialog(QDialog):
 
         layout.addLayout(search_row)
 
-        self.assets_table = QTableWidget(0, 8)
+        self.assets_table = QTableWidget(0, 9)
         self.assets_table.setHorizontalHeaderLabels(
             [
                 "Use",
@@ -3111,6 +3111,7 @@ class RoomTypeEditorDialog(QDialog):
                 "Group",
                 "ADB_Code",
                 "Asset",
+                "Requested by",
                 "Data points each",
                 "Qty in room",
                 "Total",
@@ -3126,9 +3127,10 @@ class RoomTypeEditorDialog(QDialog):
         self.assets_table.setColumnWidth(2, 140)
         self.assets_table.setColumnWidth(3, 130)
         self.assets_table.setColumnWidth(4, 240)
-        self.assets_table.setColumnWidth(5, 120)
-        self.assets_table.setColumnWidth(6, 110)
-        self.assets_table.setColumnWidth(7, 100)
+        self.assets_table.setColumnWidth(5, 170)
+        self.assets_table.setColumnWidth(6, 120)
+        self.assets_table.setColumnWidth(7, 110)
+        self.assets_table.setColumnWidth(8, 100)
 
         grouped_assets = []
         for asset_id, asset_name in self.asset_options:
@@ -3157,7 +3159,7 @@ class RoomTypeEditorDialog(QDialog):
 
                 category_item = QTableWidgetItem(str(category_name))
                 category_item.setFlags(Qt.ItemIsEnabled)
-                self.assets_table.setSpan(row, 0, 1, 8)
+                self.assets_table.setSpan(row, 0, 1, 9)
                 self.assets_table.setItem(row, 0, category_item)
                 self._asset_category_header_rows[str(category_name)] = row
 
@@ -3172,6 +3174,9 @@ class RoomTypeEditorDialog(QDialog):
             ).strip()
             dp = int(asset.get("data_points", 1))
             room_qty = int(self.asset_rows_by_id.get(asset_id, {}).get("qty", 1) or 1)
+            requested_by = str(
+                self.asset_rows_by_id.get(asset_id, {}).get("requested_by", "") or ""
+            ).strip()
             checked = asset_id in self.asset_rows_by_id
 
             row = self.assets_table.rowCount()
@@ -3187,15 +3192,18 @@ class RoomTypeEditorDialog(QDialog):
             self.assets_table.setItem(row, 2, QTableWidgetItem(group))
             self.assets_table.setItem(row, 3, QTableWidgetItem(adb_code))
             self.assets_table.setItem(row, 4, QTableWidgetItem(str(asset_name)))
-            self.assets_table.setItem(row, 5, QTableWidgetItem(str(dp)))
+            requested_by_edit = QLineEdit(requested_by)
+            requested_by_edit.setPlaceholderText("Name or team")
+            self.assets_table.setCellWidget(row, 5, requested_by_edit)
+            self.assets_table.setItem(row, 6, QTableWidgetItem(str(dp)))
 
             qty_spin = QSpinBox()
             qty_spin.setRange(1, 100000)
             qty_spin.setValue(room_qty)
             qty_spin.valueChanged.connect(self._refresh_total)
-            self.assets_table.setCellWidget(row, 6, qty_spin)
+            self.assets_table.setCellWidget(row, 7, qty_spin)
 
-            self.assets_table.setItem(row, 7, QTableWidgetItem(str(room_qty * dp)))
+            self.assets_table.setItem(row, 8, QTableWidgetItem(str(room_qty * dp)))
 
             self._asset_table_rows.append(
                 {
@@ -3210,6 +3218,7 @@ class RoomTypeEditorDialog(QDialog):
                             str(adb_code),
                             str(group),
                             str(category_name),
+                            requested_by,
                         )
                     ).casefold(),
                 }
@@ -3282,6 +3291,7 @@ class RoomTypeEditorDialog(QDialog):
                 result[asset_id] = {
                     "asset_id": asset_id,
                     "qty": int(row.get("qty", 1) or 1),
+                    "requested_by": str(row.get("requested_by", "") or "").strip(),
                 }
 
         for asset_id in self.seed.get("asset_ids", []) or []:
@@ -3311,15 +3321,19 @@ class RoomTypeEditorDialog(QDialog):
             if not asset_id:
                 continue
 
-            qty_spin = self.assets_table.cellWidget(row, 6)
+            requested_by_edit = self.assets_table.cellWidget(row, 5)
+            qty_spin = self.assets_table.cellWidget(row, 7)
             qty = int(qty_spin.value()) if qty_spin is not None else 1
 
-            result.append(
-                {
-                    "asset_id": asset_id,
-                    "qty": qty,
-                }
+            asset_row = {"asset_id": asset_id, "qty": qty}
+            requested_by = (
+                requested_by_edit.text().strip()
+                if isinstance(requested_by_edit, QLineEdit)
+                else ""
             )
+            if requested_by:
+                asset_row["requested_by"] = requested_by
+            result.append(asset_row)
 
         return result
 
@@ -3335,8 +3349,8 @@ class RoomTypeEditorDialog(QDialog):
                 if use_item is None or use_item.data(Qt.UserRole) is None:
                     continue
 
-                dp_item = self.assets_table.item(row, 5)
-                qty_widget = self.assets_table.cellWidget(row, 6)
+                dp_item = self.assets_table.item(row, 6)
+                qty_widget = self.assets_table.cellWidget(row, 7)
 
                 if dp_item is None or qty_widget is None:
                     continue
@@ -3349,10 +3363,10 @@ class RoomTypeEditorDialog(QDialog):
                     row_total = dp * qty
                     total += row_total
 
-                total_item = self.assets_table.item(row, 7)
+                total_item = self.assets_table.item(row, 8)
                 if total_item is None:
                     total_item = QTableWidgetItem("0")
-                    self.assets_table.setItem(row, 7, total_item)
+                    self.assets_table.setItem(row, 8, total_item)
 
                 total_item.setText(str(row_total))
         finally:
@@ -3764,7 +3778,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         self.status_label = QLabel()
         detail_layout.addWidget(self.status_label)
 
-        self.asset_table = QTableWidget(0, 8)
+        self.asset_table = QTableWidget(0, 9)
         self.asset_table.setHorizontalHeaderLabels(
             [
                 "Asset ID",
@@ -3772,6 +3786,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
                 "Category",
                 "Group",
                 "ADB_Code",
+                "Requested by",
                 "Qty",
                 "Data points each",
                 "Total",
@@ -3785,9 +3800,10 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         self.asset_table.setColumnWidth(2, 150)
         self.asset_table.setColumnWidth(3, 130)
         self.asset_table.setColumnWidth(4, 120)
-        self.asset_table.setColumnWidth(5, 70)
-        self.asset_table.setColumnWidth(6, 115)
-        self.asset_table.setColumnWidth(7, 80)
+        self.asset_table.setColumnWidth(5, 170)
+        self.asset_table.setColumnWidth(6, 70)
+        self.asset_table.setColumnWidth(7, 115)
+        self.asset_table.setColumnWidth(8, 80)
         detail_layout.addWidget(self.asset_table, 1)
 
         self.summary_label = QLabel()
@@ -3859,7 +3875,13 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
                 continue
             asset_id = self._text(row.get("asset_id", row.get("id", "")))
             if asset_id:
-                rows.append({"asset_id": asset_id, "qty": max(1, int(row.get("qty", 1) or 1))})
+                rows.append(
+                    {
+                        "asset_id": asset_id,
+                        "qty": max(1, int(row.get("qty", 1) or 1)),
+                        "requested_by": self._text(row.get("requested_by", "")),
+                    }
+                )
         if rows:
             return sorted(rows, key=lambda row: self._natural_key(row["asset_id"]))
         return sorted(
@@ -3876,6 +3898,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             [
                 row["asset_id"],
                 row["qty"],
+                self._text(row.get("requested_by", "")),
                 max(0, _safe_int(self.assets_by_id.get(row["asset_id"], {}).get("data_points", 1), 0)),
             ]
             for row in self._room_asset_rows(room_type)
@@ -3980,6 +4003,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
                 category or "-",
                 self._text(asset.get("Group", asset.get("group", ""))) or "-",
                 self._text(asset.get("ADB_Code", asset.get("adb_code", ""))) or "-",
+                self._text(asset_row.get("requested_by", "")),
                 qty,
                 data_points,
                 total,
@@ -3988,17 +4012,22 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             self.asset_table.insertRow(row)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
-                if column in {7}:
+                if column in {8}:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.asset_table.setItem(row, column, item)
             qty_spin = self._spinbox(qty, 1)
             ports_spin = self._spinbox(data_points, 0)
-            self.asset_table.setCellWidget(row, 5, qty_spin)
-            self.asset_table.setCellWidget(row, 6, ports_spin)
+            requested_by_edit = QLineEdit(self._text(asset_row.get("requested_by", "")))
+            requested_by_edit.setPlaceholderText("Name or team")
+            requested_by_edit.textChanged.connect(self._asset_values_changed)
+            self.asset_table.setCellWidget(row, 5, requested_by_edit)
+            self.asset_table.setCellWidget(row, 6, qty_spin)
+            self.asset_table.setCellWidget(row, 7, ports_spin)
             self._asset_row_widgets.append(
                 {
                     "row": row,
                     "asset_id": asset_id,
+                    "requested_by_edit": requested_by_edit,
                     "qty_spin": qty_spin,
                     "ports_spin": ports_spin,
                 }
@@ -4007,7 +4036,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         if not rows:
             self.asset_table.insertRow(0)
             self.asset_table.setItem(0, 0, QTableWidgetItem("No assets assigned"))
-            self.asset_table.setSpan(0, 0, 1, 8)
+            self.asset_table.setSpan(0, 0, 1, 9)
 
         self.summary_label.setText(
             f"{len(rows)} asset line(s) | {total_assets} asset instance(s) per room type | {total_points} data point(s) per room type"
@@ -4027,11 +4056,11 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             total = qty * ports
             total_assets += qty
             total_points += total
-            total_item = self.asset_table.item(int(metadata["row"]), 7)
+            total_item = self.asset_table.item(int(metadata["row"]), 8)
             if total_item is None:
                 total_item = QTableWidgetItem("0")
                 total_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                self.asset_table.setItem(int(metadata["row"]), 7, total_item)
+                self.asset_table.setItem(int(metadata["row"]), 8, total_item)
             total_item.setText(str(total))
         self.summary_label.setText(
             f"{len(self._asset_row_widgets)} asset line(s) | {total_assets} asset instance(s) per room type | {total_points} data point(s) per room type"
@@ -4047,7 +4076,11 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
                 continue
             qty = max(1, int(metadata["qty_spin"].value()))
             ports = max(0, int(metadata["ports_spin"].value()))
-            asset_rows.append({"asset_id": asset_id, "qty": qty})
+            asset_row = {"asset_id": asset_id, "qty": qty}
+            requested_by = self._text(metadata["requested_by_edit"].text())
+            if requested_by:
+                asset_row["requested_by"] = requested_by
+            asset_rows.append(asset_row)
             data_ports_by_asset_id[asset_id] = ports
         return asset_rows, data_ports_by_asset_id
 
@@ -4311,7 +4344,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.setWindowTitle("Room Type Asset Review and RFI")
         self.resize(1380, 760)
         self.room_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.asset_table.setColumnCount(10)
+        self.asset_table.setColumnCount(11)
         self.asset_table.setHorizontalHeaderLabels(
             [
                 "Asset ID",
@@ -4319,6 +4352,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                 "Category",
                 "Group",
                 "ADB_Code",
+                "Requested by",
                 "Qty",
                 "Data points each",
                 "Total",
@@ -4326,8 +4360,8 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                 "RFI queries",
             ]
         )
-        self.asset_table.setColumnWidth(8, 120)
-        self.asset_table.setColumnWidth(9, 320)
+        self.asset_table.setColumnWidth(9, 120)
+        self.asset_table.setColumnWidth(10, 320)
 
         action_row = QHBoxLayout()
         self.add_asset_button = QPushButton("Add Asset...")
@@ -4553,14 +4587,14 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                 f"{self._text(item.get('id'))}: {self._text(item.get('reason'))}"
                 for item in outstanding
             )
-            self.asset_table.setItem(row, 8, QTableWidgetItem(rfi_ids))
-            self.asset_table.setItem(row, 9, QTableWidgetItem(reasons))
+            self.asset_table.setItem(row, 9, QTableWidgetItem(rfi_ids))
+            self.asset_table.setItem(row, 10, QTableWidgetItem(reasons))
             if outstanding:
-                self.asset_table.item(row, 8).setBackground(Qt.GlobalColor.yellow)
                 self.asset_table.item(row, 9).setBackground(Qt.GlobalColor.yellow)
+                self.asset_table.item(row, 10).setBackground(Qt.GlobalColor.yellow)
         if not self._asset_row_widgets and self.asset_table.rowCount():
             self.asset_table.clearSpans()
-            self.asset_table.setSpan(0, 0, 1, 10)
+            self.asset_table.setSpan(0, 0, 1, 11)
         self.add_asset_button.setEnabled(bool(self.assets_by_id))
         self.remove_asset_button.setEnabled(bool(self._asset_row_widgets))
         self.query_button.setEnabled(bool(self._asset_row_widgets))
@@ -4593,20 +4627,80 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                 self, "Add Asset", "All configured assets are already assigned."
             )
             return
-        label, accepted = QInputDialog.getItem(
-            self, "Add Asset", "Asset", [row[1] for row in choices], 0, False
-        )
-        if not accepted:
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Asset")
+        dialog.setMinimumWidth(560)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Asset"))
+
+        asset_combo = QComboBox()
+        asset_combo.setEditable(True)
+        asset_combo.setInsertPolicy(QComboBox.NoInsert)
+        asset_combo.setMaxVisibleItems(20)
+        asset_combo.setPlaceholderText("Type an asset ID or description")
+        for asset_id, display in choices:
+            asset_combo.addItem(display, asset_id)
+        asset_combo.setCurrentIndex(-1)
+
+        proxy_model = QSortFilterProxyModel(asset_combo)
+        proxy_model.setSourceModel(asset_combo.model())
+        proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        proxy_model.setFilterKeyColumn(0)
+
+        completer = QCompleter(proxy_model, asset_combo)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        asset_combo.setCompleter(completer)
+        asset_combo.lineEdit().textEdited.connect(proxy_model.setFilterFixedString)
+        layout.addWidget(asset_combo)
+
+        hint = QLabel("Start typing to search the unassigned assets, then choose a suggestion.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        layout.addWidget(QLabel("Requested by"))
+        requested_by_edit = QLineEdit()
+        requested_by_edit.setPlaceholderText("Name or team")
+        layout.addWidget(requested_by_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+        labels_to_ids = {display.casefold(): asset_id for asset_id, display in choices}
+        ids_to_ids = {asset_id.casefold(): asset_id for asset_id, _display in choices}
+
+        def selected_asset_id():
+            text = self._text(asset_combo.currentText()).casefold()
+            return labels_to_ids.get(text, ids_to_ids.get(text, ""))
+
+        def update_ok_button(*_):
+            ok_button.setEnabled(bool(selected_asset_id()))
+
+        asset_combo.currentTextChanged.connect(update_ok_button)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        update_ok_button()
+        asset_combo.setFocus()
+
+        if dialog.exec() != QDialog.Accepted:
             return
-        asset_id = dict((display, key) for key, display in choices).get(label, "")
+        asset_id = selected_asset_id()
+        if not asset_id:
+            return
         asset = self.assets_by_id.get(asset_id, {})
+        requested_by = self._text(requested_by_edit.text())
         reason = self._required_reason(
             "Add Asset",
             f"Why is {asset_id} being added to {self._room_option_label(room_type)}?",
         )
-        if not asset_id or not reason:
+        if not reason:
             return
-        rows = self._room_asset_rows(room_type) + [{"asset_id": asset_id, "qty": 1}]
+        added_row = {"asset_id": asset_id, "qty": 1}
+        if requested_by:
+            added_row["requested_by"] = requested_by
+        rows = self._room_asset_rows(room_type) + [added_row]
         rows.sort(key=lambda row: self._natural_key(row["asset_id"]))
         room_type["assets"] = rows
         room_type["asset_ids"] = [row["asset_id"] for row in rows]
@@ -4619,7 +4713,10 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             room_type=room_type,
             asset_id=asset_id,
             asset_name=asset.get("name", ""),
-            note=reason,
+            note=(
+                f"Added with quantity 1, requested by "
+                f"{requested_by or '(blank)'}. Reason: {reason}"
+            ),
         )
         self._emit_rfi_changed()
         self._emit_state_changed()
@@ -4633,6 +4730,9 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             return
         asset_id = self._text(metadata.get("asset_id"))
         asset = self.assets_by_id.get(asset_id, {})
+        previous_quantity = int(metadata["qty_spin"].value())
+        previous_ports = int(metadata["ports_spin"].value())
+        previous_requested_by = self._text(metadata["requested_by_edit"].text())
         if QMessageBox.question(
             self,
             "Remove Asset",
@@ -4657,7 +4757,11 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             room_type=room_type,
             asset_id=asset_id,
             asset_name=asset.get("name", ""),
-            note=reason,
+            note=(
+                f"Removed (previous quantity {previous_quantity}, data points each "
+                f"{previous_ports}, requested by "
+                f"{previous_requested_by or '(blank)'}). Reason: {reason}"
+            ),
         )
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         for query in self._outstanding_queries(room_type_id, asset_id):
@@ -4812,6 +4916,32 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         if self.on_export_rfi:
             self.on_export_rfi()
 
+    def _mark_complete(self):
+        room_type = self._current_room_type()
+        room_type_id = self._room_id(room_type or {})
+        was_complete = self._is_complete(room_type_id)
+        super()._mark_complete()
+        if room_type and not was_complete and self._is_complete(room_type_id):
+            self._append_rfi_history(
+                "review_marked_complete",
+                room_type=room_type,
+                note="Asset assignment review marked complete.",
+            )
+            self._emit_rfi_changed()
+
+    def _clear_complete(self):
+        room_type = self._current_room_type()
+        room_type_id = self._room_id(room_type or {})
+        was_complete = self._is_complete(room_type_id)
+        super()._clear_complete()
+        if room_type and was_complete and not self._is_complete(room_type_id):
+            self._append_rfi_history(
+                "review_completion_cleared",
+                room_type=room_type,
+                note="Asset assignment review completion was cleared.",
+            )
+            self._emit_rfi_changed()
+
     def _copy_assets_between_room_types(self):
         if self._dirty:
             self._apply_changes()
@@ -4879,27 +5009,137 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
     def _copy_asset_assignments(
         self, source_index, target_index, reason="Copied from another room type."
     ):
+        before_rows = {}
+        if 0 <= target_index < len(self.room_types):
+            before_rows = {
+                row["asset_id"]: {
+                    "qty": int(row.get("qty", 1) or 1),
+                    "requested_by": self._text(row.get("requested_by", "")),
+                }
+                for row in self._room_asset_rows(self.room_types[target_index])
+            }
         copied = super()._copy_asset_assignments(source_index, target_index)
         if copied and 0 <= target_index < len(self.room_types):
-            self._append_rfi_history(
-                "assignments_replaced",
-                room_type=self.room_types[target_index],
-                note=reason,
-            )
+            target = self.room_types[target_index]
+            after_rows = {
+                row["asset_id"]: {
+                    "qty": int(row.get("qty", 1) or 1),
+                    "requested_by": self._text(row.get("requested_by", "")),
+                }
+                for row in self._room_asset_rows(target)
+            }
+            for asset_id in sorted(set(before_rows) | set(after_rows), key=str.casefold):
+                asset = self.assets_by_id.get(asset_id, {})
+                if asset_id not in before_rows:
+                    note = (
+                        f"Added with quantity {after_rows[asset_id]['qty']} and requested by "
+                        f"{after_rows[asset_id]['requested_by'] or '(blank)'} during replacement. "
+                        f"Reason: {reason}"
+                    )
+                elif asset_id not in after_rows:
+                    note = (
+                        f"Removed (previous quantity {before_rows[asset_id]['qty']}, requested by "
+                        f"{before_rows[asset_id]['requested_by'] or '(blank)'}) during replacement. "
+                        f"Reason: {reason}"
+                    )
+                else:
+                    changes = []
+                    if before_rows[asset_id]["qty"] != after_rows[asset_id]["qty"]:
+                        changes.append(
+                            f"quantity changed from {before_rows[asset_id]['qty']} "
+                            f"to {after_rows[asset_id]['qty']}"
+                        )
+                    if before_rows[asset_id]["requested_by"] != after_rows[asset_id]["requested_by"]:
+                        changes.append(
+                            f"requested by changed from {before_rows[asset_id]['requested_by'] or '(blank)'} "
+                            f"to {after_rows[asset_id]['requested_by'] or '(blank)'}"
+                        )
+                    if not changes:
+                        continue
+                    note = "; ".join(changes) + f" during replacement. Reason: {reason}"
+                self._append_rfi_history(
+                    "assignments_replaced",
+                    room_type=target,
+                    asset_id=asset_id,
+                    asset_name=asset.get("name", ""),
+                    note=note,
+                )
             self._emit_rfi_changed()
         return copied
 
     def _apply_changes(self):
         changed = bool(self._dirty)
         room_type = self._current_room_type()
+        before_quantities = {
+            row["asset_id"]: int(row.get("qty", 1) or 1)
+            for row in self._room_asset_rows(room_type or {})
+        }
+        before_requesters = {
+            row["asset_id"]: self._text(row.get("requested_by", ""))
+            for row in self._room_asset_rows(room_type or {})
+        }
+        before_ports = {
+            asset_id: max(
+                0,
+                _safe_int(self.assets_by_id.get(asset_id, {}).get("data_points", 0), 0),
+            )
+            for asset_id in before_quantities
+        }
+        after_rows, after_ports = self._current_assignment_values()
+        after_quantities = {
+            row["asset_id"]: int(row.get("qty", 1) or 1) for row in after_rows
+        }
+        after_requesters = {
+            row["asset_id"]: self._text(row.get("requested_by", ""))
+            for row in after_rows
+        }
         super()._apply_changes()
         if changed and room_type:
-            self._append_rfi_history(
-                "assignment_values_updated",
-                room_type=room_type,
-                note="Asset quantities or data points were updated in the review.",
-            )
-            self._emit_rfi_changed()
+            history_changed = False
+            for asset_id in sorted(
+                set(before_quantities) | set(after_quantities), key=str.casefold
+            ):
+                changes = []
+                if (
+                    asset_id in before_quantities
+                    and asset_id in after_quantities
+                    and before_quantities[asset_id] != after_quantities[asset_id]
+                ):
+                    changes.append(
+                        f"quantity changed from {before_quantities[asset_id]} "
+                        f"to {after_quantities[asset_id]}"
+                    )
+                if (
+                    asset_id in before_ports
+                    and asset_id in after_ports
+                    and before_ports[asset_id] != after_ports[asset_id]
+                ):
+                    changes.append(
+                        f"data points each changed from {before_ports[asset_id]} "
+                        f"to {after_ports[asset_id]}"
+                    )
+                if (
+                    asset_id in before_requesters
+                    and asset_id in after_requesters
+                    and before_requesters[asset_id] != after_requesters[asset_id]
+                ):
+                    changes.append(
+                        f"requested by changed from {before_requesters[asset_id] or '(blank)'} "
+                        f"to {after_requesters[asset_id] or '(blank)'}"
+                    )
+                if not changes:
+                    continue
+                asset = self.assets_by_id.get(asset_id, {})
+                self._append_rfi_history(
+                    "assignment_values_updated",
+                    room_type=room_type,
+                    asset_id=asset_id,
+                    asset_name=asset.get("name", ""),
+                    note="; ".join(changes),
+                )
+                history_changed = True
+            if history_changed:
+                self._emit_rfi_changed()
 
 
 class ScenarioGroupManagerDialog(QDialog):

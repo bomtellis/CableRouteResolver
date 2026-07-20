@@ -1,7 +1,9 @@
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timezone
 import re
+from uuid import uuid4
 
 from project_sqlite import (
     AUTO_COMPACT_MIN_FREE_BYTES,
@@ -132,6 +134,13 @@ class JsonStore:
                 rfi_state[key] = [
                     dict(item) for item in rfi_state[key] if isinstance(item, dict)
                 ]
+        revision_change_log = self.data.get("revision_change_log")
+        if revision_change_log is not None and not isinstance(revision_change_log, list):
+            self.data.pop("revision_change_log", None)
+        elif isinstance(revision_change_log, list):
+            self.data["revision_change_log"] = [
+                dict(item) for item in revision_change_log if isinstance(item, dict)
+            ]
         self.data.setdefault("room_type_scenario_groups", [])
         self.data.setdefault("asset_scenario_groups", [])
         self.data.setdefault("room_type_asset_scenarios", [])
@@ -154,6 +163,7 @@ class JsonStore:
             settings["scale"] = max(10, min(5000, int(settings.get("scale", 100) or 100)))
         except (TypeError, ValueError):
             settings["scale"] = 100
+
         self.data.setdefault("connections", [])
         self.data.setdefault("route_profiles", deepcopy(DEFAULT_JSON["route_profiles"]))
 
@@ -370,12 +380,14 @@ class JsonStore:
                     asset_id = str(row.get("asset_id", row.get("id", ""))).strip()
                     if not asset_id:
                         continue
-                    cleaned_assets.append(
-                        {
-                            "asset_id": asset_id,
-                            "qty": int(row.get("qty", 1) or 1),
-                        }
-                    )
+                    cleaned_row = {
+                        "asset_id": asset_id,
+                        "qty": int(row.get("qty", 1) or 1),
+                    }
+                    requested_by = str(row.get("requested_by", "") or "").strip()
+                    if requested_by:
+                        cleaned_row["requested_by"] = requested_by
+                    cleaned_assets.append(cleaned_row)
                 room_type["assets"] = cleaned_assets
 
             room_type["asset_ids"] = [
@@ -417,6 +429,30 @@ class JsonStore:
             ]
 
         self._normalise_scenario_group_definitions()
+
+    def record_revision_change(
+        self,
+        source: str,
+        summary: str,
+        *,
+        room_type_id: str = "",
+        details=None,
+    ) -> dict:
+        """Append an exact, persistent change event for the next saved revision."""
+        entry = {
+            "id": uuid4().hex,
+            "created_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "source": str(source or "Project").strip() or "Project",
+            "summary": str(summary or "").strip(),
+            "room_type_id": str(room_type_id or "").strip(),
+            "details": [
+                str(detail).strip()
+                for detail in (details or [])
+                if str(detail).strip()
+            ],
+        }
+        self.data.setdefault("revision_change_log", []).append(entry)
+        return entry
 
     def _normalise_group_collection(self, collection_key: str, member_key: str, valid_member_ids, legacy_members_by_group=None) -> None:
         valid_ids = {str(member_id).strip() for member_id in valid_member_ids if str(member_id).strip()}
@@ -1680,7 +1716,11 @@ class JsonStore:
             if not asset_id:
                 continue
             qty = max(1, self._safe_int(row.get("qty", 1), 1))
-            rows.append({"asset_id": asset_id, "qty": qty})
+            normalised = {"asset_id": asset_id, "qty": qty}
+            requested_by = str(row.get("requested_by", "") or "").strip()
+            if requested_by:
+                normalised["requested_by"] = requested_by
+            rows.append(normalised)
             seen.add(asset_id)
 
         for asset_id in room_type.get("asset_ids", []) or []:

@@ -285,6 +285,7 @@ class SQLiteProjectFile:
             "room_types": "room types",
             "room_type_asset_review": "room type asset review",
             "room_type_asset_rfi": "room type asset RFI list",
+            "revision_change_log": "detailed change log",
             "room_type_scenario_groups": "room type scenario groups",
             "asset_scenario_groups": "asset scenario groups",
             "room_type_asset_scenarios": "room type asset scenarios",
@@ -314,16 +315,20 @@ class SQLiteProjectFile:
         deleted_sections: Iterable[str],
         changed_chunks: int,
         deleted_chunks: int,
+        detailed_changes: Iterable[str] = (),
     ) -> str:
         changed = sorted({cls._section_label(section) for section in changed_sections})
         deleted = sorted({cls._section_label(section) for section in deleted_sections})
+        exact = [_text(item) for item in detailed_changes if _text(item)]
         if not had_existing_project:
             if changed:
                 shown = ", ".join(changed[:8])
                 if len(changed) > 8:
                     shown += f", and {len(changed) - 8} more section(s)"
-                return f"Initial project save with {changed_chunks} section chunk(s): {shown}."
-            return "Initial project save."
+                base = f"Initial project save with {changed_chunks} section chunk(s): {shown}."
+            else:
+                base = "Initial project save."
+            return " | ".join(exact + [base]) if exact else base
 
         parts = []
         if changed:
@@ -339,7 +344,8 @@ class SQLiteProjectFile:
         chunk_text = f"{changed_chunks} changed chunk(s)"
         if deleted_chunks:
             chunk_text += f", {deleted_chunks} deleted chunk(s)"
-        return "; ".join(parts) + f". {chunk_text}."
+        base = "; ".join(parts) + f". {chunk_text}."
+        return " | ".join(exact + [base]) if exact else base
 
     def load(self) -> dict:
         if not self.path.exists():
@@ -507,6 +513,8 @@ class SQLiteProjectFile:
         deleted_chunks = 0
         changed_sections: set[str] = set()
         deleted_sections: set[str] = set()
+        existing_change_ids: set[str] = set()
+        detailed_changes: List[str] = []
         revision_number = 0
         revision_notes = ""
         revision_created = False
@@ -519,6 +527,32 @@ class SQLiteProjectFile:
                     "SELECT section_key, chunk_index, payload_hash FROM project_sections"
                 )
             }
+            for (payload,) in connection.execute(
+                """
+                SELECT payload FROM project_sections
+                WHERE section_key = 'revision_change_log'
+                ORDER BY chunk_index
+                """
+            ):
+                rows = _unpack(payload)
+                if not isinstance(rows, list):
+                    continue
+                existing_change_ids.update(
+                    _text(item.get("id"))
+                    for item in rows
+                    if isinstance(item, dict) and _text(item.get("id"))
+                )
+            for item in data.get("revision_change_log", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                event_id = _text(item.get("id"))
+                if event_id and event_id in existing_change_ids:
+                    continue
+                summary = _text(item.get("summary"))
+                if not summary:
+                    continue
+                source = _text(item.get("source"))
+                detailed_changes.append(f"{source}: {summary}" if source else summary)
             seen: set[Tuple[str, int]] = set()
             ordinal_by_section: Dict[str, int] = {}
 
@@ -652,6 +686,7 @@ class SQLiteProjectFile:
                         deleted_sections=deleted_sections,
                         changed_chunks=changed_chunks,
                         deleted_chunks=deleted_chunks,
+                        detailed_changes=detailed_changes,
                     )
                     connection.execute(
                         """
