@@ -1,0 +1,3887 @@
+{
+  "format": "cable-route-resolver-asset-pack",
+  "version": 1,
+  "library_type": "assets",
+  "name": "Repeatable Rooms Common Assets",
+  "assets": [
+    {
+      "id": "CRA-001",
+      "name": "AMR Call Point",
+      "ADB_Code": "",
+      "Group": "Robotics & Automated Logistics",
+      "scenario_group": "",
+      "capability_keywords": "Robotics & Automated Logistics",
+      "capabilities": [
+        "Robotics & Automated Logistics"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AUTO",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Call point used to request or dispatch an autonomous mobile robot.",
+      "connection_method": "Ethernet",
+      "power_method": "To Confirm",
+      "source_row_count": 4,
+      "source_total_asset_qty": 3,
+      "source_categories": [
+        "AMR call point",
+        "AMR Call Point"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-002",
+      "name": "Anaesthetic machine - mobile",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; clinical computing; clinical equipment",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "clinical computing",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "ANAESTHETIC MACHINE/WORKSTATION with ventilator; with accessories; including Monitors and Keyboard; mobile;",
+      "connection_method": "Dual-homed Ethernet",
+      "power_method": "Battery",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Anaesthetic machine - mobile"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-003",
+      "name": "Automated Dispensing Cabinet",
+      "ADB_Code": "",
+      "Group": "Storage, Dispensing & Logistics",
+      "scenario_group": "",
+      "capability_keywords": "Storage, Dispensing & Logistics; storage and logistics",
+      "capabilities": [
+        "Storage, Dispensing & Logistics",
+        "storage and logistics"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-STORAGE",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Dispensing machine for non-drug & non-fluid inventory",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 6,
+      "source_total_asset_qty": 6,
+      "source_categories": [
+        "Automated Dispensing Cabinet",
+        "Automated Dispensing Cabinet (ADC)",
+        "Vending machine - Stock Dispensing"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-004",
+      "name": "AV / Video Conferencing Screen",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; visual display",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "visual display"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "SmartScreen fitted with IP Camera for AV/VC",
+      "connection_method": "Ethernet",
+      "power_method": "Unspecified",
+      "source_row_count": 3,
+      "source_total_asset_qty": 3,
+      "source_categories": [
+        "Audio Visual and Video Conferencing - Screen",
+        "AV screen"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-005",
+      "name": "AV IP Camera",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; power and charging",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "pan-Tilt-Zoom (PTZ). Feeds into the AV management and recording system. Data Point - power provided via PoE (Power over Ethernet)",
+      "connection_method": "Ethernet",
+      "power_method": "Unspecified",
+      "source_row_count": 3,
+      "source_total_asset_qty": 9,
+      "source_categories": [
+        "AV IP Camera"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-006",
+      "name": "AV Microphone",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage",
+      "capabilities": [
+        "Audio Visual, Displays & Signage"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Part of AV systems with dedicated auto cabling",
+      "connection_method": "Ethernet",
+      "power_method": "Unspecified",
+      "source_row_count": 3,
+      "source_total_asset_qty": 13,
+      "source_categories": [
+        "AV Microphone",
+        "AV microphones"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-007",
+      "name": "AV Projection Screen",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; visual display; power and charging; clinical equipment",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "visual display",
+        "power and charging",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Power mounted on wall or ceiling, as altnerative ( or augment) smart screen to be confirmed with clinical teams",
+      "connection_method": "AV / Control Cabling",
+      "power_method": "Unspecified",
+      "source_row_count": 3,
+      "source_total_asset_qty": 6,
+      "source_categories": [
+        "AV projection Screen",
+        "AV Projection Screen"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-008",
+      "name": "AV Projector",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; power and charging",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Suspended mounting from ceiling. Data and power, ancillary cabling to AV system",
+      "connection_method": "Ethernet",
+      "power_method": "Unspecified",
+      "source_row_count": 3,
+      "source_total_asset_qty": 9,
+      "source_categories": [
+        "AV projector"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-009",
+      "name": "AV Speaker",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; power and charging",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "1 data point and power ( requirements for audio including aud microphones and speakers tbc)",
+      "connection_method": "Ethernet",
+      "power_method": "Unspecified",
+      "source_row_count": 3,
+      "source_total_asset_qty": 16,
+      "source_categories": [
+        "AV speaker",
+        "AV Speakers"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-010",
+      "name": "AV System",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; power and charging",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "For AV recording of room activities / discussions for training / reference / medico-legal purposes. Utilises Video Conferencing system cameras, mics and speakers but also includes recording management system 1 Data Point and power",
+      "connection_method": "Ethernet",
+      "power_method": "USB",
+      "source_row_count": 4,
+      "source_total_asset_qty": 4,
+      "source_categories": [
+        "AV equipment",
+        "AV system",
+        "AV System"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "USB / Local Peripheral"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-011",
+      "name": "Barcode Label Printer",
+      "ADB_Code": "",
+      "Group": "Printing & Identification",
+      "scenario_group": "",
+      "capability_keywords": "Printing & Identification; printing and identification; power and charging",
+      "capabilities": [
+        "Printing & Identification",
+        "printing and identification",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-PRINT",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "1x Data Point and power",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 6,
+      "source_total_asset_qty": 7,
+      "source_categories": [
+        "Bar code Printer",
+        "Clinical Printer - Barcode"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-012",
+      "name": "Bedside Monitoring Workstation",
+      "ADB_Code": "",
+      "Group": "Computing & Workstations",
+      "scenario_group": "",
+      "capability_keywords": "Computing & Workstations; clinical computing; monitoring and sensing; patient bedside services; clinical equipment",
+      "capabilities": [
+        "Computing & Workstations",
+        "clinical computing",
+        "monitoring and sensing",
+        "patient bedside services",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMP",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Clinical Workstation - dual monitor for bedside monitoring devices. Enabled with SSO proximity reade",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Workstation - Clinical - Bedside Monitoring Workstation"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-013",
+      "name": "Clinical Collaboration and Communication Device",
+      "ADB_Code": "",
+      "Group": "Communications & Telephony",
+      "scenario_group": "",
+      "capability_keywords": "Communications & Telephony; voice and communications; clinical equipment; wireless connectivity",
+      "capabilities": [
+        "Communications & Telephony",
+        "voice and communications",
+        "clinical equipment",
+        "wireless connectivity"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-COMMS",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Wi-Fi support for total personnel (see QTY) with personal CCC devices",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 29,
+      "source_total_asset_qty": 116,
+      "source_categories": [
+        "Clinical collaboration and communication",
+        "Clinical Collaboration and Communication"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [
+        "Battery"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-014",
+      "name": "Clinical Device Data & Power Provision",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; power and charging; clinical equipment",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "power and charging",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Reserved data and mains-power provision for clinical devices.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 36,
+      "source_total_asset_qty": 95,
+      "source_categories": [
+        "Additional clinical device ICT",
+        "Additional clinical device ICT support",
+        "Additional data and power"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Dual-homed Ethernet",
+        "Power and Data"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-015",
+      "name": "Clinical Image Printer",
+      "ADB_Code": "",
+      "Group": "Printing & Identification",
+      "scenario_group": "",
+      "capability_keywords": "Printing & Identification; printing and identification; power and charging; clinical equipment",
+      "capabilities": [
+        "Printing & Identification",
+        "printing and identification",
+        "power and charging",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-PRINT",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "1x Desktop printer capable of printing scan images. Data Point and power",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Clinical Printer - Image"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-016",
+      "name": "Clinical PACS Workstation",
+      "ADB_Code": "",
+      "Group": "Computing & Workstations",
+      "scenario_group": "",
+      "capability_keywords": "Computing & Workstations; clinical computing; visual display; clinical equipment",
+      "capabilities": [
+        "Computing & Workstations",
+        "clinical computing",
+        "visual display",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMP",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Clinical image-review workstation with diagnostic-grade display capability.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 4,
+      "source_total_asset_qty": 4,
+      "source_categories": [
+        "Clinical Monitor",
+        "Clinical Workstation -dual monitor with Barcode scanner kit directly attached by USB or similar. Enabled with SSO proximity reader.",
+        "Workstation - Clinical - PACS Workstation"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-017",
+      "name": "Clinical Workstation - Dual Monitor",
+      "ADB_Code": "",
+      "Group": "Computing & Workstations",
+      "scenario_group": "",
+      "capability_keywords": "Computing & Workstations; clinical computing; clinical equipment",
+      "capabilities": [
+        "Computing & Workstations",
+        "clinical computing",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMP",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Fixed clinical workstation with two monitors and standard clinical peripherals.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 24,
+      "source_total_asset_qty": 34,
+      "source_categories": [
+        "Clinical Workstation -dual monitor with Barcode scanner kit directly attached by USB or similar. Enabled with SSO proximity reader.",
+        "Clinical Workstation -dual monitor with Barcode scanner kit directly attached by USB or similar. Enabled with SSO proximity reader. +/- laptop docking ability",
+        "Clinical Workstation -dual monitor with Barcode scanner kit directly attached by USB or similar. Enabled with SSO proximity reader. Monitors expected to be connected, and powered, via USB-C from Workstation",
+        "Clinical Workstation -single monitor with Barcode scanner kit directly attached by USB or similar. Enabled with SSO proximity reader.",
+        "Dual Monitor",
+        "Workstation - Clinical - dual monitor",
+        "Workstation - Clinical - dual monitor + barcode scanner",
+        "Workstation, clinical dual monitors +/- Laptop docking station"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "None"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-018",
+      "name": "Clinical Workstation - Single Monitor",
+      "ADB_Code": "",
+      "Group": "Computing & Workstations",
+      "scenario_group": "",
+      "capability_keywords": "Computing & Workstations; clinical computing; clinical equipment",
+      "capabilities": [
+        "Computing & Workstations",
+        "clinical computing",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMP",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Fixed clinical workstation with one monitor and standard clinical peripherals.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 23,
+      "source_total_asset_qty": 25,
+      "source_categories": [
+        "2 arm pendant",
+        "Bar code scanning kit",
+        "Clinical Workstation - single monitor",
+        "Clinical Workstation -single monitor with Barcode scanner kit directly attached by USB or similar. Enabled with SSO proximity reader.",
+        "Clinical Workstation -single monitor with Barcode scanner kit directly attached by USB or similar. Enabled with SSO proximity reader. Monitors expected to be connected, and powered, via USB-C from Workstation",
+        "Desktop UPS Power unit",
+        "Pendant - 2 arm - ICU Bedroom",
+        "Workstation - Clinical - single monitor",
+        "Workstation Clinical- Single Monitor (Desktop, Screen, Mouse, Keyboard)",
+        "Workstation Clinical- Single Monitor (Desktop, Screen, Mouse, Keyboard) (ideally on swing arm)"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-019",
+      "name": "Clinical Workstation on Wheels",
+      "ADB_Code": "",
+      "Group": "Computing & Workstations",
+      "scenario_group": "",
+      "capability_keywords": "Computing & Workstations; clinical computing; visual display; clinical equipment",
+      "capabilities": [
+        "Computing & Workstations",
+        "clinical computing",
+        "visual display",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMP",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Mobile clinical workstation with display, barcode scanning and identity-management capability.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 8,
+      "source_total_asset_qty": 8,
+      "source_categories": [
+        "COMPUTER, work station on wheels",
+        "Space for Workstatio on wheels to charge",
+        "Space for workstation on wheels",
+        "Workstation on wheels, barcode scanner, keyboard, mouse, identity management system"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Wi-Fi / Wireless"
+      ],
+      "alternative_power_methods": [
+        "Battery (Mains Charging)"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-020",
+      "name": "Command centre Hardware screen",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; visual display",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "visual display"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Wall mounted Screens-55inch screen x 33",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 33,
+      "source_categories": [
+        "Command centre Hardware screen"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-021",
+      "name": "Condensed command centre System",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; visual display",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "visual display"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Screens for showing Command centre",
+      "connection_method": "Unspecified",
+      "power_method": "Unspecified",
+      "source_row_count": 1,
+      "source_total_asset_qty": 4,
+      "source_categories": [
+        "Condensed command centre system"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-022",
+      "name": "Connected Digital Weighing Scale",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration",
+      "capabilities": [
+        "Medical Equipment & Integration"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Digital Scales",
+      "connection_method": "W-Fi",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Digital Weighing Scale"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Wi-Fi / Wireless"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-023",
+      "name": "Connected Patient Hoist / Scale",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration",
+      "capabilities": [
+        "Medical Equipment & Integration"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Ceiling Hoist",
+      "connection_method": "Dual-homed Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 4,
+      "source_total_asset_qty": 3,
+      "source_categories": [
+        "Hoist with connected Scales",
+        "Smart Hoist",
+        "Weighing Hoist"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "TBC"
+      ],
+      "alternative_power_methods": [
+        "To Confirm"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-024",
+      "name": "Control Computer",
+      "ADB_Code": "",
+      "Group": "Computing & Workstations",
+      "scenario_group": "",
+      "capability_keywords": "Computing & Workstations; clinical computing; visual display",
+      "capabilities": [
+        "Computing & Workstations",
+        "clinical computing",
+        "visual display"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMP",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "1 per 4 wall mounted screens",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Control Computer"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-025",
+      "name": "Controlled Drug Access Control",
+      "ADB_Code": "",
+      "Group": "Security, Access & Life Safety",
+      "scenario_group": "",
+      "capability_keywords": "Security, Access & Life Safety; nurse call; security and life safety",
+      "capabilities": [
+        "Security, Access & Life Safety",
+        "nurse call",
+        "security and life safety"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-SEC",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Lamp outside alerting & also on main nurse call panel system when drug cupboard is being accessed",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Control drug Access Control System"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-026",
+      "name": "Desktop Monitor",
+      "ADB_Code": "",
+      "Group": "Computing & Workstations",
+      "scenario_group": "",
+      "capability_keywords": "Computing & Workstations; monitoring and sensing",
+      "capabilities": [
+        "Computing & Workstations",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMP",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "For remote patient monitoring of continuous observations",
+      "connection_method": "None",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 0,
+      "source_categories": [
+        "Desktop monitors"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-027",
+      "name": "Device Charging Station",
+      "ADB_Code": "",
+      "Group": "Power, Charging & Data Provision",
+      "scenario_group": "",
+      "capability_keywords": "Power, Charging & Data Provision; power and charging",
+      "capabilities": [
+        "Power, Charging & Data Provision",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-POWER",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Free-standing charging machine",
+      "connection_method": "None",
+      "power_method": "Mains",
+      "source_row_count": 11,
+      "source_total_asset_qty": 11,
+      "source_categories": [
+        "Phone Charger",
+        "Phone charging cabinets",
+        "Relative charging station",
+        "USB chargers"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-028",
+      "name": "Dictaphone",
+      "ADB_Code": "",
+      "Group": "Communications & Telephony",
+      "scenario_group": "",
+      "capability_keywords": "Communications & Telephony",
+      "capabilities": [
+        "Communications & Telephony"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMMS",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Dictaphone used in repeatable-room layouts.",
+      "connection_method": "None",
+      "power_method": "USB to EUD",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Dictaphone"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-029",
+      "name": "Digital Bottle Warmer",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration",
+      "capabilities": [
+        "Medical Equipment & Integration"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Water-less device",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Digital Bottle Warmer"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-030",
+      "name": "Digital Call Point",
+      "ADB_Code": "",
+      "Group": "Communications & Telephony",
+      "scenario_group": "",
+      "capability_keywords": "Communications & Telephony",
+      "capabilities": [
+        "Communications & Telephony"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMMS",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Digital Call Point used in repeatable-room layouts.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Digital Call System"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-031",
+      "name": "Digital Check in ( MRI & Main entrance)",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage",
+      "capabilities": [
+        "Audio Visual, Displays & Signage"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Digital Check in ( MRI & Main entrance) used in repeatable-room layouts.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Digital Check in ( MRI & Main entrance)"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-032",
+      "name": "Digital Signage / Wayfinding Display",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; visual display; voice and communications",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "visual display",
+        "voice and communications"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Digital Screens may be used to present Department / Ward and/or patient information at the Staff Communication Base",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Digital Signage and wayfinding"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-033",
+      "name": "Digital Signage Display",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; visual display; voice and communications",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "visual display",
+        "voice and communications"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Digital Screens may be used to present Department / Ward and/or patient information at the Staff Communication Base",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 3,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Digital Signage",
+        "Digital signage ( Not in Maternity Beaverment)"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-034",
+      "name": "Digital Urinalysis Analyzer",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; clinical equipment",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Connected clinical analyzer used for digital urinalysis.",
+      "connection_method": "Dual-homed Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Analysers",
+        "Integrated urine Analysis"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-035",
+      "name": "Digital Wayfinding Display",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; visual display",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "visual display"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "ward signage",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 3,
+      "source_total_asset_qty": 4,
+      "source_categories": [
+        "Digital Wayfinding",
+        "Digital Wayfinding ( Not in maternity)"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-036",
+      "name": "Door Access Control",
+      "ADB_Code": "",
+      "Group": "Security, Access & Life Safety",
+      "scenario_group": "",
+      "capability_keywords": "Security, Access & Life Safety; security and life safety",
+      "capabilities": [
+        "Security, Access & Life Safety",
+        "security and life safety"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-SEC",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Electronic access-control point for a room, door or controlled area.",
+      "connection_method": "Ethernet",
+      "power_method": "To Confirm",
+      "source_row_count": 50,
+      "source_total_asset_qty": 51,
+      "source_categories": [
+        "Access Control",
+        "Door Access Control",
+        "Security access",
+        "Ward Access Controls"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Wi-Fi / Wireless"
+      ],
+      "alternative_power_methods": [
+        "Low-Voltage Mains",
+        "Mains"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-037",
+      "name": "Drainage Sensor",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Smart Building",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Unspecified",
+      "source_row_count": 5,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "drainage",
+        "Drainage"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-038",
+      "name": "En Suite",
+      "ADB_Code": "",
+      "Group": "Building Controls & Environmental",
+      "scenario_group": "",
+      "capability_keywords": "Building Controls & Environmental",
+      "capabilities": [
+        "Building Controls & Environmental"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-BLDG",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "devices (including various IoT) operating within this space",
+      "connection_method": "Unspecified",
+      "power_method": "Unspecified",
+      "source_row_count": 1,
+      "source_total_asset_qty": 0,
+      "source_categories": [
+        "En Suite"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-039",
+      "name": "Environmental Control Panel",
+      "ADB_Code": "",
+      "Group": "Building Controls & Environmental",
+      "scenario_group": "",
+      "capability_keywords": "Building Controls & Environmental",
+      "capabilities": [
+        "Building Controls & Environmental"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-BLDG",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "User interface for room temperature, lighting or related environmental controls.",
+      "connection_method": "Ethernet",
+      "power_method": "PoE (To Confirm)",
+      "source_row_count": 45,
+      "source_total_asset_qty": 45,
+      "source_categories": [
+        "Environmental controls",
+        "Environmental Controls"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Wi-Fi / Wireless"
+      ],
+      "alternative_power_methods": [
+        "Mains"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-040",
+      "name": "Falls / Movement Sensor",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Falls and Movement Sensors",
+      "connection_method": "Ethernet",
+      "power_method": "PoE",
+      "source_row_count": 4,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Falls / Movement Sensors"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-041",
+      "name": "Fire / Smoke Alarm",
+      "ADB_Code": "",
+      "Group": "Security, Access & Life Safety",
+      "scenario_group": "",
+      "capability_keywords": "Security, Access & Life Safety; security and life safety",
+      "capabilities": [
+        "Security, Access & Life Safety",
+        "security and life safety"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-SEC",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Smart building",
+      "connection_method": "Ethernet",
+      "power_method": "Unspecified",
+      "source_row_count": 2,
+      "source_total_asset_qty": 0,
+      "source_categories": [
+        "fire/ Smoke alarm",
+        "Fire/Smoke Alarm"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-042",
+      "name": "General Data & Power Point",
+      "ADB_Code": "",
+      "Group": "Network Infrastructure",
+      "scenario_group": "",
+      "capability_keywords": "Network Infrastructure; power and charging",
+      "capabilities": [
+        "Network Infrastructure",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-NET",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "General-purpose data outlet with associated power provision.",
+      "connection_method": "Ethernet",
+      "power_method": "Unspecified",
+      "source_row_count": 3,
+      "source_total_asset_qty": 24,
+      "source_categories": [
+        "General purpose Data Points"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-043",
+      "name": "General Network Printer",
+      "ADB_Code": "",
+      "Group": "Printing & Identification",
+      "scenario_group": "",
+      "capability_keywords": "Printing & Identification; printing and identification",
+      "capabilities": [
+        "Printing & Identification",
+        "printing and identification"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-PRINT",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Inkjet printer (tank supply), A4 with paper cartridge",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 3,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "BCP Printer (Ward MDT)",
+        "Desktop Printer",
+        "Printer"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-044",
+      "name": "Handheld Barcode Scanner",
+      "ADB_Code": "",
+      "Group": "Printing & Identification",
+      "scenario_group": "",
+      "capability_keywords": "Printing & Identification; clinical equipment",
+      "capabilities": [
+        "Printing & Identification",
+        "clinical equipment"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-PRINT",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Handheld scanner used to capture barcodes into clinical or stock systems.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 12,
+      "source_total_asset_qty": 13,
+      "source_categories": [
+        "Bar code Scanner",
+        "RFID scanner"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [
+        "Mai"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-045",
+      "name": "Hearing Augmentation System",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage",
+      "capabilities": [
+        "Audio Visual, Displays & Signage"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Hearing loop",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Hearing Augmentation"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-046",
+      "name": "Integrated Bedside Terminal",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; voice and communications; patient bedside services",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "voice and communications",
+        "patient bedside services"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Food Order, Rehab, Entertainment, Environmental, Communication ?? Smart Bed.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 7,
+      "source_total_asset_qty": 5,
+      "source_categories": [
+        "Integrated Bedside Terminal",
+        "Integrated bedside terminal, Pendant Mounted",
+        "Intergrated Bedside terminal"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-047",
+      "name": "Intelligent Lighting Controller",
+      "ADB_Code": "",
+      "Group": "Building Controls & Environmental",
+      "scenario_group": "",
+      "capability_keywords": "Building Controls & Environmental",
+      "capabilities": [
+        "Building Controls & Environmental"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-BLDG",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Lighting",
+      "connection_method": "Ethernet",
+      "power_method": "PoE",
+      "source_row_count": 1,
+      "source_total_asset_qty": 0,
+      "source_categories": [
+        "Intelligent Lighting"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-048",
+      "name": "Interactive Digital Whiteboard",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; visual display",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "visual display"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Wall-mounted interactive display used as a digital whiteboard.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 14,
+      "source_total_asset_qty": 13,
+      "source_categories": [
+        "Digital Whiteboard",
+        "Patient Entertainment",
+        "Small Interactive Wallboard",
+        "touch screen whiteboard"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-049",
+      "name": "IoT Air Quality Sensor",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "IoT sensor for air-quality monitoring.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 15,
+      "source_total_asset_qty": 10,
+      "source_categories": [
+        "IoT Sensors",
+        "IoT Sensors - Air Quality",
+        "IoT Sensors - Overview"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-050",
+      "name": "IoT Hand-Wash Dispenser Sensor",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "IoT sensor for hand-wash or soap-dispenser monitoring.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 17,
+      "source_total_asset_qty": 22,
+      "source_categories": [
+        "IoT Sensors",
+        "IoT Sensors - Hand wash dispenser"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-051",
+      "name": "IoT Lighting Sensor",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "IoT sensor for lighting state or light-level monitoring.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 19,
+      "source_total_asset_qty": 18,
+      "source_categories": [
+        "IoT Sensors",
+        "IoT Sensors - Lighting",
+        "oT Sensors - Lighting"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [
+        "PoE"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-052",
+      "name": "IoT Multi-Function Sensor Unit",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Combined IoT sensing unit for multiple environmental or occupancy measures.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 56,
+      "source_total_asset_qty": 137,
+      "source_categories": [
+        "IoT multi function integrated sensors",
+        "IoT sensors",
+        "IoT Sensors",
+        "IoT Sensors –Multi functional integrated sensor unit",
+        "loT Sensors - Multi-functional integrated Sensor unit"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [
+        "PoE",
+        "PoE (To Confirm)"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-053",
+      "name": "IoT Occupancy / Motion Sensor",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "IoT sensor for occupancy, PIR or motion detection.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 39,
+      "source_total_asset_qty": 42,
+      "source_categories": [
+        "IoT Sensors",
+        "IoT Sensors - Motion Detection / Occupancy",
+        "IoT Sensors - PIR"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [
+        "PoE"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-054",
+      "name": "IoT Sensor - General",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Motion sensors/ PIR. Lighting",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "IoT Sensors"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-055",
+      "name": "IoT Temperature Sensor",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "IoT sensor for ambient temperature monitoring.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 10,
+      "source_total_asset_qty": 9,
+      "source_categories": [
+        "IoT Sensors",
+        "IoT Sensors - Temperature"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-056",
+      "name": "IoT Water Quality Sensor",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "IoT sensor for water-quality monitoring.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 3,
+      "source_total_asset_qty": 3,
+      "source_categories": [
+        "IoT Sensors",
+        "IoT Sensors - Water Quality"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-057",
+      "name": "IP CCTV Camera",
+      "ADB_Code": "",
+      "Group": "Security, Access & Life Safety",
+      "scenario_group": "",
+      "capability_keywords": "Security, Access & Life Safety; security and life safety; power and charging; clinical equipment",
+      "capabilities": [
+        "Security, Access & Life Safety",
+        "security and life safety",
+        "power and charging",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-SEC",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Data Point and power To be confirmed with clinical team",
+      "connection_method": "Ethernet",
+      "power_method": "PoE",
+      "source_row_count": 17,
+      "source_total_asset_qty": 19,
+      "source_categories": [
+        "Camera - Internal CCTV IP-based Camera",
+        "CCTV",
+        "Internal CCTV"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-058",
+      "name": "IP Telephone - Clinical Stand-Alone",
+      "ADB_Code": "",
+      "Group": "Communications & Telephony",
+      "scenario_group": "",
+      "capability_keywords": "Communications & Telephony; voice and communications; clinical equipment",
+      "capabilities": [
+        "Communications & Telephony",
+        "voice and communications",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMMS",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Stand-alone clinical IP telephone.",
+      "connection_method": "Ethernet",
+      "power_method": "PoE",
+      "source_row_count": 23,
+      "source_total_asset_qty": 21,
+      "source_categories": [
+        "Phone",
+        "Telephone",
+        "Telephone ( IP) clinical standalone",
+        "Telephone (IP) - clinical stand-alone"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-059",
+      "name": "IP Telephone - Patient",
+      "ADB_Code": "",
+      "Group": "Communications & Telephony",
+      "scenario_group": "",
+      "capability_keywords": "Communications & Telephony; voice and communications",
+      "capabilities": [
+        "Communications & Telephony",
+        "voice and communications"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMMS",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "integrated into Integrated Beside Terminal",
+      "connection_method": "Ethernet",
+      "power_method": "PoE",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Telephone (IP) - Patient"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-060",
+      "name": "IP Telephone - Workstation Attached",
+      "ADB_Code": "",
+      "Group": "Communications & Telephony",
+      "scenario_group": "",
+      "capability_keywords": "Communications & Telephony; clinical computing; voice and communications; clinical equipment",
+      "capabilities": [
+        "Communications & Telephony",
+        "clinical computing",
+        "voice and communications",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMMS",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Clinical IP telephone connected in conjunction with a workstation.",
+      "connection_method": "Ethernet",
+      "power_method": "PoE",
+      "source_row_count": 7,
+      "source_total_asset_qty": 6,
+      "source_categories": [
+        "Telephone (IP) - clinical attached to Workstation",
+        "Telephone- clinical attached to workstation"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-061",
+      "name": "Laptop Docking Station",
+      "ADB_Code": "",
+      "Group": "Computing & Workstations",
+      "scenario_group": "",
+      "capability_keywords": "Computing & Workstations; clinical computing",
+      "capabilities": [
+        "Computing & Workstations",
+        "clinical computing"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMP",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Ability to dock laptops",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Laptop dock station"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-062",
+      "name": "Large Clinical SmartScreen",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; visual display; clinical equipment",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "visual display",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Large sized Smart Screen for use in Clinical areas Wall, Ceiling or mobile stand mounted. Requirement for integrated Audio/Visual capability and connectivity to AV system Including microphone",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 4,
+      "source_categories": [
+        "Smart Screen - Clinical - Large"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-063",
+      "name": "Macerator",
+      "ADB_Code": "",
+      "Group": "Building Controls & Environmental",
+      "scenario_group": "",
+      "capability_keywords": "Building Controls & Environmental",
+      "capabilities": [
+        "Building Controls & Environmental"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-BLDG",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Macerator used in repeatable-room layouts.",
+      "connection_method": "Ethernet",
+      "power_method": "Unspecified",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Macerator"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-064",
+      "name": "Medical Device Integration Box",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; clinical equipment",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Four-port integration box connecting temporary medical devices to clinical systems.",
+      "connection_method": "Dual-homed Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 13,
+      "source_total_asset_qty": 12,
+      "source_categories": [
+        "Medical device integration box",
+        "Medical Device integration Box"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [
+        "None"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-065",
+      "name": "Medication Label Printer",
+      "ADB_Code": "",
+      "Group": "Printing & Identification",
+      "scenario_group": "",
+      "capability_keywords": "Printing & Identification; printing and identification; clinical equipment",
+      "capabilities": [
+        "Printing & Identification",
+        "printing and identification",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-PRINT",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Networked clinical label printer for pharmacy and medication workflows.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 5,
+      "source_total_asset_qty": 4,
+      "source_categories": [
+        "Clinical Printer - Pharmacy/medication label",
+        "Printer-Pharmacy Labels"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-066",
+      "name": "Monitor",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage",
+      "capabilities": [
+        "Audio Visual, Displays & Signage"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "From ceiling, Command centre over -view",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Monitor"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-067",
+      "name": "Multi Sensory experience equipment",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Sensory equipement TBC",
+      "connection_method": "None",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Multi Sensory experience equipment"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-068",
+      "name": "Network-Monitored Freezer",
+      "ADB_Code": "",
+      "Group": "Building Controls & Environmental",
+      "scenario_group": "",
+      "capability_keywords": "Building Controls & Environmental; monitoring and sensing; power and charging",
+      "capabilities": [
+        "Building Controls & Environmental",
+        "monitoring and sensing",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-BLDG",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Data Point for temperature monitoring and power",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 3,
+      "source_total_asset_qty": 3,
+      "source_categories": [
+        "Freezer",
+        "Freezer and integrated thermometer"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-069",
+      "name": "Network-Monitored Refrigerator",
+      "ADB_Code": "",
+      "Group": "Building Controls & Environmental",
+      "scenario_group": "",
+      "capability_keywords": "Building Controls & Environmental; monitoring and sensing; power and charging",
+      "capabilities": [
+        "Building Controls & Environmental",
+        "monitoring and sensing",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-BLDG",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Data Point for temperature monitoring and power",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 12,
+      "source_total_asset_qty": 12,
+      "source_categories": [
+        "Fridge and integrated thermometer",
+        "Refrigerator",
+        "Refrigerator and integrated thermometer",
+        "Refrigerator and intergrated thermoter"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-070",
+      "name": "Nurse Call / Reset Unit",
+      "ADB_Code": "",
+      "Group": "Nurse Call & Clinical Alarms",
+      "scenario_group": "",
+      "capability_keywords": "Nurse Call & Clinical Alarms; nurse call",
+      "capabilities": [
+        "Nurse Call & Clinical Alarms",
+        "nurse call"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-NURSE",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Patient/staff call, emergency-call and reset control unit.",
+      "connection_method": "Nurse Call / Room Gateway Cabling",
+      "power_method": "PoE",
+      "source_row_count": 41,
+      "source_total_asset_qty": 33,
+      "source_categories": [
+        "Nurse Call - Clinical spaces Alarm, Reset Buttons",
+        "Nurse Call system",
+        "Nurse Call System"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [
+        "Mains"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-071",
+      "name": "Nurse Call Alarm Lamp - Exterior",
+      "ADB_Code": "",
+      "Group": "Nurse Call & Clinical Alarms",
+      "scenario_group": "",
+      "capability_keywords": "Nurse Call & Clinical Alarms; nurse call",
+      "capabilities": [
+        "Nurse Call & Clinical Alarms",
+        "nurse call"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-NURSE",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Nurse-call alarm lamp located outside the room entrance.",
+      "connection_method": "Ethernet",
+      "power_method": "PoE",
+      "source_row_count": 31,
+      "source_total_asset_qty": 31,
+      "source_categories": [
+        "Nurse Call - Alarm Lamp - exterior",
+        "Nurse call System",
+        "Nurse Call system",
+        "Nurse Call System"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-072",
+      "name": "Nurse Call Alarm Lamp - Interior",
+      "ADB_Code": "",
+      "Group": "Nurse Call & Clinical Alarms",
+      "scenario_group": "",
+      "capability_keywords": "Nurse Call & Clinical Alarms; nurse call",
+      "capabilities": [
+        "Nurse Call & Clinical Alarms",
+        "nurse call"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-NURSE",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Nurse-call alarm lamp located inside the room entrance.",
+      "connection_method": "Nurse Call / Room Gateway Cabling",
+      "power_method": "PoE",
+      "source_row_count": 11,
+      "source_total_asset_qty": 9,
+      "source_categories": [
+        "Nurse Call - Alarm Lam",
+        "Nurse Call - Alarm Lamp - interior",
+        "Nurse Call system",
+        "Nurse Call System"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-073",
+      "name": "Nurse Call Pull Cord",
+      "ADB_Code": "",
+      "Group": "Nurse Call & Clinical Alarms",
+      "scenario_group": "",
+      "capability_keywords": "Nurse Call & Clinical Alarms; nurse call",
+      "capabilities": [
+        "Nurse Call & Clinical Alarms",
+        "nurse call"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-NURSE",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Pull-cord device used to initiate a nurse call.",
+      "connection_method": "Ethernet",
+      "power_method": "None",
+      "source_row_count": 5,
+      "source_total_asset_qty": 3,
+      "source_categories": [
+        "Nurse Call system"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-074",
+      "name": "Nurse Call Room Gateway",
+      "ADB_Code": "",
+      "Group": "Nurse Call & Clinical Alarms",
+      "scenario_group": "",
+      "capability_keywords": "Nurse Call & Clinical Alarms; nurse call",
+      "capabilities": [
+        "Nurse Call & Clinical Alarms",
+        "nurse call"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-NURSE",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Network gateway aggregating Nurse call Alarms, reset and pull cords",
+      "connection_method": "Ethernet",
+      "power_method": "PoE",
+      "source_row_count": 2,
+      "source_total_asset_qty": 0,
+      "source_categories": [
+        "Nurse Call Room Gateway"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-075",
+      "name": "Nurse Call System Interface",
+      "ADB_Code": "",
+      "Group": "Nurse Call & Clinical Alarms",
+      "scenario_group": "",
+      "capability_keywords": "Nurse Call & Clinical Alarms; nurse call",
+      "capabilities": [
+        "Nurse Call & Clinical Alarms",
+        "nurse call"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-NURSE",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Nurse call",
+      "connection_method": "Ethernet",
+      "power_method": "PoE",
+      "source_row_count": 4,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Nurse Call system",
+        "RADAR Sensor"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "TBC-depending room configuration"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-076",
+      "name": "Nurse Call Two-Way Speech Unit",
+      "ADB_Code": "",
+      "Group": "Nurse Call & Clinical Alarms",
+      "scenario_group": "",
+      "capability_keywords": "Nurse Call & Clinical Alarms; nurse call",
+      "capabilities": [
+        "Nurse Call & Clinical Alarms",
+        "nurse call"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-NURSE",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Two Way Speech",
+      "connection_method": "Nurse Call / Room Gateway Cabling",
+      "power_method": "Mains",
+      "source_row_count": 14,
+      "source_total_asset_qty": 10,
+      "source_categories": [
+        "Nurse Call system"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [
+        "PoE"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-077",
+      "name": "Panic / Duress Button",
+      "ADB_Code": "",
+      "Group": "Security, Access & Life Safety",
+      "scenario_group": "",
+      "capability_keywords": "Security, Access & Life Safety; security and life safety",
+      "capabilities": [
+        "Security, Access & Life Safety",
+        "security and life safety"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-SEC",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Panic / Duress Button used in repeatable-room layouts.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 6,
+      "source_total_asset_qty": 6,
+      "source_categories": [
+        "Panic alarm",
+        "Panic button",
+        "Panic Button"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-078",
+      "name": "Pathology Label Printer",
+      "ADB_Code": "",
+      "Group": "Printing & Identification",
+      "scenario_group": "",
+      "capability_keywords": "Printing & Identification; printing and identification; clinical equipment",
+      "capabilities": [
+        "Printing & Identification",
+        "printing and identification",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-PRINT",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Networked clinical label printer for pathology and specimen workflows.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 6,
+      "source_total_asset_qty": 6,
+      "source_categories": [
+        "Clinical Printer - Pathology",
+        "Clinical Printer - Pathology label",
+        "Clinical printer- blood label",
+        "Digital Microscope"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-079",
+      "name": "Patient / Visitor Power & USB Charging Outlet",
+      "ADB_Code": "",
+      "Group": "Power, Charging & Data Provision",
+      "scenario_group": "",
+      "capability_keywords": "Power, Charging & Data Provision; power and charging",
+      "capabilities": [
+        "Power, Charging & Data Provision",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-POWER",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Bedhead (phone charging, input)",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 10,
+      "source_total_asset_qty": 10,
+      "source_categories": [
+        "Patient / Visitor Utilities",
+        "Power and device charging - Visitor"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "USB / Local Peripheral"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-080",
+      "name": "Patient Bedhead Service Unit",
+      "ADB_Code": "",
+      "Group": "Patient Bedside & Entertainment",
+      "scenario_group": "",
+      "capability_keywords": "Patient Bedside & Entertainment; power and charging",
+      "capabilities": [
+        "Patient Bedside & Entertainment",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-PATIENT",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "1 x normal power, 1 USB charger point, 1x USBC charger point",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 4,
+      "source_total_asset_qty": 4,
+      "source_categories": [
+        "Bed Head",
+        "Bedhead - Bedroom",
+        "Bedhead - Treatment space"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "None"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-081",
+      "name": "Patient Entertainment Games Console",
+      "ADB_Code": "",
+      "Group": "Patient Bedside & Entertainment",
+      "scenario_group": "",
+      "capability_keywords": "Patient Bedside & Entertainment; visual display; patient bedside services",
+      "capabilities": [
+        "Patient Bedside & Entertainment",
+        "visual display",
+        "patient bedside services"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-PATIENT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Games console and integrated screen on cart",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 3,
+      "source_categories": [
+        "Games Console",
+        "Patient Entertainment"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-082",
+      "name": "Patient Entertainment Smart TV",
+      "ADB_Code": "",
+      "Group": "Patient Bedside & Entertainment",
+      "scenario_group": "",
+      "capability_keywords": "Patient Bedside & Entertainment; patient bedside services",
+      "capabilities": [
+        "Patient Bedside & Entertainment",
+        "patient bedside services"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-PATIENT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Network-capable television used for patient or visitor entertainment.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 14,
+      "source_total_asset_qty": 13,
+      "source_categories": [
+        "Patient Entertainment",
+        "Smart TV",
+        "Television"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-083",
+      "name": "Patient Information Display",
+      "ADB_Code": "",
+      "Group": "Patient Bedside & Entertainment",
+      "scenario_group": "",
+      "capability_keywords": "Patient Bedside & Entertainment; clinical computing; visual display",
+      "capabilities": [
+        "Patient Bedside & Entertainment",
+        "clinical computing",
+        "visual display"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-PATIENT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "24” screen with minicomputer stick",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Information Screen (outside room)",
+        "Patient information screen"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Wi-Fi / Wireless"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-084",
+      "name": "Patient recliner / neuro chair",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; power and charging",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "1, Power required - 1 for Chair and 1 for pressure cushion",
+      "connection_method": "None",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Patient recliner / neuro chair"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-085",
+      "name": "Patient Vital Signs Monitor",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; power and charging",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Data Point and power",
+      "connection_method": "Dual-homed Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 3,
+      "source_total_asset_qty": 5,
+      "source_categories": [
+        "Monitor (Patient vital signs)",
+        "Multi-parameter Monitor (with gas monitoring)"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-086",
+      "name": "Patient Wristband Printer",
+      "ADB_Code": "",
+      "Group": "Printing & Identification",
+      "scenario_group": "",
+      "capability_keywords": "Printing & Identification; printing and identification; clinical equipment",
+      "capabilities": [
+        "Printing & Identification",
+        "printing and identification",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-PRINT",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Networked clinical printer for patient identification wristbands.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Clinical printer-patient wristband",
+        "Patient Wristband Printing"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-087",
+      "name": "Pneumatic Tube End Station",
+      "ADB_Code": "",
+      "Group": "Storage, Dispensing & Logistics",
+      "scenario_group": "",
+      "capability_keywords": "Storage, Dispensing & Logistics; storage and logistics",
+      "capabilities": [
+        "Storage, Dispensing & Logistics",
+        "storage and logistics"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-STORAGE",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Pneumatic Tube End Station used in repeatable-room layouts.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Pneumatic Tube System End Station"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-088",
+      "name": "Point-of-Care Clinical Analyzer",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; clinical equipment",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Connected analyzer used for point-of-care clinical testing.",
+      "connection_method": "Dual-homed Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 4,
+      "source_categories": [
+        "Analysers"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-089",
+      "name": "Portable video Laryngoscope",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration",
+      "capabilities": [
+        "Medical Equipment & Integration"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Portable video Laryngoscope used in repeatable-room layouts.",
+      "connection_method": "TBC",
+      "power_method": "To Confirm",
+      "source_row_count": 1,
+      "source_total_asset_qty": 0,
+      "source_categories": [
+        "Portable video Laryngoscope"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-090",
+      "name": "Public Address / Tannoy System",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; voice and communications",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "voice and communications"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "For calling patients in",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 3,
+      "source_total_asset_qty": 3,
+      "source_categories": [
+        "Tanoy system",
+        "Tanoy System"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-091",
+      "name": "Reception Desk Workstation",
+      "ADB_Code": "",
+      "Group": "Computing & Workstations",
+      "scenario_group": "",
+      "capability_keywords": "Computing & Workstations; clinical computing",
+      "capabilities": [
+        "Computing & Workstations",
+        "clinical computing"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMP",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Reception Desk Workstation used in repeatable-room layouts.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Reception Desk EUD – Desktop, Screens, Keyboard, Mouse"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-092",
+      "name": "Refrigerated Automated Dispensing Cabinet",
+      "ADB_Code": "",
+      "Group": "Storage, Dispensing & Logistics",
+      "scenario_group": "",
+      "capability_keywords": "Storage, Dispensing & Logistics; storage and logistics",
+      "capabilities": [
+        "Storage, Dispensing & Logistics",
+        "storage and logistics"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-STORAGE",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "1 x re-frigerated unit, 1 x non-refrigerated",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 3,
+      "source_categories": [
+        "Automated Dispensing Cabinet (ADC)",
+        "Refrigerated Automated Dispensing Cabinet (ADC)"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-093",
+      "name": "RFID Reader",
+      "ADB_Code": "",
+      "Group": "Printing & Identification",
+      "scenario_group": "",
+      "capability_keywords": "Printing & Identification; monitoring and sensing",
+      "capabilities": [
+        "Printing & Identification",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-PRINT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "For inventory management",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 11,
+      "source_total_asset_qty": 10,
+      "source_categories": [
+        "Asset and Location Tracking - Sensors/Readers",
+        "RFID reader"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet",
+        "either proprietary coaxial cabling or LPWAN for data connectivity and draw power from the connected Gateways or have their own battery supply."
+      ],
+      "alternative_power_methods": [
+        "PoE"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-094",
+      "name": "Room Status / Booking Display",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage; visual display",
+      "capabilities": [
+        "Audio Visual, Displays & Signage",
+        "visual display"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Room-side display for occupancy, status, infection flags or room booking information.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 37,
+      "source_total_asset_qty": 33,
+      "source_categories": [
+        "Room Calendar and display",
+        "Room display",
+        "Room Display",
+        "Roomy display"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "Ethernet"
+      ],
+      "alternative_power_methods": [
+        "PoE"
+      ],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-095",
+      "name": "RTLS Location Sensor",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "RTLS Location Sensor used in repeatable-room layouts.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Battery",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "RTLS"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-096",
+      "name": "Safe",
+      "ADB_Code": "",
+      "Group": "Security, Access & Life Safety",
+      "scenario_group": "",
+      "capability_keywords": "Security, Access & Life Safety; security and life safety",
+      "capabilities": [
+        "Security, Access & Life Safety",
+        "security and life safety"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-SEC",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Safe used in repeatable-room layouts.",
+      "connection_method": "None",
+      "power_method": "Mains (To Confirm)",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Safe"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-097",
+      "name": "Self Service Check In",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage",
+      "capabilities": [
+        "Audio Visual, Displays & Signage"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Self Service Check In used in repeatable-room layouts.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Self Service Check In"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-098",
+      "name": "Sensory Equipment",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Projector",
+      "connection_method": "None",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Sensory Equipment"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-099",
+      "name": "Smart Bed / Cot",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration",
+      "capabilities": [
+        "Medical Equipment & Integration"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Integrated smart bed OR technology layered on to standard bed.",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 6,
+      "source_total_asset_qty": 5,
+      "source_categories": [
+        "Smart Bed",
+        "Smart Bed / Cot",
+        "Smart Bed +/- Bed card",
+        "Smart bed/ Smart cot",
+        "Smart Bed/ Smart cot"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-100",
+      "name": "Smart De-Fibs",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration",
+      "capabilities": [
+        "Medical Equipment & Integration"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Smart De-Fibs used in repeatable-room layouts.",
+      "connection_method": "TBC",
+      "power_method": "To Confirm",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Smart De-Fibs"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-101",
+      "name": "Smart Incubator",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; clinical equipment",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Integrated smart incubator OR technology layered on to standard incubator =/- Digital bed card",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Smart Incubator"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-102",
+      "name": "Smart Storage Cabinet",
+      "ADB_Code": "",
+      "Group": "Storage, Dispensing & Logistics",
+      "scenario_group": "",
+      "capability_keywords": "Storage, Dispensing & Logistics; storage and logistics",
+      "capabilities": [
+        "Storage, Dispensing & Logistics",
+        "storage and logistics"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-STORAGE",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "#1",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 3,
+      "source_total_asset_qty": 3,
+      "source_categories": [
+        "Smart Cabinets",
+        "Smart Cabinets (tbc as RFID and scanner might do this)"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-103",
+      "name": "Smart Triage ( ED only)",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration",
+      "capabilities": [
+        "Medical Equipment & Integration"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Smart Triage ( ED only) used in repeatable-room layouts.",
+      "connection_method": "Ethernet",
+      "power_method": "PoE",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Smart Triage ( ED only)"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-104",
+      "name": "Staff Power & USB Charging Outlet",
+      "ADB_Code": "",
+      "Group": "Power, Charging & Data Provision",
+      "scenario_group": "",
+      "capability_keywords": "Power, Charging & Data Provision; power and charging",
+      "capabilities": [
+        "Power, Charging & Data Provision",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-POWER",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Power Outlet with: · 1 normal power · 1 USB charger point · 1 USB-C charger point",
+      "connection_method": "USB / Local Peripheral",
+      "power_method": "Mains",
+      "source_row_count": 6,
+      "source_total_asset_qty": 16,
+      "source_categories": [
+        "Power & device charging staff",
+        "Power and device charging - Staff"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [
+        "None"
+      ],
+      "alternative_power_methods": [],
+      "review_status": "Review technical variance",
+      "notes": "Default uses the most frequent source value; alternatives are retained for engineering review."
+    },
+    {
+      "id": "CRA-105",
+      "name": "Telemedicine Connection Provision",
+      "ADB_Code": "",
+      "Group": "Communications & Telephony",
+      "scenario_group": "",
+      "capability_keywords": "Communications & Telephony; voice and communications; power and charging; wireless connectivity",
+      "capabilities": [
+        "Communications & Telephony",
+        "voice and communications",
+        "power and charging",
+        "wireless connectivity"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-COMMS",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Telemedicine equipment is expected to be itinerant and utilise Wi-fi or 4G/5G mobile network although local power may be required",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 3,
+      "source_total_asset_qty": 3,
+      "source_categories": [
+        "Telemedicine"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-106",
+      "name": "Temporary Medical Device",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; clinical equipment",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "ECG, temperature, Sa02, Heart rate,Respiratory rate, Blood pressure,",
+      "connection_method": "Dual-homed Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Temporary Medical Device"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-107",
+      "name": "Ultrasound Machine",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; clinical equipment",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Mobile unit",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Ultrasound Machine"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-108",
+      "name": "Uninterrupted Power Supply (UPS) - Circuit",
+      "ADB_Code": "",
+      "Group": "Power, Charging & Data Provision",
+      "scenario_group": "",
+      "capability_keywords": "Power, Charging & Data Provision; power and charging",
+      "capabilities": [
+        "Power, Charging & Data Provision",
+        "power and charging"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-POWER",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Mains feed UPS - wall socket",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Uninterrupted Power Supply (UPS) - Circuit"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-109",
+      "name": "Ventilator",
+      "ADB_Code": "",
+      "Group": "Medical Equipment & Integration",
+      "scenario_group": "",
+      "capability_keywords": "Medical Equipment & Integration; clinical equipment",
+      "capabilities": [
+        "Medical Equipment & Integration",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-MED",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Ventilator used in repeatable-room layouts.",
+      "connection_method": "Dual-homed Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 1,
+      "source_categories": [
+        "Ventilator"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-110",
+      "name": "Video console",
+      "ADB_Code": "",
+      "Group": "Audio Visual, Displays & Signage",
+      "scenario_group": "",
+      "capability_keywords": "Audio Visual, Displays & Signage",
+      "capabilities": [
+        "Audio Visual, Displays & Signage"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-AV",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Entertainment systems",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 1,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Video console"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-111",
+      "name": "Virtual Ward Monitoring Workstation",
+      "ADB_Code": "",
+      "Group": "Computing & Workstations",
+      "scenario_group": "",
+      "capability_keywords": "Computing & Workstations; clinical computing; monitoring and sensing; clinical equipment",
+      "capabilities": [
+        "Computing & Workstations",
+        "clinical computing",
+        "monitoring and sensing",
+        "clinical equipment"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-COMP",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Clinical Workstation - dual monitor for virtual ward monitoring devices. Enabled with SSO proximity reade",
+      "connection_method": "Ethernet",
+      "power_method": "Mains",
+      "source_row_count": 2,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Workstation - Clinical - Virtual Ward Monitoring Workstation"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-112",
+      "name": "Water Flow Sensor",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Smart Building",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 5,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "Water flow",
+        "Water Flow"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-113",
+      "name": "Water Temperature Sensor",
+      "ADB_Code": "",
+      "Group": "IoT, Location & Sensors",
+      "scenario_group": "",
+      "capability_keywords": "IoT, Location & Sensors; monitoring and sensing",
+      "capabilities": [
+        "IoT, Location & Sensors",
+        "monitoring and sensing"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-IOT",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Smart Building",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains",
+      "source_row_count": 5,
+      "source_total_asset_qty": 2,
+      "source_categories": [
+        "water temperature",
+        "Water Temperature"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-114",
+      "name": "Wi-Fi Wireless Access Point",
+      "ADB_Code": "",
+      "Group": "Network Infrastructure",
+      "scenario_group": "",
+      "capability_keywords": "Network Infrastructure; power and charging; wireless connectivity",
+      "capabilities": [
+        "Network Infrastructure",
+        "power and charging",
+        "wireless connectivity"
+      ],
+      "connection_type": "wired",
+      "category_id": "CAT-NET",
+      "qty": 1,
+      "data_points": 1,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "In the event that due to the grid layout of Wi-Fi a Wi-Fi Access Point is installed in this space, then a Data Point and power will be required.",
+      "connection_method": "Ethernet",
+      "power_method": "PoE",
+      "source_row_count": 4,
+      "source_total_asset_qty": 10,
+      "source_categories": [
+        "Wi-Fi Wireless Access Point"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    },
+    {
+      "id": "CRA-115",
+      "name": "Wireless Synchronized Clock",
+      "ADB_Code": "",
+      "Group": "Building Controls & Environmental",
+      "scenario_group": "",
+      "capability_keywords": "Building Controls & Environmental; wireless connectivity",
+      "capabilities": [
+        "Building Controls & Environmental",
+        "wireless connectivity"
+      ],
+      "connection_type": "wireless",
+      "category_id": "CAT-BLDG",
+      "qty": 1,
+      "data_points": 0,
+      "north_south_concurrency_factor": 1,
+      "east_west_concurrency_factor": 1,
+      "description": "Wireless clock synchronized to a common network time source.",
+      "connection_method": "Wi-Fi / Wireless",
+      "power_method": "Mains (To Confirm)",
+      "source_row_count": 21,
+      "source_total_asset_qty": 20,
+      "source_categories": [
+        "Clock - Wireless"
+      ],
+      "source_adb_codes": [],
+      "alternative_connections": [],
+      "alternative_power_methods": [],
+      "review_status": "Ready",
+      "notes": "Consolidated from equivalent source rows."
+    }
+  ],
+  "related": {
+    "asset_categories": [
+      {
+        "id": "CAT-AUTO",
+        "name": "Robotics & Automated Logistics"
+      },
+      {
+        "id": "CAT-MED",
+        "name": "Medical Equipment & Integration"
+      },
+      {
+        "id": "CAT-COMP",
+        "name": "Computing & Workstations"
+      },
+      {
+        "id": "CAT-PRINT",
+        "name": "Printing & Identification"
+      },
+      {
+        "id": "CAT-AV",
+        "name": "Audio Visual, Displays & Signage"
+      },
+      {
+        "id": "CAT-COMMS",
+        "name": "Communications & Telephony"
+      },
+      {
+        "id": "CAT-NURSE",
+        "name": "Nurse Call & Clinical Alarms"
+      },
+      {
+        "id": "CAT-SEC",
+        "name": "Security, Access & Life Safety"
+      },
+      {
+        "id": "CAT-IOT",
+        "name": "IoT, Location & Sensors"
+      },
+      {
+        "id": "CAT-BLDG",
+        "name": "Building Controls & Environmental"
+      },
+      {
+        "id": "CAT-POWER",
+        "name": "Power, Charging & Data Provision"
+      },
+      {
+        "id": "CAT-PATIENT",
+        "name": "Patient Bedside & Entertainment"
+      },
+      {
+        "id": "CAT-STORAGE",
+        "name": "Storage, Dispensing & Logistics"
+      },
+      {
+        "id": "CAT-NET",
+        "name": "Network Infrastructure"
+      },
+      {
+        "id": "CAT-OTHER",
+        "name": "General & Other"
+      }
+    ]
+  },
+  "metadata": {
+    "source_workbook": "Repeatable_Rooms_Common_Assets.xlsx",
+    "source_sheet": "Unique Assets",
+    "source_rows_sheet": "Updated Rows",
+    "created_for": "Cable Route Resolver",
+    "asset_count": 115,
+    "source_row_count": 884,
+    "category_assignment": "Rule-based functional grouping from asset names, descriptions and source categories",
+    "category_counts": {
+      "CAT-AUTO": 1,
+      "CAT-MED": 19,
+      "CAT-STORAGE": 4,
+      "CAT-AV": 21,
+      "CAT-PRINT": 8,
+      "CAT-COMP": 10,
+      "CAT-COMMS": 7,
+      "CAT-SEC": 6,
+      "CAT-POWER": 4,
+      "CAT-IOT": 15,
+      "CAT-BLDG": 7,
+      "CAT-NET": 2,
+      "CAT-NURSE": 7,
+      "CAT-PATIENT": 4
+    },
+    "quantity_note": "Library quantity defaults to 1; room-type assignments control deployed quantities.",
+    "data_points_note": "data_points is populated from Standard Data Qty in the source workbook."
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cable Route Resolver Asset Packs"
+  short_description: "Build and validate resolver asset packs"
+  default_prompt: "Use $create-asset-packs to create a validated Cable Route Resolver asset pack from this asset source."

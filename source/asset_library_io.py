@@ -11,6 +11,14 @@ from typing import Iterable, Optional
 ASSET_PACK_FORMAT = "cable-route-resolver-asset-pack"
 ASSET_PACK_VERSION = 1
 SUPPORTED_LIBRARY_TYPES = {"assets", "network_assets"}
+IMPORT_ACTION_MAP = "map"
+IMPORT_ACTION_CREATE = "create"
+IMPORT_ACTION_REJECT = "reject"
+SUPPORTED_IMPORT_ACTIONS = {
+    IMPORT_ACTION_MAP,
+    IMPORT_ACTION_CREATE,
+    IMPORT_ACTION_REJECT,
+}
 
 
 class AssetPackError(ValueError):
@@ -140,4 +148,109 @@ def merge_asset_rows(existing, incoming, *, replace_existing: bool) -> tuple:
         "replaced": replaced,
         "skipped": skipped,
         "imported_ids": imported_ids,
+    }
+
+
+def marshal_asset_rows(existing, incoming, resolutions) -> tuple:
+    """Apply explicit per-row import resolutions without mutating the inputs.
+
+    ``resolutions`` contains one row per incoming asset with ``source_id``,
+    ``action`` and, for map/create actions, ``target_id``. Mapping acknowledges
+    that the imported definition is represented by an existing local asset;
+    creating copies the incoming definition under the selected local ID.
+    """
+    existing_rows = [deepcopy(row) for row in existing if isinstance(row, dict)]
+    incoming_rows = [deepcopy(row) for row in incoming if isinstance(row, dict)]
+    existing_ids = {
+        str(row.get("id", "") or "").strip()
+        for row in existing_rows
+        if str(row.get("id", "") or "").strip()
+    }
+    resolution_by_source = {}
+    for raw in resolutions:
+        if not isinstance(raw, dict):
+            raise AssetPackError("Each asset import resolution must be an object.")
+        source_id = str(raw.get("source_id", "") or "").strip()
+        action = str(raw.get("action", "") or "").strip().lower()
+        target_id = str(raw.get("target_id", "") or "").strip()
+        if not source_id:
+            raise AssetPackError("An asset import resolution has no source ID.")
+        if source_id in resolution_by_source:
+            raise AssetPackError(f"Asset {source_id} has more than one import resolution.")
+        if action not in SUPPORTED_IMPORT_ACTIONS:
+            raise AssetPackError(f"Asset {source_id} has an unsupported import action: {action}")
+        resolution_by_source[source_id] = {
+            "source_id": source_id,
+            "action": action,
+            "target_id": target_id,
+        }
+
+    incoming_ids = {
+        str(row.get("id", "") or "").strip() for row in incoming_rows
+    }
+    missing = sorted(incoming_ids - set(resolution_by_source))
+    unexpected = sorted(set(resolution_by_source) - incoming_ids)
+    if missing:
+        raise AssetPackError(
+            "No import resolution was supplied for: " + ", ".join(missing)
+        )
+    if unexpected:
+        raise AssetPackError(
+            "Import resolutions reference unknown assets: " + ", ".join(unexpected)
+        )
+
+    created_targets = set()
+    for source_id, resolution in resolution_by_source.items():
+        action = resolution["action"]
+        target_id = resolution["target_id"]
+        if action == IMPORT_ACTION_REJECT:
+            continue
+        if not target_id:
+            raise AssetPackError(f"Asset {source_id} has no target asset ID.")
+        if action == IMPORT_ACTION_MAP:
+            if target_id not in existing_ids:
+                raise AssetPackError(
+                    f"Asset {source_id} maps to unknown existing asset {target_id}."
+                )
+            continue
+        if target_id in existing_ids or target_id in created_targets:
+            raise AssetPackError(
+                f"New asset ID {target_id} is already used by another asset."
+            )
+        created_targets.add(target_id)
+
+    merged = list(existing_rows)
+    created_ids = []
+    created_source_ids = []
+    mapped_ids = []
+    rejected_ids = []
+    source_to_target = {}
+    for row in incoming_rows:
+        source_id = str(row.get("id", "") or "").strip()
+        resolution = resolution_by_source[source_id]
+        action = resolution["action"]
+        if action == IMPORT_ACTION_REJECT:
+            rejected_ids.append(source_id)
+            continue
+        target_id = resolution["target_id"]
+        source_to_target[source_id] = target_id
+        if action == IMPORT_ACTION_MAP:
+            mapped_ids.append(target_id)
+            continue
+        row["id"] = target_id
+        merged.append(row)
+        created_ids.append(target_id)
+        created_source_ids.append(source_id)
+
+    return merged, {
+        "added": len(created_ids),
+        "mapped": len(mapped_ids),
+        "rejected": len(rejected_ids),
+        "created_ids": created_ids,
+        "created_source_ids": created_source_ids,
+        "mapped_ids": mapped_ids,
+        "rejected_ids": rejected_ids,
+        "accepted_source_ids": list(source_to_target),
+        "source_to_target": source_to_target,
+        "imported_ids": created_ids + mapped_ids,
     }

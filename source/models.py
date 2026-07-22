@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 import re
+import shutil
 from uuid import uuid4
 
 from project_sqlite import (
@@ -26,6 +27,8 @@ DEFAULT_JSON = {
     "departments": [],
     "room_types": [],
     "room_type_asset_review": {},
+    "room_type_asset_staging": {},
+    "room_type_asset_commits": [],
     "room_type_asset_rfi": {
         "queries": [],
         "history": [],
@@ -123,6 +126,16 @@ class JsonStore:
         if not isinstance(self.data.get("room_type_asset_review"), dict):
             self.data["room_type_asset_review"] = {}
         self.data.setdefault("room_type_asset_review", {})
+        if not isinstance(self.data.get("room_type_asset_staging"), dict):
+            self.data["room_type_asset_staging"] = {}
+        if not isinstance(self.data.get("room_type_asset_commits"), list):
+            self.data["room_type_asset_commits"] = []
+        else:
+            self.data["room_type_asset_commits"] = [
+                dict(item)
+                for item in self.data["room_type_asset_commits"]
+                if isinstance(item, dict)
+            ]
         rfi_state = self.data.setdefault("room_type_asset_rfi", {})
         if not isinstance(rfi_state, dict):
             rfi_state = {}
@@ -583,6 +596,23 @@ class JsonStore:
         destination = Path(path)
         if not destination.suffix:
             destination = destination.with_suffix(DEFAULT_EXTENSION)
+        source = Path(self.storage_path) if self.storage_path else None
+        if (
+            source is not None
+            and source.exists()
+            and is_sqlite_project(source)
+            and source.resolve() != destination.resolve()
+        ):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary_copy = destination.with_name(
+                f".{destination.name}.save-as-{uuid4().hex}.tmp"
+            )
+            try:
+                shutil.copy2(source, temporary_copy)
+                temporary_copy.replace(destination)
+            finally:
+                if temporary_copy.exists():
+                    temporary_copy.unlink()
         project = SQLiteProjectFile(destination)
         self.last_save_statistics = project.save(
             self.data,

@@ -1830,6 +1830,7 @@ class PdfReportStudioDialog(QDialog):
         report_title="PDF Report Studio",
         show_report_controls=True,
         network_data=None,
+        report_option_groups=None,
     ):
         super().__init__(parent)
         self.setWindowFlags(
@@ -1872,6 +1873,17 @@ class PdfReportStudioDialog(QDialog):
             (initial_settings or {}).get("saved_report_configurations", {}) or {}
         )
         self.network_data = deepcopy(network_data or {})
+        self.report_option_groups = deepcopy(report_option_groups or [])
+        self.report_option_checks = {}
+        for group in self.report_option_groups:
+            setting_key = str(group.get("setting_key", "") or "").strip()
+            option_ids = [
+                str(option.get("id", "") or "").strip()
+                for option in group.get("options", []) or []
+                if str(option.get("id", "") or "").strip()
+            ]
+            if setting_key and setting_key not in self.settings:
+                self.settings[setting_key] = option_ids
         self._network_snippet_png_cache = {}
         self.preview_path = ""
         self._composed_preview_path = ""
@@ -2067,6 +2079,43 @@ class PdfReportStudioDialog(QDialog):
         controls_scroll.setWidgetResizable(True)
         controls = QWidget()
         controls_layout = QVBoxLayout(controls)
+
+        for group in self.report_option_groups:
+            setting_key = str(group.get("setting_key", "") or "").strip()
+            options = list(group.get("options", []) or [])
+            if not setting_key or not options:
+                continue
+            option_group = QGroupBox(
+                str(group.get("title", "Report fields") or "Report fields")
+            )
+            option_layout = QVBoxLayout(option_group)
+            help_text = str(group.get("help", "") or "").strip()
+            if help_text:
+                help_label = QLabel(help_text)
+                help_label.setWordWrap(True)
+                option_layout.addWidget(help_label)
+            selected = {
+                str(value)
+                for value in self.settings.get(setting_key, []) or []
+            }
+            checks = {}
+            for option in options:
+                option_id = str(option.get("id", "") or "").strip()
+                if not option_id:
+                    continue
+                check = QCheckBox(
+                    str(option.get("label", option_id) or option_id)
+                )
+                check.setChecked(option_id in selected)
+                check.toggled.connect(
+                    lambda value, key=setting_key, field=option_id: self._report_option_toggled(
+                        key, field, bool(value)
+                    )
+                )
+                checks[option_id] = check
+                option_layout.addWidget(check)
+            self.report_option_checks[setting_key] = checks
+            controls_layout.addWidget(option_group)
 
         layers = QGroupBox("Report contents")
         layers_layout = QVBoxLayout(layers)
@@ -2335,6 +2384,27 @@ class PdfReportStudioDialog(QDialog):
         self.settings[str(key)] = value
         self._record_history_state()
 
+    def _report_option_toggled(self, setting_key, option_id, checked):
+        checks = self.report_option_checks.get(str(setting_key), {})
+        selected = [
+            field_id for field_id, check in checks.items() if check.isChecked()
+        ]
+        if not selected:
+            check = checks.get(str(option_id))
+            if check is not None:
+                check.blockSignals(True)
+                check.setChecked(True)
+                check.blockSignals(False)
+            QMessageBox.information(
+                self,
+                "Report fields",
+                "Select at least one field for the report.",
+            )
+            return
+        self.settings[str(setting_key)] = selected
+        self._record_history_state()
+        self.refresh_preview(collect_current=False)
+
     def _record_history_state(self):
         if self._history_suspended:
             return
@@ -2361,6 +2431,18 @@ class PdfReportStudioDialog(QDialog):
         self.font_scale_spin.blockSignals(True)
         self.font_scale_spin.setValue(float(self.settings.get("font_scale", 1.0)))
         self.font_scale_spin.blockSignals(False)
+        for setting_key, checks in self.report_option_checks.items():
+            selected = {
+                str(value)
+                for value in self.settings.get(setting_key, []) or []
+            }
+            if not selected:
+                selected = set(checks)
+                self.settings[setting_key] = list(checks)
+            for option_id, check in checks.items():
+                check.blockSignals(True)
+                check.setChecked(option_id in selected)
+                check.blockSignals(False)
         self._refresh_report_configuration_combo()
 
     def _restore_history_snapshot(self, snapshot):
@@ -3135,6 +3217,7 @@ class PdfReportStudioDialog(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "Report preview failed", str(exc))
             return
+        self.base_preview_path = str(base_path)
         self.manifest = list(manifest or [])
         self.document.close()
         if self._composed_preview_path:

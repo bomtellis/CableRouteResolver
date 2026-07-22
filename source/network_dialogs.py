@@ -121,10 +121,11 @@ from network_schema import (
 )
 from asset_library_io import (
     AssetPackError,
-    merge_asset_rows,
+    marshal_asset_rows,
     read_asset_pack,
     write_asset_pack,
 )
+from asset_import_dialog import AssetImportMarshallingDialog
 
 
 def _text(value) -> str:
@@ -6077,36 +6078,23 @@ class NetworkPlannerDialog(QDialog):
             QMessageBox.critical(self, "Import failed", str(exc))
             return
 
-        existing_ids = {
-            _text(row.get("id"))
-            for row in self._items("network_assets")
-            if isinstance(row, dict) and _text(row.get("id"))
-        }
-        duplicate_ids = sorted(
-            existing_ids
-            & {_text(row.get("id")) for row in payload.get("assets", [])}
+        existing_assets = self._items("network_assets")
+        incoming_assets = payload.get("assets", [])
+        marshalling = AssetImportMarshallingDialog(
+            self,
+            incoming_assets,
+            existing_assets,
+            asset_label="network asset",
         )
-        replace_existing = False
-        if duplicate_ids:
-            answer = QMessageBox.question(
-                self,
-                "Existing network assets",
-                f"{len(duplicate_ids)} asset ID(s) already exist.\n\n"
-                "Yes: replace existing definitions\n"
-                "No: keep existing definitions and import only new assets\n"
-                "Cancel: do not import",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                QMessageBox.No,
+        if marshalling.exec() != QDialog.Accepted:
+            return
+        try:
+            merged, result = marshal_asset_rows(
+                existing_assets, incoming_assets, marshalling.resolutions
             )
-            if answer == QMessageBox.Cancel:
-                return
-            replace_existing = answer == QMessageBox.Yes
-
-        merged, result = merge_asset_rows(
-            self._items("network_assets"),
-            payload.get("assets", []),
-            replace_existing=replace_existing,
-        )
+        except AssetPackError as exc:
+            QMessageBox.critical(self, "Import failed", str(exc))
+            return
         self.data["network_assets"] = merged
         self.tabs.setCurrentWidget(self.assets_tab)
         self.asset_group_filter_combo.blockSignals(True)
@@ -6123,9 +6111,9 @@ class NetworkPlannerDialog(QDialog):
         QMessageBox.information(
             self,
             "Import complete",
-            f"Added: {result['added']}\n"
-            f"Replaced: {result['replaced']}\n"
-            f"Skipped: {result['skipped']}",
+            f"Created: {result['added']}\n"
+            f"Mapped to existing: {result['mapped']}\n"
+            f"Rejected: {result['rejected']}",
         )
 
     def add_asset(self) -> None:

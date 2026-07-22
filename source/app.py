@@ -136,6 +136,21 @@ from advanced_dialogs import (
     RouteProfilesEditorV2,
 )
 from models import JsonStore
+from asset_condensation import (
+    condense_assets as apply_asset_condensation,
+    create_condensation_rfis,
+    expand_asset as apply_asset_expansion,
+)
+from room_type_condensation import condense_room_types as apply_room_type_condensation
+from room_type_asset_staging import (
+    build_commit as build_room_type_asset_commit,
+    clean_assignment_rows,
+    staged_changes as room_type_asset_staged_changes,
+    update_staging as update_room_type_asset_staging,
+    resolve_rfis_with_commit,
+    remember_room_type_revision_change,
+    should_mirror_rfi_audit_to_revision,
+)
 
 try:
     import pulp
@@ -2745,9 +2760,14 @@ class CableRouteEditor(QMainWindow):
             assets_by_id=assets_by_id,
             asset_categories_by_id=asset_categories_by_id,
             review_state=self.store.data.get("room_type_asset_review", {}),
+            staging_state=self.store.data.get("room_type_asset_staging", {}),
+            asset_commits=self.store.data.get("room_type_asset_commits", []),
             rfi_state=self.store.data.get("room_type_asset_rfi", {}),
             on_state_changed=self._save_room_type_asset_review_state,
             on_assignments_changed=self._save_room_type_asset_review_assignments,
+            on_commit_staging=self._commit_room_type_asset_staging,
+            on_reset_staging=self._reset_room_type_asset_staging,
+            on_rollback_commit=self._rollback_room_type_asset_commit,
             on_rfi_changed=self._save_room_type_asset_rfi_state,
             on_export_rfi=self.export_room_type_asset_rfi_pdf,
         )
@@ -2868,6 +2888,16 @@ class CableRouteEditor(QMainWindow):
         if not details:
             return
         identity = str(room_type_id or "").strip() or "(no ID)"
+        fingerprints = getattr(
+            self, "_room_type_revision_change_fingerprints", None
+        )
+        if fingerprints is None:
+            fingerprints = {}
+            self._room_type_revision_change_fingerprints = fingerprints
+        if not remember_room_type_revision_change(
+            fingerprints, source, identity, details
+        ):
+            return
         name = str(room_type_name or "").strip()
         label = f"{identity} - {name}" if name and name != identity else identity
         summary = f"Room type {label}: " + "; ".join(details)
@@ -2962,6 +2992,17 @@ class CableRouteEditor(QMainWindow):
             ),
             None,
         )
+        before_assignment_rows = clean_assignment_rows(
+            (
+                room_type.get("assets", [])
+                or [
+                    {"asset_id": asset_id, "qty": 1}
+                    for asset_id in room_type.get("asset_ids", []) or []
+                ]
+            )
+            if isinstance(room_type, dict)
+            else []
+        )
         before_quantities = self._room_type_asset_quantities(room_type)
         before_requesters = self._room_type_asset_requesters(room_type)
         before_ports = {}
@@ -2978,8 +3019,8 @@ class CableRouteEditor(QMainWindow):
             except (TypeError, ValueError):
                 before_ports[asset_id] = 0
         self.push_undo_state("Update room type asset assignments")
+        cleaned_rows = []
         if isinstance(room_type, dict):
-            cleaned_rows = []
             for row in asset_rows or []:
                 if not isinstance(row, dict):
                     continue
@@ -3023,6 +3064,22 @@ class CableRouteEditor(QMainWindow):
                 after_ports[asset_id] = max(0, int(ports or 0))
             except (TypeError, ValueError):
                 after_ports[asset_id] = 0
+        asset_names = {
+            str(asset.get("id", "") or "").strip(): str(asset.get("name", "") or "").strip()
+            for asset in self.store.data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        staging = update_room_type_asset_staging(
+            self.store.data.get("room_type_asset_staging", {}),
+            room_type_id=room_type_id,
+            room_type_name=(room_type.get("name", "") if isinstance(room_type, dict) else ""),
+            before_rows=before_assignment_rows,
+            after_rows=cleaned_rows,
+            before_ports=before_ports,
+            after_ports=ports_by_asset,
+            asset_names=asset_names,
+        )
+        self.store.data["room_type_asset_staging"] = staging
         details = self._room_assignment_change_details(
             before_quantities,
             after_quantities,
@@ -3044,6 +3101,291 @@ class CableRouteEditor(QMainWindow):
             review_state.pop(room_type_id, None)
         self.store.sync_all_room_type_quantities()
         self.set_status(f"Updated asset quantities and data ports for room type {room_type_id}")
+        return deepcopy(staging)
+
+    def _commit_room_type_asset_staging(self, message, resolve_rfi_ids=None):
+        staging = self.store.data.get("room_type_asset_staging", {})
+        changes = staging.get("changes", []) if isinstance(staging, dict) else []
+        if not changes:
+            return {}
+        commits = self.store.data.setdefault("room_type_asset_commits", [])
+        highest = 0
+        for item in commits:
+            if not isinstance(item, dict):
+                continue
+            match = re.search(r"(\d+)$", str(item.get("id", "") or ""))
+            if match:
+                highest = max(highest, int(match.group(1)))
+        commit_id = f"RTAC-{highest + 1:06d}"
+        try:
+            commit = build_room_type_asset_commit(
+                staging, message, commit_id=commit_id
+            )
+        except ValueError as exc:
+            QMessageBox.information(self, "Commit Asset Changes", str(exc))
+            return deepcopy(staging)
+
+        self.push_undo_state("Commit staged room type asset changes")
+        commits.append(commit)
+        self.store.data["room_type_asset_staging"] = {}
+        rfi_state, resolved_rfi_ids = resolve_rfis_with_commit(
+            self.store.data.get("room_type_asset_rfi", {}),
+            resolve_rfi_ids,
+            commit_id=commit_id,
+            message=message,
+        )
+        self.store.data["room_type_asset_rfi"] = rfi_state
+        if resolved_rfi_ids:
+            commit["resolved_rfi_ids"] = resolved_rfi_ids
+        details = []
+        for change in commit["changes"]:
+            action = str(change.get("change_type", "changed") or "changed")
+            room_id = str(change.get("room_type_id", "") or "").strip()
+            asset_id = str(change.get("asset_id", "") or "").strip()
+            scope = str(change.get("scope", "assignment") or "assignment")
+            if scope == "asset":
+                before = change.get("before", {}) or {}
+                after = change.get("after", {}) or {}
+                details.append(
+                    f"changed asset {asset_id} data points from "
+                    f"{before.get('data_points', 0)} to {after.get('data_points', 0)}"
+                )
+            else:
+                details.append(f"{action} asset {asset_id} for room type {room_id}")
+        details.extend(
+            f"resolved RFI {rfi_id} with commit {commit_id}"
+            for rfi_id in resolved_rfi_ids
+        )
+        self.store.record_revision_change(
+            "Room Type Asset Commit",
+            f"{commit_id}: {str(message or '').strip()}",
+            details=details,
+        )
+        self.set_status(
+            f"Committed {len(commit['changes'])} staged room type asset change(s) as "
+            f"{commit_id}; resolved {len(resolved_rfi_ids)} RFI(s)"
+        )
+        return self._room_type_asset_staging_result({})
+
+    def _rollback_room_type_asset_commit(self, commit_id):
+        identity = str(commit_id or "").strip()
+        commit = next(
+            (
+                item
+                for item in self.store.data.get("room_type_asset_commits", []) or []
+                if isinstance(item, dict)
+                and str(item.get("id", "") or "").strip() == identity
+            ),
+            None,
+        )
+        if not isinstance(commit, dict):
+            QMessageBox.information(
+                self, "Rollback Asset Commit", f"Asset commit {identity} was not found."
+            )
+            return self._room_type_asset_staging_result(
+                self.store.data.get("room_type_asset_staging", {})
+            )
+
+        self.push_undo_state(f"Rollback room type asset commit {identity}")
+        staging = deepcopy(self.store.data.get("room_type_asset_staging", {}))
+        room_types_by_id = {
+            str(row.get("id", "") or "").strip(): row
+            for row in self.store.data.get("room_types", []) or []
+            if isinstance(row, dict) and str(row.get("id", "") or "").strip()
+        }
+        assets_by_id = {
+            str(row.get("id", "") or "").strip(): row
+            for row in self.store.data.get("assets", []) or []
+            if isinstance(row, dict) and str(row.get("id", "") or "").strip()
+        }
+        asset_names = {
+            asset_id: str(asset.get("name", "") or "").strip()
+            for asset_id, asset in assets_by_id.items()
+        }
+        assignment_changes = {}
+        asset_changes = []
+        for change in commit.get("changes", []) or []:
+            if not isinstance(change, dict):
+                continue
+            if str(change.get("scope", "assignment") or "assignment") == "asset":
+                asset_changes.append(change)
+                continue
+            room_id = str(change.get("room_type_id", "") or "").strip()
+            if room_id:
+                assignment_changes.setdefault(room_id, []).append(change)
+
+        for room_id, changes in assignment_changes.items():
+            room_type = room_types_by_id.get(room_id)
+            if not isinstance(room_type, dict):
+                continue
+            before_rows = clean_assignment_rows(
+                room_type.get("assets", [])
+                or [
+                    {"asset_id": value, "qty": 1}
+                    for value in room_type.get("asset_ids", []) or []
+                ]
+            )
+            target_by_id = {row["asset_id"]: row for row in before_rows}
+            for change in changes:
+                asset_id = str(change.get("asset_id", "") or "").strip()
+                original = change.get("before")
+                if isinstance(original, dict):
+                    restored = clean_assignment_rows([original])
+                    if restored:
+                        target_by_id[asset_id] = restored[0]
+                else:
+                    target_by_id.pop(asset_id, None)
+            after_rows = sorted(target_by_id.values(), key=lambda row: row["asset_id"].casefold())
+            staging = update_room_type_asset_staging(
+                staging,
+                room_type_id=room_id,
+                room_type_name=room_type.get("name", ""),
+                before_rows=before_rows,
+                after_rows=after_rows,
+                before_ports={},
+                after_ports={},
+                asset_names=asset_names,
+            )
+            room_type["assets"] = after_rows
+            room_type["asset_ids"] = [row["asset_id"] for row in after_rows]
+
+        for change in asset_changes:
+            asset_id = str(change.get("asset_id", "") or "").strip()
+            asset = assets_by_id.get(asset_id)
+            before = change.get("before", {}) or {}
+            if not isinstance(asset, dict) or "data_points" not in before:
+                continue
+            try:
+                current_value = max(0, int(asset.get("data_points", 0) or 0))
+                target_value = max(0, int(before.get("data_points", 0) or 0))
+            except (TypeError, ValueError):
+                continue
+            room_id = str(change.get("room_type_id", "") or "").strip()
+            room_type = room_types_by_id.get(room_id, {})
+            current_rows = clean_assignment_rows(
+                room_type.get("assets", []) if isinstance(room_type, dict) else []
+            )
+            staging = update_room_type_asset_staging(
+                staging,
+                room_type_id=room_id,
+                room_type_name=(room_type.get("name", "") if isinstance(room_type, dict) else ""),
+                before_rows=current_rows,
+                after_rows=current_rows,
+                before_ports={asset_id: current_value},
+                after_ports={asset_id: target_value},
+                asset_names=asset_names,
+            )
+            asset["data_points"] = target_value
+
+        if staging:
+            rollback_ids = [
+                str(value).strip()
+                for value in staging.get("rollback_of", []) or []
+                if str(value).strip()
+            ]
+            if identity not in rollback_ids:
+                rollback_ids.append(identity)
+            staging["rollback_of"] = rollback_ids
+            staging["changes"] = room_type_asset_staged_changes(staging)
+        self.store.data["room_type_asset_staging"] = staging
+        self.store.sync_all_room_type_quantities()
+        self.set_status(
+            f"Staged rollback of {identity}: {len(staging.get('changes', [])) if staging else 0} change(s)"
+        )
+        return self._room_type_asset_staging_result(staging)
+
+    def _reset_room_type_asset_staging(self, room_type_id=""):
+        staging = deepcopy(self.store.data.get("room_type_asset_staging", {}))
+        if not isinstance(staging, dict):
+            staging = {}
+        target_id = str(room_type_id or "").strip()
+        rooms = staging.get("rooms", {})
+        assets = staging.get("assets", {})
+        if not isinstance(rooms, dict):
+            rooms = {}
+        if not isinstance(assets, dict):
+            assets = {}
+        selected_room_ids = (
+            {target_id} if target_id else set(str(key) for key in rooms)
+        )
+        selected_asset_ids = {
+            str(asset_id)
+            for asset_id, record in assets.items()
+            if not target_id
+            or (
+                isinstance(record, dict)
+                and str(record.get("room_type_id", "") or "").strip() == target_id
+            )
+        }
+        if not selected_room_ids and not selected_asset_ids:
+            return self._room_type_asset_staging_result(staging)
+
+        self.push_undo_state(
+            "Reset current room asset changes"
+            if target_id
+            else "Clear all staged room type asset changes"
+        )
+        room_types_by_id = {
+            str(row.get("id", "") or "").strip(): row
+            for row in self.store.data.get("room_types", []) or []
+            if isinstance(row, dict) and str(row.get("id", "") or "").strip()
+        }
+        for reset_room_id in selected_room_ids:
+            record = rooms.get(reset_room_id)
+            room_type = room_types_by_id.get(reset_room_id)
+            if not isinstance(record, dict) or not isinstance(room_type, dict):
+                continue
+            restored_rows = clean_assignment_rows(record.get("before", []))
+            room_type["assets"] = restored_rows
+            room_type["asset_ids"] = [row["asset_id"] for row in restored_rows]
+            rooms.pop(reset_room_id, None)
+
+        assets_by_id = {
+            str(row.get("id", "") or "").strip(): row
+            for row in self.store.data.get("assets", []) or []
+            if isinstance(row, dict) and str(row.get("id", "") or "").strip()
+        }
+        for asset_id in selected_asset_ids:
+            record = assets.get(asset_id)
+            asset = assets_by_id.get(asset_id)
+            if isinstance(record, dict) and isinstance(asset, dict):
+                try:
+                    value = max(0, int(record.get("before_data_points", 0) or 0))
+                except (TypeError, ValueError):
+                    value = 0
+                asset["data_points"] = value
+            assets.pop(asset_id, None)
+
+        staging["rooms"] = rooms
+        staging["assets"] = assets
+        staging["changes"] = room_type_asset_staged_changes(staging)
+        if not staging["changes"]:
+            staging = {}
+        self.store.data["room_type_asset_staging"] = staging
+        self.store.sync_all_room_type_quantities()
+        self.set_status(
+            f"Reset staged asset changes for room type {target_id}"
+            if target_id
+            else "Cleared all staged room type asset changes"
+        )
+        return self._room_type_asset_staging_result(staging)
+
+    def _room_type_asset_staging_result(self, staging):
+        return {
+            "staging": deepcopy(staging if isinstance(staging, dict) else {}),
+            "room_types": deepcopy(self.store.data.get("room_types", []) or []),
+            "assets_by_id": {
+                str(asset.get("id", "") or "").strip(): deepcopy(asset)
+                for asset in self.store.data.get("assets", []) or []
+                if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+            },
+            "commits": deepcopy(
+                self.store.data.get("room_type_asset_commits", []) or []
+            ),
+            "rfi_state": deepcopy(
+                self.store.data.get("room_type_asset_rfi", {}) or {}
+            ),
+        }
 
     def _save_room_type_asset_rfi_state(self, rfi_state):
         old_state = self.store.data.get("room_type_asset_rfi", {})
@@ -3069,6 +3411,8 @@ class CableRouteEditor(QMainWindow):
         new_history = self.store.data["room_type_asset_rfi"]["history"]
         appended = new_history[len(old_history):] if new_history[:len(old_history)] == old_history else []
         for item in appended:
+            if not should_mirror_rfi_audit_to_revision(item):
+                continue
             action = str(item.get("action", "audit updated") or "audit updated").replace("_", " ")
             asset_id = str(item.get("asset_id", "") or "").strip()
             asset_name = str(item.get("asset_name", "") or "").strip()
@@ -3194,6 +3538,7 @@ class CableRouteEditor(QMainWindow):
             ("Save Project As", "file-earmark-plus", self.save_json_as),
             ("Revision History...", "clock-history", self.show_revision_history),
             ("Export Revision History PDF", "filetype-pdf", self.export_revision_history_pdf),
+            ("Export Asset Register PDF", "filetype-pdf", self.export_asset_register_pdf),
             ("Export Room Type Asset RFI PDF", "filetype-pdf", self.export_room_type_asset_rfi_pdf),
             ("Export Project Summary PDF", "filetype-pdf", self.export_project_summary_pdf),
             ("Export Floor Plans PDF", "filetype-pdf", self.export_all_floors_pdf),
@@ -3928,6 +4273,12 @@ class CableRouteEditor(QMainWindow):
                     "Export room, use-case and network summary PDF",
                     QStyle.SP_FileIcon,
                     self.export_project_summary_pdf,
+                ),
+                self._ribbon_icon_button(
+                    "Asset Register",
+                    "Export the project asset library and deployment totals",
+                    QStyle.SP_FileIcon,
+                    self.export_asset_register_pdf,
                 ),
                 self._ribbon_icon_button(
                     "Floor PDF",
@@ -9815,6 +10166,8 @@ class CableRouteEditor(QMainWindow):
         report_title="PDF Report Studio",
         output_path=None,
         layout_manifest=None,
+        preview_builder=None,
+        report_option_groups=None,
     ):
         pdf_path = str(pdf_path or "").strip()
         if not pdf_path or not Path(pdf_path).exists():
@@ -9840,21 +10193,29 @@ class CableRouteEditor(QMainWindow):
             deepcopy(self.store.data.get("pdf_report_page_templates", []) or []),
         )
 
-        def preview_builder(_settings):
-            return pdf_path, list(layout_manifest or [])
+        if preview_builder is None:
+            def studio_preview_builder(_settings):
+                return pdf_path, list(layout_manifest or [])
+        else:
+            studio_preview_builder = preview_builder
 
         studio = PdfReportStudioDialog(
-            preview_builder,
+            studio_preview_builder,
             initial_settings=initial_settings,
             parent=self,
             report_title=report_title,
             show_report_controls=bool(layout_manifest),
             network_data=self.store.data,
+            report_option_groups=report_option_groups,
         )
         try:
             if studio.run_as_window() != QDialog.Accepted:
                 return False
             settings = studio.export_settings()
+            selected_pdf_path = str(
+                getattr(studio, "base_preview_path", "") or pdf_path
+            )
+            selected_manifest = list(studio.manifest or layout_manifest or [])
         finally:
             studio.release_preview()
 
@@ -9869,18 +10230,18 @@ class CableRouteEditor(QMainWindow):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             annotations = list(settings.get("annotations", []) or [])
-            generated_callouts = list(layout_manifest or [])
+            generated_callouts = selected_manifest
             if annotations or generated_callouts or settings.get("extra_pages"):
                 from pdf_report_annotations import apply_pdf_studio_annotations
 
                 apply_pdf_studio_annotations(
-                    pdf_path,
+                    selected_pdf_path,
                     temporary_output,
                     settings,
                     callout_manifest=generated_callouts,
                 )
             else:
-                shutil.copy2(pdf_path, temporary_output)
+                shutil.copy2(selected_pdf_path, temporary_output)
             os.replace(temporary_output, destination_path)
         except Exception as exc:
             if Path(temporary_output).exists():
@@ -9909,6 +10270,8 @@ class CableRouteEditor(QMainWindow):
         build_preview,
         settings_key,
         report_title,
+        build_preview_with_settings=None,
+        report_option_groups=None,
     ):
         """Build a temporary PDF and only publish it after studio approval."""
         from uuid import uuid4
@@ -9934,12 +10297,24 @@ class CableRouteEditor(QMainWindow):
             else:
                 generated_path = str(generated or preview_path)
                 layout_manifest = []
+            studio_preview_builder = None
+            if build_preview_with_settings is not None:
+                def studio_preview_builder(settings):
+                    candidate = preview_directory / (
+                        f"{Path(destination_path).stem}_{uuid4().hex}.pdf"
+                    )
+                    rebuilt = build_preview_with_settings(str(candidate), settings)
+                    if isinstance(rebuilt, tuple):
+                        return str(rebuilt[0] or candidate), list(rebuilt[1] or [])
+                    return str(rebuilt or candidate), []
             if not self._review_pdf_in_report_studio(
                 generated_path,
                 settings_key=settings_key,
                 report_title=report_title,
                 output_path=destination_path,
                 layout_manifest=layout_manifest,
+                preview_builder=studio_preview_builder,
+                report_option_groups=report_option_groups,
             ):
                 return ""
             return destination_path
@@ -10033,6 +10408,91 @@ class CableRouteEditor(QMainWindow):
             self,
             "Revision PDF complete",
             f"Revision history PDF written to:\n\n{output_path}",
+        )
+
+    def export_asset_register_pdf(self):
+        assets = self.store.data.get("assets", []) or []
+        if not assets:
+            QMessageBox.information(
+                self,
+                "Asset Register PDF",
+                "No project assets are available to export.",
+            )
+            return
+
+        source_path = (
+            getattr(self.store, "storage_path", "") or self.current_json_path or ""
+        )
+        base_path = Path(source_path) if source_path else Path("cable_routes.crsdb")
+        initial = str(
+            base_path.with_suffix("").with_name(base_path.stem + "_asset_register.pdf")
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Asset Register PDF",
+            initial,
+            "PDF files (*.pdf)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+
+        try:
+            from asset_register_report import (
+                ASSET_REGISTER_COLUMNS,
+                asset_register_column_ids,
+                export_asset_register_pdf,
+            )
+
+            def build_asset_register(preview_path, settings=None):
+                settings = settings or {}
+                return export_asset_register_pdf(
+                    self.store.data,
+                    preview_path,
+                    source_path=source_path,
+                    revision_number=self.latest_project_revision_number(),
+                    columns=settings.get(
+                        "asset_register_columns", asset_register_column_ids()
+                    ),
+                )
+
+            output_path = self._export_pdf_through_report_studio(
+                path,
+                lambda preview_path: build_asset_register(preview_path),
+                settings_key="asset_register",
+                report_title="Asset Register Report Studio",
+                build_preview_with_settings=build_asset_register,
+                report_option_groups=[
+                    {
+                        "title": "Asset register columns",
+                        "setting_key": "asset_register_columns",
+                        "help": "Choose the columns included in the exported register.",
+                        "options": [
+                            {"id": column["id"], "label": column["label"]}
+                            for column in ASSET_REGISTER_COLUMNS
+                        ],
+                    }
+                ],
+            )
+        except ImportError as exc:
+            QMessageBox.critical(
+                self,
+                "Asset Register PDF failed",
+                "PDF export requires reportlab. Install project requirements and "
+                f"try again.\n\n{exc}",
+            )
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Asset Register PDF failed", str(exc))
+            return
+        if not output_path:
+            return
+        self.set_status(f"Exported asset register PDF: {Path(output_path).name}")
+        QMessageBox.information(
+            self,
+            "Asset Register PDF complete",
+            f"Asset register PDF written to:\n\n{output_path}",
         )
 
     def export_room_type_asset_rfi_pdf(self):
@@ -11185,6 +11645,7 @@ class CableRouteEditor(QMainWindow):
             asset_options=self.store.asset_options(),
             assets_by_id=assets_by_id,
             asset_categories_by_id=asset_categories_by_id,
+            on_condense_room_types=self._condense_room_types,
         )
 
     def _room_type_editor_change_details(self, before, after):
@@ -11298,6 +11759,70 @@ class CableRouteEditor(QMainWindow):
 
         self.set_status("Room types updated and data point quantities recalculated")
         self.refresh_canvas()
+
+    def _condense_room_types(
+        self, items, main_room_type_id, condensed_room_type_ids, reason
+    ):
+        reason = str(reason or "").strip()
+        if not reason:
+            raise ValueError("A database commit note is required.")
+        staging = self.store.data.get("room_type_asset_staging", {})
+        if isinstance(staging, dict) and staging.get("changes"):
+            raise ValueError(
+                "Commit or reset the staged room-type asset changes before "
+                "condensing room types."
+            )
+
+        updated_data = deepcopy(self.store.data)
+        updated_data["room_types"] = deepcopy(items)
+        result = apply_room_type_condensation(
+            updated_data,
+            main_room_type_id,
+            condensed_room_type_ids,
+            reason,
+        )
+        self.push_undo_state("Condense room types")
+        self.store.data = updated_data
+        self.store.sync_all_room_type_quantities()
+
+        removed_labels = []
+        for room_type in result["removed_room_types"]:
+            room_type_id = str(room_type.get("id", "") or "").strip()
+            name = str(room_type.get("name", room_type_id) or room_type_id).strip()
+            removed_labels.append(
+                f"{room_type_id} ({name})"
+                if name and name != room_type_id
+                else room_type_id
+            )
+        main_label = result["main_room_type_id"]
+        if result["main_room_type_name"] != main_label:
+            main_label += f" ({result['main_room_type_name']})"
+        details = [
+            f"reassigned {count} placed room(s)/data point(s) from "
+            f"{room_type_id} to {result['main_room_type_id']}"
+            for room_type_id, count in result["placement_counts"].items()
+        ]
+        details.extend(
+            f"raised {rfi['id']} to verify the retained room type asset and port count"
+            for rfi in result["created_rfis"]
+        )
+        self.store.record_revision_change(
+            "Room Type Condensation",
+            f"Condensed {', '.join(removed_labels)} into {main_label}. Reason: {reason}",
+            room_type_id=result["main_room_type_id"],
+            details=details,
+        )
+        self.set_status(
+            f"Condensed {len(removed_labels)} room type(s) into "
+            f"{result['main_room_type_id']}; reassigned "
+            f"{sum(result['placement_counts'].values())} placement(s) and raised "
+            f"{len(result['created_rfis'])} RFI(s)"
+        )
+        self.refresh_canvas()
+        return {
+            "placement_count": sum(result["placement_counts"].values()),
+            "rfi_count": len(result["created_rfis"]),
+        }
 
     def manage_room_type_scenario_groups(self):
         room_options = [
@@ -16018,6 +16543,8 @@ class CableRouteEditor(QMainWindow):
             deployment_locations=self.store.asset_deployment_locations(),
             on_navigate_to_room=self._centre_on_named_point,
             on_show_capability_overlap=self.show_asset_capability_overlap_dialog,
+            on_condense_assets=self._condense_assets,
+            on_expand_asset=self._expand_asset,
         )
 
     def manage_asset_categories(self):
@@ -16048,6 +16575,130 @@ class CableRouteEditor(QMainWindow):
 
         self.set_status("Assets updated and room type quantities recalculated")
         self.refresh_canvas()
+
+    def _condense_assets(self, items, main_asset_id, condensed_asset_ids, reason):
+        reason = str(reason or "").strip()
+        if not reason:
+            raise ValueError("A database commit note is required.")
+        staging = self.store.data.get("room_type_asset_staging", {})
+        if isinstance(staging, dict) and staging.get("changes"):
+            raise ValueError(
+                "Commit or reset the staged room-type asset changes before "
+                "condensing assets."
+            )
+
+        updated_data = deepcopy(self.store.data)
+        updated_data["assets"] = deepcopy(items)
+        result = apply_asset_condensation(
+            updated_data, main_asset_id, condensed_asset_ids
+        )
+        created_rfis = create_condensation_rfis(updated_data, result, reason)
+        self.push_undo_state("Condense assets")
+        self.store.data = updated_data
+        removed_labels = []
+        for asset in result["removed_assets"]:
+            asset_id = str(asset.get("id", "") or "").strip()
+            name = str(asset.get("name", asset_id) or asset_id).strip()
+            removed_labels.append(
+                f"{asset_id} ({name})" if name and name != asset_id else asset_id
+            )
+        main_label = result["main_asset_id"]
+        if result["main_asset_name"] != main_label:
+            main_label += f" ({result['main_asset_name']})"
+        details = [
+            f"{change['room_type_id'] or change['room_type_name']}: replaced condensed "
+            f"asset assignments with {result['main_asset_id']}"
+            for change in result["room_changes"]
+        ]
+        details.extend(f"Removed asset {label}" for label in removed_labels)
+        details.extend(
+            f"Raised {rfi['id']} for room type {rfi['room_type_id']} to verify "
+            f"{rfi['asset_id']} and its port count"
+            for rfi in created_rfis
+        )
+        self.store.record_revision_change(
+            "Asset Condensation",
+            f"Condensed {', '.join(removed_labels)} into {main_label}. Reason: {reason}",
+            details=details,
+        )
+        self.store.sync_all_room_type_quantities()
+        self.set_status(
+            f"Condensed {len(removed_labels)} asset(s) into {result['main_asset_id']} "
+            f"across {len(result['room_changes'])} room type(s)"
+        )
+        self.refresh_canvas()
+        return {
+            "room_type_count": len(result["room_changes"]),
+            "rfi_count": len(created_rfis),
+            "deployment_summary": self.store.asset_deployment_summary(),
+            "deployment_locations": self.store.asset_deployment_locations(),
+        }
+
+    def _expand_asset(self, items, source_asset_id, replacement_assets, reason):
+        reason = str(reason or "").strip()
+        if not reason:
+            raise ValueError("A database commit note is required.")
+        staging = self.store.data.get("room_type_asset_staging", {})
+        if isinstance(staging, dict) and staging.get("changes"):
+            raise ValueError(
+                "Commit or reset the staged room-type asset changes before "
+                "expanding an asset."
+            )
+
+        updated_data = deepcopy(self.store.data)
+        updated_data["assets"] = deepcopy(items)
+        result = apply_asset_expansion(
+            updated_data, source_asset_id, replacement_assets
+        )
+        self.push_undo_state("Expand asset")
+        self.store.data = updated_data
+
+        source = result["source_asset"]
+        source_id = str(source.get("id", "") or "").strip()
+        source_name = str(source.get("name", source_id) or source_id).strip()
+        source_label = (
+            f"{source_id} ({source_name})"
+            if source_name and source_name != source_id
+            else source_id
+        )
+        replacement_labels = []
+        for asset in result["replacement_assets"]:
+            asset_id = str(asset.get("id", "") or "").strip()
+            name = str(asset.get("name", asset_id) or asset_id).strip()
+            replacement_labels.append(
+                f"{asset_id} ({name})" if name and name != asset_id else asset_id
+            )
+
+        replacement_ids = [
+            str(asset.get("id", "") or "").strip()
+            for asset in result["replacement_assets"]
+        ]
+        details = [
+            f"{change['room_type_id'] or change['room_type_name']}: replaced "
+            f"{source_id} with {', '.join(replacement_ids)}, retaining the "
+            "assigned quantity for each replacement"
+            for change in result["room_changes"]
+        ]
+        details.append(f"Removed expanded asset {source_label}")
+        details.extend(f"Created replacement asset {label}" for label in replacement_labels)
+        self.store.record_revision_change(
+            "Asset Expansion",
+            f"Expanded {source_label} into {', '.join(replacement_labels)}. "
+            f"Reason: {reason}",
+            details=details,
+        )
+        self.store.sync_all_room_type_quantities()
+        self.set_status(
+            f"Expanded {source_id} into {', '.join(replacement_ids)} across "
+            f"{len(result['room_changes'])} room type(s)"
+        )
+        self.refresh_canvas()
+        return {
+            "assets": deepcopy(self.store.data.get("assets", [])),
+            "room_type_count": len(result["room_changes"]),
+            "deployment_summary": self.store.asset_deployment_summary(),
+            "deployment_locations": self.store.asset_deployment_locations(),
+        }
 
     def show_asset_capability_overlap_dialog(self):
         assets = list(self.store.data.get("assets", []) or [])

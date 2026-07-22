@@ -211,3 +211,6 @@ __marimo__/
 
 # Assets
 source/assets
+
+tests/
+tmp/

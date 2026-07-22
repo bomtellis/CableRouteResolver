@@ -284,6 +284,8 @@ class SQLiteProjectFile:
             "departments": "departments",
             "room_types": "room types",
             "room_type_asset_review": "room type asset review",
+            "room_type_asset_staging": "staged room type asset changes",
+            "room_type_asset_commits": "room type asset commits",
             "room_type_asset_rfi": "room type asset RFI list",
             "revision_change_log": "detailed change log",
             "room_type_scenario_groups": "room type scenario groups",
