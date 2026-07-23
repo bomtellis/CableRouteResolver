@@ -19,6 +19,7 @@ import os
 import re
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from network_capacity import rough_cabinet_requirement
 from network_schema import (
     CATALYST_9600_LINE_CARDS,
     PLUGGABLE_OPTIC_PORT_TYPES,
@@ -11668,6 +11669,7 @@ def estimate_network_switch_counts(data: dict) -> dict:
             "core switch estimate",
         )
 
+    endpoint_port_count = sum(len(endpoint.ports) for endpoint in endpoints)
     return {
         "available": True,
         "technology": "Traditional",
@@ -11676,7 +11678,10 @@ def estimate_network_switch_counts(data: dict) -> dict:
         "aggregation_switches": aggregation_count,
         "access_switches": access_members,
         "access_stacks": access_stacks,
-        "endpoint_ports": sum(len(endpoint.ports) for endpoint in endpoints),
+        "endpoint_ports": endpoint_port_count,
+        "rough_cabinet_requirement": rough_cabinet_requirement(
+            endpoint_port_count
+        ),
         "warnings": warnings,
         "note": (
             "Estimated minimum before final route, cabinet and patch-panel placement."

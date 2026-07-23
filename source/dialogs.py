@@ -45,8 +45,13 @@ from asset_library_io import (
     write_asset_pack,
 )
 from asset_import_dialog import AssetImportMarshallingDialog
+from asset_bundles import (
+    merge_selected_bundles,
+    normalise_asset_bundles,
+)
 from library_csv import (
     export_assets_csv as write_assets_csv,
+    export_room_type_asset_assignments_csv as write_room_type_asset_assignments_csv,
     export_room_types_csv as write_room_types_csv,
 )
 from room_type_asset_staging import room_type_matches_filter
@@ -3555,6 +3560,402 @@ class AssetsEditorWindow(QMainWindow):
         self.close()
 
 
+class AssetBundleEditorDialog(QDialog):
+    """Create one reusable bundle with per-room asset quantities."""
+
+    def __init__(self, parent, seed=None, asset_options=None, default_id="AB1"):
+        super().__init__(parent)
+        self.setWindowTitle("Asset Bundle")
+        self.resize(760, 620)
+        self.seed = dict(seed or {})
+        self.asset_options = list(asset_options or [])
+        self.default_id = default_id
+        self.result = None
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        layout.addLayout(form)
+        self.id_edit = QLineEdit(str(self.seed.get("id", default_id) or default_id))
+        self.name_edit = QLineEdit(str(self.seed.get("name", "") or ""))
+        self.description_edit = QPlainTextEdit(
+            str(self.seed.get("description", "") or "")
+        )
+        self.description_edit.setMaximumHeight(90)
+        form.addRow("Bundle ID", self.id_edit)
+        form.addRow("Bundle name", self.name_edit)
+        form.addRow("Description", self.description_edit)
+
+        layout.addWidget(
+            QLabel(
+                "Select the assets included whenever this bundle is added to a "
+                "room type. Quantities are added to any existing assignment."
+            )
+        )
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("Search assets"))
+        self.asset_search_edit = QLineEdit()
+        self.asset_search_edit.setPlaceholderText(
+            "Type an asset ID or name to filter..."
+        )
+        self.asset_search_edit.setClearButtonEnabled(True)
+        search_row.addWidget(self.asset_search_edit, 1)
+        self.asset_filter_count_label = QLabel()
+        self.asset_filter_count_label.setMinimumWidth(105)
+        self.asset_filter_count_label.setAlignment(
+            Qt.AlignRight | Qt.AlignVCenter
+        )
+        search_row.addWidget(self.asset_filter_count_label)
+        layout.addLayout(search_row)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Use", "Asset", "Qty in bundle"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 55)
+        self.table.setColumnWidth(2, 110)
+        layout.addWidget(self.table, 1)
+
+        self._asset_search_rows = []
+        seed_rows = {
+            row["asset_id"]: row
+            for row in normalise_asset_bundles(
+                [{"id": "seed", "name": "seed", "assets": self.seed.get("assets", [])}]
+            )[0]["assets"]
+        }
+        for asset_id, asset_name in sorted(
+            self.asset_options,
+            key=lambda row: (str(row[1]).casefold(), str(row[0]).casefold()),
+        ):
+            asset_id = str(asset_id or "").strip()
+            if not asset_id:
+                continue
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            use_item = QTableWidgetItem()
+            use_item.setFlags(
+                Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+            )
+            use_item.setCheckState(
+                Qt.Checked if asset_id in seed_rows else Qt.Unchecked
+            )
+            use_item.setData(Qt.UserRole, asset_id)
+            self.table.setItem(row, 0, use_item)
+            self.table.setItem(
+                row, 1, QTableWidgetItem(f"{asset_id} - {asset_name}")
+            )
+            qty = QSpinBox()
+            qty.setRange(1, 100000)
+            qty.setValue(int(seed_rows.get(asset_id, {}).get("qty", 1) or 1))
+            self.table.setCellWidget(row, 2, qty)
+            self._asset_search_rows.append(
+                {
+                    "row": row,
+                    "search_text": f"{asset_id} {asset_name}".casefold(),
+                }
+            )
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.asset_search_edit.textChanged.connect(self._filter_assets)
+        self._filter_assets("")
+        self.asset_search_edit.setFocus()
+
+    def _filter_assets(self, value):
+        terms = [
+            term
+            for term in str(value or "").casefold().split()
+            if term
+        ]
+        visible_count = 0
+        for metadata in self._asset_search_rows:
+            visible = all(
+                term in metadata["search_text"] for term in terms
+            )
+            self.table.setRowHidden(int(metadata["row"]), not visible)
+            if visible:
+                visible_count += 1
+        total_count = len(self._asset_search_rows)
+        self.asset_filter_count_label.setText(
+            f"{visible_count} of {total_count}"
+            if terms
+            else f"{total_count} assets"
+        )
+
+    def accept(self):
+        bundle_id = self.id_edit.text().strip()
+        name = self.name_edit.text().strip()
+        if not bundle_id or not name:
+            QMessageBox.information(
+                self, "Asset Bundle", "Bundle ID and name are required."
+            )
+            return
+        rows = []
+        for row in range(self.table.rowCount()):
+            use_item = self.table.item(row, 0)
+            if use_item is None or use_item.checkState() != Qt.Checked:
+                continue
+            asset_id = str(use_item.data(Qt.UserRole) or "").strip()
+            qty = self.table.cellWidget(row, 2)
+            if asset_id:
+                rows.append(
+                    {
+                        "asset_id": asset_id,
+                        "qty": int(qty.value()) if isinstance(qty, QSpinBox) else 1,
+                    }
+                )
+        if not rows:
+            QMessageBox.information(
+                self, "Asset Bundle", "Select at least one asset."
+            )
+            return
+        self.result = {
+            "id": bundle_id,
+            "name": name,
+            "description": self.description_edit.toPlainText().strip(),
+            "assets": rows,
+        }
+        super().accept()
+
+
+class AssetBundleManagerDialog(QDialog):
+    """Manage reusable asset bundles independently of scenario groups."""
+
+    def __init__(self, parent, bundles=None, asset_options=None):
+        super().__init__(parent)
+        self.setWindowTitle("Asset Bundles")
+        self.resize(820, 540)
+        self.asset_options = list(asset_options or [])
+        self.items = normalise_asset_bundles(
+            bundles or [], [asset_id for asset_id, _name in self.asset_options]
+        )
+        self.result = None
+
+        layout = QVBoxLayout(self)
+        description = QLabel(
+            "Bundles are reusable sets of assets and quantities for room-type "
+            "assignment. They are separate from room/asset scenario groups."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(
+            ["Bundle ID", "Name", "Asset lines", "Total quantity"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.doubleClicked.connect(self.edit_bundle)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        layout.addWidget(self.table, 1)
+
+        row = QHBoxLayout()
+        add_button = QPushButton("Add")
+        edit_button = QPushButton("Edit")
+        copy_button = QPushButton("Copy")
+        delete_button = QPushButton("Delete")
+        save_button = QPushButton("Save")
+        cancel_button = QPushButton("Cancel")
+        add_button.clicked.connect(self.add_bundle)
+        edit_button.clicked.connect(self.edit_bundle)
+        copy_button.clicked.connect(self.copy_bundle)
+        delete_button.clicked.connect(self.delete_bundle)
+        save_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        for button in (add_button, edit_button, copy_button, delete_button):
+            row.addWidget(button)
+        row.addStretch(1)
+        row.addWidget(save_button)
+        row.addWidget(cancel_button)
+        layout.addLayout(row)
+        self._refresh()
+
+    def _refresh(self):
+        self.table.setRowCount(0)
+        for bundle in self.items:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            assets = bundle.get("assets", []) or []
+            values = [
+                bundle.get("id", ""),
+                bundle.get("name", ""),
+                len(assets),
+                sum(int(item.get("qty", 1) or 1) for item in assets),
+            ]
+            for column, value in enumerate(values):
+                self.table.setItem(row, column, QTableWidgetItem(str(value)))
+
+    def _selected_row(self):
+        rows = self.table.selectionModel().selectedRows()
+        return rows[0].row() if rows else -1
+
+    def _edit_value(self, seed, default_id):
+        dialog = AssetBundleEditorDialog(
+            self,
+            seed=seed,
+            asset_options=self.asset_options,
+            default_id=default_id,
+        )
+        return dialog.result if dialog.exec() == QDialog.Accepted else None
+
+    def _id_available(self, bundle_id, ignored_row=-1):
+        return all(
+            index == ignored_row or str(item.get("id", "")).strip() != bundle_id
+            for index, item in enumerate(self.items)
+        )
+
+    def add_bundle(self):
+        result = self._edit_value(
+            {}, suggest_next_id(self.items, "AB")
+        )
+        if not result:
+            return
+        if not self._id_available(result["id"]):
+            QMessageBox.information(self, "Asset Bundles", "Bundle ID already exists.")
+            return
+        self.items.append(result)
+        self._refresh()
+        self.table.selectRow(len(self.items) - 1)
+
+    def edit_bundle(self):
+        row = self._selected_row()
+        if not 0 <= row < len(self.items):
+            return
+        result = self._edit_value(deepcopy(self.items[row]), self.items[row]["id"])
+        if not result:
+            return
+        if not self._id_available(result["id"], row):
+            QMessageBox.information(self, "Asset Bundles", "Bundle ID already exists.")
+            return
+        self.items[row] = result
+        self._refresh()
+        self.table.selectRow(row)
+
+    def copy_bundle(self):
+        row = self._selected_row()
+        if not 0 <= row < len(self.items):
+            return
+        seed = deepcopy(self.items[row])
+        seed["id"] = suggest_next_id(self.items, "AB")
+        seed["name"] = f"{seed.get('name', '')} Copy".strip()
+        result = self._edit_value(seed, seed["id"])
+        if result and self._id_available(result["id"]):
+            self.items.append(result)
+            self._refresh()
+            self.table.selectRow(len(self.items) - 1)
+
+    def delete_bundle(self):
+        row = self._selected_row()
+        if 0 <= row < len(self.items):
+            del self.items[row]
+            self._refresh()
+
+    def accept(self):
+        self.result = normalise_asset_bundles(self.items)
+        super().accept()
+
+
+class AssetBundleSelectionDialog(QDialog):
+    """Select bundle recipes and the number of instances to add."""
+
+    def __init__(self, parent, bundles=None, assets_by_id=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Asset Bundles")
+        self.resize(660, 480)
+        self.bundles = normalise_asset_bundles(bundles or [])
+        self.assets_by_id = dict(assets_by_id or {})
+        self.result = None
+
+        layout = QVBoxLayout(self)
+        label = QLabel(
+            "Select one or more bundles and enter the number required. Each "
+            "asset's saved base quantity is multiplied by the bundle quantity."
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(
+            ["Use", "Bundle", "Base contents", "Bundle qty"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 55)
+        self.table.setColumnWidth(3, 100)
+        for index, bundle in enumerate(self.bundles):
+            details = []
+            for row in bundle.get("assets", []) or []:
+                asset_id = row["asset_id"]
+                asset_name = str(
+                    self.assets_by_id.get(asset_id, {}).get("name", asset_id)
+                    or asset_id
+                )
+                details.append(f"{row['qty']} × {asset_id} - {asset_name}")
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            use_item = QTableWidgetItem()
+            use_item.setData(Qt.UserRole, index)
+            use_item.setFlags(
+                Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+            )
+            use_item.setCheckState(Qt.Unchecked)
+            self.table.setItem(row, 0, use_item)
+            bundle_item = QTableWidgetItem(f"{bundle['name']} [{bundle['id']}]")
+            bundle_item.setToolTip(str(bundle.get("description", "") or ""))
+            self.table.setItem(row, 1, bundle_item)
+            contents_item = QTableWidgetItem("; ".join(details))
+            contents_item.setToolTip("\n".join(details))
+            self.table.setItem(row, 2, contents_item)
+            quantity_spin = QSpinBox()
+            quantity_spin.setRange(1, 100000)
+            quantity_spin.setValue(1)
+            quantity_spin.setEnabled(False)
+            quantity_spin.setToolTip(
+                "Number of bundle instances. Saved asset quantities are "
+                "multiplied by this value."
+            )
+            self.table.setCellWidget(row, 3, quantity_spin)
+        self.table.itemChanged.connect(self._bundle_selection_changed)
+        layout.addWidget(self.table, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Add selected bundles")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _bundle_selection_changed(self, item):
+        if item.column() != 0:
+            return
+        quantity_spin = self.table.cellWidget(item.row(), 3)
+        if isinstance(quantity_spin, QSpinBox):
+            quantity_spin.setEnabled(item.checkState() == Qt.Checked)
+
+    def accept(self):
+        selected = []
+        for row in range(self.table.rowCount()):
+            use_item = self.table.item(row, 0)
+            if use_item is None or use_item.checkState() != Qt.Checked:
+                continue
+            bundle = deepcopy(self.bundles[int(use_item.data(Qt.UserRole))])
+            quantity_spin = self.table.cellWidget(row, 3)
+            bundle["bundle_qty"] = (
+                int(quantity_spin.value())
+                if isinstance(quantity_spin, QSpinBox)
+                else 1
+            )
+            selected.append(bundle)
+        if not selected:
+            QMessageBox.information(
+                self, "Add Asset Bundles", "Select at least one bundle."
+            )
+            return
+        self.result = deepcopy(selected)
+        super().accept()
+
+
 class RoomTypeEditorDialog(QDialog):
     def __init__(
         self,
@@ -3563,6 +3964,7 @@ class RoomTypeEditorDialog(QDialog):
         asset_options=None,
         assets_by_id=None,
         asset_categories_by_id=None,
+        asset_bundles=None,
         default_id="RT1",
     ):
         super().__init__(parent)
@@ -3573,6 +3975,9 @@ class RoomTypeEditorDialog(QDialog):
         self.asset_options = list(asset_options or [])
         self.assets_by_id = dict(assets_by_id or {})
         self.asset_categories_by_id = dict(asset_categories_by_id or {})
+        self.asset_bundles = normalise_asset_bundles(
+            asset_bundles or [], self.assets_by_id
+        )
         self.result = None
 
         self.asset_rows_by_id = self._seed_asset_rows_by_id()
@@ -3600,6 +4005,15 @@ class RoomTypeEditorDialog(QDialog):
         self.asset_filter_count_label = QLabel()
         self.asset_filter_count_label.setMinimumWidth(110)
         self.asset_filter_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.add_bundle_button = QPushButton("Add bundle...")
+        self.add_bundle_button.setEnabled(bool(self.asset_bundles))
+        self.add_bundle_button.setToolTip(
+            "Add reusable bundle quantities to the current room assignment."
+            if self.asset_bundles
+            else "Create an asset bundle from Tools > Asset Bundles first."
+        )
+        self.add_bundle_button.clicked.connect(self._add_asset_bundles)
+        search_row.addWidget(self.add_bundle_button)
         search_row.addWidget(self.asset_filter_count_label)
 
         layout.addLayout(search_row)
@@ -3739,6 +4153,36 @@ class RoomTypeEditorDialog(QDialog):
         self._refresh_total()
         self._filter_asset_rows("")
         self.asset_search_edit.setFocus()
+
+    def _add_asset_bundles(self):
+        dialog = AssetBundleSelectionDialog(
+            self,
+            self.asset_bundles,
+            self.assets_by_id,
+        )
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+        merged = merge_selected_bundles(
+            self._checked_asset_rows(), dialog.result
+        )
+        merged_by_id = {row["asset_id"]: row for row in merged}
+        self.assets_table.blockSignals(True)
+        try:
+            for metadata in self._asset_table_rows:
+                row = int(metadata["row"])
+                asset_id = metadata["asset_id"]
+                merged_row = merged_by_id.get(asset_id)
+                if merged_row is None:
+                    continue
+                use_item = self.assets_table.item(row, 0)
+                qty_spin = self.assets_table.cellWidget(row, 7)
+                if use_item is not None:
+                    use_item.setCheckState(Qt.Checked)
+                if isinstance(qty_spin, QSpinBox):
+                    qty_spin.setValue(int(merged_row.get("qty", 1) or 1))
+        finally:
+            self.assets_table.blockSignals(False)
+        self._refresh_total()
 
     def _filter_asset_rows(self, search_text):
         """Filter room assets without rebuilding the table or losing selections."""
@@ -3907,6 +4351,7 @@ class RoomTypesEditorWindow(QMainWindow):
         asset_options=None,
         assets_by_id=None,
         asset_categories_by_id=None,
+        asset_bundles=None,
         on_condense_room_types=None,
     ):
         super().__init__(master)
@@ -3919,6 +4364,9 @@ class RoomTypesEditorWindow(QMainWindow):
         self.asset_options = list(asset_options or [])
         self.assets_by_id = dict(assets_by_id or {})
         self.asset_categories_by_id = dict(asset_categories_by_id or {})
+        self.asset_bundles = normalise_asset_bundles(
+            asset_bundles or [], self.assets_by_id
+        )
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -3970,6 +4418,7 @@ class RoomTypesEditorWindow(QMainWindow):
         delete_btn = QPushButton("Delete selected")
         condense_btn = QPushButton("Condense room types...")
         export_csv_btn = QPushButton("Export CSV...")
+        export_assignments_csv_btn = QPushButton("Export assigned assets CSV...")
         save_btn = QPushButton("Save")
 
         add_btn.clicked.connect(self.add_room_type)
@@ -3978,6 +4427,9 @@ class RoomTypesEditorWindow(QMainWindow):
         delete_btn.clicked.connect(self.delete_room_types)
         condense_btn.clicked.connect(self.condense_room_types)
         export_csv_btn.clicked.connect(self.export_room_types_csv)
+        export_assignments_csv_btn.clicked.connect(
+            self.export_room_type_asset_assignments_csv
+        )
         save_btn.clicked.connect(self.save)
 
         buttons.addWidget(add_btn)
@@ -3986,6 +4438,7 @@ class RoomTypesEditorWindow(QMainWindow):
         buttons.addWidget(delete_btn)
         buttons.addWidget(condense_btn)
         buttons.addWidget(export_csv_btn)
+        buttons.addWidget(export_assignments_csv_btn)
         buttons.addStretch(1)
         buttons.addWidget(save_btn)
 
@@ -4124,6 +4577,7 @@ class RoomTypesEditorWindow(QMainWindow):
             assets_by_id=self.assets_by_id,
             default_id=suggest_next_id(self.items, "RT"),
             asset_categories_by_id=self.asset_categories_by_id,
+            asset_bundles=self.asset_bundles,
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self.items.append(dialog.result)
@@ -4144,6 +4598,7 @@ class RoomTypesEditorWindow(QMainWindow):
             asset_options=self.asset_options,
             assets_by_id=self.assets_by_id,
             asset_categories_by_id=self.asset_categories_by_id,
+            asset_bundles=self.asset_bundles,
         )
 
         if dialog.exec() == QDialog.Accepted and dialog.result:
@@ -4259,6 +4714,32 @@ class RoomTypesEditorWindow(QMainWindow):
             f"Exported {count} room type(s) to:\n{path}",
         )
 
+    def export_room_type_asset_assignments_csv(self):
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Room Type Assigned Assets to CSV",
+            "room_type_assigned_assets.csv",
+            "CSV files (*.csv);;All files (*.*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        try:
+            count = write_room_type_asset_assignments_csv(
+                path,
+                self.items,
+                self.assets_by_id,
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Export complete",
+            f"Exported {count} room type asset assignment(s) to:\n{path}",
+        )
+
     def save(self):
         self.on_save(self.items)
         self.close()
@@ -4294,6 +4775,7 @@ class RoomTypesEditorWindow(QMainWindow):
             assets_by_id=self.assets_by_id,
             default_id=source["id"],
             asset_categories_by_id=self.asset_categories_by_id,
+            asset_bundles=self.asset_bundles,
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             self.items.append(dialog.result)
@@ -4310,6 +4792,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         room_types,
         assets_by_id=None,
         asset_categories_by_id=None,
+        asset_bundles=None,
         review_state=None,
         staging_state=None,
         asset_commits=None,
@@ -4333,6 +4816,9 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         self.room_types = [dict(item) for item in room_types if isinstance(item, dict)]
         self.assets_by_id = dict(assets_by_id or {})
         self.asset_categories_by_id = dict(asset_categories_by_id or {})
+        self.asset_bundles = normalise_asset_bundles(
+            asset_bundles or [], self.assets_by_id
+        )
         self.review_state = deepcopy(review_state or {})
         self.staging_state = deepcopy(staging_state or {})
         self.asset_commits = [
@@ -5432,6 +5918,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         room_types,
         assets_by_id=None,
         asset_categories_by_id=None,
+        asset_bundles=None,
         review_state=None,
         staging_state=None,
         asset_commits=None,
@@ -5457,6 +5944,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             room_types,
             assets_by_id=assets_by_id,
             asset_categories_by_id=asset_categories_by_id,
+            asset_bundles=asset_bundles,
             review_state=review_state,
             staging_state=staging_state,
             asset_commits=asset_commits,
@@ -5491,6 +5979,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
 
         action_row = QHBoxLayout()
         self.add_asset_button = QPushButton("Add Assets...")
+        self.add_bundle_button = QPushButton("Add Bundles...")
         self.remove_asset_button = QPushButton("Remove Selected Assets...")
         self.query_button = QPushButton("Add Asset RFI...")
         self.resolve_query_button = QPushButton("Resolve Asset RFI...")
@@ -5498,6 +5987,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.resolve_room_query_button = QPushButton("Resolve Room RFI...")
         self.export_rfi_button = QPushButton("Export RFI PDF...")
         self.add_asset_button.clicked.connect(self._add_asset)
+        self.add_bundle_button.clicked.connect(self._add_asset_bundles)
         self.remove_asset_button.clicked.connect(self._remove_selected_asset)
         self.query_button.clicked.connect(self._raise_asset_query)
         self.resolve_query_button.clicked.connect(self._resolve_asset_query)
@@ -5506,6 +5996,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.export_rfi_button.clicked.connect(self._export_rfi)
         for widget in (
             self.add_asset_button,
+            self.add_bundle_button,
             self.remove_asset_button,
             self.query_button,
             self.resolve_query_button,
@@ -5691,6 +6182,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         if not room_type:
             for button in (
                 self.add_asset_button,
+                self.add_bundle_button,
                 self.remove_asset_button,
                 self.query_button,
                 self.resolve_query_button,
@@ -5737,6 +6229,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             self.asset_table.clearSpans()
             self.asset_table.setSpan(0, 0, 1, 11)
         self.add_asset_button.setEnabled(bool(self.assets_by_id))
+        self.add_bundle_button.setEnabled(bool(self.asset_bundles))
         self.remove_asset_button.setEnabled(bool(self._asset_row_widgets))
         self.query_button.setEnabled(bool(self._asset_row_widgets))
         self.resolve_query_button.setEnabled(bool(self._asset_row_widgets))
@@ -5804,6 +6297,67 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                 note=(
                     f"Added with quantity {quantity}, requested by "
                     f"{requested_by or '(blank)'}. Insertion message: {reason}"
+                ),
+            )
+        self._emit_rfi_changed()
+        self._emit_state_changed()
+        self._sync_sidebar_current()
+
+    def _add_asset_bundles(self):
+        if self._dirty:
+            self._apply_changes()
+        room_type = self._current_room_type()
+        if not room_type or not self.asset_bundles:
+            return
+        dialog = AssetBundleSelectionDialog(
+            self, self.asset_bundles, self.assets_by_id
+        )
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+        reason = self._required_reason(
+            "Add Asset Bundles",
+            "Enter the insertion message for the selected asset bundle(s).",
+        )
+        if not reason:
+            return
+
+        before_rows = self._room_asset_rows(room_type)
+        before_qty = {
+            row["asset_id"]: int(row.get("qty", 1) or 1)
+            for row in before_rows
+        }
+        rows = merge_selected_bundles(before_rows, dialog.result)
+        after_qty = {
+            row["asset_id"]: int(row.get("qty", 1) or 1)
+            for row in rows
+        }
+        room_type["assets"] = rows
+        room_type["asset_ids"] = [row["asset_id"] for row in rows]
+        room_type_id = self._room_id(room_type)
+        self.review_state.pop(room_type_id, None)
+        self._capture_staging_state(room_type_id, rows, {})
+
+        bundle_names = ", ".join(
+            (
+                self._text(bundle.get("name"))
+                or self._text(bundle.get("id"))
+            )
+            + f" × {max(1, int(bundle.get('bundle_qty', 1) or 1))}"
+            for bundle in dialog.result
+        )
+        for asset_id in sorted(after_qty, key=self._natural_key):
+            if after_qty[asset_id] == before_qty.get(asset_id, 0):
+                continue
+            asset = self.assets_by_id.get(asset_id, {})
+            self._append_rfi_history(
+                "asset_bundle_added",
+                room_type=room_type,
+                asset_id=asset_id,
+                asset_name=asset.get("name", ""),
+                note=(
+                    f"Added via bundle(s) {bundle_names}; quantity "
+                    f"{before_qty.get(asset_id, 0)} to {after_qty[asset_id]}. "
+                    f"Insertion message: {reason}"
                 ),
             )
         self._emit_rfi_changed()

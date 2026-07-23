@@ -124,6 +124,7 @@ from dialogs import (
     RoomTypeAssetReviewWizard,
     AssetsEditorWindow,
     AssetCategoriesEditorWindow,
+    AssetBundleManagerDialog,
     ScenarioGroupManagerDialog,
     RoomTypeAssetScenarioDialog,
     AssetCapabilityOverlapDialog,
@@ -3042,6 +3043,7 @@ class CableRouteEditor(QMainWindow):
             review_state=self.store.data.get("room_type_asset_review", {}),
             staging_state=self.store.data.get("room_type_asset_staging", {}),
             asset_commits=self.store.data.get("room_type_asset_commits", []),
+            asset_bundles=self.store.data.get("asset_bundles", []),
             rfi_state=self.store.data.get("room_type_asset_rfi", {}),
             on_state_changed=self._save_room_type_asset_review_state,
             on_assignments_changed=self._save_room_type_asset_review_assignments,
@@ -3886,6 +3888,10 @@ class CableRouteEditor(QMainWindow):
         set_action_icon(asset_groups_action, "boxes")
         asset_groups_action.triggered.connect(self.manage_asset_scenario_groups)
 
+        asset_bundles_action = tools_menu.addAction("Asset Bundles")
+        set_action_icon(asset_bundles_action, "collection")
+        asset_bundles_action.triggered.connect(self.manage_asset_bundles)
+
         capability_overlap_action = tools_menu.addAction("Asset Capability Overlap Matrix")
         set_action_icon(capability_overlap_action, "tags")
         capability_overlap_action.triggered.connect(self.show_asset_capability_overlap_dialog)
@@ -4279,6 +4285,12 @@ class CableRouteEditor(QMainWindow):
                     "Manage reusable asset scenario groups",
                     QStyle.SP_FileLinkIcon,
                     self.manage_asset_scenario_groups,
+                ),
+                self._ribbon_icon_button(
+                    "Bundles",
+                    "Manage reusable room-assignment asset bundles",
+                    QStyle.SP_DirLinkIcon,
+                    self.manage_asset_bundles,
                 ),
                 self._ribbon_icon_button(
                     "Locations",
@@ -5147,6 +5159,11 @@ class CableRouteEditor(QMainWindow):
         self._queue_all_floor_dxf_loads(
             active_floor=self.floor_spin.value(), force_reload=False
         )
+        if self._pinned_equipment_room_extent_name:
+            self.show_equipment_room_extents(
+                self._pinned_equipment_room_extent_name,
+                display_floor=self.floor_spin.value(),
+            )
 
     def floor_dxf_entries(self):
         self.push_undo_state("Set default dxf floor entries")
@@ -12143,6 +12160,7 @@ class CableRouteEditor(QMainWindow):
             asset_options=self.store.asset_options(),
             assets_by_id=assets_by_id,
             asset_categories_by_id=asset_categories_by_id,
+            asset_bundles=self.store.data.get("asset_bundles", []),
             on_condense_room_types=self._condense_room_types,
         )
 
@@ -12383,6 +12401,32 @@ class CableRouteEditor(QMainWindow):
             self.store.data["asset_scenario_groups"] = dialog.result
             self.set_status(f"Saved {len(dialog.result)} asset scenario group(s)")
             self.refresh_rhs_search_sidebar()
+
+    def manage_asset_bundles(self):
+        asset_options = [
+            (
+                str(asset.get("id", "") or "").strip(),
+                str(asset.get("name", asset.get("id", "")) or "").strip(),
+            )
+            for asset in self.store.data.get("assets", []) or []
+            if str(asset.get("id", "") or "").strip()
+        ]
+        if not asset_options:
+            QMessageBox.information(
+                self,
+                "Asset Bundles",
+                "Create endpoint assets before defining asset bundles.",
+            )
+            return
+        dialog = AssetBundleManagerDialog(
+            self,
+            self.store.data.get("asset_bundles", []),
+            asset_options,
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.result is not None:
+            self.push_undo_state("Save asset bundles")
+            self.store.data["asset_bundles"] = dialog.result
+            self.set_status(f"Saved {len(dialog.result)} asset bundle(s)")
 
     def manage_data_points(self):
         columns = [
@@ -13321,8 +13365,12 @@ class CableRouteEditor(QMainWindow):
         source_name="",
         include_current=False,
         preview=False,
+        display_floor=None,
     ):
-        floor = int(floor)
+        source_floor = int(floor)
+        display_floor = (
+            source_floor if display_floor is None else int(display_floor)
+        )
         x = float(x)
         y = float(y)
         distance_limit = max(0.1, float(distance_limit))
@@ -13337,7 +13385,7 @@ class CableRouteEditor(QMainWindow):
             best = None
             for anchor_name in self._routing_anchor_names():
                 anchor = points.get(anchor_name)
-                if not anchor or int(anchor.get("floor", 0)) != floor:
+                if not anchor or int(anchor.get("floor", 0)) != source_floor:
                     continue
                 distance = math.hypot(
                     float(anchor.get("x", 0.0)) - x,
@@ -13391,7 +13439,10 @@ class CableRouteEditor(QMainWindow):
                     b = points.get(b_name)
                     if not a or not b:
                         continue
-                    if int(a.get("floor", 0)) != floor or int(b.get("floor", 0)) != floor:
+                    if (
+                        int(a.get("floor", 0)) != display_floor
+                        or int(b.get("floor", 0)) != display_floor
+                    ):
                         continue
                     a_xy = (float(a.get("x", 0.0)), float(a.get("y", 0.0)))
                     b_xy = (float(b.get("x", 0.0)), float(b.get("y", 0.0)))
@@ -13436,7 +13487,7 @@ class CableRouteEditor(QMainWindow):
                     continue
                 target_name = str(connection.get("to", "")).strip()
                 target = points.get(target_name)
-                if not target or int(target.get("floor", 0)) != floor:
+                if not target:
                     continue
                 target_anchor = target_name if graph.get(target_name) else None
                 target_spur = 0.0
@@ -13451,21 +13502,33 @@ class CableRouteEditor(QMainWindow):
                 )
                 if not node_path:
                     continue
-                route = [(x, y)]
-                route.extend(
-                    (
-                        float(points[node_name].get("x", 0.0)),
-                        float(points[node_name].get("y", 0.0)),
-                    )
+                route_records = []
+                source_record = points.get(source_name)
+                if source_record:
+                    route_records.append(source_record)
+                route_records.extend(
+                    points[node_name]
                     for node_name in node_path
-                    if int(points[node_name].get("floor", 0)) == floor
+                    if node_name in points
                 )
-                target_xy = (
-                    float(target.get("x", 0.0)),
-                    float(target.get("y", 0.0)),
-                )
-                if not route or route[-1] != target_xy:
-                    route.append(target_xy)
+                route_records.append(target)
+
+                floor_segment = []
+                for record in route_records:
+                    if int(record.get("floor", 0)) != display_floor:
+                        if len(floor_segment) >= 2:
+                            current_polylines.append(floor_segment)
+                        floor_segment = []
+                        continue
+                    point_xy = (
+                        float(record.get("x", 0.0)),
+                        float(record.get("y", 0.0)),
+                    )
+                    if not floor_segment or floor_segment[-1] != point_xy:
+                        floor_segment.append(point_xy)
+                if len(floor_segment) >= 2:
+                    current_polylines.append(floor_segment)
+
                 extension = max(
                     0.0, float(target.get("extension_distance_m", 0.0) or 0.0)
                 )
@@ -13475,18 +13538,43 @@ class CableRouteEditor(QMainWindow):
                     + float(target_spur or 0.0)
                     + extension
                 )
-                if len(route) >= 2:
-                    current_polylines.append(route)
-                if served_distance > current_max_distance:
+                if (
+                    int(target.get("floor", 0)) == display_floor
+                    and served_distance > current_max_distance
+                ):
+                    target_xy = (
+                        float(target.get("x", 0.0)),
+                        float(target.get("y", 0.0)),
+                    )
                     current_max_distance = served_distance
                     current_max_target = target_name
                     current_max_point = target_xy
 
+        marker_x = x
+        marker_y = y
+        if display_floor != source_floor:
+            floor_nodes = [
+                (
+                    float(distance),
+                    str(node_name),
+                    points.get(node_name),
+                )
+                for node_name, distance in distances.items()
+                if points.get(node_name)
+                and int(points[node_name].get("floor", 0)) == display_floor
+                and float(distance) <= distance_limit + 1e-9
+            ]
+            if floor_nodes:
+                _distance, _node_name, marker = min(floor_nodes)
+                marker_x = float(marker.get("x", 0.0))
+                marker_y = float(marker.get("y", 0.0))
+
         return {
             "name": str(name),
-            "floor": floor,
-            "x": x,
-            "y": y,
+            "floor": display_floor,
+            "source_floor": source_floor,
+            "x": marker_x,
+            "y": marker_y,
             "distance_limit_m": distance_limit,
             "possible_polylines": possible_polylines,
             "current_polylines": current_polylines,
@@ -13499,7 +13587,7 @@ class CableRouteEditor(QMainWindow):
             "preview": bool(preview),
         }
 
-    def show_equipment_room_extents(self, location_name):
+    def show_equipment_room_extents(self, location_name, display_floor=None):
         location_name = str(location_name or "").strip()
         location = next(
             (
@@ -13510,6 +13598,8 @@ class CableRouteEditor(QMainWindow):
             None,
         )
         if not location:
+            self._pinned_equipment_room_extent_name = None
+            self._clear_equipment_room_extent_overlay()
             return
 
         kind = str(location.get("kind", "")).strip()
@@ -13519,6 +13609,7 @@ class CableRouteEditor(QMainWindow):
             return
 
         floor = int(location.get("floor", 0))
+        visible_floor = floor if display_floor is None else int(display_floor)
         x = float(location.get("x", 0.0))
         y = float(location.get("y", 0.0))
         distance_limit = max(
@@ -13534,10 +13625,12 @@ class CableRouteEditor(QMainWindow):
                 distance_limit=distance_limit,
                 source_name=location_name,
                 include_current=True,
+                display_floor=visible_floor,
             )
         )
         self.set_status(
-            f"Showing {location_name} graph extents within {distance_limit:.1f} m"
+            f"Showing {location_name} graph extents on floor {visible_floor} "
+            f"within {distance_limit:.1f} m"
         )
 
     def _update_placement_zone_preview(self, x, y):

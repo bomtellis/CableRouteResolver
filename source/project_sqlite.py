@@ -314,6 +314,7 @@ class SQLiteProjectFile:
             "room_type_scenario_groups": "room type scenario groups",
             "asset_scenario_groups": "asset scenario groups",
             "room_type_asset_scenarios": "room type asset scenarios",
+            "asset_bundles": "asset bundles",
             "asset_categories": "asset categories",
             "assets": "assets",
             "retired_asset_ids": "retired asset IDs",

@@ -16,6 +16,7 @@ from project_sqlite import (
     load_json,
 )
 from room_type_asset_staging import staged_changes as room_type_asset_staged_changes
+from asset_bundles import normalise_asset_bundles
 
 
 DEFAULT_JSON = {
@@ -37,6 +38,7 @@ DEFAULT_JSON = {
     "room_type_scenario_groups": [],
     "asset_scenario_groups": [],
     "room_type_asset_scenarios": [],
+    "asset_bundles": [],
     "asset_categories": [],
     "assets": [],
     "retired_asset_ids": [],
@@ -176,8 +178,17 @@ class JsonStore:
         self.data.setdefault("room_type_scenario_groups", [])
         self.data.setdefault("asset_scenario_groups", [])
         self.data.setdefault("room_type_asset_scenarios", [])
+        self.data.setdefault("asset_bundles", [])
         self.data.setdefault("asset_categories", [])
         self.data.setdefault("assets", [])
+        self.data["asset_bundles"] = normalise_asset_bundles(
+            self.data.get("asset_bundles", []),
+            [
+                asset.get("id")
+                for asset in self.data.get("assets", [])
+                if isinstance(asset, dict)
+            ],
+        )
         self.data.setdefault("locations", [])
         self.data.setdefault("equipment_room_placement_zones", [])
         self.data.setdefault("data_points", [])

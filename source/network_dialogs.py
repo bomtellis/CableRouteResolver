@@ -135,13 +135,30 @@ def _text(value) -> str:
 def _layer_switch_estimate_text(estimate: dict) -> str:
     if not bool(estimate.get("available", True)):
         return _text(estimate.get("note")) or "Layer estimate is unavailable."
+    cabinet = estimate.get("rough_cabinet_requirement", {}) or {}
+    cabinet_text = (
+        f"Rough cabinet allowance: "
+        f"{int(cabinet.get('cabinet_count', 0) or 0)} x "
+        f"{int(cabinet.get('rack_size_u', 42) or 42)}U cabinet(s), "
+        f"{int(cabinet.get('ports_per_cabinet', 768) or 768)} ports each "
+        f"({int(cabinet.get('switches_per_cabinet', 16) or 16)} x "
+        f"{int(cabinet.get('ports_per_switch', 48) or 48)}-port switches).\n"
+        f"Approximate single-row footprint: "
+        f"{int(cabinet.get('row_width_mm', 0) or 0)} x "
+        f"{int(cabinet.get('row_depth_mm', 0) or 0)} mm, "
+        f"{float(cabinet.get('footprint_area_m2', 0.0) or 0.0):.2f} m\u00b2; "
+        f"nominal cabinet height "
+        f"{int(cabinet.get('cabinet_height_mm', 2000) or 2000)} mm. "
+        "Excludes working clearances and other rack equipment."
+    )
     return (
         f"Core: {int(estimate.get('core_switches', 0) or 0)}   |   "
         f"Aggregation: {int(estimate.get('aggregation_switches', 0) or 0)}   |   "
         f"Access: {int(estimate.get('access_switches', 0) or 0)} physical "
         f"switches in {int(estimate.get('access_stacks', 0) or 0)} logical stacks\n"
         f"Based on {int(estimate.get('endpoint_ports', 0) or 0)} endpoint ports. "
-        f"{_text(estimate.get('note'))}"
+        f"{_text(estimate.get('note'))}\n"
+        f"{cabinet_text}"
     )
 
 
