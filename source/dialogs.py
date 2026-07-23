@@ -600,8 +600,8 @@ class BulkDataPointPlacementDialog(QDialog):
 
             if count <= 0:
                 raise ValueError("Number to place must be greater than 0")
-            if qty <= 0:
-                raise ValueError("Qty must be greater than 0")
+            if qty < 0:
+                raise ValueError("Qty cannot be negative")
             if extension_distance_m < 0:
                 raise ValueError("Extension distance cannot be negative")
 
@@ -840,8 +840,8 @@ class DataPointEditorDialog(QDialog):
                 raise ValueError("Name is required")
             qty = int(self.qty_edit.text())
             extension_distance_m = float(self.extension_edit.text())
-            if qty <= 0:
-                raise ValueError("Qty must be greater than 0")
+            if qty < 0:
+                raise ValueError("Qty cannot be negative")
             if extension_distance_m < 0:
                 raise ValueError("Extension distance cannot be negative")
             self.result = {
@@ -2739,7 +2739,14 @@ class CondenseRoomTypesDialog(_CondenseItemsDialog):
 class ExpandAssetDialog(QDialog):
     """Configure two new assets that replace one existing endpoint asset."""
 
-    def __init__(self, parent, assets, selected_id="", category_options=None):
+    def __init__(
+        self,
+        parent,
+        assets,
+        selected_id="",
+        category_options=None,
+        reserved_asset_ids=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Expand asset")
         self.resize(720, 430)
@@ -2750,8 +2757,15 @@ class ExpandAssetDialog(QDialog):
             if str(row.get("id", "") or "").strip()
         }
         self.category_options = list(category_options or [])
-        first_id = suggest_next_id(self.assets, "A")
-        second_id = suggest_next_id(self.assets + [{"id": first_id}], "A")
+        reserved_rows = [
+            {"id": str(asset_id or "").strip()}
+            for asset_id in (reserved_asset_ids or [])
+            if str(asset_id or "").strip()
+        ]
+        first_id = suggest_next_id(self.assets + reserved_rows, "A")
+        second_id = suggest_next_id(
+            self.assets + reserved_rows + [{"id": first_id}], "A"
+        )
         self.replacement_ids = [first_id, second_id]
         self.replacements = [None, None]
         self.result = None
@@ -2888,6 +2902,7 @@ class AssetsEditorWindow(QMainWindow):
         on_show_capability_overlap=None,
         on_condense_assets=None,
         on_expand_asset=None,
+        retired_asset_ids=None,
     ):
         super().__init__(master)
         self.setWindowTitle("Assets")
@@ -2901,6 +2916,11 @@ class AssetsEditorWindow(QMainWindow):
         self.on_show_capability_overlap = on_show_capability_overlap
         self.on_condense_assets = on_condense_assets
         self.on_expand_asset = on_expand_asset
+        self.retired_asset_ids = {
+            str(asset_id or "").strip()
+            for asset_id in (retired_asset_ids or [])
+            if str(asset_id or "").strip()
+        }
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -3156,9 +3176,10 @@ class AssetsEditorWindow(QMainWindow):
             self.asset_filter_count_label.setText(f"{total} assets")
 
     def add_asset(self):
+        reserved_rows = [{"id": asset_id} for asset_id in self.retired_asset_ids]
         dialog = AssetEditorDialog(
             self,
-            default_id=suggest_next_id(self.items, "A"),
+            default_id=suggest_next_id(self.items + reserved_rows, "A"),
             category_options=self.category_options,
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
@@ -3199,8 +3220,14 @@ class AssetsEditorWindow(QMainWindow):
             != QMessageBox.Yes
         ):
             return
+        removed_ids = {
+            str(self.items[row].get("id", "") or "").strip()
+            for row in rows
+            if 0 <= row < len(self.items)
+        }
         for row in rows:
             del self.items[row]
+        self.retired_asset_ids.update(asset_id for asset_id in removed_ids if asset_id)
         self._refresh_table()
 
     def condense_assets(self):
@@ -3228,6 +3255,7 @@ class AssetsEditorWindow(QMainWindow):
             QMessageBox.critical(self, "Condense assets", str(exc))
             return
         removed_ids = set(dialog.result["condensed_ids"])
+        self.retired_asset_ids.update(removed_ids)
         self.items = [
             item
             for item in self.items
@@ -3259,6 +3287,7 @@ class AssetsEditorWindow(QMainWindow):
             self.items,
             selected_id=selected_id,
             category_options=self.category_options,
+            reserved_asset_ids=self.retired_asset_ids,
         )
         if dialog.exec() != QDialog.Accepted or not dialog.result:
             return
@@ -3276,6 +3305,7 @@ class AssetsEditorWindow(QMainWindow):
             self.items = [dict(row) for row in result.get("assets", self.items)]
             self.deployment_summary = dict(result.get("deployment_summary", {}))
             self.deployment_locations = dict(result.get("deployment_locations", {}))
+        self.retired_asset_ids.add(dialog.result["source_id"])
         self._refresh_table()
         QMessageBox.information(
             self,
@@ -3425,7 +3455,11 @@ class AssetsEditorWindow(QMainWindow):
 
         incoming_assets = payload.get("assets", [])
         marshalling = AssetImportMarshallingDialog(
-            self, incoming_assets, self.items, asset_label="asset"
+            self,
+            incoming_assets,
+            self.items,
+            asset_label="asset",
+            reserved_ids=self.retired_asset_ids,
         )
         if marshalling.exec() != QDialog.Accepted:
             return
@@ -3513,7 +3547,11 @@ class AssetsEditorWindow(QMainWindow):
     def save(self):
         if self.categories_changed and callable(self.on_save_categories):
             self.on_save_categories(self.category_items)
-        self.on_save(self.items)
+        try:
+            self.on_save(self.items)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Save assets", str(exc))
+            return
         self.close()
 
 
@@ -5253,6 +5291,138 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         self.room_list.setCurrentRow(next_row)
 
 
+class BulkAssetAdditionDialog(QDialog):
+    def __init__(self, parent, choices):
+        super().__init__(parent)
+        self.setWindowTitle("Add Assets")
+        self.resize(680, 560)
+        self.choices = list(choices or [])
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Select one or more unassigned assets"))
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search by asset ID or description...")
+        self.search_edit.setClearButtonEnabled(True)
+        layout.addWidget(self.search_edit)
+
+        self.asset_table = QTableWidget(0, 3)
+        self.asset_table.setHorizontalHeaderLabels(["Add", "Asset", "Quantity"])
+        self.asset_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.asset_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.asset_table.setAlternatingRowColors(True)
+        self.asset_table.verticalHeader().setVisible(False)
+        header = self.asset_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        for asset_id, display in self.choices:
+            row = self.asset_table.rowCount()
+            self.asset_table.insertRow(row)
+
+            check_item = QTableWidgetItem()
+            check_item.setFlags(
+                Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+            )
+            check_item.setCheckState(Qt.Unchecked)
+            check_item.setData(Qt.UserRole, asset_id)
+            self.asset_table.setItem(row, 0, check_item)
+
+            display_item = QTableWidgetItem(display)
+            display_item.setData(Qt.UserRole, asset_id)
+            self.asset_table.setItem(row, 1, display_item)
+
+            quantity_spin = QSpinBox()
+            quantity_spin.setRange(1, 100000)
+            quantity_spin.setValue(1)
+            quantity_spin.setEnabled(False)
+            quantity_spin.setToolTip("Quantity to add for this room type")
+            self.asset_table.setCellWidget(row, 2, quantity_spin)
+        self.asset_table.itemChanged.connect(self._selection_changed)
+        layout.addWidget(self.asset_table, 1)
+
+        selection_row = QHBoxLayout()
+        select_all_btn = QPushButton("Select All Visible")
+        clear_btn = QPushButton("Clear Selection")
+        select_all_btn.clicked.connect(self._select_all_visible)
+        clear_btn.clicked.connect(self._clear_selection)
+        selection_row.addWidget(select_all_btn)
+        selection_row.addWidget(clear_btn)
+        selection_row.addStretch(1)
+        layout.addLayout(selection_row)
+
+        form = QFormLayout()
+        self.requested_by_edit = QLineEdit()
+        self.requested_by_edit.setPlaceholderText("Name or team (applied to every asset)")
+        form.addRow("Requested by", self.requested_by_edit)
+        self.message_edit = QPlainTextEdit()
+        self.message_edit.setPlaceholderText(
+            "Required insertion message applied to every selected asset"
+        )
+        self.message_edit.setMaximumHeight(100)
+        form.addRow("Insertion message", self.message_edit)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Add Selected Assets")
+        buttons.accepted.connect(self._accept_selection)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.search_edit.textChanged.connect(self._apply_filter)
+
+    def _apply_filter(self, text):
+        query = str(text or "").strip().casefold()
+        for row in range(self.asset_table.rowCount()):
+            display_item = self.asset_table.item(row, 1)
+            self.asset_table.setRowHidden(
+                row,
+                bool(query and query not in display_item.text().casefold()),
+            )
+
+    def _selection_changed(self, item):
+        if item.column() != 0:
+            return
+        quantity_spin = self.asset_table.cellWidget(item.row(), 2)
+        if quantity_spin is not None:
+            quantity_spin.setEnabled(item.checkState() == Qt.Checked)
+
+    def _select_all_visible(self):
+        for row in range(self.asset_table.rowCount()):
+            if not self.asset_table.isRowHidden(row):
+                self.asset_table.item(row, 0).setCheckState(Qt.Checked)
+
+    def _clear_selection(self):
+        for row in range(self.asset_table.rowCount()):
+            self.asset_table.item(row, 0).setCheckState(Qt.Unchecked)
+
+    def selected_asset_rows(self):
+        selected = []
+        for row in range(self.asset_table.rowCount()):
+            check_item = self.asset_table.item(row, 0)
+            if check_item.checkState() != Qt.Checked:
+                continue
+            asset_id = str(check_item.data(Qt.UserRole) or "").strip()
+            quantity_spin = self.asset_table.cellWidget(row, 2)
+            if asset_id and quantity_spin is not None:
+                selected.append(
+                    {"asset_id": asset_id, "qty": int(quantity_spin.value())}
+                )
+        return selected
+
+    def selected_asset_ids(self):
+        return [row["asset_id"] for row in self.selected_asset_rows()]
+
+    def _accept_selection(self):
+        if not self.selected_asset_rows():
+            QMessageBox.information(self, "Add Assets", "Select at least one asset.")
+            return
+        if not self.message_edit.toPlainText().strip():
+            QMessageBox.information(
+                self, "Add Assets", "An insertion message is required."
+            )
+            return
+        self.accept()
+
+
 class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
     """Asset review workflow with recoverable room and asset RFI tracking."""
 
@@ -5299,6 +5469,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.setWindowTitle("Room Type Asset Review and RFI")
         self.resize(1380, 760)
         self.room_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.asset_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.asset_table.setColumnCount(11)
         self.asset_table.setHorizontalHeaderLabels(
             [
@@ -5319,8 +5490,8 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.asset_table.setColumnWidth(10, 320)
 
         action_row = QHBoxLayout()
-        self.add_asset_button = QPushButton("Add Asset...")
-        self.remove_asset_button = QPushButton("Remove Asset...")
+        self.add_asset_button = QPushButton("Add Assets...")
+        self.remove_asset_button = QPushButton("Remove Selected Assets...")
         self.query_button = QPushButton("Add Asset RFI...")
         self.resolve_query_button = QPushButton("Resolve Asset RFI...")
         self.room_query_button = QPushButton("Add Room RFI for Selected...")
@@ -5437,6 +5608,18 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             ),
             None,
         )
+
+    def _selected_asset_metadatas(self):
+        selected_rows = {
+            index.row() for index in self.asset_table.selectionModel().selectedRows()
+        }
+        if not selected_rows and self.asset_table.currentRow() >= 0:
+            selected_rows.add(self.asset_table.currentRow())
+        return [
+            item
+            for item in self._asset_row_widgets
+            if int(item.get("row", -1)) in selected_rows
+        ]
 
     def _selected_room_types(self):
         selected = []
@@ -5582,159 +5765,129 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         ]
         if not choices:
             QMessageBox.information(
-                self, "Add Asset", "All configured assets are already assigned."
+                self, "Add Assets", "All configured assets are already assigned."
             )
             return
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Add Asset")
-        dialog.setMinimumWidth(560)
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel("Asset"))
-
-        asset_combo = QComboBox()
-        asset_combo.setEditable(True)
-        asset_combo.setInsertPolicy(QComboBox.NoInsert)
-        asset_combo.setMaxVisibleItems(20)
-        asset_combo.setPlaceholderText("Type an asset ID or description")
-        for asset_id, display in choices:
-            asset_combo.addItem(display, asset_id)
-        asset_combo.setCurrentIndex(-1)
-
-        proxy_model = QSortFilterProxyModel(asset_combo)
-        proxy_model.setSourceModel(asset_combo.model())
-        proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
-        proxy_model.setFilterKeyColumn(0)
-
-        completer = QCompleter(proxy_model, asset_combo)
-        completer.setCompletionMode(QCompleter.PopupCompletion)
-        completer.setCaseSensitivity(Qt.CaseInsensitive)
-        completer.setFilterMode(Qt.MatchContains)
-        asset_combo.setCompleter(completer)
-        asset_combo.lineEdit().textEdited.connect(proxy_model.setFilterFixedString)
-        layout.addWidget(asset_combo)
-
-        hint = QLabel("Start typing to search the unassigned assets, then choose a suggestion.")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        layout.addWidget(QLabel("Requested by"))
-        requested_by_edit = QLineEdit()
-        requested_by_edit.setPlaceholderText("Name or team")
-        layout.addWidget(requested_by_edit)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        ok_button = buttons.button(QDialogButtonBox.Ok)
-        labels_to_ids = {display.casefold(): asset_id for asset_id, display in choices}
-        ids_to_ids = {asset_id.casefold(): asset_id for asset_id, _display in choices}
-
-        def selected_asset_id():
-            text = self._text(asset_combo.currentText()).casefold()
-            return labels_to_ids.get(text, ids_to_ids.get(text, ""))
-
-        def update_ok_button(*_):
-            ok_button.setEnabled(bool(selected_asset_id()))
-
-        asset_combo.currentTextChanged.connect(update_ok_button)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        update_ok_button()
-        asset_combo.setFocus()
-
+        dialog = BulkAssetAdditionDialog(self, choices)
         if dialog.exec() != QDialog.Accepted:
             return
-        asset_id = selected_asset_id()
-        if not asset_id:
+        selected_assets = dialog.selected_asset_rows()
+        if not selected_assets:
             return
-        asset = self.assets_by_id.get(asset_id, {})
-        requested_by = self._text(requested_by_edit.text())
-        reason = self._required_reason(
-            "Add Asset",
-            f"Why is {asset_id} being added to {self._room_option_label(room_type)}?",
-        )
+        requested_by = self._text(dialog.requested_by_edit.text())
+        reason = self._text(dialog.message_edit.toPlainText())
         if not reason:
             return
-        added_row = {"asset_id": asset_id, "qty": 1}
-        if requested_by:
-            added_row["requested_by"] = requested_by
-        rows = self._room_asset_rows(room_type) + [added_row]
+        rows = self._room_asset_rows(room_type)
+        for selected_asset in selected_assets:
+            asset_id = selected_asset["asset_id"]
+            quantity = max(1, int(selected_asset.get("qty", 1)))
+            added_row = {"asset_id": asset_id, "qty": quantity}
+            if requested_by:
+                added_row["requested_by"] = requested_by
+            rows.append(added_row)
         rows.sort(key=lambda row: self._natural_key(row["asset_id"]))
         room_type["assets"] = rows
         room_type["asset_ids"] = [row["asset_id"] for row in rows]
         room_type_id = self._room_id(room_type)
         self.review_state.pop(room_type_id, None)
         self._capture_staging_state(room_type_id, rows, {})
-        self._append_rfi_history(
-            "asset_added",
-            room_type=room_type,
-            asset_id=asset_id,
-            asset_name=asset.get("name", ""),
-            note=(
-                f"Added with quantity 1, requested by "
-                f"{requested_by or '(blank)'}. Reason: {reason}"
-            ),
-        )
+        for selected_asset in selected_assets:
+            asset_id = selected_asset["asset_id"]
+            quantity = max(1, int(selected_asset.get("qty", 1)))
+            asset = self.assets_by_id.get(asset_id, {})
+            self._append_rfi_history(
+                "asset_added",
+                room_type=room_type,
+                asset_id=asset_id,
+                asset_name=asset.get("name", ""),
+                note=(
+                    f"Added with quantity {quantity}, requested by "
+                    f"{requested_by or '(blank)'}. Insertion message: {reason}"
+                ),
+            )
         self._emit_rfi_changed()
         self._emit_state_changed()
         self._sync_sidebar_current()
 
     def _remove_selected_asset(self):
-        metadata = self._selected_asset_metadata()
+        metadatas = self._selected_asset_metadatas()
         room_type = self._current_room_type()
-        if not metadata or not room_type:
-            QMessageBox.information(self, "Remove Asset", "Select an asset row first.")
+        if not metadatas or not room_type:
+            QMessageBox.information(
+                self, "Remove Assets", "Select one or more asset rows first."
+            )
             return
-        asset_id = self._text(metadata.get("asset_id"))
-        asset = self.assets_by_id.get(asset_id, {})
-        previous_quantity = int(metadata["qty_spin"].value())
-        previous_ports = int(metadata["ports_spin"].value())
-        previous_requested_by = self._text(metadata["requested_by_edit"].text())
+        removal_rows = []
+        for metadata in metadatas:
+            asset_id = self._text(metadata.get("asset_id"))
+            if not asset_id:
+                continue
+            removal_rows.append(
+                {
+                    "asset_id": asset_id,
+                    "asset": self.assets_by_id.get(asset_id, {}),
+                    "quantity": int(metadata["qty_spin"].value()),
+                    "ports": int(metadata["ports_spin"].value()),
+                    "requested_by": self._text(
+                        metadata["requested_by_edit"].text()
+                    ),
+                }
+            )
+        if not removal_rows:
+            return
+        asset_ids = {row["asset_id"] for row in removal_rows}
+        shown_ids = ", ".join(sorted(asset_ids, key=self._natural_key))
         if QMessageBox.question(
             self,
-            "Remove Asset",
-            f"Remove {asset_id} from {self._room_option_label(room_type)}?",
+            "Remove Assets",
+            f"Remove {len(asset_ids)} selected asset(s) from "
+            f"{self._room_option_label(room_type)}?\n\n{shown_ids}",
         ) != QMessageBox.Yes:
             return
         reason = self._required_reason(
-            "Remove Asset", "Record why this asset is being removed."
+            "Remove Assets",
+            "Enter the removal message to apply to every selected asset.",
         )
         if not reason:
             return
         rows, ports = self._current_assignment_values()
-        rows = [row for row in rows if row["asset_id"] != asset_id]
+        rows = [row for row in rows if row["asset_id"] not in asset_ids]
         room_type["assets"] = rows
         room_type["asset_ids"] = [row["asset_id"] for row in rows]
         room_type_id = self._room_id(room_type)
         self.review_state.pop(room_type_id, None)
         self._capture_staging_state(room_type_id, rows, ports)
-        self._append_rfi_history(
-            "asset_removed",
-            room_type=room_type,
-            asset_id=asset_id,
-            asset_name=asset.get("name", ""),
-            note=(
-                f"Removed (previous quantity {previous_quantity}, data points each "
-                f"{previous_ports}, requested by "
-                f"{previous_requested_by or '(blank)'}). Reason: {reason}"
-            ),
-        )
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        for query in self._outstanding_queries(room_type_id, asset_id):
-            query.update(
-                status="resolved",
-                resolution=reason,
-                resolved_at=timestamp,
-                updated_at=timestamp,
-            )
+        for removal in removal_rows:
+            asset_id = removal["asset_id"]
+            asset = removal["asset"]
             self._append_rfi_history(
-                "query_resolved",
+                "asset_removed",
                 room_type=room_type,
                 asset_id=asset_id,
                 asset_name=asset.get("name", ""),
-                note=reason,
-                rfi_id=query.get("id", ""),
+                note=(
+                    f"Removed (previous quantity {removal['quantity']}, data points each "
+                    f"{removal['ports']}, requested by "
+                    f"{removal['requested_by'] or '(blank)'}). Removal message: {reason}"
+                ),
             )
+            for query in self._outstanding_queries(room_type_id, asset_id):
+                query.update(
+                    status="resolved",
+                    resolution=reason,
+                    resolved_at=timestamp,
+                    updated_at=timestamp,
+                )
+                self._append_rfi_history(
+                    "query_resolved",
+                    room_type=room_type,
+                    asset_id=asset_id,
+                    asset_name=asset.get("name", ""),
+                    note=reason,
+                    rfi_id=query.get("id", ""),
+                )
         self._emit_rfi_changed()
         self._emit_state_changed()
         self._set_dirty(False)
@@ -8420,8 +8573,9 @@ class DataPointBulkEditDialog(QDialog):
         form.addRow("Extension distance", extension_row)
 
         self.qty_spin = QSpinBox()
-        self.qty_spin.setRange(1, 1000000)
-        self.qty_spin.setValue(max(1, int(common_value("qty", 1) or 1)))
+        self.qty_spin.setRange(0, 1000000)
+        common_qty = common_value("qty", 1)
+        self.qty_spin.setValue(max(0, int(1 if common_qty is None else common_qty)))
         qty_row, self.apply_qty_check = controlled_row("Apply", self.qty_spin)
         form.addRow("Quantity", qty_row)
 
@@ -8693,11 +8847,12 @@ class DataPointsTableEditor(TableListEditor):
                 return
         try:
             for item in self.items:
-                qty = int(item.get("qty", 1) or 1)
+                raw_qty = item.get("qty", 1)
+                qty = int(1 if raw_qty is None else raw_qty)
                 extension = float(item.get("extension_distance_m", 0.0) or 0.0)
-                if qty <= 0:
+                if qty < 0:
                     raise ValueError(
-                        f"{item.get('name')}: quantity must be greater than zero"
+                        f"{item.get('name')}: quantity cannot be negative"
                     )
                 if extension < 0:
                     raise ValueError(

@@ -9175,6 +9175,18 @@ class NetworkTopologyDialog(QDialog):
             and _text(row.get("peer_instance_id")) not in remove_ids
             and _text(row.get("connection_id")) not in connection_ids
         ]
+        self.data["network_optic_modules"] = [
+            row
+            for row in self.data.get("network_optic_modules", [])
+            if _text(row.get("host_instance_id")) not in remove_ids
+            and _text(row.get("connection_id")) not in connection_ids
+        ]
+        self.data["network_optical_paths"] = [
+            row
+            for row in self.data.get("network_optical_paths", [])
+            if _text(row.get("source_instance_id")) not in remove_ids
+            and _text(row.get("destination_instance_id")) not in remove_ids
+        ]
         self.data["network_endpoint_assignments"] = [
             row
             for row in self.data.get("network_endpoint_assignments", [])

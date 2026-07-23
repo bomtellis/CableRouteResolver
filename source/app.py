@@ -1264,6 +1264,181 @@ class RoomTypeCountsDialog(QDialog):
         self.navigateRequested.emit(room_type_id)
 
 
+class HistoricalAssetRestoreDialog(QDialog):
+    def __init__(self, historical_store, live_store, revision_number, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Restore Assets from Revision {int(revision_number)}")
+        self.resize(980, 560)
+        self._row_asset_ids = []
+
+        layout = QVBoxLayout(self)
+        explanation = QLabel(
+            "Select assets to recover into the current project. Existing current asset "
+            "definitions and room assignments are retained; missing definitions and "
+            "historical room-type assignments are restored."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search asset ID, name, or room type...")
+        self.search_edit.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.search_edit)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ["Restore", "Asset ID", "Asset name", "Definition", "Historical room types"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.Stretch)
+        layout.addWidget(self.table, 1)
+
+        historical_assets = {
+            str(asset.get("id", "") or "").strip(): asset
+            for asset in historical_store.data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        current_asset_ids = {
+            str(asset.get("id", "") or "").strip()
+            for asset in live_store.data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        current_rooms = live_store.room_type_lookup()
+        historical_assignments = {}
+        for room in historical_store.data.get("room_types", []) or []:
+            if not isinstance(room, dict):
+                continue
+            room_id = str(room.get("id", "") or "").strip()
+            room_name = str(room.get("name", room_id) or room_id).strip()
+            for assignment in historical_store.room_type_asset_rows(room):
+                asset_id = str(assignment.get("asset_id", "") or "").strip()
+                if asset_id:
+                    historical_assignments.setdefault(asset_id, []).append(
+                        (room_id, room_name)
+                    )
+
+        candidates = []
+        for asset_id, asset in historical_assets.items():
+            assignments = historical_assignments.get(asset_id, [])
+            if not assignments:
+                continue
+            missing_assignment = False
+            room_labels = []
+            for room_id, room_name in assignments:
+                current_room = current_rooms.get(room_id)
+                if current_room is None:
+                    room_labels.append(f"{room_name or room_id} (room type missing)")
+                    continue
+                current_ids = {
+                    row.get("asset_id")
+                    for row in live_store.room_type_asset_rows(current_room)
+                }
+                if asset_id not in current_ids:
+                    missing_assignment = True
+                    room_labels.append(room_name or room_id)
+                else:
+                    room_labels.append(f"{room_name or room_id} (already assigned)")
+            definition_missing = asset_id not in current_asset_ids
+            if not definition_missing and not missing_assignment:
+                continue
+            candidates.append(
+                (
+                    asset_id,
+                    str(asset.get("name", asset_id) or asset_id).strip(),
+                    "Restore historical definition with a new ID"
+                    if definition_missing
+                    else "Keep latest current definition",
+                    ", ".join(room_labels),
+                )
+            )
+
+        candidates.sort(key=lambda row: (row[1].casefold(), row[0].casefold()))
+        self.table.setRowCount(len(candidates))
+        for row, (asset_id, name, definition, rooms) in enumerate(candidates):
+            check_item = QTableWidgetItem("")
+            check_item.setFlags(
+                Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+            )
+            check_item.setCheckState(Qt.Unchecked)
+            check_item.setData(Qt.UserRole, asset_id)
+            self.table.setItem(row, 0, check_item)
+            for column, value in enumerate((asset_id, name, definition, rooms), start=1):
+                self.table.setItem(row, column, QTableWidgetItem(value))
+            self._row_asset_ids.append(asset_id)
+        self.table.resizeRowsToContents()
+
+        selection_row = QHBoxLayout()
+        select_all_btn = QPushButton("Select All")
+        clear_btn = QPushButton("Clear")
+        select_all_btn.clicked.connect(lambda: self._set_visible_checked(True))
+        clear_btn.clicked.connect(lambda: self._set_visible_checked(False))
+        selection_row.addWidget(select_all_btn)
+        selection_row.addWidget(clear_btn)
+        selection_row.addStretch(1)
+        self.count_label = QLabel()
+        selection_row.addWidget(self.count_label)
+        layout.addLayout(selection_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Restore to Current")
+        buttons.accepted.connect(self._accept_selection)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._restore_button = buttons.button(QDialogButtonBox.Ok)
+        self.table.itemChanged.connect(self._update_selection_count)
+        self._update_selection_count()
+
+    def has_candidates(self):
+        return self.table.rowCount() > 0
+
+    def selected_asset_ids(self):
+        selected = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and item.checkState() == Qt.Checked:
+                selected.append(str(item.data(Qt.UserRole) or "").strip())
+        return [asset_id for asset_id in selected if asset_id]
+
+    def _apply_filter(self):
+        query = self.search_edit.text().strip().casefold()
+        for row in range(self.table.rowCount()):
+            text = " ".join(
+                self.table.item(row, column).text()
+                for column in range(1, self.table.columnCount())
+                if self.table.item(row, column) is not None
+            ).casefold()
+            self.table.setRowHidden(row, bool(query and query not in text))
+
+    def _set_visible_checked(self, checked):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in range(self.table.rowCount()):
+            if not self.table.isRowHidden(row):
+                item = self.table.item(row, 0)
+                if item is not None:
+                    item.setCheckState(state)
+        self._update_selection_count()
+
+    def _update_selection_count(self, *_):
+        selected = len(self.selected_asset_ids())
+        self.count_label.setText(f"{selected} asset{'s' if selected != 1 else ''} selected")
+        self._restore_button.setEnabled(selected > 0)
+
+    def _accept_selection(self):
+        if not self.selected_asset_ids():
+            QMessageBox.information(self, "Restore Assets", "Select at least one asset.")
+            return
+        self.accept()
+
+
 class RevisionHistoryDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1300,13 +1475,30 @@ class RevisionHistoryDialog(QDialog):
         layout.addLayout(button_row)
         refresh_btn = QPushButton("Refresh")
         export_btn = QPushButton("Export PDF")
+        self.checkout_btn = QPushButton("Checkout Selected")
+        self.checkout_btn.setEnabled(False)
+        self.return_btn = QPushButton("Return to Current")
+        self.return_btn.setEnabled(False)
+        self.restore_assets_btn = QPushButton("Restore Assets to Current...")
+        self.restore_assets_btn.setEnabled(False)
+        self.rollback_btn = QPushButton("Rollback to Selected...")
+        self.rollback_btn.setEnabled(False)
         close_btn = QPushButton("Close")
         refresh_btn.clicked.connect(self.refresh_from_parent)
         export_btn.clicked.connect(self._export_pdf)
+        self.checkout_btn.clicked.connect(self._checkout_selected)
+        self.return_btn.clicked.connect(self._return_to_current)
+        self.restore_assets_btn.clicked.connect(self._restore_assets_to_current)
+        self.rollback_btn.clicked.connect(self._rollback_selected)
+        self.table.itemSelectionChanged.connect(self._update_revision_actions)
         close_btn.clicked.connect(self.close)
         button_row.addWidget(refresh_btn)
         button_row.addWidget(export_btn)
         button_row.addStretch(1)
+        button_row.addWidget(self.checkout_btn)
+        button_row.addWidget(self.return_btn)
+        button_row.addWidget(self.restore_assets_btn)
+        button_row.addWidget(self.rollback_btn)
         button_row.addWidget(close_btn)
 
     def refresh_from_parent(self):
@@ -1314,11 +1506,28 @@ class RevisionHistoryDialog(QDialog):
         revisions = []
         if parent is not None and hasattr(parent, "store"):
             try:
+                if hasattr(parent, "refresh_data_point_quantities"):
+                    parent.refresh_data_point_quantities()
                 revisions = parent.store.revision_history()
             except Exception as exc:
                 QMessageBox.critical(self, "Revision history failed", str(exc))
                 return
         self.set_revisions(revisions)
+        checked_out = int(getattr(parent, "_checked_out_revision", 0) or 0)
+        if checked_out:
+            self.summary_label.setText(
+                f"{self.summary_label.text()} — viewing revision {checked_out} "
+                "(historical checkout; project saves are disabled)"
+            )
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                revision = item.data(Qt.UserRole) if item is not None else None
+                if isinstance(revision, dict) and int(
+                    revision.get("revision_number", 0) or 0
+                ) == checked_out:
+                    self.table.selectRow(row)
+                    break
+        self._update_revision_actions()
 
     def set_revisions(self, revisions):
         revisions = list(revisions or [])
@@ -1339,8 +1548,77 @@ class RevisionHistoryDialog(QDialog):
                 item = QTableWidgetItem(str(value))
                 if column in {0, 3, 4, 5}:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if column == 0:
+                    item.setData(Qt.UserRole, dict(revision))
                 self.table.setItem(row, column, item)
         self.table.resizeRowsToContents()
+        if revisions:
+            self.table.selectRow(0)
+        self._update_revision_actions()
+
+    def _selected_revision(self):
+        row = self.table.currentRow()
+        item = self.table.item(row, 0) if row >= 0 else None
+        revision = item.data(Qt.UserRole) if item is not None else None
+        return revision if isinstance(revision, dict) else None
+
+    def _update_revision_actions(self):
+        revision = self._selected_revision()
+        parent = self.parent()
+        checked_out = int(getattr(parent, "_checked_out_revision", 0) or 0)
+        restorable = bool(revision and revision.get("restorable"))
+        selected_number = int(revision.get("revision_number", 0) or 0) if revision else 0
+        self.checkout_btn.setEnabled(restorable and selected_number != checked_out)
+        self.return_btn.setEnabled(bool(checked_out))
+        self.restore_assets_btn.setEnabled(bool(checked_out))
+        self.rollback_btn.setEnabled(restorable and not checked_out)
+
+    def _checkout_selected(self):
+        revision = self._selected_revision()
+        if not revision or not revision.get("restorable"):
+            return
+        revision_number = int(revision.get("revision_number", 0) or 0)
+        parent = self.parent()
+        if revision_number > 0 and parent is not None and hasattr(
+            parent, "checkout_project_revision"
+        ):
+            if parent.checkout_project_revision(revision_number):
+                self.refresh_from_parent()
+
+    def _return_to_current(self):
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "return_to_current_project"):
+            if parent.return_to_current_project():
+                self.refresh_from_parent()
+
+    def _restore_assets_to_current(self):
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "restore_assets_from_checkout"):
+            if parent.restore_assets_from_checkout():
+                self.refresh_from_parent()
+
+    def _rollback_selected(self):
+        revision = self._selected_revision()
+        if not revision or not revision.get("restorable"):
+            return
+        revision_number = int(revision.get("revision_number", 0) or 0)
+        if revision_number <= 0:
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Rollback Project",
+            f"Rollback the project to revision {revision_number}?\n\n"
+            "The current project data will be replaced. The rollback is saved as "
+            "a new commit, so the current state remains available in this history.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "rollback_project_revision"):
+            if parent.rollback_project_revision(revision_number):
+                self.refresh_from_parent()
 
     def _export_pdf(self):
         parent = self.parent()
@@ -1789,6 +2067,8 @@ class CableRouteEditor(QMainWindow):
         self.max_undo_steps = 50
 
         self.store = JsonStore()
+        self._checkout_live_store = None
+        self._checked_out_revision = None
         self.current_json_path = None
         self.current_dxf_path = None
         self.loaded_dxf_floor = None
@@ -5271,10 +5551,26 @@ class CableRouteEditor(QMainWindow):
         toggle = bool(modifiers & Qt.ControlModifier)
         self._set_canvas_multi_selection(selected, append=append, toggle=toggle)
         self.refresh_canvas()
-        if selected:
-            self.set_status(f"Selected {len(selected)} template item(s)")
-        else:
-            self.set_status("No template items found in selection box")
+
+        data_point_names = {
+            str(point.get("name", "") or "").strip()
+            for point in self.store.data.get("data_points", []) or []
+            if isinstance(point, dict) and str(point.get("name", "") or "").strip()
+        }
+        boxed_data_point_names = [
+            name for name in selected if name in data_point_names
+        ]
+        deployed_data_points = self.store.count_deployed_data_points(
+            boxed_data_point_names
+        )
+        corridor_nodes = len(selected) - len(boxed_data_point_names)
+        status = (
+            f"Selection box: {deployed_data_points} deployed data point(s) across "
+            f"{len(boxed_data_point_names)} placed marker(s)"
+        )
+        if corridor_nodes:
+            status += f", plus {corridor_nodes} corridor node(s)"
+        self.set_status(status)
         return True
 
     def _clear_static_scene_items(self):
@@ -9794,7 +10090,23 @@ class CableRouteEditor(QMainWindow):
                 return candidate
             number += 1
 
-    def _activate_loaded_project(self, store, path, status_message):
+    def refresh_data_point_quantities(self):
+        """Refresh graph point and connection quantities from live asset demand."""
+        changed = self.store.sync_all_room_type_quantities()
+        if changed:
+            self._render_data_revision += 1
+            self._invalidate_static_scene_cache()
+            self.refresh_canvas()
+        return changed
+
+    def _activate_loaded_project(
+        self, store, path, status_message, *, preserve_checkout=False
+    ):
+        if not preserve_checkout:
+            self._checkout_live_store = None
+            self._checked_out_revision = None
+            self.setWindowTitle("Cable Routing Graph Editor")
+        store.sync_all_room_type_quantities()
         self.store = store
         self._render_data_revision += 1
         self._measure_data_point_name = None
@@ -10112,9 +10424,24 @@ class CableRouteEditor(QMainWindow):
             path += ".crsdb"
         return path
 
+    def _historical_checkout_blocks_save(self):
+        if not self._checked_out_revision:
+            return False
+        QMessageBox.information(
+            self,
+            "Historical checkout",
+            f"Revision {self._checked_out_revision} is checked out for exploration.\n\n"
+            "Return to the current project before saving. Any changes made while "
+            "exploring the historical revision will be discarded.",
+        )
+        return True
+
     def _save_project_to_path(self, path, status_prefix="Saved"):
+        if self._historical_checkout_blocks_save():
+            return False
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
+            self.refresh_data_point_quantities()
             self.store.save(path)
         finally:
             QApplication.restoreOverrideCursor()
@@ -10139,6 +10466,7 @@ class CableRouteEditor(QMainWindow):
                 detail += " - compaction skipped"
         self.set_status(f"{status_prefix} {Path(self.current_json_path).name}{detail}")
         self.refresh_canvas()
+        return True
 
     def show_revision_history(self):
         if getattr(self.store, "storage_format", "") != "sqlite" or not getattr(
@@ -10158,6 +10486,172 @@ class CableRouteEditor(QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def checkout_project_revision(self, revision_number):
+        revision_number = int(revision_number)
+        live_store = self._checkout_live_store or self.store
+        path = getattr(live_store, "storage_path", "") or self.current_json_path or ""
+        if revision_number <= 0 or not path:
+            return False
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            historical_data = live_store.revision_data(revision_number)
+            historical_store = JsonStore(historical_data)
+            historical_store.storage_path = str(path)
+            historical_store.storage_format = "sqlite"
+        except Exception as exc:
+            QMessageBox.critical(self, "Checkout revision failed", str(exc))
+            return False
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        first_checkout = self._checkout_live_store is None
+        if first_checkout:
+            self._checkout_live_store = live_store
+        self._checked_out_revision = revision_number
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._activate_loaded_project(
+            historical_store,
+            path,
+            f"Viewing historical revision {revision_number} - project saves are disabled",
+            preserve_checkout=True,
+        )
+        self.setWindowTitle(
+            f"Cable Routing Graph Editor - Historical Revision {revision_number}"
+        )
+        if first_checkout:
+            QMessageBox.information(
+                self,
+                "Historical checkout",
+                f"Revision {revision_number} is now loaded for exploration.\n\n"
+                "Project saves and rollback are disabled in this view. Use Return to "
+                "Current in Revision History to restore your live working state.",
+            )
+        return True
+
+    def return_to_current_project(self):
+        live_store = self._checkout_live_store
+        if live_store is None:
+            return False
+        path = getattr(live_store, "storage_path", "") or self.current_json_path or ""
+        self._checkout_live_store = None
+        self._checked_out_revision = None
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._activate_loaded_project(
+            live_store,
+            path,
+            "Returned to the current project",
+            preserve_checkout=True,
+        )
+        self.setWindowTitle("Cable Routing Graph Editor")
+        return True
+
+    def restore_assets_from_checkout(self):
+        revision_number = int(self._checked_out_revision or 0)
+        live_store = self._checkout_live_store
+        historical_store = self.store
+        if revision_number <= 0 or live_store is None:
+            return False
+
+        dialog = HistoricalAssetRestoreDialog(
+            historical_store,
+            live_store,
+            revision_number,
+            self,
+        )
+        if not dialog.has_candidates():
+            QMessageBox.information(
+                self,
+                "Restore Assets",
+                "All assets from this revision are already present on their historical "
+                "room types in the current project.",
+            )
+            return False
+        if dialog.exec() != QDialog.Accepted:
+            return False
+        asset_ids = dialog.selected_asset_ids()
+        if not asset_ids:
+            return False
+
+        historical_data = historical_store.data
+        self.return_to_current_project()
+        self.push_undo_state(
+            f"Restore {len(asset_ids)} asset(s) from revision {revision_number}"
+        )
+        result = self.store.restore_historical_assets(
+            historical_data,
+            asset_ids,
+            source_revision=revision_number,
+        )
+        if not result.get("changed"):
+            if self.undo_stack:
+                self.undo_stack.pop()
+            QMessageBox.information(
+                self,
+                "Restore Assets",
+                "The selected assets did not require any changes in the current project.",
+            )
+            self.refresh_canvas()
+            return True
+
+        restored_definitions = len(result.get("restored_asset_ids", []))
+        restored_assignments = len(result.get("restored_assignments", []))
+        retained_latest = len(result.get("retained_latest_asset_ids", []))
+        missing_rooms = {
+            row.get("room_type_id")
+            for row in result.get("missing_room_types", [])
+            if row.get("room_type_id")
+        }
+        summary = (
+            f"Recovered asset definitions: {restored_definitions}\n"
+            f"Latest current definitions retained: {retained_latest}\n"
+            f"Room-type assignments restored: {restored_assignments}"
+        )
+        if missing_rooms:
+            summary += f"\nHistorical room types missing from current project: {len(missing_rooms)}"
+        summary += (
+            "\n\nThe restored data is now in the current project. Review it, then use "
+            "Save Project to create a restorable commit."
+        )
+        self.set_status(
+            f"Restored {len(asset_ids)} asset(s) from revision {revision_number} to current project"
+        )
+        self.refresh_canvas()
+        QMessageBox.information(self, "Assets Restored", summary)
+        return True
+
+    def rollback_project_revision(self, revision_number):
+        if self._checked_out_revision:
+            QMessageBox.information(
+                self,
+                "Historical checkout",
+                "Return to the current project before rolling back a revision.",
+            )
+            return False
+        revision_number = int(revision_number)
+        path = getattr(self.store, "storage_path", "") or self.current_json_path or ""
+        if not path:
+            return False
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            statistics = self.store.restore_revision(revision_number)
+        except Exception as exc:
+            QMessageBox.critical(self, "Rollback project failed", str(exc))
+            return False
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._activate_loaded_project(
+            self.store,
+            path,
+            f"Rolled back to revision {revision_number} and saved revision "
+            f"{statistics.revision_number}",
+        )
+        return True
 
     def _review_pdf_in_report_studio(
         self,
@@ -10931,6 +11425,8 @@ class CableRouteEditor(QMainWindow):
         )
 
     def save_json(self):
+        if self._historical_checkout_blocks_save():
+            return
         path = self.current_json_path
         if not path or Path(path).suffix.lower() == ".json":
             initial = str(Path(path).with_suffix(".crsdb")) if path else ""
@@ -10943,6 +11439,8 @@ class CableRouteEditor(QMainWindow):
             QMessageBox.critical(self, "Save project failed", str(exc))
 
     def save_json_as(self):
+        if self._historical_checkout_blocks_save():
+            return
         initial = self.current_json_path or ""
         if initial:
             initial = str(Path(initial).with_suffix(".crsdb"))
@@ -11915,7 +12413,8 @@ class CableRouteEditor(QMainWindow):
         for source in items:
             point = dict(source)
             point["name"] = str(point.get("name", "")).strip()
-            point["qty"] = max(1, int(point.get("qty", 1) or 1))
+            raw_qty = point.get("qty", 1)
+            point["qty"] = max(0, int(1 if raw_qty is None else raw_qty))
             point["extension_distance_m"] = max(
                 0.0,
                 float(point.get("extension_distance_m", 0.0) or 0.0),
@@ -14310,16 +14809,17 @@ class CableRouteEditor(QMainWindow):
 
     def closeEvent(self, event):
         if not getattr(self, "_close_database_prompt_handled", False):
-            storage_path = getattr(self.store, "storage_path", "") or self.current_json_path or ""
+            save_store = self._checkout_live_store or self.store
+            storage_path = getattr(save_store, "storage_path", "") or self.current_json_path or ""
             is_database = (
-                getattr(self.store, "storage_format", "") == "sqlite"
+                getattr(save_store, "storage_format", "") == "sqlite"
                 and bool(storage_path)
                 and Path(storage_path).suffix.lower() == ".crsdb"
             )
             if is_database:
                 usage = {}
                 try:
-                    usage = self.store.database_space_usage()
+                    usage = save_store.database_space_usage()
                 except Exception:
                     usage = {}
                 file_mb = float(usage.get("file_size_bytes", 0) or 0) / (1024 * 1024)
@@ -14348,10 +14848,10 @@ class CableRouteEditor(QMainWindow):
                 if clicked == compact_button:
                     QApplication.setOverrideCursor(Qt.WaitCursor)
                     try:
-                        self.store.save_sqlite(storage_path, auto_compact=False)
-                        compaction = self.store.compact_database(force=True)
+                        save_store.save_sqlite(storage_path, auto_compact=False)
+                        compaction = save_store.compact_database(force=True)
                         reclaimed = getattr(compaction, "reclaimed_bytes", 0) / (1024 * 1024) if compaction else 0.0
-                        statistics = getattr(self.store, "last_save_statistics", None)
+                        statistics = getattr(save_store, "last_save_statistics", None)
                         revision_detail = ""
                         if statistics is not None:
                             if getattr(statistics, "revision_created", True):
@@ -16545,6 +17045,7 @@ class CableRouteEditor(QMainWindow):
             on_show_capability_overlap=self.show_asset_capability_overlap_dialog,
             on_condense_assets=self._condense_assets,
             on_expand_asset=self._expand_asset,
+            retired_asset_ids=self.store.data.get("retired_asset_ids", []),
         )
 
     def manage_asset_categories(self):
@@ -16561,19 +17062,18 @@ class CableRouteEditor(QMainWindow):
 
     def _save_assets(self, items):
         self.push_undo_state("Save assets")
-        self.store.data["assets"] = items
-        valid_asset_ids = {str(asset.get("id", "") or "").strip() for asset in items if str(asset.get("id", "") or "").strip()}
-        for group in self.store.data.get("asset_scenario_groups", []) or []:
-            if isinstance(group, dict):
-                group["asset_ids"] = [
-                    str(asset_id).strip()
-                    for asset_id in group.get("asset_ids", []) or []
-                    if str(asset_id).strip() in valid_asset_ids
-                ]
-
+        try:
+            result = self.store.replace_assets(items)
+        except Exception:
+            if self.undo_stack:
+                self.undo_stack.pop()
+            raise
         self.store.sync_all_room_type_quantities()
 
-        self.set_status("Assets updated and room type quantities recalculated")
+        self.set_status(
+            f"Assets updated; retired {len(result['removed_ids'])} ID(s) and purged "
+            f"{result['purged_count']} missing room-type assignment(s)"
+        )
         self.refresh_canvas()
 
     def _condense_assets(self, items, main_asset_id, condensed_asset_ids, reason):
@@ -16587,14 +17087,32 @@ class CableRouteEditor(QMainWindow):
                 "condensing assets."
             )
 
+        previous_asset_ids = {
+            str(asset.get("id", "") or "").strip()
+            for asset in self.store.data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
         updated_data = deepcopy(self.store.data)
         updated_data["assets"] = deepcopy(items)
         result = apply_asset_condensation(
             updated_data, main_asset_id, condensed_asset_ids
         )
         created_rfis = create_condensation_rfis(updated_data, result, reason)
+        final_asset_ids = {
+            str(asset.get("id", "") or "").strip()
+            for asset in updated_data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        retired_ids = {
+            str(asset_id or "").strip()
+            for asset_id in updated_data.get("retired_asset_ids", []) or []
+            if str(asset_id or "").strip()
+        }
+        retired_ids.update(previous_asset_ids - final_asset_ids)
+        updated_data["retired_asset_ids"] = sorted(retired_ids, key=str.casefold)
         self.push_undo_state("Condense assets")
         self.store.data = updated_data
+        self.store.purge_missing_asset_assignments(record_change=False)
         removed_labels = []
         for asset in result["removed_assets"]:
             asset_id = str(asset.get("id", "") or "").strip()
@@ -16645,13 +17163,43 @@ class CableRouteEditor(QMainWindow):
                 "expanding an asset."
             )
 
+        replacement_ids = {
+            str(asset.get("id", "") or "").strip()
+            for asset in replacement_assets or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        reused_ids = sorted(
+            replacement_ids & self.store.retired_asset_ids(), key=str.casefold
+        )
+        if reused_ids:
+            raise ValueError(
+                "Retired asset IDs cannot be reused: " + ", ".join(reused_ids)
+            )
+        previous_asset_ids = {
+            str(asset.get("id", "") or "").strip()
+            for asset in self.store.data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
         updated_data = deepcopy(self.store.data)
         updated_data["assets"] = deepcopy(items)
         result = apply_asset_expansion(
             updated_data, source_asset_id, replacement_assets
         )
+        final_asset_ids = {
+            str(asset.get("id", "") or "").strip()
+            for asset in updated_data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        retired_ids = {
+            str(asset_id or "").strip()
+            for asset_id in updated_data.get("retired_asset_ids", []) or []
+            if str(asset_id or "").strip()
+        }
+        retired_ids.update(previous_asset_ids - final_asset_ids)
+        updated_data["retired_asset_ids"] = sorted(retired_ids, key=str.casefold)
         self.push_undo_state("Expand asset")
         self.store.data = updated_data
+        self.store.purge_missing_asset_assignments(record_change=False)
 
         source = result["source_asset"]
         source_id = str(source.get("id", "") or "").strip()

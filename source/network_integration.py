@@ -1299,6 +1299,12 @@ def _delete_network_instance(editor, instance_id: str) -> None:
     ):
         return
     _safe_push_undo(editor, "Delete network asset instance")
+    removed_connection_ids = {
+        _text(item.get("id"))
+        for item in editor.store.data.get("network_connections", [])
+        if _text(item.get("from_instance_id")) == instance_id
+        or _text(item.get("to_instance_id")) == instance_id
+    }
     editor.store.data["network_asset_instances"] = [
         item
         for item in editor.store.data.get("network_asset_instances", [])
@@ -1315,6 +1321,18 @@ def _delete_network_instance(editor, instance_id: str) -> None:
         for item in editor.store.data.get("network_power_connections", [])
         if _text(item.get("from_instance_id")) != instance_id
         and _text(item.get("to_instance_id")) != instance_id
+    ]
+    editor.store.data["network_optic_modules"] = [
+        item
+        for item in editor.store.data.get("network_optic_modules", [])
+        if _text(item.get("host_instance_id")) != instance_id
+        and _text(item.get("connection_id")) not in removed_connection_ids
+    ]
+    editor.store.data["network_optical_paths"] = [
+        item
+        for item in editor.store.data.get("network_optical_paths", [])
+        if _text(item.get("source_instance_id")) != instance_id
+        and _text(item.get("destination_instance_id")) != instance_id
     ]
     editor.selected_point_name = None
     editor.refresh_canvas()

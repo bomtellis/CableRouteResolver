@@ -19,7 +19,7 @@ from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 import zlib
 
 FORMAT_NAME = "CableRouteResolver SQLite Project"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_EXTENSION = ".crsdb"
 SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_CHUNK_SIZE = 512
@@ -225,6 +225,29 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             deleted_chunks INTEGER NOT NULL DEFAULT 0,
             indexed_records INTEGER NOT NULL DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS project_revision_blobs (
+            payload_hash TEXT PRIMARY KEY,
+            section_kind TEXT NOT NULL CHECK(section_kind IN ('scalar', 'list')),
+            record_count INTEGER NOT NULL,
+            payload BLOB NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE IF NOT EXISTS project_revision_sections (
+            revision_number INTEGER NOT NULL,
+            section_key TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            payload_hash TEXT NOT NULL,
+            PRIMARY KEY(revision_number, section_key, chunk_index),
+            FOREIGN KEY(revision_number)
+                REFERENCES project_revisions(revision_number)
+                ON DELETE CASCADE,
+            FOREIGN KEY(payload_hash)
+                REFERENCES project_revision_blobs(payload_hash)
+        ) WITHOUT ROWID;
+
+        CREATE INDEX IF NOT EXISTS idx_project_revision_sections_hash
+            ON project_revision_sections(payload_hash);
         """
     )
 
@@ -293,6 +316,7 @@ class SQLiteProjectFile:
             "room_type_asset_scenarios": "room type asset scenarios",
             "asset_categories": "asset categories",
             "assets": "assets",
+            "retired_asset_ids": "retired asset IDs",
             "locations": "locations",
             "equipment_room_placement_zones": "equipment room placement zones",
             "data_points": "data points",
@@ -318,19 +342,13 @@ class SQLiteProjectFile:
         changed_chunks: int,
         deleted_chunks: int,
         detailed_changes: Iterable[str] = (),
+        commit_message: str = "Project saved",
     ) -> str:
         changed = sorted({cls._section_label(section) for section in changed_sections})
         deleted = sorted({cls._section_label(section) for section in deleted_sections})
         exact = [_text(item) for item in detailed_changes if _text(item)]
         if not had_existing_project:
-            if changed:
-                shown = ", ".join(changed[:8])
-                if len(changed) > 8:
-                    shown += f", and {len(changed) - 8} more section(s)"
-                base = f"Initial project save with {changed_chunks} section chunk(s): {shown}."
-            else:
-                base = "Initial project save."
-            return " | ".join(exact + [base]) if exact else base
+            return "Initial commit"
 
         parts = []
         if changed:
@@ -346,8 +364,96 @@ class SQLiteProjectFile:
         chunk_text = f"{changed_chunks} changed chunk(s)"
         if deleted_chunks:
             chunk_text += f", {deleted_chunks} deleted chunk(s)"
-        base = "; ".join(parts) + f". {chunk_text}."
-        return " | ".join(exact + [base]) if exact else base
+        summary = "; ".join(parts)
+        base = f"{summary}. {chunk_text}." if summary else f"{chunk_text}."
+        message = _text(commit_message) or "Project saved"
+        return " | ".join([message] + exact + [base])
+
+    @staticmethod
+    def _snapshot_revision(connection: sqlite3.Connection, revision_number: int) -> None:
+        """Attach a deduplicated, restorable project snapshot to a revision."""
+
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO project_revision_blobs(
+                payload_hash, section_kind, record_count, payload
+            )
+            SELECT payload_hash, section_kind, record_count, payload
+            FROM project_sections
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO project_revision_sections(
+                revision_number, section_key, chunk_index, payload_hash
+            )
+            SELECT ?, section_key, chunk_index, payload_hash
+            FROM project_sections
+            """,
+            (int(revision_number),),
+        )
+
+    @classmethod
+    def _insert_revision(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        revision_number: int,
+        created_utc: str,
+        notes: str,
+        changed_chunks: int,
+        unchanged_chunks: int,
+        deleted_chunks: int,
+        indexed_records: int,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO project_revisions(
+                revision_number, created_utc, notes,
+                changed_chunks, unchanged_chunks, deleted_chunks, indexed_records
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(revision_number),
+                _text(created_utc),
+                _text(notes),
+                int(changed_chunks),
+                int(unchanged_chunks),
+                int(deleted_chunks),
+                int(indexed_records),
+            ),
+        )
+        cls._snapshot_revision(connection, revision_number)
+
+    @staticmethod
+    def _data_from_section_rows(rows: Iterable[Tuple[str, str, int, bytes]]) -> dict:
+        data: Dict[str, object] = {}
+        list_sections: Dict[str, List[object]] = {}
+        for section_key, section_kind, _chunk_index, payload in rows:
+            value = _unpack(payload)
+            if section_kind == "list":
+                target = list_sections.setdefault(section_key, [])
+                if isinstance(value, list):
+                    target.extend(value)
+            else:
+                data[section_key] = value
+
+        for section_key, section_rows in list_sections.items():
+            if section_key == "corridors.nodes":
+                corridors = data.setdefault("corridors", {})
+                if not isinstance(corridors, dict):
+                    corridors = {}
+                    data["corridors"] = corridors
+                corridors["nodes"] = section_rows
+            elif section_key == "corridors.edges":
+                corridors = data.setdefault("corridors", {})
+                if not isinstance(corridors, dict):
+                    corridors = {}
+                    data["corridors"] = corridors
+                corridors["edges"] = section_rows
+            else:
+                data[section_key] = section_rows
+        return data
 
     def load(self) -> dict:
         if not self.path.exists():
@@ -369,8 +475,6 @@ class SQLiteProjectFile:
                     f"Project schema version {schema_version} is newer than this application supports ({SCHEMA_VERSION})."
                 )
 
-            data: Dict[str, object] = {}
-            list_sections: Dict[str, List[object]] = {}
             cursor = connection.execute(
                 """
                 SELECT section_key, section_kind, chunk_index, payload
@@ -378,34 +482,97 @@ class SQLiteProjectFile:
                 ORDER BY section_key, chunk_index
                 """
             )
-            for section_key, section_kind, _chunk_index, payload in cursor:
-                value = _unpack(payload)
-                if section_kind == "list":
-                    target = list_sections.setdefault(section_key, [])
-                    if isinstance(value, list):
-                        target.extend(value)
-                else:
-                    data[section_key] = value
-
-            for section_key, rows in list_sections.items():
-                if section_key == "corridors.nodes":
-                    corridors = data.setdefault("corridors", {})
-                    if not isinstance(corridors, dict):
-                        corridors = {}
-                        data["corridors"] = corridors
-                    corridors["nodes"] = rows
-                elif section_key == "corridors.edges":
-                    corridors = data.setdefault("corridors", {})
-                    if not isinstance(corridors, dict):
-                        corridors = {}
-                        data["corridors"] = corridors
-                    corridors["edges"] = rows
-                else:
-                    data[section_key] = rows
-
-            return data
+            return self._data_from_section_rows(cursor)
         finally:
             connection.close()
+
+    def load_revision(self, revision_number: int) -> dict:
+        """Load a restorable revision without changing the current project."""
+
+        revision_number = int(revision_number)
+        connection = sqlite3.connect(str(self.path))
+        try:
+            _configure_connection(connection, writable=False)
+            exists = connection.execute(
+                "SELECT 1 FROM project_revisions WHERE revision_number = ?",
+                (revision_number,),
+            ).fetchone()
+            if not exists:
+                raise ValueError(f"Revision {revision_number} was not found.")
+            cursor = connection.execute(
+                """
+                SELECT sections.section_key, blobs.section_kind,
+                       sections.chunk_index, blobs.payload
+                FROM project_revision_sections AS sections
+                JOIN project_revision_blobs AS blobs
+                  ON blobs.payload_hash = sections.payload_hash
+                WHERE sections.revision_number = ?
+                ORDER BY sections.section_key, sections.chunk_index
+                """,
+                (revision_number,),
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                raise ValueError(
+                    f"Revision {revision_number} predates restorable project commits."
+                )
+            return self._data_from_section_rows(rows)
+        except sqlite3.OperationalError as exc:
+            if "project_revision_" in str(exc):
+                raise ValueError(
+                    f"Revision {revision_number} predates restorable project commits."
+                ) from exc
+            raise
+        finally:
+            connection.close()
+
+    def restore_revision(self, revision_number: int) -> Tuple[dict, SaveStatistics]:
+        """Restore a revision and record that rollback as a new commit."""
+
+        revision_number = int(revision_number)
+        current = self.load()
+        restored = self.load_revision(revision_number)
+        active_asset_ids = {
+            _text(asset.get("id"))
+            for asset in restored.get("assets", []) or []
+            if isinstance(asset, dict) and _text(asset.get("id"))
+        }
+        retired_asset_ids = {
+            _text(asset_id)
+            for payload in (current, restored)
+            for asset_id in payload.get("retired_asset_ids", []) or []
+            if _text(asset_id)
+        }
+        restored["retired_asset_ids"] = sorted(
+            retired_asset_ids - active_asset_ids, key=str.casefold
+        )
+        for room_type in restored.get("room_types", []) or []:
+            if not isinstance(room_type, dict):
+                continue
+            rows = [
+                row
+                for row in room_type.get("assets", []) or []
+                if isinstance(row, dict)
+                and _text(row.get("asset_id", row.get("id"))) in active_asset_ids
+            ]
+            legacy_ids = [
+                _text(asset_id)
+                for asset_id in room_type.get("asset_ids", []) or []
+                if _text(asset_id) in active_asset_ids
+            ]
+            if "assets" in room_type:
+                room_type["assets"] = rows
+                room_type["asset_ids"] = [
+                    _text(row.get("asset_id", row.get("id"))) for row in rows
+                ]
+            else:
+                room_type["asset_ids"] = legacy_ids
+        statistics = self.save(
+            restored,
+            source_path=str(self.path),
+            commit_message=f"Rollback to revision {revision_number}",
+        )
+        return restored, statistics
 
     def space_usage(self) -> DatabaseSpaceStatistics:
         """Return file and free-page information for maintenance decisions."""
@@ -500,6 +667,7 @@ class SQLiteProjectFile:
         data: dict,
         *,
         source_path: str = "",
+        commit_message: str = "Project saved",
         auto_compact: bool = True,
         compact_min_free_bytes: int = AUTO_COMPACT_MIN_FREE_BYTES,
         compact_min_free_ratio: float = AUTO_COMPACT_MIN_FREE_RATIO,
@@ -529,6 +697,16 @@ class SQLiteProjectFile:
                     "SELECT section_key, chunk_index, payload_hash FROM project_sections"
                 )
             }
+            row = connection.execute(
+                "SELECT COALESCE(MAX(revision_number), 0) FROM project_revisions"
+            ).fetchone()
+            revision_number = int(row[0] or 0)
+            has_restorable_revisions = bool(
+                connection.execute(
+                    "SELECT 1 FROM project_revision_sections LIMIT 1"
+                ).fetchone()
+            )
+            initial_revision_created = False
             for (payload,) in connection.execute(
                 """
                 SELECT payload FROM project_sections
@@ -559,6 +737,30 @@ class SQLiteProjectFile:
             ordinal_by_section: Dict[str, int] = {}
 
             with connection:
+                # Databases written before restorable commits were introduced
+                # already contain the current project but no snapshot. Preserve
+                # that state before applying the next save so it can be recovered.
+                if existing_hashes and not has_restorable_revisions:
+                    revision_number += 1
+                    initial_created_utc = _utc_now()
+                    existing_indexed_records = int(
+                        connection.execute(
+                            "SELECT COALESCE(SUM(record_count), 0) FROM project_sections"
+                        ).fetchone()[0]
+                        or 0
+                    )
+                    self._insert_revision(
+                        connection,
+                        revision_number=revision_number,
+                        created_utc=initial_created_utc,
+                        notes="Initial commit",
+                        changed_chunks=len(existing_hashes),
+                        unchanged_chunks=0,
+                        deleted_chunks=0,
+                        indexed_records=existing_indexed_records,
+                    )
+                    initial_revision_created = True
+
                 for section_key, section_kind, chunk_index, value in _section_rows(
                     data, self.chunk_size
                 ):
@@ -654,10 +856,6 @@ class SQLiteProjectFile:
                 )
                 created_utc = existing_meta.get("created_utc") or _utc_now()
                 modified_utc = _utc_now()
-                row = connection.execute(
-                    "SELECT COALESCE(MAX(revision_number), 0) FROM project_revisions"
-                ).fetchone()
-                revision_number = int(row[0] or 0)
                 has_project_data_changes = bool(
                     changed_chunks or deleted_chunks or not existing_hashes
                 )
@@ -671,15 +869,18 @@ class SQLiteProjectFile:
                     "application": "CableRouteResolver",
                 }
 
-                if has_project_data_changes:
-                    connection.executemany(
-                        """
-                        INSERT INTO project_meta(key, value) VALUES(?, ?)
-                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                        """,
-                        list(meta_rows.items()),
-                    )
+                connection.executemany(
+                    """
+                    INSERT INTO project_meta(key, value) VALUES(?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    list(meta_rows.items()),
+                )
 
+                # Every explicit project save creates a restorable commit. When
+                # an older database has just received its missing initial commit
+                # and no data changed, that initial commit is the save commit.
+                if has_project_data_changes or not initial_revision_created:
                     revision_number += 1
                     revision_created = True
                     revision_notes = self._revision_notes(
@@ -689,24 +890,21 @@ class SQLiteProjectFile:
                         changed_chunks=changed_chunks,
                         deleted_chunks=deleted_chunks,
                         detailed_changes=detailed_changes,
+                        commit_message=commit_message,
                     )
-                    connection.execute(
-                        """
-                        INSERT INTO project_revisions(
-                            revision_number, created_utc, notes,
-                            changed_chunks, unchanged_chunks, deleted_chunks, indexed_records
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            revision_number,
-                            meta_rows["modified_utc"],
-                            revision_notes,
-                            changed_chunks,
-                            unchanged_chunks,
-                            deleted_chunks,
-                            indexed_records,
-                        ),
+                    self._insert_revision(
+                        connection,
+                        revision_number=revision_number,
+                        created_utc=meta_rows["modified_utc"],
+                        notes=revision_notes,
+                        changed_chunks=changed_chunks,
+                        unchanged_chunks=unchanged_chunks,
+                        deleted_chunks=deleted_chunks,
+                        indexed_records=indexed_records,
                     )
+                else:
+                    revision_created = True
+                    revision_notes = "Initial commit"
 
             connection.execute("PRAGMA optimize")
         finally:
@@ -776,6 +974,22 @@ class SQLiteProjectFile:
                     connection.execute("SELECT 1 FROM project_revisions LIMIT 1").fetchone()
                 except sqlite3.DatabaseError as exc:
                     errors.append(f"Revision history is not readable: {exc}")
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_revision_sections'"
+            ).fetchone():
+                missing_blobs = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM project_revision_sections AS sections
+                    LEFT JOIN project_revision_blobs AS blobs
+                      ON blobs.payload_hash = sections.payload_hash
+                    WHERE blobs.payload_hash IS NULL
+                    """
+                ).fetchone()[0]
+                if missing_blobs:
+                    errors.append(
+                        f"Revision history has {int(missing_blobs)} missing snapshot chunk(s)."
+                    )
         except sqlite3.DatabaseError as exc:
             errors.append(str(exc))
         finally:
@@ -897,9 +1111,28 @@ class SQLiteProjectFile:
         connection = sqlite3.connect(str(self.path))
         try:
             _configure_connection(connection, writable=False)
-            sql = """
+            has_snapshot_table = bool(
+                connection.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'project_revision_sections'
+                    """
+                ).fetchone()
+            )
+            restorable_sql = (
+                """
+                EXISTS(
+                    SELECT 1 FROM project_revision_sections AS sections
+                    WHERE sections.revision_number = project_revisions.revision_number
+                )
+                """
+                if has_snapshot_table
+                else "0"
+            )
+            sql = f"""
                 SELECT revision_number, created_utc, notes,
-                       changed_chunks, unchanged_chunks, deleted_chunks, indexed_records
+                       changed_chunks, unchanged_chunks, deleted_chunks, indexed_records,
+                       {restorable_sql} AS restorable
                 FROM project_revisions
                 ORDER BY revision_number DESC
             """
@@ -917,6 +1150,7 @@ class SQLiteProjectFile:
                     "unchanged_chunks": int(unchanged_chunks or 0),
                     "deleted_chunks": int(deleted_chunks or 0),
                     "indexed_records": int(indexed_records or 0),
+                    "restorable": bool(restorable),
                 }
                 for (
                     revision_number,
@@ -926,6 +1160,7 @@ class SQLiteProjectFile:
                     unchanged_chunks,
                     deleted_chunks,
                     indexed_records,
+                    restorable,
                 ) in rows
             ]
         except sqlite3.OperationalError as exc:

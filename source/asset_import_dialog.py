@@ -42,11 +42,22 @@ def _new_id_proposal(source_id: str, reserved: set[str]) -> str:
 class AssetImportMarshallingDialog(QDialog):
     """Resolve every imported definition to an existing, new, or rejected row."""
 
-    def __init__(self, parent, incoming, existing, *, asset_label="asset"):
+    def __init__(
+        self,
+        parent,
+        incoming,
+        existing,
+        *,
+        asset_label="asset",
+        reserved_ids=None,
+    ):
         super().__init__(parent)
         self.incoming = [dict(row) for row in incoming if isinstance(row, dict)]
         self.existing = [dict(row) for row in existing if isinstance(row, dict)]
         self.asset_label = asset_label
+        self.reserved_ids = {
+            _text(asset_id) for asset_id in (reserved_ids or []) if _text(asset_id)
+        }
         self.resolutions = []
         self._row_controls = []
 
@@ -83,7 +94,7 @@ class AssetImportMarshallingDialog(QDialog):
             key=lambda item: (item[1].casefold(), item[0].casefold()),
         )
         existing_ids = {asset_id for asset_id, _name in existing_options}
-        reserved = set(existing_ids)
+        reserved = set(existing_ids) | self.reserved_ids
         proposals = {}
         for row in self.incoming:
             source_id = _text(row.get("id"))
@@ -192,6 +203,10 @@ class AssetImportMarshallingDialog(QDialog):
                     errors.append(f"{source_id}: enter an ID for the new {self.asset_label}.")
                 elif target_id in existing_ids or target_id in created_ids:
                     errors.append(f"{source_id}: ID {target_id} is already in use.")
+                elif target_id in self.reserved_ids:
+                    errors.append(
+                        f"{source_id}: ID {target_id} was previously used and is retired."
+                    )
                 else:
                     created_ids.add(target_id)
             resolutions.append(

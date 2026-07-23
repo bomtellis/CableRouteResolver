@@ -1911,10 +1911,25 @@ def _clear_previous_auto_design(data: dict) -> None:
         for item in data.get("network_redundancy_groups", [])
         if not bool(item.get("auto_generated"))
     ]
+    retained_instance_ids = {
+        _text(item.get("id"))
+        for item in data.get("network_asset_instances", [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    retained_connection_ids = {
+        _text(item.get("id"))
+        for item in data.get("network_connections", [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
     data["network_optic_modules"] = [
         item
         for item in data.get("network_optic_modules", [])
         if not bool(item.get("auto_generated"))
+        and _text(item.get("host_instance_id")) in retained_instance_ids
+        and (
+            not _text(item.get("connection_id"))
+            or _text(item.get("connection_id")) in retained_connection_ids
+        )
     ]
     data["network_fibre_cables"] = [
         item for item in data.get("network_fibre_cables", [])

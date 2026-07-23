@@ -15,6 +15,7 @@ from project_sqlite import (
     is_sqlite_project,
     load_json,
 )
+from room_type_asset_staging import staged_changes as room_type_asset_staged_changes
 
 
 DEFAULT_JSON = {
@@ -38,6 +39,7 @@ DEFAULT_JSON = {
     "room_type_asset_scenarios": [],
     "asset_categories": [],
     "assets": [],
+    "retired_asset_ids": [],
     "locations": [],
     "equipment_room_placement_zones": [],
     "data_points": [],
@@ -154,6 +156,23 @@ class JsonStore:
             self.data["revision_change_log"] = [
                 dict(item) for item in revision_change_log if isinstance(item, dict)
             ]
+        retired_asset_ids = self.data.get("retired_asset_ids", [])
+        if not isinstance(retired_asset_ids, list):
+            retired_asset_ids = []
+        active_asset_ids = {
+            str(asset.get("id", "") or "").strip()
+            for asset in self.data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        self.data["retired_asset_ids"] = sorted(
+            {
+                str(asset_id or "").strip()
+                for asset_id in retired_asset_ids
+                if str(asset_id or "").strip()
+                and str(asset_id or "").strip() not in active_asset_ids
+            },
+            key=str.casefold,
+        )
         self.data.setdefault("room_type_scenario_groups", [])
         self.data.setdefault("asset_scenario_groups", [])
         self.data.setdefault("room_type_asset_scenarios", [])
@@ -442,6 +461,7 @@ class JsonStore:
             ]
 
         self._normalise_scenario_group_definitions()
+        self.purge_missing_asset_assignments(record_change=True)
 
     def record_revision_change(
         self,
@@ -466,6 +486,197 @@ class JsonStore:
         }
         self.data.setdefault("revision_change_log", []).append(entry)
         return entry
+
+    def retired_asset_ids(self) -> set:
+        return {
+            str(asset_id or "").strip()
+            for asset_id in self.data.get("retired_asset_ids", []) or []
+            if str(asset_id or "").strip()
+        }
+
+    def next_asset_id(self, prefix: str = "A", extra_reserved=()) -> str:
+        used = self.retired_asset_ids()
+        used.update(
+            str(asset.get("id", "") or "").strip()
+            for asset in self.data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        )
+        used.update(
+            str(asset_id or "").strip()
+            for asset_id in extra_reserved or []
+            if str(asset_id or "").strip()
+        )
+        number = 1
+        while f"{prefix}{number}" in used:
+            number += 1
+        return f"{prefix}{number}"
+
+    def purge_missing_asset_assignments(self, *, record_change: bool = True) -> dict:
+        valid_asset_ids = {
+            str(asset.get("id", "") or "").strip()
+            for asset in self.data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        purged = []
+        for room_type in self.data.get("room_types", []) or []:
+            if not isinstance(room_type, dict):
+                continue
+            room_type_id = str(room_type.get("id", "") or "").strip()
+            room_name = str(
+                room_type.get("name", room_type_id) or room_type_id
+            ).strip()
+            rows = self.room_type_asset_rows(room_type)
+            kept_rows = [
+                row for row in rows if str(row.get("asset_id", "") or "").strip() in valid_asset_ids
+            ]
+            removed_ids = [
+                str(row.get("asset_id", "") or "").strip()
+                for row in rows
+                if str(row.get("asset_id", "") or "").strip() not in valid_asset_ids
+            ]
+            if not removed_ids:
+                continue
+            room_type["assets"] = kept_rows
+            room_type["asset_ids"] = [row["asset_id"] for row in kept_rows]
+            purged.append(
+                {
+                    "room_type_id": room_type_id,
+                    "room_type_name": room_name,
+                    "asset_ids": removed_ids,
+                }
+            )
+
+        staging_purged_count = 0
+        staging = self.data.get("room_type_asset_staging", {})
+        if isinstance(staging, dict) and staging:
+            staging = deepcopy(staging)
+            rooms = staging.get("rooms", {})
+            if not isinstance(rooms, dict):
+                rooms = {}
+            for room_type_id in list(rooms):
+                record = rooms.get(room_type_id)
+                if not isinstance(record, dict):
+                    rooms.pop(room_type_id, None)
+                    continue
+                for key in ("before", "after"):
+                    original = self.room_type_asset_rows({"assets": record.get(key, [])})
+                    filtered = [
+                        row for row in original if row.get("asset_id") in valid_asset_ids
+                    ]
+                    staging_purged_count += len(original) - len(filtered)
+                    record[key] = filtered
+                asset_names = record.get("asset_names", {})
+                record["asset_names"] = {
+                    str(asset_id): name
+                    for asset_id, name in (
+                        asset_names.items() if isinstance(asset_names, dict) else []
+                    )
+                    if str(asset_id) in valid_asset_ids
+                }
+                if record.get("before") == record.get("after"):
+                    rooms.pop(room_type_id, None)
+            assets = staging.get("assets", {})
+            if not isinstance(assets, dict):
+                assets = {}
+            for asset_id in list(assets):
+                if str(asset_id) not in valid_asset_ids:
+                    assets.pop(asset_id, None)
+                    staging_purged_count += 1
+            staging["rooms"] = rooms
+            staging["assets"] = assets
+            staging["changes"] = room_type_asset_staged_changes(staging)
+            self.data["room_type_asset_staging"] = staging if staging["changes"] else {}
+
+        if (purged or staging_purged_count) and record_change:
+            self.record_revision_change(
+                "Asset Library",
+                f"Purged {sum(len(row['asset_ids']) for row in purged)} missing asset assignment(s) from room types",
+                details=[
+                    f"{row['room_type_id'] or row['room_type_name']}: removed "
+                    + ", ".join(row["asset_ids"])
+                    for row in purged
+                ]
+                + (
+                    [
+                        f"Removed {staging_purged_count} missing asset reference(s) from staged room-type changes"
+                    ]
+                    if staging_purged_count
+                    else []
+                ),
+            )
+        return {
+            "purged": purged,
+            "count": sum(len(row["asset_ids"]) for row in purged),
+            "staging_purged_count": staging_purged_count,
+        }
+
+    def replace_assets(self, items) -> dict:
+        new_assets = [deepcopy(item) for item in items or [] if isinstance(item, dict)]
+        new_ids = [
+            str(asset.get("id", "") or "").strip()
+            for asset in new_assets
+            if str(asset.get("id", "") or "").strip()
+        ]
+        if len(new_ids) != len(new_assets):
+            raise ValueError("Every asset must have a non-empty ID.")
+        if len(new_ids) != len(set(new_ids)):
+            raise ValueError("Asset IDs must be unique.")
+
+        previous_ids = {
+            str(asset.get("id", "") or "").strip()
+            for asset in self.data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        retired_ids = self.retired_asset_ids()
+        newly_added_ids = set(new_ids) - previous_ids
+        reused_ids = sorted(newly_added_ids & retired_ids, key=str.casefold)
+        if reused_ids:
+            raise ValueError(
+                "Retired asset IDs cannot be reused: " + ", ".join(reused_ids)
+            )
+
+        removed_ids = previous_ids - set(new_ids)
+        retired_ids.update(removed_ids)
+        self.data["retired_asset_ids"] = sorted(retired_ids, key=str.casefold)
+        self.data["assets"] = new_assets
+
+        for group in self.data.get("asset_scenario_groups", []) or []:
+            if isinstance(group, dict):
+                group["asset_ids"] = [
+                    str(asset_id).strip()
+                    for asset_id in group.get("asset_ids", []) or []
+                    if str(asset_id).strip() in set(new_ids)
+                ]
+
+        purge_result = self.purge_missing_asset_assignments(record_change=False)
+        if removed_ids or purge_result["count"]:
+            details = [f"Retired asset ID {asset_id}" for asset_id in sorted(removed_ids)]
+            details.extend(
+                f"{row['room_type_id'] or row['room_type_name']}: removed "
+                + ", ".join(row["asset_ids"])
+                for row in purge_result["purged"]
+            )
+            summary_parts = []
+            if removed_ids:
+                summary_parts.append(
+                    "Deleted and retired asset IDs: "
+                    + ", ".join(sorted(removed_ids, key=str.casefold))
+                )
+            if purge_result["count"]:
+                summary_parts.append(
+                    f"purged {purge_result['count']} missing room-type assignment(s)"
+                )
+            self.record_revision_change(
+                "Asset Library",
+                "; ".join(summary_parts),
+                details=details,
+            )
+        return {
+            "removed_ids": sorted(removed_ids, key=str.casefold),
+            "retired_ids": sorted(retired_ids, key=str.casefold),
+            "purged_assignments": purge_result["purged"],
+            "purged_count": purge_result["count"],
+        }
 
     def _normalise_group_collection(self, collection_key: str, member_key: str, valid_member_ids, legacy_members_by_group=None) -> None:
         valid_ids = {str(member_id).strip() for member_id in valid_member_ids if str(member_id).strip()}
@@ -589,10 +800,12 @@ class JsonStore:
         self,
         path: str,
         *,
+        commit_message: str = "Project saved",
         auto_compact: bool = True,
         compact_min_free_bytes: int = AUTO_COMPACT_MIN_FREE_BYTES,
         compact_min_free_ratio: float = AUTO_COMPACT_MIN_FREE_RATIO,
     ) -> None:
+        self.sync_all_room_type_quantities()
         destination = Path(path)
         if not destination.suffix:
             destination = destination.with_suffix(DEFAULT_EXTENSION)
@@ -617,6 +830,7 @@ class JsonStore:
         self.last_save_statistics = project.save(
             self.data,
             source_path=self.storage_path or "",
+            commit_message=commit_message,
             auto_compact=auto_compact,
             compact_min_free_bytes=compact_min_free_bytes,
             compact_min_free_ratio=compact_min_free_ratio,
@@ -628,6 +842,7 @@ class JsonStore:
         self.storage_format = "sqlite"
 
     def export_json(self, path: str) -> None:
+        self.sync_all_room_type_quantities()
         export_json_atomic(self.data, path)
 
     def database_statistics(self) -> dict:
@@ -639,6 +854,24 @@ class JsonStore:
         if self.storage_format != "sqlite" or not self.storage_path:
             return []
         return SQLiteProjectFile(self.storage_path).revision_history(limit=limit)
+
+    def revision_data(self, revision_number: int) -> dict:
+        if self.storage_format != "sqlite" or not self.storage_path:
+            raise ValueError("Save this project as a .crsdb database before checking out a revision.")
+        return SQLiteProjectFile(self.storage_path).load_revision(revision_number)
+
+    def restore_revision(self, revision_number: int):
+        if self.storage_format != "sqlite" or not self.storage_path:
+            raise ValueError("Save this project as a .crsdb database before rolling it back.")
+        project = SQLiteProjectFile(self.storage_path)
+        restored, statistics = project.restore_revision(revision_number)
+        errors = project.verify()
+        if errors:
+            raise ValueError("SQLite project verification failed: " + "; ".join(errors))
+        self.data = deepcopy(DEFAULT_JSON)
+        self._load_from_payload(restored)
+        self.last_save_statistics = statistics
+        return statistics
 
     def database_space_usage(self) -> dict:
         if self.storage_format != "sqlite" or not self.storage_path:
@@ -1238,9 +1471,9 @@ class JsonStore:
                 )
             try:
                 qty = int(connection.get("qty", 1))
-                if qty <= 0:
+                if qty < 0:
                     errors.append(
-                        f"Connection {connection_id} qty must be greater than 0"
+                        f"Connection {connection_id} qty cannot be negative"
                     )
             except Exception:
                 errors.append(f"Connection {connection_id} has invalid qty")
@@ -1274,9 +1507,9 @@ class JsonStore:
         for point in self.data.get("data_points", []):
             try:
                 qty = int(point.get("qty", 1))
-                if qty <= 0:
+                if qty < 0:
                     errors.append(
-                        f"Data point {point.get('name', '-')} qty must be greater than 0"
+                        f"Data point {point.get('name', '-')} qty cannot be negative"
                     )
             except Exception:
                 errors.append(f"Data point {point.get('name', '-')} has invalid qty")
@@ -1446,8 +1679,8 @@ class JsonStore:
                 reason = "connection starts and ends at the same point"
             else:
                 try:
-                    if int(connection.get("qty", 1)) <= 0:
-                        reason = "quantity is not greater than zero"
+                    if int(connection.get("qty", 1)) < 0:
+                        reason = "quantity is negative"
                 except (TypeError, ValueError):
                     reason = "quantity is invalid"
             if not reason and profile_name and profile_name not in profiles:
@@ -1760,6 +1993,176 @@ class JsonStore:
                 seen.add(asset_id)
 
         return rows
+
+    def restore_historical_assets(
+        self,
+        historical_data: dict,
+        asset_ids,
+        *,
+        source_revision: int = 0,
+    ) -> dict:
+        """Recover selected historical assets and their missing room assignments.
+
+        Existing asset definitions and assignment rows belong to the current
+        project and are retained. A definition is copied from history only when
+        that asset no longer exists, and historical assignment metadata is used
+        only when adding a missing room-type assignment.
+        """
+
+        selected_ids = []
+        seen = set()
+        for value in asset_ids or []:
+            asset_id = str(value or "").strip()
+            if asset_id and asset_id not in seen:
+                selected_ids.append(asset_id)
+                seen.add(asset_id)
+
+        historical_assets = {
+            str(asset.get("id", "") or "").strip(): asset
+            for asset in historical_data.get("assets", []) or []
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        current_assets = self.data.setdefault("assets", [])
+        current_assets_by_id = {
+            str(asset.get("id", "") or "").strip(): asset
+            for asset in current_assets
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        current_rooms = self.room_type_lookup()
+        historical_rooms = [
+            room
+            for room in historical_data.get("room_types", []) or []
+            if isinstance(room, dict)
+        ]
+
+        result = {
+            "selected_asset_ids": selected_ids,
+            "restored_asset_ids": [],
+            "retained_latest_asset_ids": [],
+            "restored_assignments": [],
+            "existing_assignments": [],
+            "missing_room_types": [],
+            "missing_asset_ids": [],
+            "asset_id_map": {},
+        }
+
+        for asset_id in selected_ids:
+            historical_asset = historical_assets.get(asset_id)
+            if historical_asset is None:
+                result["missing_asset_ids"].append(asset_id)
+                continue
+
+            definition_restored = asset_id not in current_assets_by_id
+            target_asset_id = asset_id
+            if definition_restored:
+                retired_ids = self.retired_asset_ids()
+                retired_ids.add(asset_id)
+                self.data["retired_asset_ids"] = sorted(retired_ids, key=str.casefold)
+                target_asset_id = self.next_asset_id()
+                restored_asset = deepcopy(historical_asset)
+                restored_asset["id"] = target_asset_id
+                current_assets.append(restored_asset)
+                current_assets_by_id[target_asset_id] = restored_asset
+                result["restored_asset_ids"].append(target_asset_id)
+                result["asset_id_map"][asset_id] = target_asset_id
+            else:
+                result["retained_latest_asset_ids"].append(asset_id)
+                result["asset_id_map"][asset_id] = asset_id
+
+            restored_rooms = []
+            skipped_rooms = []
+            for historical_room in historical_rooms:
+                historical_row = next(
+                    (
+                        row
+                        for row in self.room_type_asset_rows(historical_room)
+                        if row.get("asset_id") == asset_id
+                    ),
+                    None,
+                )
+                if historical_row is None:
+                    continue
+                room_type_id = str(historical_room.get("id", "") or "").strip()
+                room_name = str(
+                    historical_room.get("name", room_type_id) or room_type_id
+                ).strip()
+                current_room = current_rooms.get(room_type_id)
+                if current_room is None:
+                    missing = {
+                        "asset_id": target_asset_id,
+                        "source_asset_id": asset_id,
+                        "room_type_id": room_type_id,
+                        "room_type_name": room_name,
+                    }
+                    result["missing_room_types"].append(missing)
+                    skipped_rooms.append(room_name or room_type_id)
+                    continue
+
+                current_rows = self.room_type_asset_rows(current_room)
+                if any(row.get("asset_id") == target_asset_id for row in current_rows):
+                    result["existing_assignments"].append(
+                        {"asset_id": target_asset_id, "room_type_id": room_type_id}
+                    )
+                    continue
+
+                restored_row = deepcopy(historical_row)
+                restored_row["asset_id"] = target_asset_id
+                current_rows.append(restored_row)
+                current_room["assets"] = current_rows
+                current_room["asset_ids"] = [
+                    row["asset_id"] for row in current_rows if row.get("asset_id")
+                ]
+                assignment = {
+                    "asset_id": target_asset_id,
+                    "source_asset_id": asset_id,
+                    "room_type_id": room_type_id,
+                    "room_type_name": room_name,
+                    "qty": int(restored_row.get("qty", 1) or 1),
+                    "requested_by": str(
+                        restored_row.get("requested_by", "") or ""
+                    ).strip(),
+                }
+                result["restored_assignments"].append(assignment)
+                restored_rooms.append(room_name or room_type_id)
+
+            if definition_restored or restored_rooms:
+                asset_name = str(
+                    historical_asset.get("name", asset_id) or asset_id
+                ).strip()
+                details = []
+                if definition_restored:
+                    details.append(
+                        f"Recovered the asset definition from history under new ID {target_asset_id}"
+                    )
+                else:
+                    details.append("Retained the latest current asset definition")
+                if restored_rooms:
+                    details.append(
+                        "Reapplied to room types: " + ", ".join(restored_rooms)
+                    )
+                if skipped_rooms:
+                    details.append(
+                        "Skipped room types missing from current project: "
+                        + ", ".join(skipped_rooms)
+                    )
+                revision_text = (
+                    f" from revision {int(source_revision)}" if source_revision else ""
+                )
+                self.record_revision_change(
+                    "Historical asset restore",
+                    (
+                        f"Restored historical asset {asset_id} as {target_asset_id} - "
+                        f"{asset_name}{revision_text} to the current project"
+                        if definition_restored
+                        else f"Restored asset {asset_id} - {asset_name}{revision_text} to the current project"
+                    ),
+                    details=details,
+                )
+
+        result["changed"] = bool(
+            result["restored_asset_ids"] or result["restored_assignments"]
+        )
+        return result
 
     def room_type_lookup(self) -> Dict[str, dict]:
         return {
@@ -2137,11 +2540,34 @@ class JsonStore:
             )
         return rows
 
-    def sync_all_room_type_quantities(self) -> None:
+    def sync_all_room_type_quantities(self) -> int:
+        changed = 0
         for point in self.data.get("data_points", []) or []:
             name = str(point.get("name", "")).strip()
             if name:
+                previous_point_qty = point.get("qty", 1)
+                previous_connection_qty = [
+                    connection.get("qty", 1)
+                    for connection in self.data.get("connections", []) or []
+                    if str(connection.get("to", "")).strip() == name
+                    or str(connection.get("from", "")).strip() == name
+                ]
                 self.sync_connection_qty_for_data_point(name)
+                if point.get("qty", 1) != previous_point_qty:
+                    changed += 1
+                current_connection_qty = [
+                    connection.get("qty", 1)
+                    for connection in self.data.get("connections", []) or []
+                    if str(connection.get("to", "")).strip() == name
+                    or str(connection.get("from", "")).strip() == name
+                ]
+                changed += sum(
+                    before != after
+                    for before, after in zip(
+                        previous_connection_qty, current_connection_qty
+                    )
+                )
+        return changed
 
     def room_type_options(self) -> List[Tuple[str, str]]:
         return [
@@ -2203,6 +2629,33 @@ class JsonStore:
         room_type_id = str(point.get("room_type_id", "") or "").strip()
         asset_ports = self.room_type_cable_qty(room_type_id) if room_type_id else 0
         return max(manual_ports, asset_ports)
+
+    def count_deployed_data_points(self, point_names=None) -> int:
+        """Return deployed port demand for the named placed data-point records.
+
+        A placed marker can represent several physical data points through its
+        manual quantity or its assigned room type.  Passing ``None`` counts the
+        whole project; passing an iterable limits the count to those markers.
+        """
+        selected_names = None
+        if point_names is not None:
+            selected_names = {
+                str(name or "").strip()
+                for name in point_names
+                if str(name or "").strip()
+            }
+            if not selected_names:
+                return 0
+
+        total = 0
+        for point in self.data.get("data_points", []) or []:
+            if not isinstance(point, dict):
+                continue
+            name = str(point.get("name", "") or "").strip()
+            if not name or (selected_names is not None and name not in selected_names):
+                continue
+            total += self.data_point_required_port_count(point)
+        return max(0, int(total))
 
     def access_switch_capacity_profile(self) -> dict:
         """Return the configured access-switch endpoint and rack-space capacity."""
@@ -2305,7 +2758,7 @@ class JsonStore:
 
             room_type_id = str(point.get("room_type_id", "") or "").strip()
             if room_type_id:
-                point["qty"] = self.data_point_required_port_count(point)
+                point["qty"] = max(0, self.room_type_cable_qty(room_type_id))
             return max(0, int(point.get("qty", 1) or 0))
 
         return 1

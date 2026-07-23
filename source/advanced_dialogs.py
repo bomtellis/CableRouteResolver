@@ -820,8 +820,8 @@ class BulkConnectionDialog(QDialog):
                 raise ValueError("ID prefix is required")
 
             qty = int(self.qty_edit.text())
-            if qty <= 0:
-                raise ValueError("Qty must be greater than 0")
+            if qty < 0:
+                raise ValueError("Qty cannot be negative")
 
             rows = self._build_rows()
             if not rows:
