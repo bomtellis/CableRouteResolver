@@ -189,6 +189,14 @@ def _styles():
             alignment=1,
             textColor=colors.white,
         ),
+        "group": ParagraphStyle(
+            "ProjectReportTableGroup",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=7.2,
+            leading=8.5,
+            textColor=colors.HexColor("#1e3a5f"),
+        ),
         "toc0": ParagraphStyle(
             "ProjectReportTOC0",
             parent=styles["Normal"],
@@ -216,7 +224,15 @@ def _p(value, style):
     return Paragraph(text or "-", style)
 
 
-def _table(rows, widths, styles, *, numeric_columns: Iterable[int] = (), total_rows: Iterable[int] = ()):
+def _table(
+    rows,
+    widths,
+    styles,
+    *,
+    numeric_columns: Iterable[int] = (),
+    total_rows: Iterable[int] = (),
+    group_rows: Iterable[int] = (),
+):
     max_width = styles.get("_max_table_width") if isinstance(styles, dict) else None
     if max_width:
         total_width = sum(widths)
@@ -249,6 +265,29 @@ def _table(rows, widths, styles, *, numeric_columns: Iterable[int] = (), total_r
                     ("FONTNAME", (0, row_index), (-1, row_index), "Helvetica-Bold"),
                 ]
             )
+    for row in group_rows:
+        row_index = row_count + row if row < 0 else row
+        if 0 <= row_index < row_count:
+            commands.extend(
+                [
+                    ("SPAN", (0, row_index), (-1, row_index)),
+                    (
+                        "BACKGROUND",
+                        (0, row_index),
+                        (-1, row_index),
+                        colors.HexColor("#dbeafe"),
+                    ),
+                    (
+                        "TEXTCOLOR",
+                        (0, row_index),
+                        (-1, row_index),
+                        colors.HexColor("#1e3a5f"),
+                    ),
+                    ("FONTNAME", (0, row_index), (-1, row_index), "Helvetica-Bold"),
+                    ("TOPPADDING", (0, row_index), (-1, row_index), 5),
+                    ("BOTTOMPADDING", (0, row_index), (-1, row_index), 5),
+                ]
+            )
     table.setStyle(TableStyle(commands))
     return table
 
@@ -262,6 +301,18 @@ def _summary_cards(items, styles):
 
 def _room_type_sections(store: JsonStore):
     data = store.data
+    category_names = {
+        _text(category.get("id")): _text(
+            category.get("name", category.get("id", ""))
+        )
+        for category in data.get("asset_categories", []) or []
+        if isinstance(category, Mapping) and _text(category.get("id"))
+    }
+    category_order = {
+        _text(category.get("id")): index
+        for index, category in enumerate(data.get("asset_categories", []) or [])
+        if isinstance(category, Mapping) and _text(category.get("id"))
+    }
     assets_by_id = {
         _text(asset.get("id")): asset
         for asset in data.get("assets", [])
@@ -289,6 +340,12 @@ def _room_type_sections(store: JsonStore):
             if not asset_id:
                 continue
             asset = assets_by_id.get(asset_id, {})
+            category_id = _text(
+                asset.get("category_id", asset.get("category", ""))
+            )
+            category_name = (
+                category_names.get(category_id, category_id) or "Uncategorised"
+            )
             qty_per_room = max(1, _int(asset_row.get("qty"), 1))
             ports_each = _asset_ports(asset)
             asset_subtotal = placed_rooms * qty_per_room
@@ -303,6 +360,11 @@ def _room_type_sections(store: JsonStore):
                     "asset_id": asset_id,
                     "asset_name": _text(asset.get("name")) or asset_id,
                     "asset": _asset_label(asset_id, asset),
+                    "category_id": category_id,
+                    "category_name": category_name,
+                    "category_order": category_order.get(
+                        category_id, len(category_order)
+                    ),
                     "adb_code": _text(asset.get("ADB_Code", asset.get("adb_code"))),
                     "group": _text(asset.get("Group", asset.get("group"))),
                     "make_model": _asset_make_model(asset),
@@ -313,7 +375,13 @@ def _room_type_sections(store: JsonStore):
                     "port_subtotal": port_subtotal,
                 }
             )
-        rows.sort(key=lambda row: _natural_key(row.get("asset_id")))
+        rows.sort(
+            key=lambda row: (
+                row["category_order"],
+                _natural_key(row["category_name"]),
+                _natural_key(row["asset_id"]),
+            )
+        )
         total_assets += room_asset_total
         total_ports += room_port_total
         room_totals.append(
@@ -347,6 +415,57 @@ def _room_type_sections(store: JsonStore):
         "total_assets": total_assets,
         "total_ports": total_ports,
     }
+
+
+def _room_asset_table_rows(room: Mapping, styles):
+    rows = [[
+        _p("Asset ID", styles["header"]),
+        _p("Description", styles["header"]),
+        _p("ADB code", styles["header"]),
+        _p("Grouping", styles["header"]),
+        _p("Make / model", styles["header"]),
+        _p("Qty per room", styles["header"]),
+        _p("Ports each", styles["header"]),
+        _p("Ports per room", styles["header"]),
+        _p("Asset total", styles["header"]),
+        _p("Port total", styles["header"]),
+    ]]
+    group_rows = []
+    current_category_id = object()
+    for asset in room["assets"]:
+        category_id = asset["category_id"]
+        if category_id != current_category_id:
+            group_rows.append(len(rows))
+            rows.append(
+                [_p(f"Category: {asset['category_name']}", styles["group"])]
+                + [_p("", styles["small"])] * 9
+            )
+            current_category_id = category_id
+        rows.append([
+            _p(asset["asset_id"], styles["small"]),
+            _p(asset["asset_name"], styles["small"]),
+            _p(asset["adb_code"], styles["small"]),
+            _p(asset["group"], styles["small"]),
+            _p(asset["make_model"], styles["small"]),
+            _p(asset["qty_per_room"], styles["small"]),
+            _p(asset["ports_each"], styles["small"]),
+            _p(asset["port_per_room"], styles["small"]),
+            _p(asset["asset_subtotal"], styles["small"]),
+            _p(asset["port_subtotal"], styles["small"]),
+        ])
+    rows.append([
+        _p("Total", styles["header"]),
+        _p("", styles["header"]),
+        _p("", styles["header"]),
+        _p("", styles["header"]),
+        _p("", styles["header"]),
+        _p(room["assets_per_room"], styles["header"]),
+        _p("", styles["header"]),
+        _p(room["ports_per_room"], styles["header"]),
+        _p(room["asset_total"], styles["header"]),
+        _p(room["port_total"], styles["header"]),
+    ])
+    return rows, group_rows
 
 
 def _scenario_rows(store: JsonStore, assets_by_id: Mapping[str, Mapping]):
@@ -950,44 +1069,28 @@ def export_project_summary_pdf(
                     styles["h2"],
                 )
             )
-            rows = [[
-                _p("Asset ID", styles["header"]),
-                _p("Description", styles["header"]),
-                _p("ADB code", styles["header"]),
-                _p("Grouping", styles["header"]),
-                _p("Make / model", styles["header"]),
-                _p("Qty per room", styles["header"]),
-                _p("Ports each", styles["header"]),
-                _p("Ports per room", styles["header"]),
-                _p("Asset total", styles["header"]),
-                _p("Port total", styles["header"]),
-            ]]
-            for asset in room["assets"]:
-                rows.append([
-                    _p(asset["asset_id"], styles["small"]),
-                    _p(asset["asset_name"], styles["small"]),
-                    _p(asset["adb_code"], styles["small"]),
-                    _p(asset["group"], styles["small"]),
-                    _p(asset["make_model"], styles["small"]),
-                    _p(asset["qty_per_room"], styles["small"]),
-                    _p(asset["ports_each"], styles["small"]),
-                    _p(asset["port_per_room"], styles["small"]),
-                    _p(asset["asset_subtotal"], styles["small"]),
-                    _p(asset["port_subtotal"], styles["small"]),
-                ])
-            rows.append([
-                _p("Total", styles["header"]),
-                _p("", styles["header"]),
-                _p("", styles["header"]),
-                _p("", styles["header"]),
-                _p("", styles["header"]),
-                _p(room["assets_per_room"], styles["header"]),
-                _p("", styles["header"]),
-                _p(room["ports_per_room"], styles["header"]),
-                _p(room["asset_total"], styles["header"]),
-                _p(room["port_total"], styles["header"]),
-            ])
-            story.append(_table(rows, [27 * mm, 48 * mm, 24 * mm, 28 * mm, 34 * mm, 18 * mm, 18 * mm, 22 * mm, 22 * mm, 22 * mm], styles, numeric_columns=(5, 6, 7, 8, 9), total_rows=(-1,)))
+            rows, group_rows = _room_asset_table_rows(room, styles)
+            story.append(
+                _table(
+                    rows,
+                    [
+                        27 * mm,
+                        48 * mm,
+                        24 * mm,
+                        28 * mm,
+                        34 * mm,
+                        18 * mm,
+                        18 * mm,
+                        22 * mm,
+                        22 * mm,
+                        22 * mm,
+                    ],
+                    styles,
+                    numeric_columns=(5, 6, 7, 8, 9),
+                    total_rows=(-1,),
+                    group_rows=group_rows,
+                )
+            )
             story.append(Spacer(1, 3 * mm))
 
     if "use_cases" in selected_sections:

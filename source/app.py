@@ -3262,7 +3262,13 @@ class CableRouteEditor(QMainWindow):
         )
         self.set_status(f"Reviewed {completed} of {len(valid_ids)} room type asset assignment(s)")
 
-    def _save_room_type_asset_review_assignments(self, room_type_id, asset_rows, data_ports_by_asset_id):
+    def _save_room_type_asset_review_assignments(
+        self,
+        room_type_id,
+        asset_rows,
+        data_ports_by_asset_id,
+        bundle_assignments=None,
+    ):
         room_type_id = str(room_type_id or "").strip()
         if not room_type_id:
             return
@@ -3320,6 +3326,17 @@ class CableRouteEditor(QMainWindow):
                 cleaned_rows.append(cleaned_row)
             room_type["assets"] = cleaned_rows
             room_type["asset_ids"] = [row["asset_id"] for row in cleaned_rows]
+            if bundle_assignments is not None:
+                from asset_bundles import clean_bundle_assignments
+
+                room_type["asset_bundle_assignments"] = clean_bundle_assignments(
+                    bundle_assignments,
+                    [
+                        bundle.get("id")
+                        for bundle in self.store.data.get("asset_bundles", [])
+                        if isinstance(bundle, dict)
+                    ],
+                )
 
         ports_by_asset = {
             str(asset_id or "").strip(): ports
@@ -3821,6 +3838,7 @@ class CableRouteEditor(QMainWindow):
             ("Revision History...", "clock-history", self.show_revision_history),
             ("Export Revision History PDF", "filetype-pdf", self.export_revision_history_pdf),
             ("Export Asset Register PDF", "filetype-pdf", self.export_asset_register_pdf),
+            ("Export Asset Bundle PDF", "filetype-pdf", self.export_asset_bundle_pdf),
             ("Export Room Type Asset RFI PDF", "filetype-pdf", self.export_room_type_asset_rfi_pdf),
             ("Export Project Summary PDF", "filetype-pdf", self.export_project_summary_pdf),
             ("Export Floor Plans PDF", "filetype-pdf", self.export_all_floors_pdf),
@@ -4571,6 +4589,12 @@ class CableRouteEditor(QMainWindow):
                     "Export the project asset library and deployment totals",
                     QStyle.SP_FileIcon,
                     self.export_asset_register_pdf,
+                ),
+                self._ribbon_icon_button(
+                    "Asset Bundles",
+                    "Export the assets and quantities included in each reusable bundle",
+                    QStyle.SP_FileIcon,
+                    self.export_asset_bundle_pdf,
                 ),
                 self._ribbon_icon_button(
                     "Floor PDF",
@@ -11006,6 +11030,68 @@ class CableRouteEditor(QMainWindow):
             f"Asset register PDF written to:\n\n{output_path}",
         )
 
+    def export_asset_bundle_pdf(self):
+        bundles = self.store.data.get("asset_bundles", []) or []
+        if not bundles:
+            QMessageBox.information(
+                self,
+                "Asset Bundle PDF",
+                "No asset bundles are available to export.",
+            )
+            return
+
+        source_path = (
+            getattr(self.store, "storage_path", "") or self.current_json_path or ""
+        )
+        base_path = Path(source_path) if source_path else Path("cable_routes.crsdb")
+        initial = str(
+            base_path.with_suffix("").with_name(base_path.stem + "_asset_bundles.pdf")
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Asset Bundle PDF",
+            initial,
+            "PDF files (*.pdf)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+
+        try:
+            from asset_bundle_report import export_asset_bundle_pdf
+
+            output_path = self._export_pdf_through_report_studio(
+                path,
+                lambda preview_path: export_asset_bundle_pdf(
+                    self.store.data,
+                    preview_path,
+                    source_path=source_path,
+                    revision_number=self.latest_project_revision_number(),
+                ),
+                settings_key="asset_bundles",
+                report_title="Asset Bundle Report Studio",
+            )
+        except ImportError as exc:
+            QMessageBox.critical(
+                self,
+                "Asset Bundle PDF failed",
+                "PDF export requires reportlab. Install project requirements and "
+                f"try again.\n\n{exc}",
+            )
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Asset Bundle PDF failed", str(exc))
+            return
+        if not output_path:
+            return
+        self.set_status(f"Exported asset bundle PDF: {Path(output_path).name}")
+        QMessageBox.information(
+            self,
+            "Asset Bundle PDF complete",
+            f"Asset bundle PDF written to:\n\n{output_path}",
+        )
+
     def export_room_type_asset_rfi_pdf(self):
         rfi_state = self.store.data.get("room_type_asset_rfi", {})
         queries = rfi_state.get("queries", []) if isinstance(rfi_state, dict) else []
@@ -12424,9 +12510,24 @@ class CableRouteEditor(QMainWindow):
             asset_options,
         )
         if dialog.exec() == QDialog.Accepted and dialog.result is not None:
+            from asset_bundles import sync_room_types_for_bundle_updates
+
+            old_bundles = deepcopy(self.store.data.get("asset_bundles", []))
             self.push_undo_state("Save asset bundles")
+            changed_room_ids = sync_room_types_for_bundle_updates(
+                self.store.data.get("room_types", []),
+                old_bundles,
+                dialog.result,
+            )
             self.store.data["asset_bundles"] = dialog.result
-            self.set_status(f"Saved {len(dialog.result)} asset bundle(s)")
+            if changed_room_ids:
+                self.store.sync_all_room_type_quantities()
+            status = f"Saved {len(dialog.result)} asset bundle(s)"
+            if changed_room_ids:
+                status += (
+                    f"; updated {len(changed_room_ids)} linked room type(s)"
+                )
+            self.set_status(status)
 
     def manage_data_points(self):
         columns = [

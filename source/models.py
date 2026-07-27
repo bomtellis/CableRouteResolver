@@ -16,7 +16,7 @@ from project_sqlite import (
     load_json,
 )
 from room_type_asset_staging import staged_changes as room_type_asset_staged_changes
-from asset_bundles import normalise_asset_bundles
+from asset_bundles import clean_bundle_assignments, normalise_asset_bundles
 
 
 DEFAULT_JSON = {
@@ -438,6 +438,14 @@ class JsonStore:
                 for row in room_type.get("assets", [])
                 if str(row.get("asset_id", "")).strip()
             ]
+            room_type["asset_bundle_assignments"] = clean_bundle_assignments(
+                room_type.get("asset_bundle_assignments", []),
+                [
+                    bundle.get("id")
+                    for bundle in self.data.get("asset_bundles", [])
+                    if isinstance(bundle, dict)
+                ],
+            )
 
             for location in self.data.get("locations", []):
                 if "department_ids" not in location:
