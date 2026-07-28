@@ -856,9 +856,13 @@ class SQLiteProjectFile:
                     connection.execute("SELECT key, value FROM project_meta")
                 )
                 created_utc = existing_meta.get("created_utc") or _utc_now()
-                modified_utc = _utc_now()
                 has_project_data_changes = bool(
                     changed_chunks or deleted_chunks or not existing_hashes
+                )
+                modified_utc = (
+                    _utc_now()
+                    if has_project_data_changes
+                    else existing_meta.get("modified_utc") or created_utc
                 )
                 meta_rows = {
                     "format_name": FORMAT_NAME,
@@ -878,10 +882,11 @@ class SQLiteProjectFile:
                     list(meta_rows.items()),
                 )
 
-                # Every explicit project save creates a restorable commit. When
-                # an older database has just received its missing initial commit
-                # and no data changed, that initial commit is the save commit.
-                if has_project_data_changes or not initial_revision_created:
+                # Create a restorable revision only when project-section data
+                # changed. Repeated Ctrl+S operations must not add identical
+                # revisions. A legacy database may still receive its one missing
+                # initial snapshot above without creating a duplicate revision.
+                if has_project_data_changes:
                     revision_number += 1
                     revision_created = True
                     revision_notes = self._revision_notes(
@@ -903,7 +908,7 @@ class SQLiteProjectFile:
                         deleted_chunks=deleted_chunks,
                         indexed_records=indexed_records,
                     )
-                else:
+                elif initial_revision_created:
                     revision_created = True
                     revision_notes = "Initial commit"
 

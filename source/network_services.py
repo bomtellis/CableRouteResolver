@@ -999,6 +999,157 @@ def sync_fibre_cables_from_connections(data: dict, replace_auto: bool = False) -
     return created
 
 
+def apply_auto_external_optical_profiles(data: dict) -> int:
+    """Repair fixed optics on planner-created external demarcation equipment.
+
+    An automatically generated carrier demarcation has a fixed LC service
+    interface rather than a managed SFP cage.  Its optical characteristics
+    therefore follow the compatible managed optic installed at the router end.
+    Older projects did not persist that fixed-interface profile, which left an
+    otherwise valid one-sided installed optic pair permanently unconfigured.
+    User-authored external equipment and pluggable cages are never changed.
+    """
+
+    assets = {
+        _text(row.get("id")): row
+        for row in data.get("network_assets", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    instances = {
+        _text(row.get("id")): row
+        for row in data.get("network_asset_instances", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    modules_by_connection: Dict[str, List[dict]] = defaultdict(list)
+    for module in data.get("network_optic_modules", []):
+        if not isinstance(module, dict):
+            continue
+        connection_id = _text(module.get("connection_id"))
+        if connection_id:
+            modules_by_connection[connection_id].append(module)
+
+    pluggable_types = {
+        "sfp", "sfp+", "sfp28", "sfp56", "qsfp", "qsfp+", "qsfp28",
+        "qsfp56", "qsfpdd", "osfp",
+    }
+
+    def matching_port(asset: dict, observed_name: str) -> dict:
+        target = _text(observed_name).lower()
+        rows = [
+            row
+            for row in asset.get("port_definitions", [])
+            if isinstance(row, dict)
+        ]
+        for row in rows:
+            explicit = {
+                _text(value).lower()
+                for value in row.get("explicit_names", [])
+                if _text(value)
+            }
+            prefix = _text(row.get("name_prefix")).lower()
+            if target in explicit or (prefix and target.startswith(prefix)):
+                return row
+        return rows[0] if len(rows) == 1 else {}
+
+    updated = 0
+    for connection in data.get("network_connections", []):
+        if (
+            not isinstance(connection, dict)
+            or _text(connection.get("medium")).lower() != "fibre"
+            or not (
+                _text(connection.get("external_network_id"))
+                or _text(connection.get("logical_link_role")).lower()
+                == "untrusted_external_to_edge"
+            )
+        ):
+            continue
+        connection_id = _text(connection.get("id"))
+        if not connection_id:
+            continue
+        for side, peer_side in (("from", "to"), ("to", "from")):
+            instance_id = _text(connection.get(f"{side}_instance_id"))
+            peer_instance_id = _text(
+                connection.get(f"{peer_side}_instance_id")
+            )
+            instance = instances.get(instance_id, {})
+            asset = assets.get(_text(instance.get("asset_id")), {})
+            if (
+                _text(asset.get("asset_type")).lower() != "external_network"
+                or not bool(asset.get("auto_network_asset"))
+            ):
+                continue
+            port = matching_port(
+                asset, _text(connection.get(f"{side}_port"))
+            )
+            if (
+                not port
+                or _text(port.get("port_type")).lower() in pluggable_types
+                or (
+                    _optional_float(port.get("transmit_power_dbm")) is not None
+                    and _optional_float(
+                        port.get("receiver_sensitivity_dbm")
+                    )
+                    is not None
+                )
+            ):
+                continue
+            peer_module = next(
+                (
+                    row
+                    for row in modules_by_connection.get(connection_id, [])
+                    if _text(row.get("host_instance_id")) == peer_instance_id
+                ),
+                None,
+            )
+            optic_asset = assets.get(
+                _text((peer_module or {}).get("asset_id")), {}
+            )
+            if (
+                _optional_float(optic_asset.get("optical_tx_power_dbm"))
+                is None
+                or _optional_float(
+                    optic_asset.get("optical_receiver_sensitivity_dbm")
+                )
+                is None
+            ):
+                continue
+
+            port_fields = {
+                "transmit_power_dbm": "optical_tx_power_dbm",
+                "receiver_sensitivity_dbm":
+                    "optical_receiver_sensitivity_dbm",
+                "insertion_loss_db": "optical_insertion_loss_db",
+                "return_loss_db": "optical_return_loss_db",
+                "wavelength_nm": "optical_wavelength_nm",
+            }
+            for target_key, source_key in port_fields.items():
+                missing = _text(port.get(target_key)) == ""
+                if target_key in {"return_loss_db", "wavelength_nm"}:
+                    missing = missing or _float(port.get(target_key)) <= 0.0
+                if missing:
+                    port[target_key] = optic_asset.get(source_key, "")
+            speed = max(0, _int(connection.get("link_speed_mbps")))
+            if speed and not port.get("supported_speeds_mbps"):
+                port["supported_speeds_mbps"] = [speed]
+                port["default_speed_mbps"] = speed
+            port["fixed_optic_profile_asset_id"] = _text(
+                optic_asset.get("id")
+            )
+            asset["fixed_optic_profile_asset_id"] = _text(
+                optic_asset.get("id")
+            )
+            asset["optic_connector_type"] = (
+                _text(asset.get("optic_connector_type"))
+                or _text(optic_asset.get("optic_connector_type"))
+            )
+            asset["optic_fibre_standard"] = (
+                _text(asset.get("optic_fibre_standard"))
+                or _text(optic_asset.get("optic_fibre_standard"))
+            )
+            updated += 1
+    return updated
+
+
 def calculate_optical_budgets(data: dict) -> List[dict]:
     """Calculate optical budgets from installed transceivers and passive plant.
 
@@ -1007,6 +1158,7 @@ def calculate_optical_budgets(data: dict) -> List[dict]:
     switch. Integrated optics such as PON ports retain port/asset fallback for
     backwards compatibility.
     """
+    apply_auto_external_optical_profiles(data)
     assets = {_text(row.get("id")): row for row in data.get("network_assets", []) if isinstance(row, dict)}
     instances = {_text(row.get("id")): row for row in data.get("network_asset_instances", []) if isinstance(row, dict)}
     modules = {_text(row.get("id")): row for row in data.get("network_optic_modules", []) if isinstance(row, dict) and _text(row.get("id"))}
@@ -1581,6 +1733,12 @@ def sync_fibre_nodes_from_design(data: dict, replace_auto: bool = False) -> List
     created: List[dict] = []
     endpoint_ids: Set[str] = set()
     physical_cable_ids_by_logical: Dict[str, List[str]] = defaultdict(list)
+
+    def has_saved_values(value) -> bool:
+        return isinstance(value, (list, tuple, set)) and any(
+            _text(item) for item in value
+        )
+
     for cable in data.get("network_fibre_cables", []):
         if not isinstance(cable, dict):
             continue
@@ -1660,6 +1818,7 @@ def sync_fibre_nodes_from_design(data: dict, replace_auto: bool = False) -> List
                     "termination_mode": _text(asset.get("patch_panel_cassette_termination_mode")) or "spliced",
                     "rear_connector": _text(asset.get("patch_panel_cassette_rear_connector")) or "splice",
                     "rear_connector_count": _int(asset.get("patch_panel_cassette_rear_connector_count"), 0),
+                    "installed": False,
                     "used_front_connectors": 0,
                     "used_fibres": 0,
                     "cable_ids": [],
@@ -1669,6 +1828,19 @@ def sync_fibre_nodes_from_design(data: dict, replace_auto: bool = False) -> List
 
         for row_index, cassette_config in enumerate(cassette_rows, start=1):
             if not isinstance(cassette_config, dict):
+                continue
+            if is_modular_panel and not (
+                bool(cassette_config.get("installed"))
+                or max(0, _int(cassette_config.get("used_front_connectors"))) > 0
+                or max(0, _int(cassette_config.get("used_fibres"))) > 0
+                or has_saved_values(
+                    cassette_config.get("used_front_connector_names")
+                )
+                or has_saved_values(cassette_config.get("cable_ids"))
+                or has_saved_values(
+                    cassette_config.get("associated_instance_ids")
+                )
+            ):
                 continue
             position = max(1, _int(cassette_config.get("position"), row_index))
             cassette = existing_cassettes.get((instance_id, position))
@@ -1727,8 +1899,12 @@ def sync_fibre_nodes_from_design(data: dict, replace_auto: bool = False) -> List
                 "cable_ids": associated_physical_cable_ids,
                 "circuit_ids": logical_circuit_ids,
                 "notes": (
-                    f"Modular cassette {position}: {front_connector}, {mode}; "
-                    f"rear interface {rear} x{max(0, _int(cassette_config.get('rear_connector_count')))}."
+                    _text(cassette_config.get("notes"))
+                    or (
+                        f"Modular cassette {position}: {front_connector}, {mode}; "
+                        f"rear interface {rear} x"
+                        f"{max(0, _int(cassette_config.get('rear_connector_count')))}."
+                    )
                 ),
             })
     return created

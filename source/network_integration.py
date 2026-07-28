@@ -1115,7 +1115,7 @@ def _place_fibre_node(editor, x: float, y: float) -> None:
         default_y=float(y),
         default_auto_connect=bool(
             editor.store.data.get("network_settings", {}).get(
-                "auto_connect_new_manual_devices", True
+                "auto_connect_new_manual_devices", False
             )
         ),
     )
@@ -1162,6 +1162,11 @@ def _place_or_select_network_asset(editor, x: float, y: float) -> None:
         default_floor=int(editor.floor_spin.value()),
         default_x=float(x),
         default_y=float(y),
+        default_auto_connect=bool(
+            editor.store.data.get("network_settings", {}).get(
+                "auto_connect_new_manual_devices", False
+            )
+        ),
     )
     if dialog.exec() != QDialog.Accepted or not dialog.result:
         return

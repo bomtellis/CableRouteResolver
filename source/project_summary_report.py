@@ -335,6 +335,7 @@ def _room_type_sections(store: JsonStore):
         room_assets_per_room = 0
         room_ports_per_room = 0
         rows = []
+        port_summary = store.room_type_port_summary(room_type_id)
         for asset_row in store.room_type_asset_rows(room_type):
             asset_id = _text(asset_row.get("asset_id"))
             if not asset_id:
@@ -373,6 +374,47 @@ def _room_type_sections(store: JsonStore):
                     "port_per_room": port_per_room,
                     "asset_subtotal": asset_subtotal,
                     "port_subtotal": port_subtotal,
+                    "record_type": "assigned_asset",
+                }
+            )
+        for asset_id, quantity in port_summary.get("connection_assets", {}).items():
+            asset_id = _text(asset_id)
+            qty_per_room = max(0, _int(quantity, 0))
+            if not asset_id or qty_per_room <= 0:
+                continue
+            asset = assets_by_id.get(asset_id, {})
+            category_id = _text(
+                asset.get("category_id", asset.get("category", ""))
+            )
+            category_name = (
+                category_names.get(category_id, category_id) or "Uncategorised"
+            )
+            asset_subtotal = placed_rooms * qty_per_room
+            room_assets_per_room += qty_per_room
+            room_asset_total += asset_subtotal
+            rows.append(
+                {
+                    "asset_id": asset_id,
+                    "asset_name": _text(asset.get("name"))
+                    or "(missing connection asset)",
+                    "asset": _asset_label(asset_id, asset),
+                    "category_id": category_id,
+                    "category_name": category_name,
+                    "category_order": category_order.get(
+                        category_id, len(category_order)
+                    ),
+                    "adb_code": _text(
+                        asset.get("ADB_Code", asset.get("adb_code"))
+                    ),
+                    "group": _text(asset.get("Group", asset.get("group")))
+                    or "Calculated connection cable",
+                    "make_model": _asset_make_model(asset),
+                    "qty_per_room": qty_per_room,
+                    "ports_each": 0,
+                    "port_per_room": 0,
+                    "asset_subtotal": asset_subtotal,
+                    "port_subtotal": 0,
+                    "record_type": "connection_cable",
                 }
             )
         rows.sort(
@@ -384,7 +426,6 @@ def _room_type_sections(store: JsonStore):
         )
         input_ports_per_room = room_ports_per_room
         input_port_total = room_port_total
-        port_summary = store.room_type_port_summary(room_type_id)
         room_ports_per_room = int(port_summary["upstream_ports"])
         room_port_total = placed_rooms * room_ports_per_room
         total_assets += room_asset_total
@@ -1027,7 +1068,10 @@ def export_project_summary_pdf(
                 [
                     ("Room types configured", len(room_report["room_rows"])),
                     ("Placed rooms with room types", placed_rooms),
-                    ("Endpoint assets required", room_report["total_assets"]),
+                    (
+                        "Assets and connection cables required",
+                        room_report["total_assets"],
+                    ),
                     ("Upstream data ports required", room_report["total_ports"]),
                     ("Use cases configured", len(scenarios)),
                     ("Network asset instances", sum(network["type_counts"].values())),
@@ -1049,7 +1093,7 @@ def export_project_summary_pdf(
         rows = [[
             _p("Room type", styles["header"]),
             _p("Placed rooms", styles["header"]),
-            _p("Assets per room", styles["header"]),
+            _p("Assets / cables per room", styles["header"]),
             _p("Upstream ports per room", styles["header"]),
         ]]
         for room in room_report["room_totals"]:

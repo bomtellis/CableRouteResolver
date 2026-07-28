@@ -60,11 +60,16 @@ from PySide6.QtWidgets import (
 
 from network_schema import (
     CATALYST_9600_LINE_CARDS,
-    MODULAR_PANEL_FRONT_CONNECTORS,
     NETWORK_SCHEMA_VERSION, default_port_speeds, ensure_network_schema,
     next_network_id, normalise_port_speeds, port_speed_label,
 )
-from network_services import circuit_trace, network_traffic_loads
+from network_services import (
+    calculate_optical_budgets,
+    circuit_trace,
+    ensure_physical_fibre_for_design,
+    network_traffic_loads,
+    sync_fibre_nodes_from_design,
+)
 from network_auto_planner import (
     auto_connect_manual_devices,
     synchronise_network_connection_routes,
@@ -73,6 +78,7 @@ from network_dialogs import (
     NetworkConnectionEditorDialog,
     NetworkInstanceEditorDialog,
     NetworkRackEditorDialog,
+    PatchPanelCassetteEditorDialog,
     rack_selection_records,
 )
 from network_fibre_dialogs import PatchLeadEditorDialog
@@ -90,11 +96,149 @@ def _int(value, default: int = 0) -> int:
 
 
 def _modular_panel_front_positions(asset: dict) -> int:
-    fibre_capacity = max(1, _int(asset.get("patch_panel_cassette_capacity"), 12))
-    front_key = _text(asset.get("patch_panel_cassette_front_connector")).lower() or "lc_duplex"
-    front = MODULAR_PANEL_FRONT_CONNECTORS.get(front_key, MODULAR_PANEL_FRONT_CONNECTORS["lc_duplex"])
-    fibres_per_position = max(1, _int(front.get("fibres_per_position"), 1))
-    return max(1, int(math.ceil(fibre_capacity / float(fibres_per_position))))
+    # The saved capacity is the number of front connector positions, not the
+    # number of fibre cores. LC/SC duplex affects fibres carried per position
+    # but must not halve the number of sockets shown on a cassette.
+    return max(1, _int(asset.get("patch_panel_cassette_capacity"), 12))
+
+
+def _modular_patch_panel_feature_slots(
+    node: TopologyNode,
+    ports: Sequence[dict],
+    occupied_ports: Iterable[str] = (),
+) -> List[dict]:
+    """Describe fitted cassettes and unused cassette spaces for the tree."""
+
+    cassette_count = max(
+        1,
+        _int(node.asset.get("patch_panel_cassette_count"), 1),
+    )
+    configured_rows = node.instance.get("fibre_cassettes", [])
+    if not isinstance(configured_rows, list):
+        configured_rows = []
+    rows_by_position = {
+        max(1, _int(row.get("position"), index + 1)): row
+        for index, row in enumerate(configured_rows)
+        if isinstance(row, dict)
+    }
+    ports_by_position: Dict[int, List[dict]] = defaultdict(list)
+    fallback_ports: List[dict] = []
+    for port in ports:
+        port_name = _text(port.get("name"))
+        match = re.match(r"^c(\d+)[-_/ ]", port_name, re.IGNORECASE)
+        if match:
+            ports_by_position[max(1, _int(match.group(1), 1))].append(port)
+        else:
+            fallback_ports.append(port)
+    if fallback_ports:
+        capacity = max(
+            1,
+            int(math.ceil(len(fallback_ports) / float(cassette_count))),
+        )
+        for index, port in enumerate(fallback_ports):
+            ports_by_position[index // capacity + 1].append(port)
+
+    occupied = {_text(value) for value in occupied_ports if _text(value)}
+    slots = []
+    connector_labels = {
+        "lc_duplex": "LC duplex",
+        "sc_simplex": "SC simplex",
+        "sc_duplex": "SC duplex",
+    }
+    for position in range(1, cassette_count + 1):
+        row = rows_by_position.get(position, {})
+        slot_ports = ports_by_position.get(position, [])
+        port_names = {
+            _text(port.get("name")) for port in slot_ports if _text(port.get("name"))
+        }
+        raw_used_names = row.get("used_front_connector_names", [])
+        if not isinstance(raw_used_names, (list, tuple, set)):
+            raw_used_names = []
+        raw_cable_ids = row.get("cable_ids", [])
+        if not isinstance(raw_cable_ids, (list, tuple, set)):
+            raw_cable_ids = []
+        raw_associated_ids = row.get("associated_instance_ids", [])
+        if not isinstance(raw_associated_ids, (list, tuple, set)):
+            raw_associated_ids = []
+        used_names = {
+            _text(value)
+            for value in raw_used_names
+            if _text(value)
+        }
+        used_names.update(port_names & occupied)
+        used_count = max(
+            len(used_names),
+            max(0, _int(row.get("used_front_connectors"), 0)),
+        )
+        installed = bool(row.get("installed")) or bool(
+            used_count
+            or max(0, _int(row.get("used_fibres"), 0))
+            or any(_text(value) for value in raw_cable_ids)
+            or any(_text(value) for value in raw_associated_ids)
+        )
+        capacity = max(
+            1,
+            _int(
+                row.get("front_connector_capacity"),
+                len(slot_ports)
+                or _int(node.asset.get("patch_panel_cassette_capacity"), 12),
+            ),
+        )
+        front_key = (
+            _text(
+                row.get(
+                    "front_connector",
+                    node.asset.get("patch_panel_cassette_front_connector"),
+                )
+            ).lower()
+            or "lc_duplex"
+        )
+        mode = (
+            _text(
+                row.get(
+                    "termination_mode",
+                    node.asset.get("patch_panel_cassette_termination_mode"),
+                )
+            ).lower()
+            or "spliced"
+        )
+        if installed:
+            label = (
+                f"Cassette {position} - "
+                f"{connector_labels.get(front_key, front_key.replace('_', ' ').title())}, "
+                f"{mode} - {used_count}/{capacity} used"
+            )
+        else:
+            label = f"Cassette slot {position} - Blank space"
+        slots.append(
+            {
+                "position": position,
+                "installed": installed,
+                "label": label,
+                "ports": slot_ports if installed else [],
+                "used_count": used_count,
+                "capacity": capacity,
+            }
+        )
+    return slots
+
+
+def _modular_patch_panel_graphics_slots(
+    node: TopologyNode,
+    port_nodes: Sequence[TopologyNode],
+) -> List[dict]:
+    return _modular_patch_panel_feature_slots(
+        node,
+        [
+            {"name": _text(port_node.details.get("port_name"))}
+            for port_node in port_nodes
+        ],
+        [
+            _text(port_node.details.get("port_name"))
+            for port_node in port_nodes
+            if bool(port_node.details.get("occupied"))
+        ],
+    )
 
 
 def _float(value, default: float = 0.0) -> float:
@@ -112,6 +256,79 @@ def _human_number(value: float) -> str:
     if float(value).is_integer():
         return str(int(value))
     return f"{value:.1f}"
+
+
+def _endpoint_asset_chain_label(assignment: dict) -> str:
+    """Return a compact Phone -> Computer description for an assignment."""
+    nodes = [
+        row
+        for row in assignment.get("endpoint_asset_chain", [])
+        if isinstance(row, dict)
+    ]
+    links = [
+        row
+        for row in assignment.get("endpoint_asset_connections", [])
+        if isinstance(row, dict)
+    ]
+    upstream = assignment.get("endpoint_upstream_connection", {})
+    upstream_name = (
+        _text(upstream.get("connection_asset_name"))
+        or _text(upstream.get("connection_asset_id"))
+        if isinstance(upstream, dict)
+        else ""
+    )
+    if not nodes:
+        asset_name = _text(assignment.get("endpoint_asset_name"))
+        return (
+            f"[{upstream_name}] → {asset_name}"
+            if upstream_name and asset_name
+            else upstream_name or asset_name
+        )
+    names = {
+        _text(row.get("node_id")): (
+            _text(row.get("asset_name"))
+            or _text(row.get("asset_id"))
+            or "Endpoint asset"
+        )
+        for row in nodes
+    }
+    targets = {_text(row.get("to_node_id")) for row in links}
+    roots = [
+        node_id for node_id in names if node_id and node_id not in targets
+    ] or list(names)
+    parts = []
+    for root in roots:
+        cursor = root
+        seen = set()
+        branch = []
+        while cursor and cursor not in seen:
+            seen.add(cursor)
+            branch.append(names.get(cursor, cursor))
+            outgoing = [
+                row for row in links if _text(row.get("from_node_id")) == cursor
+            ]
+            if not outgoing:
+                break
+            link = outgoing[0]
+            accessory = _text(link.get("connection_asset_name"))
+            link_speed = max(
+                0,
+                _int(
+                    link.get(
+                        "link_speed_mbps",
+                        assignment.get("link_speed_mbps"),
+                    )
+                ),
+            )
+            link_description = accessory or "Direct connection"
+            if link_speed:
+                link_description += f" @ {port_speed_label(link_speed)}"
+            if accessory or link_speed:
+                branch.append(f"[{link_description}]")
+            cursor = _text(link.get("to_node_id"))
+        parts.append(" → ".join(branch))
+    label = "; ".join(parts)
+    return f"[{upstream_name}] → {label}" if upstream_name else label
 
 
 def _asset_port_definitions(asset: dict) -> List[dict]:
@@ -469,6 +686,8 @@ class TopologyModel:
         self.level: Dict[str, int] = {}
         self.tree_edge_ids: Set[str] = set()
         self.client_groups: Dict[str, List[TopologyNode]] = defaultdict(list)
+        self.client_nodes_by_id: Dict[str, TopologyNode] = {}
+        self.client_children: Dict[str, List[str]] = defaultdict(list)
         self._descendant_cache: Dict[str, int] = {}
         self._cross_edges_cache: Optional[List[TopologyEdge]] = None
         self.traffic: dict = {}
@@ -1048,6 +1267,92 @@ class TopologyModel:
                     # planner-generated endpoint edge; do not also show it as an
                     # anonymous department client group.
                     continue
+                chain_nodes = [
+                    row
+                    for row in assignment.get("endpoint_asset_chain", [])
+                    if isinstance(row, dict) and _text(row.get("node_id"))
+                ]
+                if chain_nodes:
+                    assignment_id = _text(assignment.get("id")) or str(
+                        len(self.client_nodes_by_id) + 1
+                    )
+                    node_ids = {
+                        _text(row.get("node_id")): (
+                            f"client::{instance_id}::{assignment_id}::{index}"
+                        )
+                        for index, row in enumerate(chain_nodes, start=1)
+                    }
+                    links = [
+                        row
+                        for row in assignment.get(
+                            "endpoint_asset_connections", []
+                        )
+                        if isinstance(row, dict)
+                    ]
+                    targets = {_text(row.get("to_node_id")) for row in links}
+                    root_source_ids = [
+                        source_id
+                        for source_id in node_ids
+                        if source_id not in targets
+                    ] or [next(iter(node_ids))]
+                    for chain_row in chain_nodes:
+                        source_node_id = _text(chain_row.get("node_id"))
+                        topology_node_id = node_ids[source_node_id]
+                        outgoing = [
+                            row
+                            for row in links
+                            if _text(row.get("from_node_id")) == source_node_id
+                        ]
+                        incoming = [
+                            row
+                            for row in links
+                            if _text(row.get("to_node_id")) == source_node_id
+                        ]
+                        node = TopologyNode(
+                            node_id=topology_node_id,
+                            name=(
+                                _text(chain_row.get("asset_name"))
+                                or _text(chain_row.get("asset_id"))
+                                or "Endpoint asset"
+                            ),
+                            asset_type="client_device",
+                            role="client_device",
+                            floor=_int(
+                                assignment.get("floor"),
+                                self.nodes[instance_id].floor,
+                            ),
+                            location_name=(
+                                _text(assignment.get("endpoint_name"))
+                                or "Endpoint"
+                            ),
+                            ports_used=1,
+                            poe_used_w=(
+                                max(0.0, _float(assignment.get("poe_power_w")))
+                                if source_node_id in root_source_ids
+                                else 0.0
+                            ),
+                            endpoint_count=1,
+                            endpoint_locations=1,
+                            pseudo=True,
+                            details={
+                                "parent_instance_id": instance_id,
+                                "assignment": assignment,
+                                "asset_chain_node": chain_row,
+                                "incoming_asset_connections": incoming,
+                                "outgoing_asset_connections": outgoing,
+                            },
+                        )
+                        self.client_nodes_by_id[topology_node_id] = node
+                    for link in links:
+                        source_id = node_ids.get(_text(link.get("from_node_id")))
+                        target_id = node_ids.get(_text(link.get("to_node_id")))
+                        if source_id and target_id:
+                            self.client_children[source_id].append(target_id)
+                    self.client_groups[instance_id].extend(
+                        self.client_nodes_by_id[node_ids[source_id]]
+                        for source_id in root_source_ids
+                    )
+                    continue
                 department_id = _text(assignment.get("department_id")) or "UNASSIGNED"
                 department_name = _text(assignment.get("department_name")) or department_id
                 grouped[(department_id, department_name)].append(assignment)
@@ -1075,7 +1380,7 @@ class TopologyModel:
                         },
                     )
                 )
-            self.client_groups[instance_id] = rows
+            self.client_groups[instance_id].extend(rows)
 
     def descendants(self, node_id: str) -> int:
         if node_id in self._descendant_cache:
@@ -1486,6 +1791,7 @@ class RackEquipmentItem(QGraphicsObject):
         self.port_nodes = list(port_nodes)
         self._port_rects: Dict[str, QRectF] = {}
         self._cassette_rects: Dict[int, QRectF] = {}
+        self._cassette_installed: Set[int] = set()
         self._switch_module_rects: List[Tuple[str, QRectF]] = []
         self._compact_vertical_lc = False
         self._selected_port_node_id = ""
@@ -1615,6 +1921,7 @@ class RackEquipmentItem(QGraphicsObject):
     def _build_port_rects(self) -> None:
         self._port_rects.clear()
         self._cassette_rects.clear()
+        self._cassette_installed.clear()
         self._switch_module_rects.clear()
         self._compact_vertical_lc = False
         if not self.port_nodes or self._width < 42.0 or self._height < 14.0:
@@ -2091,6 +2398,14 @@ class RackEquipmentItem(QGraphicsObject):
             port_rows += 1
 
         ports_by_cassette: Dict[int, List[TopologyNode]] = defaultdict(list)
+        self._cassette_installed = {
+            int(slot["position"])
+            for slot in _modular_patch_panel_graphics_slots(
+                self.node,
+                self.port_nodes,
+            )
+            if bool(slot.get("installed"))
+        }
         fallback_index = 0
         for port_node in self.port_nodes:
             name = _text(port_node.details.get("port_name"))
@@ -2112,6 +2427,8 @@ class RackEquipmentItem(QGraphicsObject):
                 cassette_h,
             )
             self._cassette_rects[cassette] = cassette_rect
+            if cassette not in self._cassette_installed:
+                continue
             inner = cassette_rect.adjusted(4.0 * scale, 4.0 * scale, -4.0 * scale, -3.0 * scale)
             label_h = max(7.0, min(12.0, cassette_h * 0.22))
             grid = inner.adjusted(0.0, label_h, 0.0, 0.0)
@@ -2211,17 +2528,23 @@ class RackEquipmentItem(QGraphicsObject):
             )
 
         for cassette, cassette_rect in sorted(self._cassette_rects.items()):
-            painter.setBrush(QColor("#1a242c"))
-            painter.setPen(QPen(QColor("#526273"), 0.9))
+            fitted = cassette in self._cassette_installed
+            painter.setBrush(QColor("#1a242c") if fitted else QColor("#111820"))
+            painter.setPen(
+                QPen(
+                    QColor("#526273") if fitted else QColor("#3c4852"),
+                    0.9,
+                )
+            )
             painter.drawRoundedRect(cassette_rect, 2.5, 2.5)
             label_font = QFont("Arial", 5 if cassette_rect.height() < 22 else 6)
             label_font.setBold(True)
             painter.setFont(label_font)
-            painter.setPen(QColor("#b8c8d4"))
+            painter.setPen(QColor("#b8c8d4") if fitted else QColor("#71808b"))
             painter.drawText(
                 cassette_rect.adjusted(3.0, 1.0, -3.0, 0.0),
-                Qt.AlignLeft | Qt.AlignTop,
-                f"C{cassette}",
+                Qt.AlignLeft | Qt.AlignTop if fitted else Qt.AlignCenter,
+                f"C{cassette}" if fitted else f"SLOT {cassette} - BLANK",
             )
 
         for port_node in self.port_nodes:
@@ -2301,6 +2624,12 @@ class RackEquipmentItem(QGraphicsObject):
             self.activated.emit(self.node.node_id)
             event.accept()
             return
+        if event.button() == Qt.RightButton:
+            # QGraphicsItem's default movable-item handling is not limited to
+            # the left button.  Let the later context-menu event own a right
+            # click without starting a move or changing the rack position.
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
@@ -2319,6 +2648,12 @@ class RackEquipmentItem(QGraphicsObject):
         self.dragMoved.emit(self.node.node_id, QPointF(self.pos()))
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.RightButton:
+            # _drag_origin belongs exclusively to a left-button rack move.
+            # Comparing a context click against it used to restore equipment
+            # to the default scene origin, outside the rack.
+            event.accept()
+            return
         if self._port_press_active:
             self._port_press_active = False
             event.accept()
@@ -2367,6 +2702,7 @@ class SwitchFrontPanelItem(QGraphicsObject):
         self._height = float(height)
         self._port_rects: Dict[str, QRectF] = {}
         self._cassette_rects: Dict[int, QRectF] = {}
+        self._cassette_installed: Set[int] = set()
         self._compact_vertical_lc = False
         self._selected_port_node_id = ""
         self.search_match = False
@@ -2408,6 +2744,7 @@ class SwitchFrontPanelItem(QGraphicsObject):
     def _build_port_rects(self) -> None:
         self._port_rects.clear()
         self._cassette_rects.clear()
+        self._cassette_installed.clear()
         self._compact_vertical_lc = False
         if not self.port_nodes:
             return
@@ -2566,6 +2903,14 @@ class SwitchFrontPanelItem(QGraphicsObject):
             port_rows += 1
 
         ports_by_cassette: Dict[int, List[TopologyNode]] = defaultdict(list)
+        self._cassette_installed = {
+            int(slot["position"])
+            for slot in _modular_patch_panel_graphics_slots(
+                self.node,
+                self.port_nodes,
+            )
+            if bool(slot.get("installed"))
+        }
         fallback_index = 0
         for port_node in self.port_nodes:
             name = _text(port_node.details.get("port_name"))
@@ -2587,6 +2932,8 @@ class SwitchFrontPanelItem(QGraphicsObject):
                 cassette_h,
             )
             self._cassette_rects[cassette] = cassette_rect
+            if cassette not in self._cassette_installed:
+                continue
             inner = cassette_rect.adjusted(5.0, 5.0, -5.0, -4.0)
             label_h = max(9.0, min(15.0, cassette_h * 0.2))
             grid = inner.adjusted(0.0, label_h, 0.0, 0.0)
@@ -2620,17 +2967,23 @@ class SwitchFrontPanelItem(QGraphicsObject):
         painter.setPen(QColor('#dce5ea'))
         painter.drawText(QRectF(30.0, 4.0, rect.width()-60.0, 16.0), Qt.AlignCenter, self.node.name)
         for cassette, cassette_rect in sorted(self._cassette_rects.items()):
-            painter.setBrush(QColor("#1a242c"))
-            painter.setPen(QPen(QColor("#526273"), 1.0))
+            fitted = cassette in self._cassette_installed
+            painter.setBrush(QColor("#1a242c") if fitted else QColor("#111820"))
+            painter.setPen(
+                QPen(
+                    QColor("#526273") if fitted else QColor("#3c4852"),
+                    1.0,
+                )
+            )
             painter.drawRoundedRect(cassette_rect, 3.0, 3.0)
             label_font = QFont("Arial", 6 if cassette_rect.height() < 28 else 7)
             label_font.setBold(True)
             painter.setFont(label_font)
-            painter.setPen(QColor("#b8c8d4"))
+            painter.setPen(QColor("#b8c8d4") if fitted else QColor("#71808b"))
             painter.drawText(
                 cassette_rect.adjusted(5.0, 2.0, -5.0, 0.0),
-                Qt.AlignLeft | Qt.AlignTop,
-                f"C{cassette}",
+                Qt.AlignLeft | Qt.AlignTop if fitted else Qt.AlignCenter,
+                f"C{cassette}" if fitted else f"SLOT {cassette} - BLANK",
             )
         for port_node in self.port_nodes:
             port_rect = self._port_rects.get(port_node.node_id)
@@ -2860,6 +3213,9 @@ class SplitterFrontPanelItem(QGraphicsObject):
             super().mousePressEvent(event)
             self.activated.emit(self.node.node_id)
             event.accept(); return
+        if event.button() == Qt.RightButton:
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
@@ -2878,6 +3234,9 @@ class SplitterFrontPanelItem(QGraphicsObject):
         self.dragMoved.emit(self.node.node_id, QPointF(self.pos()))
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.RightButton:
+            event.accept()
+            return
         if self._port_press_active:
             self._port_press_active = False
             event.accept()
@@ -4290,10 +4649,41 @@ class NetworkTopologyDialog(QDialog):
             "QTreeWidget::item:selected { background: #dbeafe; color: #084298; }"
         )
         self.feature_tree.itemSelectionChanged.connect(self._feature_tree_selection_changed)
+        self.feature_tree.itemSelectionChanged.connect(
+            self._update_cassette_controls
+        )
+        self.feature_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.feature_tree.customContextMenuRequested.connect(
+            self._feature_tree_context_menu
+        )
         panel_layout.addWidget(self.feature_tree, 1)
+        cassette_buttons = QHBoxLayout()
+        cassette_buttons.setSpacing(4)
+        self.add_cassette_button = QPushButton("Add cassette")
+        self.edit_cassette_button = QPushButton("Edit")
+        self.remove_cassette_button = QPushButton("Remove")
+        self.add_cassette_button.setToolTip(
+            "Fit a cassette into the selected modular patch-panel slot."
+        )
+        self.edit_cassette_button.setToolTip(
+            "Modify the selected fitted cassette."
+        )
+        self.remove_cassette_button.setToolTip(
+            "Remove the selected unused cassette and leave a blank slot."
+        )
+        self.add_cassette_button.clicked.connect(self._add_selected_cassette)
+        self.edit_cassette_button.clicked.connect(self._edit_selected_cassette)
+        self.remove_cassette_button.clicked.connect(
+            self._remove_selected_cassette
+        )
+        cassette_buttons.addWidget(self.add_cassette_button)
+        cassette_buttons.addWidget(self.edit_cassette_button)
+        cassette_buttons.addWidget(self.remove_cassette_button)
+        panel_layout.addLayout(cassette_buttons)
         self._feature_tree_updating = False
         self._feature_tree_items: Dict[Tuple[str, object], QTreeWidgetItem] = {}
         self._rebuild_feature_tree()
+        self._update_cassette_controls()
         return panel
 
     def _feature_tree_item(
@@ -4316,6 +4706,403 @@ class NetworkTopologyDialog(QDialog):
         except TypeError:
             pass
         return item
+
+    def _cassette_feature_target(
+        self, item: Optional[QTreeWidgetItem] = None
+    ) -> Tuple[str, int, str]:
+        if item is None and hasattr(self, "feature_tree"):
+            selected = self.feature_tree.selectedItems()
+            item = selected[0] if selected else None
+        if item is None:
+            return "", 0, ""
+        kind = _text(item.data(0, Qt.UserRole))
+        payload = item.data(0, Qt.UserRole + 1)
+        if kind in {"cassette", "cassette_blank"} and isinstance(
+            payload, (tuple, list)
+        ):
+            instance_id = _text(payload[0])
+            position = max(1, _int(payload[1], 1))
+        elif kind in {"cassette_slots", "device"}:
+            instance_id = _text(payload)
+            position = 0
+        else:
+            return "", 0, kind
+        node = self.model.nodes.get(instance_id)
+        if (
+            node is None
+            or node.asset_type != "patch_panel"
+            or not bool(node.asset.get("modular_patch_panel"))
+        ):
+            return "", 0, kind
+        return instance_id, position, kind
+
+    def _patch_panel_cassette_records(
+        self, instance_id: str
+    ) -> Tuple[Optional[dict], dict, int]:
+        instance = next(
+            (
+                row
+                for row in self.data.get("network_asset_instances", [])
+                if _text(row.get("id")) == _text(instance_id)
+            ),
+            None,
+        )
+        if instance is None:
+            return None, {}, 0
+        asset = next(
+            (
+                row
+                for row in self.data.get("network_assets", [])
+                if _text(row.get("id")) == _text(instance.get("asset_id"))
+            ),
+            {},
+        )
+        if not (
+            _text(asset.get("asset_type")).lower() == "patch_panel"
+            and bool(asset.get("modular_patch_panel"))
+        ):
+            return None, asset, 0
+        slot_count = max(
+            1, min(4, _int(asset.get("patch_panel_cassette_count"), 4))
+        )
+        rows = instance.get("fibre_cassettes", [])
+        if not isinstance(rows, list):
+            rows = []
+            instance["fibre_cassettes"] = rows
+        return instance, asset, slot_count
+
+    @staticmethod
+    def _cassette_row_is_fitted(row: dict) -> bool:
+        return bool(row.get("installed")) or bool(
+            max(0, _int(row.get("used_front_connectors")))
+            or max(0, _int(row.get("used_fibres")))
+            or any(_text(value) for value in row.get("cable_ids", []))
+            or any(
+                _text(value)
+                for value in row.get("associated_instance_ids", [])
+            )
+        )
+
+    def _cassette_row(
+        self, instance: dict, position: int
+    ) -> Tuple[int, Optional[dict]]:
+        for index, row in enumerate(instance.get("fibre_cassettes", [])):
+            if isinstance(row, dict) and max(
+                1, _int(row.get("position"), index + 1)
+            ) == position:
+                return index, row
+        return -1, None
+
+    def _cassette_blank_positions(
+        self, instance: dict, slot_count: int
+    ) -> List[int]:
+        fitted = {
+            max(1, _int(row.get("position"), index + 1))
+            for index, row in enumerate(instance.get("fibre_cassettes", []))
+            if isinstance(row, dict) and self._cassette_row_is_fitted(row)
+        }
+        return [
+            position
+            for position in range(1, slot_count + 1)
+            if position not in fitted
+        ]
+
+    def _refresh_patch_panel_cassette_totals(
+        self, instance: dict, slot_count: int
+    ) -> None:
+        rows = [
+            row
+            for row in instance.get("fibre_cassettes", [])
+            if isinstance(row, dict)
+        ]
+        used = sum(max(0, _int(row.get("used_front_connectors"))) for row in rows)
+        fitted = sum(self._cassette_row_is_fitted(row) for row in rows)
+        capacity = slot_count * 12
+        instance["installed_cassette_count"] = fitted
+        instance["termination_count"] = used
+        instance["available_connector_count"] = max(0, capacity - used)
+        instance["front_connector_capacity"] = capacity
+        instance["front_connector_used"] = used
+        instance["front_connector_available"] = max(0, capacity - used)
+        instance["front_connector_utilisation_percent"] = (
+            round(100.0 * used / float(capacity), 2) if capacity else 0.0
+        )
+
+    def _update_cassette_controls(self) -> None:
+        if not hasattr(self, "add_cassette_button"):
+            return
+        instance_id, position, kind = self._cassette_feature_target()
+        instance, _asset, slot_count = self._patch_panel_cassette_records(
+            instance_id
+        )
+        blanks = (
+            self._cassette_blank_positions(instance, slot_count)
+            if instance is not None
+            else []
+        )
+        selected_fitted = False
+        if instance is not None and position > 0:
+            _index, row = self._cassette_row(instance, position)
+            selected_fitted = bool(
+                row is not None and self._cassette_row_is_fitted(row)
+            )
+        self.add_cassette_button.setEnabled(
+            bool(instance is not None and blanks and kind != "cassette")
+        )
+        self.edit_cassette_button.setEnabled(selected_fitted)
+        self.remove_cassette_button.setEnabled(selected_fitted)
+
+    def _feature_tree_context_menu(self, position: QPoint) -> None:
+        item = self.feature_tree.itemAt(position)
+        if item is None:
+            return
+        raw_kind = _text(item.data(0, Qt.UserRole))
+        raw_payload = item.data(0, Qt.UserRole + 1)
+        self._feature_tree_updating = True
+        self.feature_tree.setCurrentItem(item)
+        self._feature_tree_updating = False
+        self._update_cassette_controls()
+        menu = QMenu(self)
+        find_action = None
+        if raw_kind not in {"topology", "floor"}:
+            find_action = menu.addAction("Find on topology / rack view")
+
+        instance_id, cassette_position, cassette_kind = (
+            self._cassette_feature_target(item)
+        )
+        add_action = None
+        edit_action = None
+        remove_action = None
+        if instance_id:
+            instance, _asset, slot_count = self._patch_panel_cassette_records(
+                instance_id
+            )
+            blanks = (
+                self._cassette_blank_positions(instance, slot_count)
+                if instance is not None
+                else []
+            )
+            if find_action is not None:
+                menu.addSeparator()
+            if blanks and cassette_kind != "cassette":
+                label = (
+                    f"Fit cassette in slot {cassette_position}"
+                    if cassette_kind == "cassette_blank"
+                    and cassette_position
+                    else "Add cassette to next blank slot"
+                )
+                add_action = menu.addAction(label)
+            if cassette_kind == "cassette":
+                edit_action = menu.addAction(
+                    f"Modify cassette {cassette_position}"
+                )
+                remove_action = menu.addAction(
+                    f"Remove cassette {cassette_position}"
+                )
+        if not any((find_action, add_action, edit_action, remove_action)):
+            return
+        action = menu.exec(self.feature_tree.viewport().mapToGlobal(position))
+        if action == find_action:
+            self._find_feature_tree_item(raw_kind, raw_payload)
+        elif action == add_action:
+            self._add_patch_panel_cassette(
+                instance_id,
+                cassette_position
+                if cassette_kind == "cassette_blank"
+                else 0,
+            )
+        elif action == edit_action:
+            self._edit_patch_panel_cassette(instance_id, cassette_position)
+        elif action == remove_action:
+            self._remove_patch_panel_cassette(instance_id, cassette_position)
+
+    def _add_selected_cassette(self) -> None:
+        instance_id, position, kind = self._cassette_feature_target()
+        if instance_id:
+            self._add_patch_panel_cassette(
+                instance_id,
+                position if kind == "cassette_blank" else 0,
+            )
+
+    def _edit_selected_cassette(self) -> None:
+        instance_id, position, _kind = self._cassette_feature_target()
+        if instance_id and position:
+            self._edit_patch_panel_cassette(instance_id, position)
+
+    def _remove_selected_cassette(self) -> None:
+        instance_id, position, _kind = self._cassette_feature_target()
+        if instance_id and position:
+            self._remove_patch_panel_cassette(instance_id, position)
+
+    def _add_patch_panel_cassette(
+        self, instance_id: str, position: int = 0
+    ) -> None:
+        instance, asset, slot_count = self._patch_panel_cassette_records(
+            instance_id
+        )
+        if instance is None:
+            return
+        blanks = self._cassette_blank_positions(instance, slot_count)
+        if not blanks:
+            QMessageBox.information(
+                self,
+                "Modular patch panel",
+                "Every cassette position in this panel is already fitted.",
+            )
+            return
+        if position not in blanks:
+            position = blanks[0]
+        dialog = PatchPanelCassetteEditorDialog(
+            self,
+            available_positions=blanks,
+            suggested_position=position,
+            default_front_connector=_text(
+                asset.get("patch_panel_cassette_front_connector")
+            )
+            or "lc_duplex",
+            default_termination_mode=_text(
+                asset.get("patch_panel_cassette_termination_mode")
+            )
+            or "spliced",
+            default_rear_connector=_text(
+                asset.get("patch_panel_cassette_rear_connector")
+            )
+            or "mpo-24",
+        )
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+        result_position = max(1, _int(dialog.result.get("position"), position))
+        row_index, _row = self._cassette_row(instance, result_position)
+        if row_index >= 0:
+            instance["fibre_cassettes"][row_index] = dialog.result
+        else:
+            instance.setdefault("fibre_cassettes", []).append(dialog.result)
+        instance["fibre_cassettes"].sort(
+            key=lambda row: max(1, _int(row.get("position"), 1))
+        )
+        self._refresh_patch_panel_cassette_totals(instance, slot_count)
+        sync_fibre_nodes_from_design(self.data, replace_auto=False)
+        self._commit_changes()
+        self._set_feature_tree_current(
+            "cassette", (instance_id, result_position)
+        )
+        self.status_label.setText(
+            f"Fitted cassette {result_position} in "
+            f"{_text(instance.get('name')) or instance_id}."
+        )
+
+    def _edit_patch_panel_cassette(
+        self, instance_id: str, position: int
+    ) -> None:
+        instance, asset, slot_count = self._patch_panel_cassette_records(
+            instance_id
+        )
+        if instance is None:
+            return
+        row_index, row = self._cassette_row(instance, position)
+        if row is None or not self._cassette_row_is_fitted(row):
+            self._add_patch_panel_cassette(instance_id, position)
+            return
+        dialog = PatchPanelCassetteEditorDialog(
+            self,
+            row,
+            available_positions=[position],
+            suggested_position=position,
+            default_front_connector=_text(
+                asset.get("patch_panel_cassette_front_connector")
+            )
+            or "lc_duplex",
+            default_termination_mode=_text(
+                asset.get("patch_panel_cassette_termination_mode")
+            )
+            or "spliced",
+            default_rear_connector=_text(
+                asset.get("patch_panel_cassette_rear_connector")
+            )
+            or "mpo-24",
+        )
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+        instance["fibre_cassettes"][row_index] = dialog.result
+        self._refresh_patch_panel_cassette_totals(instance, slot_count)
+        sync_fibre_nodes_from_design(self.data, replace_auto=False)
+        self._commit_changes()
+        self._set_feature_tree_current("cassette", (instance_id, position))
+        self.status_label.setText(
+            f"Updated cassette {position} in "
+            f"{_text(instance.get('name')) or instance_id}."
+        )
+
+    def _remove_patch_panel_cassette(
+        self, instance_id: str, position: int
+    ) -> None:
+        instance, _asset, slot_count = self._patch_panel_cassette_records(
+            instance_id
+        )
+        if instance is None:
+            return
+        row_index, row = self._cassette_row(instance, position)
+        if row is None or not self._cassette_row_is_fitted(row):
+            return
+        linked_nodes = [
+            node
+            for node in self.data.get("network_fibre_nodes", [])
+            if _text(node.get("linked_instance_id")) == instance_id
+            and _text(node.get("node_type")) == "splice_cassette"
+            and max(
+                1,
+                _int(
+                    node.get("cassette_position", node.get("tray_number")),
+                    1,
+                ),
+            )
+            == position
+        ]
+        linked_node_ids = {
+            _text(node.get("id")) for node in linked_nodes if _text(node.get("id"))
+        }
+        linked_splices = [
+            splice
+            for splice in self.data.get("network_fibre_splices", [])
+            if _text(splice.get("cassette_id")) in linked_node_ids
+            or _text(splice.get("node_id")) in linked_node_ids
+        ]
+        used = self._cassette_row_is_fitted(
+            {**row, "installed": False}
+        ) or bool(linked_splices)
+        if used:
+            QMessageBox.warning(
+                self,
+                "Cassette is in use",
+                f"Cassette {position} cannot be removed while it has assigned "
+                "front ports, fibres, cables, devices or splice records. "
+                "Disconnect or reassign those records first.",
+            )
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Remove patch panel cassette",
+                f"Remove cassette {position} from "
+                f"{_text(instance.get('name')) or instance_id} and leave the "
+                "slot blank?",
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        instance["fibre_cassettes"].pop(row_index)
+        if linked_node_ids:
+            self.data["network_fibre_nodes"] = [
+                node
+                for node in self.data.get("network_fibre_nodes", [])
+                if _text(node.get("id")) not in linked_node_ids
+            ]
+        self._refresh_patch_panel_cassette_totals(instance, slot_count)
+        self._commit_changes()
+        self._set_feature_tree_current("cassette_blank", (instance_id, position))
+        self.status_label.setText(
+            f"Removed cassette {position}; the panel position is now blank."
+        )
 
     def _rebuild_feature_tree(self) -> None:
         if not hasattr(self, "feature_tree"):
@@ -4407,15 +5194,237 @@ class NetworkTopologyDialog(QDialog):
         if not self._supports_port_view(node):
             return
         ports = self._defined_ports(node)
+        if (
+            node.asset_type == "patch_panel"
+            and bool(node.asset.get("modular_patch_panel"))
+        ):
+            slots = _modular_patch_panel_feature_slots(
+                node,
+                ports,
+                self.model.occupied_ports_by_instance.get(node.node_id, set()),
+            )
+            installed_count = sum(
+                bool(slot.get("installed")) for slot in slots
+            )
+            slots_item = self._feature_tree_item(
+                item,
+                (
+                    f"Cassette slots ({installed_count} fitted, "
+                    f"{len(slots) - installed_count} blank)"
+                ),
+                "cassette_slots",
+                node.node_id,
+            )
+            for slot in slots:
+                payload = (node.node_id, int(slot["position"]))
+                slot_item = self._feature_tree_item(
+                    slots_item,
+                    _text(slot["label"]),
+                    "cassette" if slot["installed"] else "cassette_blank",
+                    payload,
+                )
+                for port in slot["ports"]:
+                    port_name = _text(port.get("name"))
+                    if port_name:
+                        port_item = self._feature_tree_item(
+                            slot_item,
+                            port_name,
+                            "port",
+                            (node.node_id, port_name),
+                        )
+                        self._append_feature_port_connections(
+                            port_item, node, port_name
+                        )
+            return
         ports_item = self._feature_tree_item(
             item, f"Ports ({len(ports)})", "ports", node.node_id
         )
         for port in ports:
             port_name = _text(port.get("name"))
             if port_name:
-                self._feature_tree_item(
+                port_item = self._feature_tree_item(
                     ports_item, port_name, "port", (node.node_id, port_name)
                 )
+                self._append_feature_port_connections(
+                    port_item, node, port_name
+                )
+
+    def _append_feature_port_connections(
+        self,
+        port_item: QTreeWidgetItem,
+        node: TopologyNode,
+        port_name: str,
+    ) -> None:
+        """Show direct devices and endpoint chains below their active port."""
+
+        connected_rows: List[Tuple[str, object]] = []
+        defined_ports = self._defined_ports(node)
+        canonical_port = _canonical_port_name(
+            node.asset, port_name, defined_ports
+        )
+
+        for peer_id, edge in self.model.adjacency.get(node.node_id, []):
+            local_port = (
+                edge.source_port
+                if edge.source_id == node.node_id
+                else edge.target_port
+            )
+            local_port = _canonical_port_name(
+                node.asset, local_port, defined_ports
+            )
+            if _text(local_port) != _text(canonical_port):
+                continue
+            peer = self.model.nodes.get(peer_id)
+            if peer is None:
+                continue
+            connected_rows.append(
+                (
+                    "device",
+                    {
+                        "label": peer.name,
+                        "kind": "connected_device",
+                        "payload": (node.node_id, port_name, peer_id),
+                    },
+                )
+            )
+
+        assignments = []
+        for assignment in self._assignments_by_instance.get(node.node_id, []):
+            assignment_port = _canonical_port_name(
+                node.asset,
+                _text(assignment.get("network_port")),
+                defined_ports,
+            )
+            if _text(assignment_port) == _text(canonical_port):
+                assignments.append(assignment)
+
+        if not connected_rows and not assignments:
+            return
+        root_count = len(connected_rows) + len(assignments)
+        connections_item = self._feature_tree_item(
+            port_item,
+            f"Connected items ({root_count})",
+            "port_connections",
+            (node.node_id, port_name),
+        )
+        for _row_type, connected in connected_rows:
+            self._feature_tree_item(
+                connections_item,
+                _text(connected["label"]),
+                _text(connected["kind"]),
+                connected["payload"],
+            )
+
+        for assignment in sorted(
+            assignments,
+            key=lambda row: (
+                _text(row.get("endpoint_name")).casefold(),
+                _int(row.get("endpoint_port"), 0),
+                _text(row.get("id")),
+            ),
+        ):
+            chain_rows = [
+                row
+                for row in assignment.get("endpoint_asset_chain", [])
+                if isinstance(row, dict) and _text(row.get("node_id"))
+            ]
+            assignment_id = _text(assignment.get("id")) or str(
+                self._assignments_by_instance[node.node_id].index(assignment) + 1
+            )
+            if not chain_rows:
+                endpoint_name = (
+                    _text(assignment.get("endpoint_name")) or "Endpoint"
+                )
+                asset_name = _text(assignment.get("endpoint_asset_name"))
+                label = (
+                    f"{endpoint_name} - {asset_name}"
+                    if asset_name
+                    else endpoint_name
+                )
+                self._feature_tree_item(
+                    connections_item,
+                    label,
+                    "connected_endpoint",
+                    (node.node_id, port_name, assignment_id),
+                )
+                continue
+
+            topology_ids = {
+                _text(row.get("node_id")): (
+                    f"client::{node.node_id}::{assignment_id}::{index}"
+                )
+                for index, row in enumerate(chain_rows, start=1)
+            }
+            rows_by_id = {
+                _text(row.get("node_id")): row for row in chain_rows
+            }
+            children_by_id: Dict[str, List[str]] = defaultdict(list)
+            targets = set()
+            connection_label_by_pair: Dict[Tuple[str, str], str] = {}
+            for connection in assignment.get(
+                "endpoint_asset_connections", []
+            ):
+                if not isinstance(connection, dict):
+                    continue
+                source_id = _text(connection.get("from_node_id"))
+                target_id = _text(connection.get("to_node_id"))
+                if source_id in rows_by_id and target_id in rows_by_id:
+                    children_by_id[source_id].append(target_id)
+                    targets.add(target_id)
+                    connection_label_by_pair[(source_id, target_id)] = (
+                        _text(connection.get("connection_asset_name"))
+                        or _text(connection.get("cable_specification"))
+                    )
+            roots = [
+                _text(row.get("node_id"))
+                for row in chain_rows
+                if _text(row.get("node_id")) not in targets
+            ] or [_text(chain_rows[0].get("node_id"))]
+
+            def append_chain(
+                parent: QTreeWidgetItem,
+                chain_id: str,
+                visited: Set[str],
+                incoming_label: str = "",
+            ) -> None:
+                if chain_id in visited or chain_id not in rows_by_id:
+                    return
+                visited = set(visited)
+                visited.add(chain_id)
+                chain_row = rows_by_id[chain_id]
+                asset_name = (
+                    _text(chain_row.get("asset_name"))
+                    or _text(chain_row.get("asset_id"))
+                    or "Endpoint asset"
+                )
+                endpoint_name = _text(assignment.get("endpoint_name"))
+                label = (
+                    f"{endpoint_name} - {asset_name}"
+                    if parent is connections_item and endpoint_name
+                    else asset_name
+                )
+                if incoming_label:
+                    label = f"{label} via {incoming_label}"
+                chain_item = self._feature_tree_item(
+                    parent,
+                    label,
+                    "endpoint_chain_device",
+                    (
+                        node.node_id,
+                        port_name,
+                        topology_ids.get(chain_id, ""),
+                    ),
+                )
+                for child_id in children_by_id.get(chain_id, []):
+                    append_chain(
+                        chain_item,
+                        child_id,
+                        visited,
+                        connection_label_by_pair.get((chain_id, child_id), ""),
+                    )
+
+            for root_id in roots:
+                append_chain(connections_item, root_id, set())
 
     def _feature_tree_selection_changed(self) -> None:
         if self._feature_tree_updating:
@@ -4491,11 +5500,38 @@ class NetworkTopologyDialog(QDialog):
             else:
                 self._set_feature_tree_current("room", payload)
             return
+        if kind == "connected_device" and isinstance(payload, (tuple, list)):
+            self._navigate_feature_device(_text(payload[2]))
+            return
+        if kind == "endpoint_chain_device" and isinstance(
+            payload, (tuple, list)
+        ):
+            self._navigate_feature_endpoint_chain(
+                _text(payload[0]), _text(payload[1]), _text(payload[2])
+            )
+            return
+        if kind in {"connected_endpoint", "port_connections"} and isinstance(
+            payload, (tuple, list)
+        ):
+            port_payload = (_text(payload[0]), _text(payload[1]))
+            self._set_feature_tree_current("port", port_payload)
+            self._feature_tree_selection_changed()
+            return
         if kind == "device":
             self._navigate_feature_device(_text(payload))
             return
-        if kind in {"ports", "port"}:
-            instance_id = _text(payload[0] if kind == "port" else payload)
+        if kind in {
+            "ports",
+            "port",
+            "cassette_slots",
+            "cassette",
+            "cassette_blank",
+        }:
+            instance_id = _text(
+                payload[0]
+                if kind in {"port", "cassette", "cassette_blank"}
+                else payload
+            )
             node = self.model.nodes.get(instance_id)
             if node is None or not self._supports_port_view(node):
                 return
@@ -4519,9 +5555,94 @@ class NetworkTopologyDialog(QDialog):
                 if port_node_id:
                     self._card_activated(port_node_id)
                 self._set_feature_tree_current("port", payload)
+            elif kind in {"cassette", "cassette_blank"}:
+                self._set_feature_tree_current(kind, payload)
+            elif kind == "cassette_slots":
+                self._set_feature_tree_current(kind, payload)
+
+    def _find_feature_tree_item(self, kind: str, payload) -> None:
+        """Explicitly reveal a feature-tree record in its applicable view."""
+
+        if kind == "connected_device" and isinstance(payload, (tuple, list)):
+            self._navigate_feature_device(_text(payload[2]))
+            return
+        if kind == "endpoint_chain_device" and isinstance(
+            payload, (tuple, list)
+        ):
+            self._navigate_feature_endpoint_chain(
+                _text(payload[0]), _text(payload[1]), _text(payload[2])
+            )
+            return
+        if kind in {"connected_endpoint", "port_connections"} and isinstance(
+            payload, (tuple, list)
+        ):
+            kind = "port"
+            payload = (_text(payload[0]), _text(payload[1]))
+        target = self._feature_tree_items.get((kind, payload))
+        if target is None:
+            return
+        self._feature_tree_updating = True
+        self.feature_tree.setCurrentItem(target)
+        self._feature_tree_updating = False
+        self._feature_tree_selection_changed()
+        self.status_label.setText(
+            "Located the selected feature in the topology or rack view."
+        )
+
+    def _navigate_feature_endpoint_chain(
+        self, instance_id: str, port_name: str, client_node_id: str
+    ) -> None:
+        if not client_node_id:
+            self._find_feature_tree_item(
+                "port", (instance_id, port_name)
+            )
+            return
+        self.rack_focus = None
+        self.switch_port_focus = None
+        if not self.show_clients_check.isChecked():
+            self.show_clients_check.setChecked(True)
+        self.explicit_expanded.add(instance_id)
+        reverse_parent: Dict[str, str] = {}
+        for parent_id, child_ids in self.model.client_children.items():
+            for child_id in child_ids:
+                reverse_parent[child_id] = parent_id
+        cursor = client_node_id
+        while cursor:
+            parent_id = reverse_parent.get(cursor, "")
+            if not parent_id:
+                break
+            self.explicit_expanded.add(parent_id)
+            cursor = parent_id
+        if self.floor_combo.currentIndex() != 0:
+            self.floor_combo.setCurrentIndex(0)
+        self.rebuild_scene(fit=False)
+        target = self.node_items.get(client_node_id)
+        if target is None:
+            self._find_feature_tree_item(
+                "port", (instance_id, port_name)
+            )
+            return
+        self.scene.clearSelection()
+        target.setSelected(True)
+        self.view.centerOn(target)
+        self._show_node_details(client_node_id)
+        feature_item = self._feature_tree_items.get(
+            (
+                "endpoint_chain_device",
+                (instance_id, port_name, client_node_id),
+            )
+        )
+        if feature_item is not None:
+            self._feature_tree_updating = True
+            self.feature_tree.setCurrentItem(feature_item)
+            self.feature_tree.scrollToItem(feature_item)
+            self._feature_tree_updating = False
+        self.status_label.setText(
+            "Located the selected daisy-chain device on the topology."
+        )
 
     def _navigate_feature_device(self, node_id: str) -> None:
-        node = self.model.nodes.get(node_id)
+        node = self._node_for(node_id)
         if node is None:
             return
         key = self._rack_group_key(node_id)
@@ -4557,7 +5678,14 @@ class NetworkTopologyDialog(QDialog):
         if not hasattr(self, "feature_tree"):
             return
         if self.switch_port_focus is not None:
-            key = ("ports", _text(self.switch_port_focus))
+            node = self.model.nodes.get(_text(self.switch_port_focus))
+            key = (
+                ("cassette_slots", _text(self.switch_port_focus))
+                if node is not None
+                and node.asset_type == "patch_panel"
+                and bool(node.asset.get("modular_patch_panel"))
+                else ("ports", _text(self.switch_port_focus))
+            )
         elif self.rack_focus is not None:
             key = ("room", (self.rack_focus[0], self.rack_focus[1]))
         else:
@@ -4891,10 +6019,58 @@ class NetworkTopologyDialog(QDialog):
                     self._detail_row("PoE load", f"{node.poe_used_w:.1f} W")
             elif node.asset_type == "client_device":
                 assignment = node.details.get("assignment", {})
+                chain_node = node.details.get("asset_chain_node", {})
                 self._detail_row("Endpoint", _text(assignment.get("endpoint_name")), True)
                 self._detail_row("Endpoint port", str(_int(assignment.get("endpoint_port"), 1)))
                 self._detail_row("Network port", _text(assignment.get("network_port")))
-                self._detail_row("Endpoint asset", _text(assignment.get("endpoint_asset_name")))
+                self._detail_row(
+                    "Endpoint asset",
+                    _text(chain_node.get("asset_name"))
+                    or _text(assignment.get("endpoint_asset_name")),
+                )
+                input_name = _text(assignment.get("endpoint_input_port_name"))
+                input_connector = _text(
+                    assignment.get("endpoint_input_connector_type")
+                )
+                if input_name or input_connector:
+                    self._detail_row(
+                        "Asset input",
+                        input_name
+                        + (f" ({input_connector})" if input_connector else ""),
+                    )
+                chain_label = _endpoint_asset_chain_label(assignment)
+                if chain_label:
+                    self._detail_row("Asset chain", chain_label)
+                chain_speed = max(
+                    0,
+                    _int(
+                        chain_node.get(
+                            "link_speed_mbps",
+                            assignment.get("link_speed_mbps"),
+                        )
+                    ),
+                )
+                if chain_speed:
+                    self._detail_row(
+                        "Link speed", port_speed_label(chain_speed)
+                    )
+                outgoing = node.details.get("outgoing_asset_connections", []) or []
+                if outgoing:
+                    self._detail_row(
+                        "Connected onward using",
+                        "\n".join(
+                            (
+                                _text(row.get("connection_asset_name"))
+                                or "Direct connection"
+                            )
+                            + (
+                                f" @ {port_speed_label(max(0, _int(row.get('link_speed_mbps'))))}"
+                                if max(0, _int(row.get("link_speed_mbps")))
+                                else ""
+                            )
+                            for row in outgoing
+                        ),
+                    )
                 self._detail_row("Expected bandwidth", f"{_float(assignment.get('expected_bandwidth_mbps')):.3f} Mbps")
                 self._detail_row("Expected packet rate", f"{_float(assignment.get('expected_packet_rate_pps')):.1f} pps")
                 self._detail_row("Copper length", f"{_float(assignment.get('copper_length_m')):.1f} m")
@@ -5029,7 +6205,7 @@ class NetworkTopologyDialog(QDialog):
         from the overview topology because they add large numbers of cards and
         links without representing another logical network tier.
         """
-        node = self.model.nodes.get(node_id)
+        node = self._node_for(node_id)
         if node is None:
             return False
         if node.pseudo or node.asset_type in {"site_group", "client_group", "client_device"}:
@@ -5075,6 +6251,8 @@ class NetworkTopologyDialog(QDialog):
         return not self._is_active_topology_device(node_id)
 
     def _children_for(self, node_id: str) -> List[str]:
+        if node_id in self.model.client_children:
+            return list(self.model.client_children.get(node_id, []))
         if self.rack_focus is None and self.switch_port_focus is None:
             cached = self._logical_children_cache.get(node_id)
             if cached is None:
@@ -5180,6 +6358,8 @@ class NetworkTopologyDialog(QDialog):
         if node_id in self.model.nodes:
             return self.model.nodes[node_id]
         if node_id.startswith("client::"):
+            if node_id in self.model.client_nodes_by_id:
+                return self.model.client_nodes_by_id[node_id]
             parent_id = node_id.split("::", 2)[1] if "::" in node_id else ""
             for node in self.model.client_groups.get(parent_id, []):
                 if node.node_id == node_id:
@@ -5401,6 +6581,54 @@ class NetworkTopologyDialog(QDialog):
             cached = tuple(_expanded_asset_ports(node.asset))
             self._expanded_ports_cache[asset_id] = cached
         ports = list(cached)
+        if (
+            node.asset_type == "patch_panel"
+            and bool(node.asset.get("modular_patch_panel"))
+        ):
+            cassette_rows = {
+                max(1, _int(row.get("position"), index + 1)): row
+                for index, row in enumerate(
+                    node.instance.get("fibre_cassettes", [])
+                )
+                if isinstance(row, dict)
+                and self._cassette_row_is_fitted(row)
+            }
+            connector_details = {
+                "lc_duplex": ("LC", "lc"),
+                "sc_simplex": ("SC", "sc"),
+                "sc_duplex": ("SC", "sc"),
+            }
+            configured_ports: List[dict] = []
+            for port in ports:
+                name = _text(port.get("name"))
+                match = re.match(
+                    r"^C(\d+)-[^-]+-(\d+)$", name, re.IGNORECASE
+                )
+                cassette = (
+                    cassette_rows.get(max(1, _int(match.group(1), 1)))
+                    if match
+                    else None
+                )
+                if cassette is None:
+                    configured_ports.append(port)
+                    continue
+                front = _text(
+                    cassette.get("front_connector")
+                ).lower() or "lc_duplex"
+                connector_label, port_type = connector_details.get(
+                    front, ("LC", "lc")
+                )
+                configured_ports.append(
+                    {
+                        **port,
+                        "name": (
+                            f"C{max(1, _int(match.group(1), 1))}-"
+                            f"{connector_label}-{match.group(2)}"
+                        ),
+                        "port_type": port_type,
+                    }
+                )
+            ports = configured_ports
         members = (
             max(1, _int(node.instance.get("stack_member_count"), 1))
             if bool(node.instance.get("logical_stack"))
@@ -5705,7 +6933,11 @@ class NetworkTopologyDialog(QDialog):
             port = _text(assignment.get("network_port")) or "Unspecified"
             endpoint = _text(assignment.get("endpoint_name")) or "Endpoint"
             asset_name = _text(assignment.get("endpoint_asset_name"))
-            records[port].append(endpoint + (f" — {asset_name}" if asset_name else ""))
+            chain_label = _endpoint_asset_chain_label(assignment)
+            endpoint_detail = chain_label or asset_name
+            records[port].append(
+                endpoint + (f" — {endpoint_detail}" if endpoint_detail else "")
+            )
             poe_by_port[port] += max(0.0, _float(assignment.get("poe_power_w")))
         for port, descriptions in self.model.physical_port_records_by_instance.get(device_id, {}).items():
             records[port].extend(description for description in descriptions if description not in records[port])
@@ -5881,6 +7113,7 @@ class NetworkTopologyDialog(QDialog):
             endpoint_name = _text(assignment.get("endpoint_name")) or "Endpoint"
             endpoint_port = _int(assignment.get("endpoint_port"), 1)
             asset_name = _text(assignment.get("endpoint_asset_name"))
+            chain_label = _endpoint_asset_chain_label(assignment)
             network_port = _text(assignment.get("network_port"))
             nodes.append(
                 TopologyNode(
@@ -5889,7 +7122,7 @@ class NetworkTopologyDialog(QDialog):
                     asset_type="client_device",
                     role="client_device",
                     floor=_int(assignment.get("floor"), parent.floor),
-                    location_name=asset_name or f"Port {network_port}",
+                    location_name=chain_label or asset_name or f"Port {network_port}",
                     ports_used=1,
                     poe_used_w=max(0.0, _float(assignment.get("poe_power_w"))),
                     endpoint_count=1,
@@ -5979,8 +7212,6 @@ class NetworkTopologyDialog(QDialog):
             place(root_id, 0, cursor_y)
             cursor_y += heights[root_id] + self.ROOT_GAP
         self._pack_layered_topology(visible_ids, positions)
-        self._space_recursive_subtrees(visible_ids, positions)
-        self._recenter_group_nodes(visible_ids, positions)
         return positions
 
 
@@ -6466,235 +7697,198 @@ class NetworkTopologyDialog(QDialog):
         return min(7, max(1, self.model._hierarchy_rank(node_id) + 1))
 
     def _pack_layered_topology(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
+        """Pack the logical topology as horizontal infrastructure tiers.
+
+        The hierarchy flows from top to bottom.  Cards within a tier are kept
+        together by room and rack, while their order follows the visible
+        parent/child tree.  This produces the familiar core, distribution,
+        access and endpoint diagram without losing room enclosures.
+        """
+
         self._layer_bounds: Dict[int, QRectF] = {}
         self._location_bus_by_node: Dict[str, Tuple[QPointF, float, float]] = {}
         self._failover_bus_by_node: Dict[str, Tuple[QPointF, float, float]] = {}
         self._main_bus_column_x: Optional[float] = None
         self._failover_bus_column_x: Optional[float] = None
-        grouped: Dict[int, Dict[Tuple[int, str, str], List[str]]] = defaultdict(lambda: defaultdict(list))
-        pseudo_ids: List[str] = []
-        for node_id in visible_ids:
-            node = self._node_for(node_id)
-            if node is None or node_id not in positions:
-                continue
-            if node.pseudo and node.asset_type not in {"site_group", "client_group"}:
-                pseudo_ids.append(node_id)
-                continue
-            rack = _text(node.instance.get("rack_name"))
-            location = node.location_name or f"Floor {node.floor}"
-            grouped[self._topology_layer(node_id)][(node.floor, location, rack)].append(node_id)
 
-        if not grouped:
+        visible_set = {
+            node_id
+            for node_id in visible_ids
+            if self._node_for(node_id) is not None
+        }
+        if not visible_set:
             return
 
-        layer_gap = 420.0
+        # Derive a stable branch order from the visible hierarchy.  A parent's
+        # preferred horizontal position is the centre of its descendants.
+        preferred_order: Dict[str, float] = {}
+        visiting: Set[str] = set()
+        leaf_index = 0
 
-        # Extra horizontal room is reserved around the distribution/access
-        # drill-down.  The allowance grows with the number of visible elements
-        # in the downstream layer so opening a large splitter branch cannot
-        # force cards and link labels into the neighbouring column.
-        layer_item_counts = {
-            layer: sum(len(node_ids) for node_ids in groups.values())
-            for layer, groups in grouped.items()
-        }
+        def visible_children(node_id: str) -> List[str]:
+            return [
+                child_id
+                for child_id in self._children_for(node_id)
+                if child_id in visible_set
+                and self.visible_parent.get(child_id) == node_id
+            ]
 
-        def gap_after(layer: int) -> float:
-            next_count = layer_item_counts.get(layer + 1, 0)
-            expansion_allowance = min(300.0, max(0, next_count - 1) * 14.0)
-            if layer == 4:
-                return 520.0 + expansion_allowance
-            if layer == 5:
-                return 560.0 + expansion_allowance
-            if layer == 6:
-                return 480.0 + expansion_allowance
-            return layer_gap + min(160.0, expansion_allowance)
-        bus_lane_h = 156.0
-        rack_group_gap_x = 44.0
-        location_gap_x = 160.0
-        location_gap_y = 72.0
-        pseudo_gap_y = 150.0
-        # Distribution devices (including OLTs) are stacked vertically so each
-        # physical device occupies its own row instead of forming one long row.
-        distribution_rows_per_column = 10_000
-        distribution_row_gap = 58.0
-        all_layers = sorted(grouped)
-        column_widths: Dict[int, float] = {}
+        def measure_branch(node_id: str) -> float:
+            nonlocal leaf_index
+            if node_id in preferred_order:
+                return preferred_order[node_id]
+            if node_id in visiting:
+                value = float(leaf_index)
+                leaf_index += 1
+                preferred_order[node_id] = value
+                return value
+            visiting.add(node_id)
+            children = visible_children(node_id)
+            if children:
+                values = [measure_branch(child_id) for child_id in children]
+                value = sum(values) / float(len(values))
+            else:
+                value = float(leaf_index)
+                leaf_index += 1
+            visiting.discard(node_id)
+            preferred_order[node_id] = value
+            return value
 
-        def group_layout_size(layer: int, node_ids: Sequence[str]) -> Tuple[float, float, int, int, float]:
-            heights = [self._node_card_height(node_id) for node_id in node_ids]
-            max_height = max(heights) if heights else self.CARD_H
-            if layer == 4 and len(node_ids) > 1:
-                rows = min(distribution_rows_per_column, len(node_ids))
-                columns = int(math.ceil(len(node_ids) / rows))
-                width = columns * self.CARD_W + max(0, columns - 1) * self.X_GAP
-                height = rows * max_height + max(0, rows - 1) * distribution_row_gap
-                return width, height, rows, columns, max_height
-            node_gap = 44.0 if layer == 5 else self.X_GAP
-            width = len(node_ids) * self.CARD_W + max(0, len(node_ids) - 1) * node_gap
-            return width, max_height, 1, len(node_ids), max_height
+        roots = [
+            node_id
+            for node_id in self.model.roots
+            if node_id in visible_set
+        ]
+        for root_id in roots:
+            measure_branch(root_id)
+        for node_id in sorted(
+            visible_set,
+            key=lambda value: (
+                self._topology_layer(value),
+                self._node_for(value).name.lower(),
+            ),
+        ):
+            measure_branch(node_id)
 
-        layer_layouts: Dict[int, List[dict]] = {}
-        for layer in all_layers:
-            rack_groups = sorted(
-                grouped[layer].items(),
-                key=lambda item: (-item[0][0], item[0][1].lower(), item[0][2].lower()),
+        by_layer: Dict[int, List[str]] = defaultdict(list)
+        for node_id in visible_ids:
+            node = self._node_for(node_id)
+            if node is None:
+                continue
+            by_layer[self._topology_layer(node_id)].append(node_id)
+
+        card_gap = 72.0
+        rack_gap = 104.0
+        room_gap = 170.0
+        tier_gap = 250.0
+        layer_rows: Dict[int, List[List[str]]] = {}
+        layer_widths: Dict[int, float] = {}
+        layer_heights: Dict[int, float] = {}
+
+        def layout_group_key(node_id: str) -> Tuple[int, str, str]:
+            node = self._node_for(node_id)
+            if node is None:
+                return (0, "", "")
+            if node.pseudo:
+                parent_id = self.visible_parent.get(node_id, "")
+                parent = self._node_for(parent_id)
+                if parent is not None:
+                    node = parent
+            return (
+                node.floor,
+                node.location_name or f"Floor {node.floor}",
+                _text(node.instance.get("rack_name")),
             )
-            by_location: Dict[Tuple[int, str], List[Tuple[Tuple[int, str, str], List[str]]]] = defaultdict(list)
-            for key, node_ids in rack_groups:
-                floor, location, _rack = key
-                by_location[(floor, location)].append((key, node_ids))
 
-            location_blocks: List[dict] = []
-            for location_key, rows in sorted(by_location.items(), key=lambda item: (-item[0][0], item[0][1].lower())):
-                rack_entries: List[dict] = []
-                for rack_key, node_ids in sorted(rows, key=lambda item: item[0][2].lower()):
+        for layer, node_ids in by_layer.items():
+            rooms: Dict[Tuple[int, str], Dict[str, List[str]]] = defaultdict(
+                lambda: defaultdict(list)
+            )
+            for node_id in node_ids:
+                floor, location, rack = layout_group_key(node_id)
+                rooms[(floor, location)][rack].append(node_id)
+
+            room_rows: List[List[str]] = []
+            room_widths: List[float] = []
+            room_keys = sorted(
+                rooms,
+                key=lambda key: (
+                    min(
+                        preferred_order[node_id]
+                        for rack_nodes in rooms[key].values()
+                        for node_id in rack_nodes
+                    ),
+                    -key[0],
+                    key[1].lower(),
+                ),
+            )
+            for room_key in room_keys:
+                ordered_room: List[str] = []
+                width = 0.0
+                rack_rows = sorted(
+                    rooms[room_key].items(),
+                    key=lambda item: (
+                        min(preferred_order[node_id] for node_id in item[1]),
+                        item[0].lower(),
+                    ),
+                )
+                for rack_index, (_rack, rack_nodes) in enumerate(rack_rows):
                     ordered = sorted(
-                        node_ids,
+                        rack_nodes,
                         key=lambda node_id: (
-                            0 if bool(self._node_for(node_id).instance.get("logical_stack")) else 1,
+                            preferred_order[node_id],
                             self._node_for(node_id).name.lower(),
                         ),
                     )
-                    group_width, group_height, grid_rows, _grid_columns, grid_card_h = group_layout_size(layer, ordered)
-                    is_switch_group = layer == 5 and any(
-                        (self._node_for(node_id) and self._node_for(node_id).asset_type == "network_switch")
-                        for node_id in ordered
-                    )
-                    block_height = group_height + (bus_lane_h if is_switch_group else 0.0)
-                    rack_entries.append(
-                        {
-                            "key": rack_key,
-                            "ordered": ordered,
-                            "width": group_width,
-                            "height": block_height,
-                            "group_height": group_height,
-                            "grid_rows": grid_rows,
-                            "grid_card_h": grid_card_h,
-                            "is_switch_group": is_switch_group,
-                        }
-                    )
-                if not rack_entries:
-                    continue
+                    if rack_index:
+                        width += rack_gap
+                    width += len(ordered) * self.CARD_W
+                    width += max(0, len(ordered) - 1) * card_gap
+                    ordered_room.extend(ordered)
+                room_rows.append(ordered_room)
+                room_widths.append(max(self.CARD_W, width))
 
-                cursor_x = 0.0
-                width = 0.0
-                height = 0.0
-                for entry in rack_entries:
-                    entry["x"] = cursor_x
-                    entry["y"] = 0.0
-                    cursor_x += entry["width"] + rack_group_gap_x
-                    height = max(height, entry["height"])
-                    width = max(width, cursor_x - rack_group_gap_x)
-                location_blocks.append(
-                    {
-                        "key": location_key,
-                        "racks": rack_entries,
-                        "width": max(self.CARD_W, width),
-                        "height": max(self.CARD_H, height),
-                    }
-                )
-
-            cursor_x = 0.0
-            cursor_y = 0.0
-            layer_width = 0.0
-            layer_height = self.CARD_H
-            for block in location_blocks:
-                if layer == 5:
-                    block["x"] = 0.0
-                    block["y"] = cursor_y
-                    cursor_y += block["height"] + location_gap_y
-                    layer_width = max(layer_width, block["width"])
-                    layer_height = max(layer_height, cursor_y - location_gap_y)
-                else:
-                    block["x"] = cursor_x
-                    block["y"] = 0.0
-                    cursor_x += block["width"] + location_gap_x
-                    layer_width = max(layer_width, cursor_x - location_gap_x)
-                    layer_height = max(layer_height, block["height"])
-
-            layer_layouts[layer] = location_blocks
-            column_widths[layer] = max(self.CARD_W, layer_width)
-
-        column_lefts: Dict[int, float] = {}
-        cursor_x = 0.0
-        for layer in all_layers:
-            column_lefts[layer] = cursor_x
-            cursor_x += column_widths[layer] + gap_after(layer)
-        access_layer = 5 if 5 in column_lefts else max(all_layers)
-        # Reserve distinct X-axis routing lanes.  Primary fibre uses the lane
-        # nearest the access layer; failover fibre uses a separate lane further
-        # upstream so the blue solid and orange dashed trunks never overlap.
-        self._main_bus_column_x = column_lefts[access_layer] - 170.0
-        self._failover_bus_column_x = column_lefts[access_layer] - 310.0
-
-        for layer in all_layers:
-            layer_height = self.CARD_H
-            for location_block in layer_layouts.get(layer, []):
-                location_left = column_lefts[layer] + location_block["x"]
-                location_top = location_block["y"]
-                switch_entries = [
-                    entry for entry in location_block["racks"]
-                    if bool(entry["is_switch_group"])
-                ]
-                location_bus_left = location_left + min(
-                    (entry["x"] + self.CARD_W / 2.0 for entry in switch_entries),
-                    default=0.0,
-                )
-                location_bus_right = location_left + max(
-                    (
-                        entry["x"] + entry["width"] - self.CARD_W / 2.0
-                        for entry in switch_entries
-                    ),
-                    default=0.0,
-                )
-                location_bus_y = location_top + 48.0
-                location_failover_bus_y = location_top + 92.0
-                for entry in location_block["racks"]:
-                    ordered = entry["ordered"]
-                    group_left = location_left + entry["x"]
-                    group_top = location_top + entry["y"]
-                    is_switch_group = bool(entry["is_switch_group"])
-                    card_top = group_top + (bus_lane_h if is_switch_group else 0.0)
-                    for index, node_id in enumerate(ordered):
-                        if layer == 4 and len(ordered) > 1:
-                            column = index // entry["grid_rows"]
-                            row = index % entry["grid_rows"]
-                            y_offset = row * (entry["grid_card_h"] + distribution_row_gap)
-                            positions[node_id] = QPointF(group_left + column * (self.CARD_W + self.X_GAP), card_top + y_offset)
-                        else:
-                            node_gap = 44.0 if layer == 5 else self.X_GAP
-                            positions[node_id] = QPointF(group_left + index * (self.CARD_W + node_gap), card_top)
-                    if is_switch_group:
-                        for node_id in ordered:
-                            positions[node_id] = QPointF(positions[node_id].x(), card_top)
-                            drop_x = positions[node_id].x() + self.CARD_W / 2.0
-                            self._location_bus_by_node[node_id] = (
-                                QPointF(drop_x, location_bus_y),
-                                location_bus_left,
-                                location_bus_right,
-                            )
-                            self._failover_bus_by_node[node_id] = (
-                                QPointF(drop_x, location_failover_bus_y),
-                                location_bus_left,
-                                location_bus_right,
-                            )
-                layer_height = max(layer_height, location_top + location_block["height"])
-            self._layer_bounds[layer] = QRectF(
-                column_lefts[layer],
-                0.0,
-                column_widths[layer],
-                max(self.CARD_H, layer_height),
+            layer_rows[layer] = room_rows
+            layer_widths[layer] = (
+                sum(room_widths) + room_gap * max(0, len(room_widths) - 1)
+            )
+            layer_heights[layer] = max(
+                (self._node_card_height(node_id) for node_id in node_ids),
+                default=self.CARD_H,
             )
 
-        pseudo_by_layer: Dict[int, List[str]] = defaultdict(list)
-        for node_id in pseudo_ids:
-            pseudo_by_layer[self._topology_layer(node_id)].append(node_id)
-        for layer, node_ids in pseudo_by_layer.items():
-            left = column_lefts.get(layer, cursor_x)
-            for index, node_id in enumerate(node_ids):
-                positions[node_id] = QPointF(
-                    left, index * (self.CARD_H + pseudo_gap_y)
-                )
+        widest_layer = max(layer_widths.values(), default=self.CARD_W)
+        layer_top: Dict[int, float] = {}
+        cursor_y = 0.0
+        for layer in sorted(by_layer):
+            layer_top[layer] = cursor_y
+            cursor_y += layer_heights[layer] + tier_gap
+
+        for layer in sorted(by_layer):
+            x = (widest_layer - layer_widths[layer]) / 2.0
+            room_rows = layer_rows[layer]
+            for room_index, ordered_room in enumerate(room_rows):
+                if room_index:
+                    x += room_gap
+                previous_rack = None
+                for node_index, node_id in enumerate(ordered_room):
+                    _floor, _location, rack = layout_group_key(node_id)
+                    if node_index:
+                        x += rack_gap if rack != previous_rack else card_gap
+                    positions[node_id] = QPointF(x, layer_top[layer])
+                    x += self.CARD_W
+                    previous_rack = rack
+
+            node_rects = [
+                self._card_rect(node_id, positions)
+                for node_id in by_layer[layer]
+                if node_id in positions
+            ]
+            if node_rects:
+                bounds = node_rects[0]
+                for rect in node_rects[1:]:
+                    bounds = bounds.united(rect)
+                self._layer_bounds[layer] = bounds
 
     def _stack_same_rack_logical_stacks(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         grouped: Dict[Tuple[str, Tuple[int, str, str]], List[str]] = defaultdict(list)
@@ -6871,36 +8065,21 @@ class NetworkTopologyDialog(QDialog):
                 self._add_link(parent_id, child_id, positions, edge, client_link=child_id.startswith("client::"))
 
         if self.show_redundant_check.isChecked() and self.rack_focus is None and self.switch_port_focus is None:
-            # Standby links from the same upstream device share one dedicated
-            # vertical riser, then branch horizontally to their separate card
-            # connection positions.  This retains distinct primary/failover
-            # terminations without drawing one full-height orange line per OLT.
-            failover_groups: Dict[
-                Tuple[str, int, int],
-                List[Tuple[str, str, TopologyEdge]],
-            ] = defaultdict(list)
+            # Route peer, active/active and failover paths with the same tiered
+            # geometry as the primary tree.  Their individual edge semantics
+            # determine solid/dashed styling, so no path is collapsed into the
+            # old shared side riser.
             for edge in visible_cross_edges:
                 if edge.source_id not in positions or edge.target_id not in positions:
                     continue
                 source_id, target_id = self._cross_link_origin_target(edge)
-                if self._edge_is_failover(edge) and _text(edge.medium).lower() == "fibre":
-                    failover_groups[
-                        self._failover_riser_key(edge, source_id, target_id)
-                    ].append((source_id, target_id, edge))
-                else:
-                    self._add_link(source_id, target_id, positions, edge, cross_link=True)
-            for rows in failover_groups.values():
-                if len(rows) > 1:
-                    self._add_shared_failover_trunk(rows, positions)
-                elif rows:
-                    source_id, target_id, edge = rows[0]
-                    self._add_link(
-                        source_id,
-                        target_id,
-                        positions,
-                        edge,
-                        cross_link=True,
-                    )
+                self._add_link(
+                    source_id,
+                    target_id,
+                    positions,
+                    edge,
+                    cross_link=True,
+                )
 
         if self.switch_port_focus is not None:
             switch_id = _text(self.switch_port_focus)
@@ -7177,27 +8356,88 @@ class NetworkTopologyDialog(QDialog):
             return False
 
         path = QPainterPath(start)
-        dx = end.x() - start.x()
-        dy = end.y() - start.y()
-        if abs(dx) < 160.0:
-            # Devices in the same cabinet are normally stacked vertically.
-            # Bow patch leads to the right of the faces so the cable remains
-            # visible without obscuring port labels or rack-unit numbers.
-            bow = max(32.0, min(115.0, abs(dy) * 0.22 + 28.0))
-            control_x = max(start.x(), end.x()) + bow
-            path.cubicTo(
-                QPointF(control_x, start.y()),
-                QPointF(control_x, end.y()),
-                end,
+        source_node = self.model.nodes.get(_text(source_id))
+        target_node = self.model.nodes.get(_text(target_id))
+        source_rack = (
+            _text(source_node.instance.get("rack_name"))
+            if source_node is not None
+            else ""
+        )
+        target_rack = (
+            _text(target_node.instance.get("rack_name"))
+            if target_node is not None
+            else ""
+        )
+        rack_names = (
+            self._rack_names_for_location(
+                self.rack_focus[0], self.rack_focus[1]
             )
+            if self.rack_focus is not None
+            else []
+        )
+        if self.rack_focus is not None and self.rack_focus[2] != "__all__":
+            rack_names = [self.rack_focus[2]]
+
+        def channel_positions(rack_name: str) -> Tuple[float, float]:
+            try:
+                rack_index = rack_names.index(rack_name)
+            except ValueError:
+                rack_index = 0
+            rack_left = (
+                self.RACK_LEFT_START
+                + rack_index * (self.RACK_WIDTH + self.RACK_GAP)
+            )
+            # These lanes sit inside the two narrow vertical cable-management
+            # channels of the rack frame, outside the usable 19-inch face.
+            return (
+                rack_left + 8.0,
+                rack_left + self.RACK_WIDTH - 8.0,
+            )
+
+        source_left, source_right = channel_positions(source_rack)
+        target_left, target_right = channel_positions(target_rack)
+        lane_seed = sum(
+            ord(character)
+            for character in (
+                _text(source_id)
+                + _text(source_port)
+                + _text(target_id)
+                + _text(target_port)
+            )
+        )
+        lane_offset = (lane_seed % 5 - 2) * 1.4
+
+        if source_rack and source_rack == target_rack:
+            left_cost = abs(start.x() - source_left) + abs(
+                end.x() - target_left
+            )
+            right_cost = abs(start.x() - source_right) + abs(
+                end.x() - target_right
+            )
+            channel_x = (
+                source_left + lane_offset
+                if left_cost < right_cost
+                else source_right + lane_offset
+            )
+            path.lineTo(QPointF(channel_x, start.y()))
+            path.lineTo(QPointF(channel_x, end.y()))
+            path.lineTo(end)
         else:
-            # Between cabinets, use a shallow horizontal S-curve.
-            mid_x = (start.x() + end.x()) / 2.0
-            path.cubicTo(
-                QPointF(mid_x, start.y()),
-                QPointF(mid_x, end.y()),
-                end,
-            )
+            source_before_target = start.x() <= end.x()
+            source_channel = (
+                source_right if source_before_target else source_left
+            ) + lane_offset
+            target_channel = (
+                target_left if source_before_target else target_right
+            ) + lane_offset
+            # Cross-cabinet leads stay in each rack's side channel and use the
+            # overhead management route between cabinets.
+            bridge_y = self.RACK_TOP - 24.0 - (lane_seed % 5) * 4.0
+            path.lineTo(QPointF(source_channel, start.y()))
+            path.lineTo(QPointF(source_channel, bridge_y))
+            path.lineTo(QPointF(target_channel, bridge_y))
+            path.lineTo(QPointF(target_channel, end.y()))
+            path.lineTo(end)
 
         fibre = _text(medium).lower() in {"fibre", "fiber", "optical"}
         colour = QColor("#65c7ff" if fibre else "#f0b35a")
@@ -7219,11 +8459,11 @@ class NetworkTopologyDialog(QDialog):
         return True
 
     def _add_rack_patch_connections(self) -> None:
-        """Draw patch leads and direct patch-panel links in rack view.
+        """Draw patch leads through side channels in rack view.
 
-        Patch panels remain omitted from the logical topology hierarchy, but
-        their physical rack-view relationships are shown between the actual
-        front-panel sockets.
+        Explicit patch leads are shown for active-to-active and passive patch
+        relationships. Imported direct patch-panel connections are included as
+        a fallback when no separate lead record exists.
         """
         if self.rack_focus is None or self.switch_port_focus is not None:
             return
@@ -7239,8 +8479,6 @@ class NetworkTopologyDialog(QDialog):
             if not source_id or not target_id or source_id == target_id:
                 return
             if source_id not in self.node_items or target_id not in self.node_items:
-                return
-            if not (self._is_patch_panel_node(source_id) or self._is_patch_panel_node(target_id)):
                 return
             forward = (source_id, source_port.casefold(), target_id, target_port.casefold())
             reverse = (target_id, target_port.casefold(), source_id, source_port.casefold())
@@ -7574,11 +8812,20 @@ class NetworkTopologyDialog(QDialog):
         self.scene.addItem(room_title)
 
     def _add_location_groups(self, visible_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
+        # Enclose every real item assigned to a comms room, not only devices
+        # that expose a switch-port drill-down.  Core, routing, security and
+        # shared support equipment therefore remain inside the same room box
+        # as their access equipment in the tiered topology.
         rack_groups: Dict[Tuple[int, str, str], List[str]] = defaultdict(list)
         for node_id in visible_ids:
-            key = self._switch_group_key(node_id)
-            if key != (0, "", ""):
-                rack_groups[key].append(node_id)
+            room_key = self._room_group_key(node_id)
+            node = self._node_for(node_id)
+            if room_key == (0, "") or node is None:
+                continue
+            floor, location = room_key
+            rack_groups[
+                (floor, location, _text(node.instance.get("rack_name")))
+            ].append(node_id)
 
         grouped: Dict[Tuple[int, str], Dict[Tuple[int, str, str], List[str]]] = defaultdict(dict)
         for key, node_ids in rack_groups.items():
@@ -7628,8 +8875,15 @@ class NetworkTopologyDialog(QDialog):
             label_text = location or "Unassigned location"
             if rack_names:
                 label_text = f"{label_text} - {len(rack_names)} rack{'s' if len(rack_names) != 1 else ''}"
-            capacity = sum(self._rack_capacity_for_key(key) for key in racks)
-            used = sum(self._rack_used_for_key(key) for key in racks)
+            physical_racks = [
+                key for key in racks if _text(key[2])
+            ]
+            capacity = sum(
+                self._rack_capacity_for_key(key) for key in physical_racks
+            )
+            used = sum(
+                self._rack_used_for_key(key) for key in physical_racks
+            )
             if capacity:
                 label_text = f"{label_text} · {used}/{capacity}U"
             label = QGraphicsSimpleTextItem(label_text)
@@ -7960,6 +9214,29 @@ class NetworkTopologyDialog(QDialog):
 
     def _add_link_rail(self, source_id: str, child_ids: Sequence[str], positions: Dict[str, QPointF]) -> None:
         if source_id not in positions:
+            return
+
+        # Tiered diagrams read most clearly when every physical/logical path
+        # leaves its source independently and fans out below it.  Shared rails
+        # are retained only by specialised legacy/rack drawing paths.
+        if self.rack_focus is None and self.switch_port_focus is None:
+            for child_id in child_ids:
+                if child_id not in positions:
+                    continue
+                edge = (
+                    None
+                    if child_id.startswith("client::")
+                    else self._edge_by_id(
+                        self.visible_parent_edge.get(child_id, "")
+                    )
+                )
+                self._add_link(
+                    source_id,
+                    child_id,
+                    positions,
+                    edge,
+                    client_link=child_id.startswith("client::"),
+                )
             return
 
         source_node = self._node_for(source_id)
@@ -8603,6 +9880,214 @@ class NetworkTopologyDialog(QDialog):
             x += 32.0 if failover else -32.0
         return x
 
+    def _vertical_edge_slot_x(
+        self,
+        node_id: str,
+        positions: Dict[str, QPointF],
+        edge: Optional[TopologyEdge],
+        *,
+        outgoing: bool,
+    ) -> float:
+        """Return a distinct top/bottom connector for visible multi-path links."""
+
+        position = positions[node_id]
+        centre = position.x() + self.CARD_W / 2.0
+        if edge is None:
+            return centre
+        candidates: List[Tuple[int, str]] = []
+        for source_id, target_id, candidate in getattr(
+            self, "_visible_drawn_fibre_edges", []
+        ):
+            matches = source_id == node_id if outgoing else target_id == node_id
+            if not matches:
+                continue
+            candidates.append(
+                (
+                    1 if self._edge_is_failover(candidate) else 0,
+                    _text(candidate.edge_id),
+                )
+            )
+        key = (
+            1 if self._edge_is_failover(edge) else 0,
+            _text(edge.edge_id),
+        )
+        if key not in candidates:
+            candidates.append(key)
+        candidates = sorted(set(candidates))
+        if len(candidates) <= 1:
+            return centre
+        try:
+            index = candidates.index(key)
+        except ValueError:
+            index = 0
+        usable_width = max(24.0, self.CARD_W - 76.0)
+        pitch = min(34.0, usable_width / max(1, len(candidates) - 1))
+        return centre + (index - (len(candidates) - 1) / 2.0) * pitch
+
+    @staticmethod
+    def _parallel_member_count(edge: Optional[TopologyEdge]) -> int:
+        if edge is None or not isinstance(edge.connection, dict):
+            return 1
+        return max(
+            1,
+            _int(edge.connection.get("link_aggregation_member_count"), 1),
+            _int(edge.connection.get("parallel_link_count"), 1),
+        )
+
+    def _add_vertical_layer_link(
+        self,
+        source_id: str,
+        target_id: str,
+        positions: Dict[str, QPointF],
+        edge: Optional[TopologyEdge],
+        *,
+        cross_link: bool = False,
+        client_link: bool = False,
+    ) -> None:
+        """Draw one top-down tier connection, including all path variants."""
+
+        source_pos = positions[source_id]
+        target_pos = positions[target_id]
+        source_height = self._node_card_height(source_id)
+        target_height = self._node_card_height(target_id)
+        source_layer = self._topology_layer(source_id)
+        target_layer = self._topology_layer(target_id)
+        failover = self._edge_is_failover(edge)
+        medium = edge.medium if edge else ("virtual" if client_link else "copper")
+        colour = (
+            self._edge_colour(edge, medium)
+            if edge is not None
+            else self._link_colour(medium)
+        )
+        traced = bool(
+            edge
+            and (
+                edge.edge_id in self.trace_connection_ids
+                or _text(
+                    edge.connection.get("parent_logical_connection_id")
+                )
+                in self.trace_connection_ids
+            )
+        )
+        width = 3.4 if traced else (1.3 if client_link else 2.0)
+        member_count = min(4, self._parallel_member_count(edge))
+
+        visible_pair_edges = sorted(
+            {
+                _text(candidate.edge_id)
+                for from_id, to_id, candidate in getattr(
+                    self, "_visible_drawn_fibre_edges", []
+                )
+                if {from_id, to_id} == {source_id, target_id}
+            }
+        )
+        edge_id = _text(edge.edge_id) if edge is not None else ""
+        try:
+            pair_lane = visible_pair_edges.index(edge_id)
+        except ValueError:
+            pair_lane = 0
+        pair_shift = (
+            pair_lane - (len(visible_pair_edges) - 1) / 2.0
+        ) * 24.0
+
+        source_slot_x = self._vertical_edge_slot_x(
+            source_id, positions, edge, outgoing=True
+        )
+        target_slot_x = self._vertical_edge_slot_x(
+            target_id, positions, edge, outgoing=False
+        )
+        stroke_offsets = [
+            (index - (member_count - 1) / 2.0) * 7.0
+            for index in range(member_count)
+        ]
+        label_point: Optional[QPointF] = None
+
+        for stroke_offset in stroke_offsets:
+            if source_layer == target_layer:
+                source_centre_y = source_pos.y() + source_height / 2.0
+                target_centre_y = target_pos.y() + target_height / 2.0
+                if source_pos.x() <= target_pos.x():
+                    start = QPointF(
+                        source_pos.x() + self.CARD_W,
+                        source_centre_y + stroke_offset,
+                    )
+                    end = QPointF(
+                        target_pos.x(),
+                        target_centre_y + stroke_offset,
+                    )
+                else:
+                    start = QPointF(
+                        source_pos.x(),
+                        source_centre_y + stroke_offset,
+                    )
+                    end = QPointF(
+                        target_pos.x() + self.CARD_W,
+                        target_centre_y + stroke_offset,
+                    )
+                route_y = (
+                    min(source_pos.y(), target_pos.y())
+                    - 54.0
+                    - abs(pair_shift)
+                )
+                path = QPainterPath(start)
+                if abs(start.y() - end.y()) < 1.0:
+                    path.lineTo(end)
+                    label_point = QPointF(
+                        (start.x() + end.x()) / 2.0,
+                        start.y() + 10.0,
+                    )
+                else:
+                    path.lineTo(QPointF(start.x(), route_y))
+                    path.lineTo(QPointF(end.x(), route_y))
+                    path.lineTo(end)
+                    label_point = QPointF(
+                        (start.x() + end.x()) / 2.0,
+                        route_y,
+                    )
+            else:
+                source_above = source_pos.y() <= target_pos.y()
+                start = QPointF(
+                    source_slot_x + stroke_offset,
+                    source_pos.y() + source_height
+                    if source_above
+                    else source_pos.y(),
+                )
+                end = QPointF(
+                    target_slot_x + stroke_offset,
+                    target_pos.y()
+                    if source_above
+                    else target_pos.y() + target_height,
+                )
+                route_y = (start.y() + end.y()) / 2.0 + pair_shift
+                path = QPainterPath(start)
+                path.lineTo(QPointF(start.x(), route_y))
+                path.lineTo(QPointF(end.x(), route_y))
+                path.lineTo(end)
+                label_point = QPointF(
+                    (start.x() + end.x()) / 2.0,
+                    route_y,
+                )
+
+            pen = QPen(colour, width)
+            if failover or client_link:
+                pen.setStyle(Qt.DashLine)
+            path_item = InteractiveLinkItem(
+                path,
+                edge.edge_id if edge else "",
+                self._edge_context_menu,
+            )
+            path_item.setPen(pen)
+            path_item.setZValue(-0.8 if failover else -1.0)
+            self.scene.addItem(path_item)
+
+        if (
+            edge
+            and self.show_link_labels_check.isChecked()
+            and not client_link
+            and label_point is not None
+        ):
+            self._add_link_label(edge.label, colour, label_point, edge)
+
     def _add_link(
         self,
         source_id: str,
@@ -8617,6 +10102,16 @@ class NetworkTopologyDialog(QDialog):
         # example switch ports inside a front-panel item). Do not attempt to
         # route a standalone scene link unless both endpoints were laid out.
         if source_id not in positions or target_id not in positions:
+            return
+        if self.rack_focus is None and self.switch_port_focus is None:
+            self._add_vertical_layer_link(
+                source_id,
+                target_id,
+                positions,
+                edge,
+                cross_link=cross_link,
+                client_link=client_link,
+            )
             return
         source_pos = positions[source_id]
         target_pos = positions[target_id]
@@ -9080,7 +10575,7 @@ class NetworkTopologyDialog(QDialog):
             suggested_id=next_network_id(self.data.get("network_asset_instances", []), "NI"),
             default_auto_connect=bool(
                 self.data.get("network_settings", {}).get(
-                    "auto_connect_new_manual_devices", True
+                    "auto_connect_new_manual_devices", False
                 )
             ),
             racks=rack_selection_records(self.data),
@@ -9643,6 +11138,7 @@ class NetworkTopologyDialog(QDialog):
         index = next((i for i, row in enumerate(rows) if _text(row.get("id")) == connection_id), -1)
         if index < 0:
             return
+        original = deepcopy(rows[index])
         dialog = NetworkConnectionEditorDialog(
             self, rows[index], self.data.get("network_asset_instances", []), self.data.get("network_vlans", []),
             list(self.data.get("route_profiles", {}).keys()), connection_id,
@@ -9650,18 +11146,234 @@ class NetworkTopologyDialog(QDialog):
         )
         if dialog.exec() == QDialog.Accepted and dialog.result:
             rows[index] = dialog.result
+            self._update_connection_dependants(original, dialog.result)
             synchronise_network_connection_routes(
                 self.data, [_text(dialog.result.get("id"))], force=True
             )
+            if {
+                _text(original.get("medium")).lower(),
+                _text(dialog.result.get("medium")).lower(),
+            }.intersection({"fibre", "fiber", "optical"}):
+                ensure_physical_fibre_for_design(
+                    self.data, replace_auto=True
+                )
+            calculate_optical_budgets(self.data)
             self._commit_changes()
+
+    @staticmethod
+    def _connection_endpoint_signature(connection: dict) -> tuple:
+        return (
+            _text(connection.get("from_instance_id")),
+            _text(connection.get("from_port")),
+            _text(connection.get("to_instance_id")),
+            _text(connection.get("to_port")),
+            _text(connection.get("medium")).lower(),
+            max(0, _int(connection.get("link_speed_mbps"))),
+        )
+
+    def _update_connection_dependants(
+        self, original: dict, updated: dict
+    ) -> None:
+        """Keep editable connection records aligned or discard stale optics."""
+
+        old_id = _text(original.get("id"))
+        new_id = _text(updated.get("id")) or old_id
+        changed_endpoints = (
+            self._connection_endpoint_signature(original)
+            != self._connection_endpoint_signature(updated)
+        )
+        old_from = _text(original.get("from_instance_id"))
+        old_to = _text(original.get("to_instance_id"))
+        new_from = _text(updated.get("from_instance_id"))
+        new_to = _text(updated.get("to_instance_id"))
+
+        for lead in self.data.get("network_patch_leads", []):
+            if _text(lead.get("connection_id")) != old_id:
+                continue
+            lead["connection_id"] = new_id
+            local_id = _text(lead.get("instance_id"))
+            if local_id == old_from:
+                lead.update(
+                    {
+                        "instance_id": new_from,
+                        "port": _text(updated.get("from_port")),
+                        "peer_instance_id": new_to,
+                        "peer_port": _text(updated.get("to_port")),
+                    }
+                )
+            elif local_id == old_to:
+                lead.update(
+                    {
+                        "instance_id": new_to,
+                        "port": _text(updated.get("to_port")),
+                        "peer_instance_id": new_from,
+                        "peer_port": _text(updated.get("from_port")),
+                    }
+                )
+
+        removed_module_ids: Set[str] = set()
+        if changed_endpoints:
+            removed_module_ids = {
+                _text(module.get("id"))
+                for module in self.data.get("network_optic_modules", [])
+                if _text(module.get("connection_id")) == old_id
+                and _text(module.get("id"))
+            }
+            self.data["network_optic_modules"] = [
+                module
+                for module in self.data.get("network_optic_modules", [])
+                if _text(module.get("connection_id")) != old_id
+            ]
+            updated["from_optic_module_id"] = ""
+            updated["to_optic_module_id"] = ""
+        else:
+            for module in self.data.get("network_optic_modules", []):
+                if _text(module.get("connection_id")) == old_id:
+                    module["connection_id"] = new_id
+
+        self.data["network_optical_paths"] = [
+            path
+            for path in self.data.get("network_optical_paths", [])
+            if not (
+                old_id
+                in {
+                    _text(value)
+                    for value in path.get("connection_ids", [])
+                }
+                or _text(path.get("source_optic_module_id"))
+                in removed_module_ids
+                or _text(path.get("destination_optic_module_id"))
+                in removed_module_ids
+            )
+        ]
+        if old_id != new_id:
+            for cable in self.data.get("network_fibre_cables", []):
+                cable["logical_connection_ids"] = [
+                    new_id if _text(value) == old_id else value
+                    for value in cable.get("logical_connection_ids", [])
+                ]
+                for core in cable.get("cores", []):
+                    if _text(core.get("circuit_id")) == old_id:
+                        core["circuit_id"] = new_id
+                for designation in cable.get("core_designations", []):
+                    if _text(designation.get("circuit_id")) == old_id:
+                        designation["circuit_id"] = new_id
+            for splice in self.data.get("network_fibre_splices", []):
+                if _text(splice.get("circuit_id")) == old_id:
+                    splice["circuit_id"] = new_id
+
+    def _remove_connection_records(
+        self, requested_connection_ids: Iterable[str]
+    ) -> Set[str]:
+        """Remove logical links and all records that are owned by those links."""
+
+        remove_ids = {
+            _text(value) for value in requested_connection_ids if _text(value)
+        }
+        if not remove_ids:
+            return set()
+        changed = True
+        while changed:
+            changed = False
+            for connection in self.data.get("network_connections", []):
+                connection_id = _text(connection.get("id"))
+                parent_id = _text(
+                    connection.get("parent_logical_connection_id")
+                )
+                if parent_id in remove_ids and connection_id not in remove_ids:
+                    remove_ids.add(connection_id)
+                    changed = True
+
+        removed_module_ids = {
+            _text(module.get("id"))
+            for module in self.data.get("network_optic_modules", [])
+            if _text(module.get("connection_id")) in remove_ids
+            and _text(module.get("id"))
+        }
+        self.data["network_connections"] = [
+            row
+            for row in self.data.get("network_connections", [])
+            if _text(row.get("id")) not in remove_ids
+        ]
+        self.data["network_patch_leads"] = [
+            row
+            for row in self.data.get("network_patch_leads", [])
+            if _text(row.get("connection_id")) not in remove_ids
+        ]
+        self.data["network_optic_modules"] = [
+            row
+            for row in self.data.get("network_optic_modules", [])
+            if _text(row.get("connection_id")) not in remove_ids
+        ]
+        self.data["network_optical_paths"] = [
+            row
+            for row in self.data.get("network_optical_paths", [])
+            if not (
+                remove_ids.intersection(
+                    {
+                        _text(value)
+                        for value in row.get("connection_ids", [])
+                        if _text(value)
+                    }
+                )
+                or _text(row.get("source_optic_module_id"))
+                in removed_module_ids
+                or _text(row.get("destination_optic_module_id"))
+                in removed_module_ids
+            )
+        ]
+        self.data["network_endpoint_assignments"] = [
+            row
+            for row in self.data.get("network_endpoint_assignments", [])
+            if _text(row.get("connection_id")) not in remove_ids
+        ]
+        self.data["network_fibre_splices"] = [
+            row
+            for row in self.data.get("network_fibre_splices", [])
+            if _text(row.get("circuit_id")) not in remove_ids
+        ]
+
+        retained_cables = []
+        for cable in self.data.get("network_fibre_cables", []):
+            cable["logical_connection_ids"] = [
+                value
+                for value in cable.get("logical_connection_ids", [])
+                if _text(value) not in remove_ids
+            ]
+            cable["core_designations"] = [
+                row
+                for row in cable.get("core_designations", [])
+                if _text(row.get("circuit_id")) not in remove_ids
+            ]
+            for core in cable.get("cores", []):
+                if _text(core.get("circuit_id")) in remove_ids:
+                    core["circuit_id"] = ""
+                    core["status"] = "dark"
+            if (
+                bool(cable.get("auto_generated"))
+                and not cable.get("logical_connection_ids")
+            ):
+                continue
+            retained_cables.append(cable)
+        self.data["network_fibre_cables"] = retained_cables
+
+        for instance in self.data.get("network_asset_instances", []):
+            for cassette in instance.get("fibre_cassettes", []):
+                if not isinstance(cassette, dict):
+                    continue
+                cassette["cable_ids"] = [
+                    value
+                    for value in cassette.get("cable_ids", [])
+                    if _text(value) not in remove_ids
+                ]
+        ensure_physical_fibre_for_design(self.data, replace_auto=True)
+        calculate_optical_budgets(self.data)
+        return remove_ids
 
     def _delete_connection(self, connection_id: str) -> None:
         if QMessageBox.question(self, "Delete network connection", f"Delete {connection_id} and its patch leads?") != QMessageBox.Yes:
             return
-        self.data["network_connections"] = [row for row in self.data.get("network_connections", []) if _text(row.get("id")) != connection_id]
-        self.data["network_patch_leads"] = [row for row in self.data.get("network_patch_leads", []) if _text(row.get("connection_id")) != connection_id]
-        for cable in self.data.get("network_fibre_cables", []):
-            cable["logical_connection_ids"] = [value for value in cable.get("logical_connection_ids", []) if _text(value) != connection_id]
+        self._remove_connection_records([connection_id])
         self._commit_changes()
 
     def _trace_circuit(self, connection_id: str) -> None:
@@ -10153,13 +11865,46 @@ class NetworkTopologyDialog(QDialog):
         if port_node is None:
             return
         instance_id = _text(port_node.details.get("parent_instance_id")); port = _text(port_node.details.get("port_name"))
-        leads = [row for row in self.data.get("network_patch_leads", []) if _text(row.get("instance_id")) == instance_id and _text(row.get("port")) == port]
+        leads = [
+            row
+            for row in self.data.get("network_patch_leads", [])
+            if (
+                _text(row.get("instance_id")) == instance_id
+                and _text(row.get("port")) == port
+            )
+            or (
+                _text(row.get("peer_instance_id")) == instance_id
+                and _text(row.get("peer_port")) == port
+            )
+        ]
         connections = [row for row in self.data.get("network_connections", []) if (_text(row.get("from_instance_id")) == instance_id and _text(row.get("from_port")) == port) or (_text(row.get("to_instance_id")) == instance_id and _text(row.get("to_port")) == port)]
+        assignments = [
+            row
+            for row in self.data.get("network_endpoint_assignments", [])
+            if _text(row.get("network_instance_id")) == instance_id
+            and _text(row.get("network_port")) == port
+        ]
+        occupied = bool(connections or assignments or leads)
         menu = QMenu(self)
         add_patch = menu.addAction("Add patch cable")
         edit_patch = menu.addAction("Edit patch cable") if leads else None
         remove_patch = menu.addAction("Remove patch cable") if leads else None
         add_connection = menu.addAction("Add logical connection from this port")
+        add_connection.setEnabled(not occupied)
+        change_actions = {}
+        if connections:
+            menu.addSeparator()
+            for connection in connections:
+                connection_id = _text(connection.get("id"))
+                label = (
+                    "Change connection"
+                    if len(connections) == 1
+                    else f"Change connection {connection_id}"
+                )
+                change_actions[menu.addAction(label)] = connection_id
+        disconnect = (
+            menu.addAction("Disconnect this port") if occupied else None
+        )
         trace = menu.addAction("Trace circuit") if connections else None
         action = menu.exec(screen_pos)
         if action == add_patch:
@@ -10177,8 +11922,98 @@ class NetworkTopologyDialog(QDialog):
             self._commit_changes()
         elif action == add_connection:
             self._start_add_link(default_from=instance_id, default_port=port)
+        elif action in change_actions:
+            self._edit_connection(change_actions[action])
+        elif disconnect is not None and action == disconnect:
+            self._disconnect_port(instance_id, port)
         elif trace is not None and action == trace:
             self._trace_circuit(_text(connections[0].get("id")))
+
+    def _disconnect_port(
+        self, instance_id: str, port: str, *, confirm: bool = True
+    ) -> bool:
+        """Disconnect every record that physically occupies one device port."""
+
+        instance_id = _text(instance_id)
+        port = _text(port)
+        connections = [
+            row
+            for row in self.data.get("network_connections", [])
+            if (
+                _text(row.get("from_instance_id")) == instance_id
+                and _text(row.get("from_port")) == port
+            )
+            or (
+                _text(row.get("to_instance_id")) == instance_id
+                and _text(row.get("to_port")) == port
+            )
+        ]
+        assignments = [
+            row
+            for row in self.data.get("network_endpoint_assignments", [])
+            if _text(row.get("network_instance_id")) == instance_id
+            and _text(row.get("network_port")) == port
+        ]
+        leads = [
+            row
+            for row in self.data.get("network_patch_leads", [])
+            if (
+                _text(row.get("instance_id")) == instance_id
+                and _text(row.get("port")) == port
+            )
+            or (
+                _text(row.get("peer_instance_id")) == instance_id
+                and _text(row.get("peer_port")) == port
+            )
+        ]
+        if not (connections or assignments or leads):
+            return False
+        if confirm and (
+            QMessageBox.question(
+                self,
+                "Disconnect network port",
+                (
+                    f"Disconnect {instance_id} port {port}?\n\n"
+                    f"This removes {len(connections)} logical connection(s), "
+                    f"{len(assignments)} endpoint assignment(s) and "
+                    f"{len(leads)} linked patch-lead record(s)."
+                ),
+            )
+            != QMessageBox.Yes
+        ):
+            return False
+
+        assignment_ids = {
+            _text(row.get("id"))
+            for row in assignments
+            if _text(row.get("id"))
+        }
+        lead_ids = {
+            _text(row.get("id")) for row in leads if _text(row.get("id"))
+        }
+        self.data["network_endpoint_assignments"] = [
+            row
+            for row in self.data.get("network_endpoint_assignments", [])
+            if row not in assignments
+        ]
+        self.data["network_patch_leads"] = [
+            row
+            for row in self.data.get("network_patch_leads", [])
+            if (
+                _text(row.get("id")) not in lead_ids
+                and _text(row.get("assignment_id")) not in assignment_ids
+            )
+        ]
+        removed_connections = self._remove_connection_records(
+            _text(row.get("id")) for row in connections
+        )
+        self.status_label.setText(
+            f"Disconnected {instance_id} port {port}: "
+            f"{len(removed_connections)} link(s), "
+            f"{len(assignments)} endpoint assignment(s)."
+        )
+        self._commit_changes()
+        return True
 
     def _apply_search_highlight(self, text: str) -> None:
         query = _text(text).lower()

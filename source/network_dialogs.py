@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -98,6 +99,7 @@ from network_auto_planner import (
     generate_network_design,
 )
 from network_services import cable_core_statistics, ensure_physical_fibre_for_design, generate_ip_address_plan, set_core_status_from_splices
+from network_optic_review import installed_optic_module_review_rows
 from network_fibre_dialogs import (
     ExternalNetworkEditorDialog, FibreCableEditorDialog, FibreNodeEditorDialog,
     FibreSpliceEditorDialog, PatchLeadEditorDialog,
@@ -117,6 +119,7 @@ from network_schema import (
     normalise_manufacturer_preferences,
     normalise_port_speeds,
     network_asset_group,
+    optic_form_factors_for_cage,
     port_speed_label,
 )
 from asset_library_io import (
@@ -310,6 +313,203 @@ def _expanded_instance_ports(instance: dict, asset: dict) -> List[dict]:
     if members > 1:
         result = [{**row, "name": f"{member}/{row['name']}"} for member in range(1, members + 1) for row in result]
     return result
+
+
+class PatchPanelCassetteEditorDialog(QDialog):
+    """Edit one fitted cassette in an installed modular patch panel."""
+
+    def __init__(
+        self,
+        parent=None,
+        cassette: Optional[dict] = None,
+        *,
+        available_positions: Sequence[int] = (),
+        suggested_position: int = 1,
+        default_front_connector: str = "lc_duplex",
+        default_termination_mode: str = "spliced",
+        default_rear_connector: str = "mpo-24",
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(
+            "Modify Patch Panel Cassette" if cassette else "Add Patch Panel Cassette"
+        )
+        self.cassette = deepcopy(cassette or {})
+        self.result: Optional[dict] = None
+        self.resize(500, 330)
+
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            "Cassette positions are physical slots in the modular panel. "
+            "Removing an unused cassette returns its position to a blank space."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        form = QFormLayout()
+
+        self.position_combo = QComboBox()
+        positions = sorted(
+            {
+                max(1, int(value))
+                for value in available_positions
+                if int(value) > 0
+            }
+        )
+        current_position = max(
+            1, int(self.cassette.get("position", suggested_position) or 1)
+        )
+        if current_position not in positions:
+            positions.append(current_position)
+            positions.sort()
+        for position in positions:
+            self.position_combo.addItem(f"Cassette slot {position}", position)
+        position_index = self.position_combo.findData(current_position)
+        if position_index >= 0:
+            self.position_combo.setCurrentIndex(position_index)
+        self.position_combo.setEnabled(not bool(cassette))
+        form.addRow("Panel position", self.position_combo)
+
+        self.front_combo = QComboBox()
+        self.front_combo.addItem("12 duplex LC connectors", "lc_duplex")
+        self.front_combo.addItem("12 simplex SC connectors", "sc_simplex")
+        self.front_combo.addItem("12 duplex SC connectors", "sc_duplex")
+        front = (
+            _text(self.cassette.get("front_connector")).lower()
+            or _text(default_front_connector).lower()
+            or "lc_duplex"
+        )
+        front_index = self.front_combo.findData(front)
+        self.front_combo.setCurrentIndex(max(0, front_index))
+        cassette_in_use = bool(
+            max(0, int(self.cassette.get("used_front_connectors", 0) or 0))
+            or max(0, int(self.cassette.get("used_fibres", 0) or 0))
+            or any(
+                _text(value) for value in self.cassette.get("cable_ids", [])
+            )
+            or any(
+                _text(value)
+                for value in self.cassette.get(
+                    "associated_instance_ids", []
+                )
+            )
+        )
+        self.front_combo.setEnabled(not cassette_in_use)
+        if cassette_in_use:
+            self.front_combo.setToolTip(
+                "Disconnect or reassign this cassette before changing its "
+                "physical front connector type."
+            )
+        form.addRow("Front connectors", self.front_combo)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Spliced / pigtail cassette", "spliced")
+        self.mode_combo.addItem(
+            "Connectorised MPO/MTP breakout cassette", "connectorised"
+        )
+        mode = (
+            _text(self.cassette.get("termination_mode")).lower()
+            or _text(default_termination_mode).lower()
+            or "spliced"
+        )
+        mode_index = self.mode_combo.findData(mode)
+        self.mode_combo.setCurrentIndex(max(0, mode_index))
+        form.addRow("Termination", self.mode_combo)
+
+        self.rear_combo = QComboBox()
+        self.rear_combo.addItem("MPO-12", "mpo-12")
+        self.rear_combo.addItem("MTP-12", "mtp-12")
+        self.rear_combo.addItem("MPO-24", "mpo-24")
+        self.rear_combo.addItem("MTP-24", "mtp-24")
+        rear = (
+            _text(self.cassette.get("rear_connector")).lower()
+            or _text(default_rear_connector).lower()
+            or "mpo-24"
+        )
+        rear_index = self.rear_combo.findData(rear)
+        self.rear_combo.setCurrentIndex(max(0, rear_index))
+        form.addRow("Rear interface", self.rear_combo)
+
+        self.rear_count_spin = QSpinBox()
+        self.rear_count_spin.setRange(1, 4)
+        self.rear_count_spin.setValue(
+            max(1, min(4, int(self.cassette.get("rear_connector_count", 1) or 1)))
+        )
+        form.addRow("Rear connector quantity", self.rear_count_spin)
+
+        usage = (
+            f"{max(0, int(self.cassette.get('used_front_connectors', 0) or 0))}/12 "
+            "front positions; "
+            f"{max(0, int(self.cassette.get('used_fibres', 0) or 0))} fibres"
+        )
+        form.addRow("Current utilisation", QLabel(usage))
+        self.notes_edit = QTextEdit(_text(self.cassette.get("notes")))
+        self.notes_edit.setMaximumHeight(80)
+        form.addRow("Notes", self.notes_edit)
+        layout.addLayout(form)
+
+        self.mode_combo.currentIndexChanged.connect(self._update_mode_fields)
+        self._update_mode_fields()
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _update_mode_fields(self) -> None:
+        connectorised = _text(self.mode_combo.currentData()) == "connectorised"
+        self.rear_combo.setEnabled(connectorised)
+        self.rear_count_spin.setEnabled(connectorised)
+
+    def accept(self) -> None:
+        position = int(self.position_combo.currentData() or 0)
+        if position <= 0:
+            QMessageBox.warning(
+                self, "Cassette position required", "Select a cassette slot."
+            )
+            return
+        mode = _text(self.mode_combo.currentData()) or "spliced"
+        self.result = {
+            **self.cassette,
+            "position": position,
+            "installed": True,
+            "front_connector": _text(self.front_combo.currentData())
+            or "lc_duplex",
+            "front_connector_capacity": 12,
+            "termination_mode": mode,
+            "rear_connector": (
+                _text(self.rear_combo.currentData())
+                if mode == "connectorised"
+                else "splice"
+            ),
+            "rear_connector_count": (
+                int(self.rear_count_spin.value())
+                if mode == "connectorised"
+                else 0
+            ),
+            "used_front_connectors": max(
+                0, int(self.cassette.get("used_front_connectors", 0) or 0)
+            ),
+            "used_front_connector_names": list(
+                self.cassette.get("used_front_connector_names", [])
+            )
+            if isinstance(
+                self.cassette.get("used_front_connector_names", []), list
+            )
+            else [],
+            "used_fibres": max(
+                0, int(self.cassette.get("used_fibres", 0) or 0)
+            ),
+            "cable_ids": list(self.cassette.get("cable_ids", []))
+            if isinstance(self.cassette.get("cable_ids", []), list)
+            else [],
+            "associated_instance_ids": list(
+                self.cassette.get("associated_instance_ids", [])
+            )
+            if isinstance(
+                self.cassette.get("associated_instance_ids", []), list
+            )
+            else [],
+            "notes": self.notes_edit.toPlainText().strip(),
+        }
+        super().accept()
 
 
 class NetworkAssetEditorDialog(QDialog):
@@ -1394,7 +1594,7 @@ class NetworkInstanceEditorDialog(QDialog):
         default_floor: int = 0,
         default_x: float = 0.0,
         default_y: float = 0.0,
-        default_auto_connect: bool = True,
+        default_auto_connect: bool = False,
         racks: Optional[Sequence[dict]] = None,
         default_location: str = "",
         default_rack: str = "",
@@ -1408,7 +1608,9 @@ class NetworkInstanceEditorDialog(QDialog):
         self.racks = [row for row in (racks or []) if isinstance(row, dict)]
         self.default_rack = _text(default_rack)
         self.result: Optional[dict] = None
-        self.auto_connect_requested = False
+        self.auto_connect_requested = (
+            bool(default_auto_connect) and not bool(self.instance)
+        )
         self.resize(560, 620)
 
         layout = QVBoxLayout(self)
@@ -1449,15 +1651,22 @@ class NetworkInstanceEditorDialog(QDialog):
         if layer_index >= 0:
             self.network_layer_combo.setCurrentIndex(layer_index)
 
-        self.auto_connect_check = QCheckBox(
-            "Auto-connect this device using the configured topology rules"
+        auto_connect_status = QLabel(
+            (
+                "Enabled globally — this new device will be connected using "
+                "the configured topology rules."
+                if self.auto_connect_requested
+                else (
+                    "Disabled globally — the device will remain unconnected. "
+                    "Use Auto connect from its context menu when required."
+                )
+            )
+            if not self.instance
+            else "Not applied while editing an existing device."
         )
-        self.auto_connect_check.setChecked(
-            bool(default_auto_connect) and not bool(self.instance)
-        )
-        self.auto_connect_check.setToolTip(
-            "Find the nearest valid upstream device, allocate compatible free ports, "
-            "and route the new link along the existing cable graph."
+        auto_connect_status.setWordWrap(True)
+        auto_connect_status.setToolTip(
+            "Change this project-wide option in Network Planner > Settings."
         )
 
         self.location_combo = QComboBox()
@@ -1515,7 +1724,7 @@ class NetworkInstanceEditorDialog(QDialog):
         form.addRow("Instance name", self.name_edit)
         form.addRow("Network asset", self.asset_combo)
         form.addRow("Network layer", self.network_layer_combo)
-        form.addRow("Automatic connection", self.auto_connect_check)
+        form.addRow("Automatic connection", auto_connect_status)
         form.addRow("Location", self.location_combo)
         form.addRow("Floor", self.floor_spin)
         form.addRow("X", self.x_spin)
@@ -1615,7 +1824,6 @@ class NetworkInstanceEditorDialog(QDialog):
             "ups_source": self.ups_source_edit.text().strip(),
             "notes": self.notes_edit.toPlainText().strip(),
         })
-        self.auto_connect_requested = bool(self.auto_connect_check.isChecked())
         super().accept()
 
 
@@ -3707,6 +3915,124 @@ class AutoPlannerSetupWizard(QWizard):
         )
 
 
+class OpticModuleInstallationDialog(QDialog):
+    """Replace one installed optic without changing every copy of its model."""
+
+    def __init__(
+        self,
+        parent,
+        module: dict,
+        optic_assets: Sequence[dict],
+        cage: str = "",
+        connection_speed_mbps: int = 0,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Installed Optic Module")
+        self.module = deepcopy(module)
+        self.result: Optional[dict] = None
+        self.resize(520, 240)
+
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            "Replace only this installed module. To correct manufacturer "
+            "parameters shared by every installed copy, use Edit optic model parameters."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QFormLayout()
+        form.addRow("Switch", QLabel(_text(module.get("_host_label"))))
+        form.addRow("Port", QLabel(_text(module.get("host_port"))))
+        form.addRow("Connection", QLabel(_text(module.get("connection_id"))))
+        form.addRow("Cage", QLabel(cage.upper() or "Unknown"))
+
+        self.model_combo = QComboBox()
+        allowed_forms = set(optic_form_factors_for_cage(cage))
+        for asset in sorted(
+            (row for row in optic_assets if isinstance(row, dict)),
+            key=lambda row: (
+                _text(row.get("name")).casefold(),
+                _text(row.get("id")),
+            ),
+        ):
+            form_factor = _text(asset.get("optic_form_factor")).lower()
+            speeds = normalise_port_speeds(asset.get("supported_speeds_mbps"))
+            compatible = (
+                (not allowed_forms or form_factor in allowed_forms)
+                and (
+                    not connection_speed_mbps
+                    or not speeds
+                    or connection_speed_mbps in speeds
+                )
+            )
+            if not compatible:
+                continue
+            speed_text = ", ".join(port_speed_label(value) for value in speeds)
+            label = (
+                f"{_text(asset.get('name')) or _text(asset.get('id'))} "
+                f"[{form_factor.upper() or 'form unspecified'}"
+                f"{'; ' + speed_text if speed_text else ''}]"
+            )
+            self.model_combo.addItem(label, _text(asset.get("id")))
+        current_index = self.model_combo.findData(_text(module.get("asset_id")))
+        if current_index >= 0:
+            self.model_combo.setCurrentIndex(current_index)
+        form.addRow("Optic model", self.model_combo)
+
+        self.speed_combo = QComboBox()
+        current_speed = max(
+            0,
+            int(module.get("link_speed_mbps", connection_speed_mbps) or 0),
+        )
+        speed_values = (
+            [connection_speed_mbps]
+            if connection_speed_mbps
+            else [speed for speed, _label in NETWORK_PORT_SPEED_OPTIONS]
+        )
+        if current_speed and current_speed not in speed_values:
+            speed_values.append(current_speed)
+        for speed in sorted(set(speed_values)):
+            self.speed_combo.addItem(port_speed_label(speed), speed)
+        speed_index = self.speed_combo.findData(current_speed or connection_speed_mbps)
+        if speed_index >= 0:
+            self.speed_combo.setCurrentIndex(speed_index)
+        if connection_speed_mbps:
+            connection_index = self.speed_combo.findData(connection_speed_mbps)
+            if connection_index >= 0:
+                self.speed_combo.setCurrentIndex(connection_index)
+            self.speed_combo.setEnabled(False)
+            self.speed_combo.setToolTip(
+                "The installed optic rate follows the logical connection. "
+                "Edit the connection to change its link rate."
+            )
+        form.addRow("Installed link rate", self.speed_combo)
+        layout.addLayout(form)
+
+        if self.model_combo.count() == 0:
+            no_match = QLabel(
+                "No optic model in the asset library is compatible with this "
+                "cage and link rate. Add or edit an optical-transceiver model first."
+            )
+            no_match.setWordWrap(True)
+            no_match.setStyleSheet("color: #a33;")
+            layout.addWidget(no_match)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setEnabled(self.model_combo.count() > 0)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:
+        self.result = {
+            **self.module,
+            "asset_id": _text(self.model_combo.currentData()),
+            "link_speed_mbps": int(self.speed_combo.currentData() or 0),
+        }
+        self.result.pop("_host_label", None)
+        super().accept()
+
+
 class NetworkPlannerDialog(QDialog):
     def __init__(self, parent, data: dict, on_save: Callable[[dict], None]):
         super().__init__(parent)
@@ -3957,10 +4283,10 @@ class NetworkPlannerDialog(QDialog):
         )
 
         self.auto_connect_manual_check = QCheckBox(
-            "Auto-connect newly placed manual devices"
+            "Automatically connect manually placed devices (project-wide)"
         )
         self.auto_connect_manual_check.setChecked(
-            bool(settings.get("auto_connect_new_manual_devices", True))
+            bool(settings.get("auto_connect_new_manual_devices", False))
         )
         self.auto_connect_manual_check.setToolTip(
             "Use the configured layer rules, nearest routed upstream device and "
@@ -4399,6 +4725,94 @@ class NetworkPlannerDialog(QDialog):
         self.tabs.addTab(self.endpoint_traffic_tab, "Endpoint Traffic")
 
         self.tabs.addTab(self.instances_tab, "Installed Assets")
+
+        self.optic_modules_tab = QWidget()
+        optic_layout = QVBoxLayout(self.optic_modules_tab)
+        self.optic_modules_notice = QLabel(
+            "Review the transceiver fitted to each switch port. Edit model "
+            "parameters to correct shared manufacturer data, or replace a "
+            "selected installed module without changing other copies."
+        )
+        self.optic_modules_notice.setWordWrap(True)
+        optic_layout.addWidget(self.optic_modules_notice)
+        self.optic_modules_table = QTableWidget(0, 21)
+        self.optic_modules_table.setHorizontalHeaderLabels(
+            [
+                "Status",
+                "Module ID",
+                "Switch",
+                "Port",
+                "Optic model",
+                "Connection",
+                "Side",
+                "Link rate",
+                "Cage / optic",
+                "Connector",
+                "Fibre",
+                "Reach m",
+                "Tx dBm",
+                "Rx sensitivity dBm",
+                "Insertion loss dB",
+                "Wavelength nm",
+                "Peer optic",
+                "Margin dB",
+                "Required dB",
+                "Validation detail",
+                "Optic asset ID",
+            ]
+        )
+        self.optic_modules_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.optic_modules_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.optic_modules_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.optic_modules_table.setAlternatingRowColors(True)
+        optic_header = self.optic_modules_table.horizontalHeader()
+        for column in range(self.optic_modules_table.columnCount()):
+            optic_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        optic_header.setSectionResizeMode(4, QHeaderView.Stretch)
+        optic_header.setSectionResizeMode(19, QHeaderView.Stretch)
+        optic_layout.addWidget(self.optic_modules_table, 1)
+        optic_buttons = QHBoxLayout()
+        self.edit_optic_model_button = QPushButton("Edit optic model parameters...")
+        self.edit_optic_model_button.setToolTip(
+            "Edit form factor, supported rates, connector, fibre standard, "
+            "reach, transmit/receive values, loss and wavelength. Changes "
+            "apply to every installed copy of the selected model."
+        )
+        self.replace_optic_module_button = QPushButton(
+            "Replace selected installed module..."
+        )
+        self.replace_optic_module_button.setToolTip(
+            "Choose a different compatible optic model for only this switch port."
+        )
+        self.validate_optic_pairs_button = QPushButton("Validate optic pairs")
+        self.validate_optic_pairs_button.setToolTip(
+            "Recalculate compatibility and both-direction optical budgets "
+            "against the configured minimum design margin."
+        )
+        self.optical_margin_spin = QDoubleSpinBox()
+        self.optical_margin_spin.setRange(0.0, 30.0)
+        self.optical_margin_spin.setDecimals(3)
+        self.optical_margin_spin.setSuffix(" dB")
+        self.optical_margin_spin.setValue(
+            float(
+                settings.get("physical_fibre_planning", {}).get(
+                    "minimum_optical_margin_db", 3.0
+                )
+                or 0.0
+            )
+        )
+        self.optical_margin_spin.setToolTip(
+            "Minimum calculated end-to-end optical margin required for a pass."
+        )
+        optic_buttons.addWidget(self.edit_optic_model_button)
+        optic_buttons.addWidget(self.replace_optic_module_button)
+        optic_buttons.addStretch(1)
+        optic_buttons.addWidget(QLabel("Required optical margin"))
+        optic_buttons.addWidget(self.optical_margin_spin)
+        optic_buttons.addWidget(self.validate_optic_pairs_button)
+        optic_layout.addLayout(optic_buttons)
+        self.tabs.addTab(self.optic_modules_tab, "Optic Modules")
+
         self.tabs.addTab(self.connections_tab, "Connections")
         self.tabs.addTab(self.patch_leads_tab, "Patch Cables")
         self.tabs.addTab(self.fibre_nodes_tab, "Fibre Nodes")
@@ -4417,6 +4831,7 @@ class NetworkPlannerDialog(QDialog):
             self.assets_tab: "assets",
             self.endpoint_traffic_tab: "endpoint_traffic",
             self.instances_tab: "instances",
+            self.optic_modules_tab: "optic_modules",
             self.connections_tab: "connections",
             self.patch_leads_tab: "patch_leads",
             self.fibre_nodes_tab: "fibre_nodes",
@@ -4455,6 +4870,19 @@ class NetworkPlannerDialog(QDialog):
         self.instances_tab.edit_button.clicked.connect(self.edit_instance)
         self.instances_tab.delete_button.clicked.connect(self.delete_instance)
         self.instances_tab.edit_requested = self.edit_instance
+
+        self.edit_optic_model_button.clicked.connect(
+            self.edit_selected_optic_model
+        )
+        self.replace_optic_module_button.clicked.connect(
+            self.replace_selected_optic_module
+        )
+        self.validate_optic_pairs_button.clicked.connect(
+            self.validate_installed_optic_pairs
+        )
+        self.optic_modules_table.cellDoubleClicked.connect(
+            lambda _row, _column: self.edit_selected_optic_model()
+        )
 
         self.connections_tab.add_button.clicked.connect(self.add_connection)
         self.connections_tab.edit_button.clicked.connect(self.edit_connection)
@@ -4535,6 +4963,9 @@ class NetworkPlannerDialog(QDialog):
             for instance in self._items("network_asset_instances"):
                 if _text(instance.get("asset_id")) == old_id:
                     instance["asset_id"] = new_id
+            for module in self._items("network_optic_modules"):
+                if _text(module.get("asset_id")) == old_id:
+                    module["asset_id"] = new_id
         elif key == "network_asset_instances":
             for connection in self._items("network_connections"):
                 if _text(connection.get("from_instance_id")) == old_id:
@@ -4863,6 +5294,8 @@ class NetworkPlannerDialog(QDialog):
                  item.get("management_ip", "")]
                 for item in self._items("network_asset_instances")
             ])
+        elif key == "optic_modules":
+            self._refresh_optic_modules_table()
         elif key == "connections":
             self.connections_tab.set_rows([
                 [item.get("id", ""), item.get("from_instance_id", ""), item.get("from_port", ""),
@@ -4943,6 +5376,253 @@ class NetworkPlannerDialog(QDialog):
         elif key == "summary":
             self._refresh_design_summary()
         self._dirty_tabs.discard(widget)
+
+    def _refresh_optic_modules_table(self) -> List[dict]:
+        rows = installed_optic_module_review_rows(self.data)
+        table = self.optic_modules_table
+        table.setSortingEnabled(False)
+        table.setRowCount(0)
+        status_colours = {
+            "pass": QColor("#177245"),
+            "unconfigured": QColor("#9a6700"),
+            "fail": QColor("#b42318"),
+        }
+        for review in rows:
+            row = table.rowCount()
+            table.insertRow(row)
+            speed = int(review.get("speed_mbps", 0) or 0)
+            values = [
+                _text(review.get("status")).upper(),
+                review.get("module_id", ""),
+                review.get("host", ""),
+                review.get("host_port", ""),
+                review.get("optic_model", ""),
+                review.get("connection_id", ""),
+                review.get("side", ""),
+                port_speed_label(speed) if speed else "",
+                " / ".join(
+                    value.upper()
+                    for value in (
+                        _text(review.get("cage")),
+                        _text(review.get("form_factor")),
+                    )
+                    if value
+                ),
+                review.get("connector", ""),
+                review.get("fibre_standard", ""),
+                review.get("reach_m", ""),
+                review.get("tx_dbm", ""),
+                review.get("rx_dbm", ""),
+                review.get("insertion_loss_db", ""),
+                review.get("wavelength_nm", ""),
+                review.get("peer_models", ""),
+                review.get("margin_db", ""),
+                review.get("required_margin_db", ""),
+                review.get("detail", ""),
+                review.get("optic_asset_id", ""),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(_text(value))
+                if column == 0:
+                    item.setData(Qt.UserRole, int(review.get("source_index", -1)))
+                    item.setForeground(
+                        status_colours.get(
+                            _text(review.get("status")).lower(),
+                            QColor("#333333"),
+                        )
+                    )
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                item.setToolTip(_text(review.get("detail")))
+                table.setItem(row, column, item)
+        table.setSortingEnabled(True)
+
+        pass_count = sum(
+            1 for row in rows if _text(row.get("status")).lower() == "pass"
+        )
+        incomplete_count = sum(
+            1
+            for row in rows
+            if _text(row.get("status")).lower() == "unconfigured"
+        )
+        fail_count = sum(
+            1 for row in rows if _text(row.get("status")).lower() == "fail"
+        )
+        if rows:
+            self.optic_modules_notice.setText(
+                f"Installed optic validation: {pass_count} passed, "
+                f"{incomplete_count} incomplete, {fail_count} failed. "
+                "Double-click a row to edit its shared optic model parameters; "
+                "use Replace to change only that installed module."
+            )
+        else:
+            self.optic_modules_notice.setText(
+                "No pluggable optic modules are installed in the current design."
+            )
+        return rows
+
+    def _selected_optic_module(self) -> Tuple[int, Optional[dict]]:
+        row = self.optic_modules_table.currentRow()
+        item = self.optic_modules_table.item(row, 0) if row >= 0 else None
+        source_index = item.data(Qt.UserRole) if item is not None else -1
+        try:
+            source_index = int(source_index)
+        except (TypeError, ValueError):
+            source_index = -1
+        modules = self._items("network_optic_modules")
+        if source_index < 0 or source_index >= len(modules):
+            return -1, None
+        return source_index, modules[source_index]
+
+    def edit_selected_optic_model(self) -> None:
+        _module_index, module = self._selected_optic_module()
+        if module is None:
+            QMessageBox.information(
+                self,
+                "Edit optic model parameters",
+                "Select an installed optic module first.",
+            )
+            return
+        asset_id = _text(module.get("asset_id"))
+        assets = self._items("network_assets")
+        asset_index = next(
+            (
+                index
+                for index, asset in enumerate(assets)
+                if _text(asset.get("id")) == asset_id
+            ),
+            -1,
+        )
+        if asset_index < 0:
+            QMessageBox.warning(
+                self,
+                "Edit optic model parameters",
+                f"The installed module references missing optic asset {asset_id}. "
+                "Use Replace selected installed module to choose a valid model.",
+            )
+            return
+        dialog = NetworkAssetEditorDialog(
+            self, assets[asset_index], suggested_id=asset_id
+        )
+        for tab_index in range(dialog.tabs.count()):
+            if dialog.tabs.tabText(tab_index) == "Optics":
+                dialog.tabs.setCurrentIndex(tab_index)
+                break
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            if self._replace_or_append(
+                "network_assets", asset_index, dialog.result
+            ):
+                self.tabs.setCurrentWidget(self.optic_modules_tab)
+
+    def replace_selected_optic_module(self) -> None:
+        module_index, module = self._selected_optic_module()
+        if module is None:
+            QMessageBox.information(
+                self,
+                "Replace installed optic",
+                "Select an installed optic module first.",
+            )
+            return
+        assets = {
+            _text(row.get("id")): row
+            for row in self._items("network_assets")
+            if isinstance(row, dict)
+        }
+        instances = {
+            _text(row.get("id")): row
+            for row in self._items("network_asset_instances")
+            if isinstance(row, dict)
+        }
+        connections = {
+            _text(row.get("id")): row
+            for row in self._items("network_connections")
+            if isinstance(row, dict)
+        }
+        host = instances.get(_text(module.get("host_instance_id")), {})
+        host_asset = assets.get(_text(host.get("asset_id")), {})
+        port = next(
+            (
+                row
+                for row in _expanded_instance_ports(host, host_asset)
+                if _text(row.get("name")) == _text(module.get("host_port"))
+            ),
+            {},
+        )
+        connection = connections.get(_text(module.get("connection_id")), {})
+        editable_module = {
+            **module,
+            "_host_label": _text(host.get("name"))
+            or _text(host.get("id"))
+            or _text(module.get("host_instance_id")),
+        }
+        dialog = OpticModuleInstallationDialog(
+            self,
+            editable_module,
+            [
+                asset
+                for asset in self._items("network_assets")
+                if _text(asset.get("asset_type")).lower()
+                == "optical_transceiver"
+            ],
+            cage=_text(port.get("port_type")),
+            connection_speed_mbps=max(
+                0, int(connection.get("link_speed_mbps", 0) or 0)
+            ),
+        )
+        if dialog.exec() == QDialog.Accepted and dialog.result:
+            self._items("network_optic_modules")[module_index] = dialog.result
+            self.refresh_tables()
+            self.tabs.setCurrentWidget(self.optic_modules_tab)
+
+    def validate_installed_optic_pairs(self) -> None:
+        self._sync_planner_settings()
+        rows = self._refresh_optic_modules_table()
+        self._dirty_tabs.discard(self.optic_modules_tab)
+        self._dirty_tabs.add(self.summary_text)
+        if not rows:
+            QMessageBox.information(
+                self,
+                "Validate optic pairs",
+                "There are no installed pluggable optic modules to validate.",
+            )
+            return
+        unresolved = [
+            row for row in rows if _text(row.get("status")).lower() != "pass"
+        ]
+        required_margin = float(rows[0].get("required_margin_db", 0.0) or 0.0)
+        if not unresolved:
+            summary = self.data.get("network_design_summary", {})
+            if isinstance(summary, dict):
+                summary["warnings"] = [
+                    warning
+                    for warning in summary.get("warnings", [])
+                    if "optic pair" not in _text(warning).lower()
+                ]
+            QMessageBox.information(
+                self,
+                "Optic pair validation passed",
+                f"All {len(rows)} installed optic modules are compatible and "
+                f"their calculated paths meet the required "
+                f"{required_margin:.3f} dB design margin.",
+            )
+            return
+        details = [
+            f"{row.get('host')} {row.get('host_port')}: "
+            f"{row.get('status')} — {row.get('detail')}"
+            for row in unresolved[:8]
+        ]
+        if len(unresolved) > len(details):
+            details.append(
+                f"... and {len(unresolved) - len(details)} more unresolved module(s)."
+            )
+        QMessageBox.warning(
+            self,
+            "Optic pair validation requires attention",
+            f"{len(unresolved)} of {len(rows)} installed optic modules could "
+            "not be validated.\n\n"
+            + "\n".join(f"• {detail}" for detail in details),
+        )
 
     def _traffic_profile_asset_entries(self) -> List[Tuple[str, dict]]:
         """Return endpoint and wireless asset models eligible for usage profiles."""
@@ -5496,6 +6176,10 @@ class NetworkPlannerDialog(QDialog):
         settings["default_fibre_core_count"] = int(self.default_fibre_core_count_spin.value())
         settings["ip_plan_base_cidr"] = self.ip_plan_base_edit.text().strip() or "10.0.0.0/8"
         settings["polan_olt_failover"] = self.olt_failover_check.isChecked()
+        fibre_planning = settings.setdefault("physical_fibre_planning", {})
+        fibre_planning["minimum_optical_margin_db"] = float(
+            self.optical_margin_spin.value()
+        )
 
     def _refresh_design_summary(self) -> None:
         summary = self.data.get("network_design_summary", {})
@@ -5957,6 +6641,19 @@ class NetworkPlannerDialog(QDialog):
                 + "\n\nWarnings:\nâ€¢ "
                 + "\nâ€¢ ".join(displayed_warnings),
             )
+            if any(
+                "optic pair" in _text(warning).lower()
+                or "optical transceiver" in _text(warning).lower()
+                for warning in warnings
+            ):
+                self.tabs.setCurrentWidget(self.optic_modules_tab)
+                self._refresh_optic_modules_table()
+                self._dirty_tabs.discard(self.optic_modules_tab)
+                self.optic_modules_notice.setText(
+                    "The automatic planner found an optic warning. Review the "
+                    "highlighted installed modules below, edit or replace them, "
+                    "then select Validate optic pairs."
+                )
         else:
             QMessageBox.information(
                 self,
@@ -6241,7 +6938,7 @@ class NetworkPlannerDialog(QDialog):
             racks=rack_selection_records(self.data),
             default_auto_connect=bool(
                 self.data.get("network_settings", {}).get(
-                    "auto_connect_new_manual_devices", True
+                    "auto_connect_new_manual_devices", False
                 )
             ),
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+import re
 from typing import Dict, Iterable, List, Tuple
 
 from network_services import (
@@ -171,11 +172,55 @@ def _switch_schedule(data: dict) -> List[dict]:
 
 def _natural_port_key(value: str):
     text = _text(value)
-    if text.isdigit():
-        return (0, int(text), "")
-    prefix = "".join(ch for ch in text if not ch.isdigit())
-    digits = "".join(ch for ch in text if ch.isdigit())
-    return (1, int(digits) if digits else 0, prefix.lower())
+    return tuple(
+        (0, int(token)) if token.isdigit() else (1, token.casefold())
+        for token in re.split(r"(\d+)", text)
+        if token
+    )
+
+
+def _declared_port_names(instance: dict, asset: dict) -> set[str]:
+    """Expand the asset's authoritative port definitions for schedules."""
+    definitions = instance.get("port_definitions")
+    if not isinstance(definitions, list) or not definitions:
+        definitions = asset.get("port_definitions", [])
+    rows = [
+        row
+        for row in definitions
+        if isinstance(row, dict) and max(0, _int(row.get("port_count"))) > 0
+    ]
+    names: list[str] = []
+    counters: Dict[str, int] = {}
+    for row in rows:
+        count = max(0, _int(row.get("port_count")))
+        explicit = (
+            [_text(value) for value in row.get("explicit_names", []) if _text(value)]
+            if isinstance(row.get("explicit_names"), list)
+            else []
+        )
+        names.extend(explicit[:count])
+        prefix = _text(row.get("name_prefix"))
+        for _index in range(count - min(count, len(explicit))):
+            counters[prefix] = counters.get(prefix, 0) + 1
+            number = counters[prefix]
+            names.append(f"{prefix}-{number}" if prefix else str(number))
+    if not rows:
+        names = [
+            str(number)
+            for number in range(1, max(0, _int(asset.get("number_of_ports"))) + 1)
+        ]
+    members = (
+        max(1, _int(instance.get("stack_member_count"), 1))
+        if bool(instance.get("logical_stack"))
+        else 1
+    )
+    if members > 1:
+        names = [
+            f"{member}/{name}"
+            for member in range(1, members + 1)
+            for name in names
+        ]
+    return set(names)
 
 
 def _port_schedule(data: dict) -> List[dict]:
@@ -201,17 +246,8 @@ def _port_schedule(data: dict) -> List[dict]:
     for instance in instances.values():
         instance_id = _text(instance.get("id"))
         asset = assets.get(_text(instance.get("asset_id")), {})
-        per_member_ports = max(0, _int(asset.get("number_of_ports")))
-        stack_members = max(1, _int(instance.get("stack_member_count"), 1)) if bool(instance.get("logical_stack")) else 1
         base = _instance_description(instance, assets, locations)
-        if bool(instance.get("logical_stack")) and stack_members > 1:
-            port_names = {
-                f"{member}/{port}"
-                for member in range(1, stack_members + 1)
-                for port in range(1, per_member_ports + 1)
-            }
-        else:
-            port_names = {str(number) for number in range(1, per_member_ports + 1)}
+        port_names = _declared_port_names(instance, asset)
         port_names.update(port for (owner, port) in endpoint_map if owner == instance_id)
         port_names.update(port for (owner, port) in assignment_map if owner == instance_id)
 
@@ -272,6 +308,20 @@ def _port_schedule(data: dict) -> List[dict]:
                 )
 
             for connection in linked:
+                connection_assignment_id = _text(
+                    connection.get(
+                        "assignment_id",
+                        connection.get("endpoint_assignment_id"),
+                    )
+                )
+                if connection_assignment_id and any(
+                    _text(assignment.get("id")) == connection_assignment_id
+                    for assignment in assignments
+                ):
+                    # The endpoint row already owns this switch port. The
+                    # hidden switch-to-panel segment belongs in the patching
+                    # schedule and must not double-count the port here.
+                    continue
                 is_from = _text(connection.get("from_instance_id")) == instance_id
                 other_side = "to" if is_from else "from"
                 rows.append(
@@ -420,7 +470,17 @@ def _patching_schedule(data: dict, medium: str) -> List[dict]:
                     "notes": "Automatically assigned endpoint port" if assignment.get("auto_generated") else "",
                 }
             )
-    return sorted(rows, key=lambda row: row["connection_id"])
+    return sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("from_location", "")),
+            str(row.get("from_instance_id", "")),
+            _natural_port_key(row.get("from_port", "")),
+            str(row.get("to_instance_id", "")),
+            _natural_port_key(row.get("to_port", "")),
+            str(row.get("connection_id", "")),
+        ),
+    )
 
 
 def _vlan_schedule(data: dict) -> List[dict]:

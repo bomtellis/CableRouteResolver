@@ -256,7 +256,8 @@ NETWORK_DEFAULTS = {
         "aggregation_rack_mode": "dedicated",
         "tor_keep_final_connections_in_cabinet": True,
         "tor_allow_adjacent_cabinet_uplinks": True,
-        "auto_connect_new_manual_devices": True,
+        "auto_connect_new_manual_devices": False,
+        "manual_device_auto_connect_setting_version": 1,
         "auto_add_switches_for_bandwidth": True,
         "auto_planner_connected_data_points_only": False,
         "prevent_additional_equipment_rooms": False,
@@ -823,7 +824,15 @@ def ensure_network_schema(data: dict) -> dict:
     settings.setdefault("aggregation_rack_mode", "dedicated")
     settings.setdefault("tor_keep_final_connections_in_cabinet", True)
     settings.setdefault("tor_allow_adjacent_cabinet_uplinks", True)
-    settings.setdefault("auto_connect_new_manual_devices", True)
+    # Earlier builds silently defaulted manual placement to auto-connect. Make
+    # the new project-wide opt-in explicit once for existing projects, then
+    # preserve the user's global choice on subsequent schema passes.
+    if _as_int(
+        settings.get("manual_device_auto_connect_setting_version"), 0
+    ) < 1:
+        settings["auto_connect_new_manual_devices"] = False
+        settings["manual_device_auto_connect_setting_version"] = 1
+    settings.setdefault("auto_connect_new_manual_devices", False)
     settings.setdefault("auto_add_switches_for_bandwidth", True)
     settings.setdefault("auto_planner_connected_data_points_only", False)
     settings.setdefault("prevent_additional_equipment_rooms", False)
@@ -910,7 +919,7 @@ def ensure_network_schema(data: dict) -> dict:
         settings.get("tor_allow_adjacent_cabinet_uplinks", True)
     )
     settings["auto_connect_new_manual_devices"] = bool(
-        settings.get("auto_connect_new_manual_devices", True)
+        settings.get("auto_connect_new_manual_devices", False)
     )
     settings["auto_add_switches_for_bandwidth"] = bool(
         settings.get("auto_add_switches_for_bandwidth", True)
@@ -1473,6 +1482,11 @@ def ensure_network_schema(data: dict) -> dict:
                 asset["chassis_modules"]
             )
         asset["rack_units"] = max(0, _as_int(asset.get("rack_units"), 1))
+        if asset["asset_type"] in {"telco_pop", "external_network"}:
+            # Carrier demarcation and peering devices are active equipment, not
+            # zero-U topology placeholders. Reserve their cabinet space even
+            # when a legacy/library definition omitted a rack height.
+            asset["rack_units"] = max(1, asset["rack_units"])
         asset["physical_width_mm"] = max(0.0, _as_float(asset.get("physical_width_mm"), 0.0))
         asset["physical_depth_mm"] = max(0.0, _as_float(asset.get("physical_depth_mm"), 0.0))
         asset["physical_height_mm"] = max(0.0, _as_float(asset.get("physical_height_mm"), 0.0))
@@ -1859,6 +1873,29 @@ def ensure_network_schema(data: dict) -> dict:
             }
             for position in range(1, max_cassettes + 1):
                 row = rows_by_position.get(position, {})
+                used_names = _normalise_string_list(
+                    row.get("used_front_connector_names", [])
+                )
+                cable_ids = _normalise_string_list(row.get("cable_ids", []))
+                associated_instance_ids = _normalise_string_list(
+                    row.get("associated_instance_ids", [])
+                )
+                used_front_connectors = min(
+                    12,
+                    max(
+                        len(used_names),
+                        max(
+                            0,
+                            _as_int(row.get("used_front_connectors"), 0),
+                        ),
+                    ),
+                )
+                installed = bool(row.get("installed")) or bool(
+                    used_front_connectors
+                    or _as_int(row.get("used_fibres"), 0)
+                    or cable_ids
+                    or associated_instance_ids
+                )
                 front_key = _text(row.get("front_connector", default_front)).lower() or default_front
                 if front_key not in MODULAR_PANEL_FRONT_CONNECTORS:
                     front_key = default_front
@@ -1876,10 +1913,12 @@ def ensure_network_schema(data: dict) -> dict:
                     "termination_mode": mode,
                     "rear_connector": rear if mode == "connectorised" else "splice",
                     "rear_connector_count": max(0, min(4, _as_int(row.get("rear_connector_count"), 1 if mode == "connectorised" else 0))),
-                    "used_front_connectors": max(0, min(12, _as_int(row.get("used_front_connectors"), 0))),
+                    "installed": installed,
+                    "used_front_connectors": used_front_connectors,
+                    "used_front_connector_names": used_names,
                     "used_fibres": max(0, _as_int(row.get("used_fibres"), 0)),
-                    "cable_ids": _normalise_string_list(row.get("cable_ids", [])),
-                    "associated_instance_ids": _normalise_string_list(row.get("associated_instance_ids", [])),
+                    "cable_ids": cable_ids,
+                    "associated_instance_ids": associated_instance_ids,
                 })
         instance["fibre_cassettes"] = normalised_cassettes
         instance.setdefault("notes", "")
@@ -2040,6 +2079,17 @@ def ensure_network_schema(data: dict) -> dict:
         )
         assignment.setdefault("endpoint_asset_id", "")
         assignment.setdefault("endpoint_asset_name", "")
+        assignment.setdefault("endpoint_input_port_id", "")
+        assignment.setdefault("endpoint_input_port_name", "")
+        assignment.setdefault("endpoint_input_connector_type", "")
+        if not isinstance(assignment.get("endpoint_asset_chain"), list):
+            assignment["endpoint_asset_chain"] = []
+        if not isinstance(assignment.get("endpoint_asset_connections"), list):
+            assignment["endpoint_asset_connections"] = []
+        if not isinstance(assignment.get("endpoint_upstream_connection"), dict):
+            assignment["endpoint_upstream_connection"] = {}
+        if not isinstance(assignment.get("endpoint_input_port_statuses"), list):
+            assignment["endpoint_input_port_statuses"] = []
         assignment.setdefault("endpoint_instance_id", "")
         assignment.setdefault("endpoint_connection_id", "")
         assignment.setdefault("endpoint_network_port", "")
@@ -2121,9 +2171,28 @@ def ensure_network_schema(data: dict) -> dict:
         lead.setdefault("peer_instance_id", "")
         lead.setdefault("peer_port", "")
         lead.setdefault("endpoint_name", "")
+        lead["endpoint_internal"] = bool(lead.get("endpoint_internal", False))
+        lead["endpoint_external_source"] = bool(
+            lead.get("endpoint_external_source", False)
+        )
+        for field in (
+            "connection_asset_id",
+            "from_endpoint_asset_id",
+            "from_endpoint_asset_node_id",
+            "from_endpoint_port_id",
+            "from_endpoint_port_name",
+            "to_endpoint_asset_id",
+            "to_endpoint_asset_node_id",
+            "to_endpoint_port_id",
+            "to_endpoint_port_name",
+        ):
+            lead.setdefault(field, "")
         lead.setdefault("port_type", "other")
         lead.setdefault("port_use", "patch")
         lead.setdefault("medium", "copper")
+        lead["link_speed_mbps"] = max(
+            0, _as_int(lead.get("link_speed_mbps"))
+        )
         lead.setdefault("cable_specification", "")
         lead["length_m"] = max(0.0, _as_float(lead.get("length_m"), 2.0))
         lead["auto_generated"] = bool(lead.get("auto_generated", False))

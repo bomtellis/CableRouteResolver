@@ -137,6 +137,7 @@ from advanced_dialogs import (
     RouteProfilesEditorV2,
 )
 from models import JsonStore
+from asset_ports import set_asset_network_port_count
 from asset_condensation import (
     condense_assets as apply_asset_condensation,
     create_condensation_rfis,
@@ -153,6 +154,9 @@ from room_type_asset_staging import (
     should_mirror_rfi_audit_to_revision,
 )
 from workbook_comparison_dialog import WorkbookComparisonDialog
+from room_asset_detail_export import export_room_asset_detail_xlsx
+from workflow_guidance import project_workflow_state
+from xlsx_workbook import XlsxError
 
 try:
     import pulp
@@ -2643,6 +2647,7 @@ class CableRouteEditor(QMainWindow):
 
         self._build_ribbon(main_layout)
         self._build_menu_bar()
+        self._build_workflow_guidance(main_layout)
 
         self.scene = None
 
@@ -2688,6 +2693,91 @@ class CableRouteEditor(QMainWindow):
         status_row.addWidget(self.status_label, 2)
 
         main_layout.addLayout(status_row)
+
+    def _build_workflow_guidance(self, main_layout):
+        self.workflow_guidance_frame = QFrame()
+        self.workflow_guidance_frame.setObjectName("WorkflowGuidance")
+        self.workflow_guidance_frame.setStyleSheet(
+            """
+            QFrame#WorkflowGuidance {
+                background: #edf6ff;
+                border: 1px solid #9ec5fe;
+                border-radius: 6px;
+            }
+            QLabel#WorkflowStage {
+                color: #084298;
+                font-weight: 700;
+            }
+            QLabel#WorkflowDetail {
+                color: #334155;
+            }
+            """
+        )
+        layout = QHBoxLayout(self.workflow_guidance_frame)
+        layout.setContentsMargins(10, 7, 8, 7)
+        layout.setSpacing(10)
+
+        self.workflow_stage_label = QLabel()
+        self.workflow_stage_label.setObjectName("WorkflowStage")
+        self.workflow_stage_label.setMinimumWidth(255)
+        layout.addWidget(self.workflow_stage_label)
+
+        self.workflow_detail_label = QLabel()
+        self.workflow_detail_label.setObjectName("WorkflowDetail")
+        self.workflow_detail_label.setWordWrap(True)
+        layout.addWidget(self.workflow_detail_label, 1)
+
+        self.workflow_action_button = QPushButton()
+        self.workflow_action_button.setIcon(bootstrap_icon("arrow-right-circle"))
+        self.workflow_action_button.setMinimumHeight(34)
+        self.workflow_action_button.clicked.connect(
+            self._run_recommended_workflow_action
+        )
+        layout.addWidget(self.workflow_action_button)
+
+        workflow_tab_button = QPushButton("Show Workflow")
+        workflow_tab_button.setIcon(bootstrap_icon("list-check"))
+        workflow_tab_button.setMinimumHeight(34)
+        workflow_tab_button.setToolTip(
+            "Open the numbered workflow tab containing the main project actions"
+        )
+        workflow_tab_button.clicked.connect(self._show_workflow_tab)
+        layout.addWidget(workflow_tab_button)
+
+        main_layout.addWidget(self.workflow_guidance_frame)
+        self._refresh_workflow_guidance()
+
+    def _show_workflow_tab(self):
+        ribbon = getattr(self, "ribbon", None)
+        index = getattr(self, "_workflow_ribbon_tab_index", -1)
+        if ribbon is not None and 0 <= index < ribbon.count():
+            ribbon.setCurrentIndex(index)
+
+    def _invoke_workflow_action(self, action_name):
+        action = getattr(self, str(action_name or ""), None)
+        if not callable(action):
+            self.set_status(
+                f"The requested workflow action is not available: {action_name}"
+            )
+            return
+        action()
+
+    def _run_recommended_workflow_action(self):
+        self._invoke_workflow_action(
+            getattr(self, "_recommended_workflow_action", "")
+        )
+
+    def _refresh_workflow_guidance(self):
+        if not hasattr(self, "workflow_stage_label"):
+            return
+        state = project_workflow_state(self.store.data)
+        self._recommended_workflow_action = state["action_name"]
+        self.workflow_stage_label.setText(
+            f"Step {state['stage']} · {state['title']}"
+        )
+        self.workflow_detail_label.setText(state["detail"])
+        self.workflow_action_button.setText(state["action_text"])
+        self.workflow_guidance_frame.setToolTip(state["counts_text"])
 
     def _build_rhs_search_sidebar(self):
         self.search_dock = QDockWidget("Search", self)
@@ -3362,8 +3452,7 @@ class CableRouteEditor(QMainWindow):
                 ports = int(ports_by_asset[asset_id] or 0)
             except (TypeError, ValueError):
                 ports = 0
-            asset["input_ports"] = max(0, ports)
-            asset["data_points"] = max(0, ports)
+            set_asset_network_port_count(asset, "input", max(0, ports))
 
         after_quantities = self._room_type_asset_quantities(room_type)
         after_requesters = self._room_type_asset_requesters(room_type)
@@ -3584,8 +3673,7 @@ class CableRouteEditor(QMainWindow):
                 after_ports={asset_id: target_value},
                 asset_names=asset_names,
             )
-            asset["input_ports"] = target_value
-            asset["data_points"] = target_value
+            set_asset_network_port_count(asset, "input", target_value)
 
         if staging:
             rollback_ids = [
@@ -3663,8 +3751,7 @@ class CableRouteEditor(QMainWindow):
                     value = max(0, int(record.get("before_data_points", 0) or 0))
                 except (TypeError, ValueError):
                     value = 0
-                asset["input_ports"] = value
-                asset["data_points"] = value
+                set_asset_network_port_count(asset, "input", value)
             assets.pop(asset_id, None)
 
         staging["rooms"] = rooms
@@ -3836,6 +3923,11 @@ class CableRouteEditor(QMainWindow):
 
     def _build_menu_bar(self):
         file_menu = self.menuBar().addMenu("File")
+        file_shortcuts = {
+            "Open Project": QKeySequence.Open,
+            "Save Project": QKeySequence.Save,
+            "Save Project As": QKeySequence.SaveAs,
+        }
 
         for text, icon_name, handler in [
             ("Open Project", "folder2-open", self.open_json),
@@ -3863,6 +3955,9 @@ class CableRouteEditor(QMainWindow):
         ]:
             action = file_menu.addAction(text)
             set_action_icon(action, icon_name)
+            if text in file_shortcuts:
+                action.setShortcut(file_shortcuts[text])
+            action.setStatusTip(text)
             action.triggered.connect(handler)
 
         edit_menu = self.menuBar().addMenu("Edit")
@@ -3940,6 +4035,17 @@ class CableRouteEditor(QMainWindow):
         set_action_icon(export_room_type_matrix_action, "database")
         export_room_type_matrix_action.triggered.connect(self.export_room_type_asset_matrix)
 
+        export_room_asset_detail_action = tools_menu.addAction(
+            "Export Room Asset Detail Excel..."
+        )
+        set_action_icon(
+            export_room_asset_detail_action,
+            "file-earmark-spreadsheet",
+        )
+        export_room_asset_detail_action.triggered.connect(
+            self.export_room_asset_detail_excel
+        )
+
         import_room_type_matrix_action = tools_menu.addAction("Import Room Type Asset Matrix")
         set_action_icon(import_room_type_matrix_action, "box-arrow-right")
         import_room_type_matrix_action.triggered.connect(self.import_room_type_asset_matrix)
@@ -3954,6 +4060,10 @@ class CableRouteEditor(QMainWindow):
 
         validate_action = tools_menu.addAction("Validate")
         set_action_icon(validate_action, "check-circle", BOOTSTRAP_GREEN)
+        validate_action.setShortcut(QKeySequence("F9"))
+        validate_action.setStatusTip(
+            "Validate the project structure before preparing deliverables"
+        )
         validate_action.triggered.connect(self.validate_json)
 
     def _ribbon_button(self, text, handler):
@@ -4237,6 +4347,154 @@ class CableRouteEditor(QMainWindow):
         ribbon.setMinimumHeight(150)
         ribbon.setMaximumHeight(168)
         main_layout.addWidget(ribbon)
+
+        # ---------------- Workflow tab ----------------
+        workflow_tab = QWidget()
+        workflow_layout = QHBoxLayout(workflow_tab)
+        workflow_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        workflow_layout.setContentsMargins(10, 1, 10, 1)
+        workflow_layout.setSpacing(10)
+
+        self._add_ribbon_group(
+            workflow_layout,
+            "1. Set up",
+            [
+                self._ribbon_icon_button(
+                    "Open Project",
+                    "Open an existing project database",
+                    QStyle.SP_DialogOpenButton,
+                    self.open_json,
+                ),
+                self._ribbon_icon_button(
+                    "Save Project",
+                    "Save the current project",
+                    QStyle.SP_DialogSaveButton,
+                    self.save_json,
+                ),
+                self._ribbon_icon_button(
+                    "Assets",
+                    "Define or import the equipment used by room types",
+                    QStyle.SP_ComputerIcon,
+                    self.manage_assets,
+                ),
+                self._ribbon_icon_button(
+                    "Room Types",
+                    "Create repeatable room requirements and assign assets",
+                    QStyle.SP_DirIcon,
+                    self.manage_room_types,
+                ),
+            ],
+            columns=2,
+        )
+
+        self._add_ribbon_group(
+            workflow_layout,
+            "2. Build",
+            [
+                self._ribbon_icon_button(
+                    "Map DXF",
+                    "Map a drawing to the current floor",
+                    QStyle.SP_DirOpenIcon,
+                    self.load_dxf,
+                ),
+                self._ribbon_icon_button(
+                    "Data Points",
+                    "Create, review, and assign the project data points",
+                    QStyle.SP_DriveNetIcon,
+                    self.manage_data_points,
+                ),
+                self._ribbon_icon_button(
+                    "Connections",
+                    "Review the equipment-room to data-point requirements",
+                    QStyle.SP_ArrowRight,
+                    self.manage_connections,
+                ),
+                self._ribbon_icon_button(
+                    "Autoroute",
+                    "Route outstanding data points to equipment rooms",
+                    QStyle.SP_BrowserReload,
+                    self.autoroute_data_points,
+                ),
+            ],
+            columns=2,
+        )
+
+        self._add_ribbon_group(
+            workflow_layout,
+            "3. Review and plan",
+            [
+                self._ribbon_icon_button(
+                    "Room Review",
+                    "Review room-type asset assignments and outstanding RFIs",
+                    QStyle.SP_DialogApplyButton,
+                    self.show_room_type_asset_review_wizard,
+                ),
+                self._ribbon_icon_button(
+                    "Network Planner",
+                    "Generate or revise the network, rack, port, fibre, and power design",
+                    QStyle.SP_ComputerIcon,
+                    lambda: self._invoke_workflow_action(
+                        "open_network_planner"
+                    ),
+                ),
+                self._ribbon_icon_button(
+                    "Topology",
+                    "Open the editable network topology, device, and rack views",
+                    QStyle.SP_FileDialogDetailedView,
+                    lambda: self._invoke_workflow_action(
+                        "open_network_topology"
+                    ),
+                ),
+                self._ribbon_icon_button(
+                    "Validate",
+                    "Check the current project structure before issuing outputs",
+                    QStyle.SP_DialogApplyButton,
+                    self.validate_json,
+                ),
+            ],
+            columns=2,
+        )
+
+        self._add_ribbon_group(
+            workflow_layout,
+            "4. Deliver",
+            [
+                self._ribbon_icon_button(
+                    "Room Assets Excel",
+                    "Export room asset details as one filterable long table",
+                    QStyle.SP_DriveHDIcon,
+                    self.export_room_asset_detail_excel,
+                ),
+                self._ribbon_icon_button(
+                    "Network Schedules",
+                    "Export port, patching, rack, power, and network schedules",
+                    QStyle.SP_DriveHDIcon,
+                    lambda: self._invoke_workflow_action(
+                        "export_network_schedules"
+                    ),
+                ),
+                self._ribbon_icon_button(
+                    "Project PDF",
+                    "Export the room, use-case, and network summary",
+                    QStyle.SP_FileIcon,
+                    self.export_project_summary_pdf,
+                ),
+                self._ribbon_icon_button(
+                    "Revision History",
+                    "Review saved project changes and restore earlier revisions",
+                    QStyle.SP_FileDialogContentsView,
+                    self.show_revision_history,
+                ),
+            ],
+            columns=2,
+        )
+        workflow_layout.addStretch(1)
+        self._workflow_ribbon_tab_index = ribbon.count()
+        self._add_scrollable_ribbon_tab(
+            ribbon,
+            workflow_tab,
+            "Workflow",
+        )
 
         # ---------------- Home tab ----------------
         home_tab = QWidget()
@@ -4642,6 +4900,12 @@ class CableRouteEditor(QMainWindow):
                     "Export outstanding room type asset queries and audit history",
                     QStyle.SP_FileIcon,
                     self.export_room_type_asset_rfi_pdf,
+                ),
+                self._ribbon_icon_button(
+                    "Room Assets Excel",
+                    "Export room asset details as one filterable long table",
+                    QStyle.SP_DriveHDIcon,
+                    self.export_room_asset_detail_excel,
                 ),
             ],
             columns=5,
@@ -5809,6 +6073,7 @@ class CableRouteEditor(QMainWindow):
             self._last_overlay_signature = overlay_signature
             if hasattr(self.canvas, "invalidate_overlay"):
                 self.canvas.invalidate_overlay()
+        self._refresh_workflow_guidance()
 
     def draw_edges(self, floor, visible_rect=None):
         if not self.show_edges_check.isChecked():
@@ -12520,17 +12785,15 @@ class CableRouteEditor(QMainWindow):
             for asset in self.store.data.get("assets", []) or []
             if str(asset.get("id", "") or "").strip()
         ]
-        if not asset_options:
-            QMessageBox.information(
-                self,
-                "Asset Bundles",
-                "Create endpoint assets before defining asset bundles.",
-            )
-            return
         dialog = AssetBundleManagerDialog(
             self,
             self.store.data.get("asset_bundles", []),
             asset_options,
+            {
+                str(asset.get("id", "") or "").strip(): asset
+                for asset in self.store.data.get("assets", []) or []
+                if str(asset.get("id", "") or "").strip()
+            },
         )
         if dialog.exec() == QDialog.Accepted and dialog.result is not None:
             from asset_bundles import sync_room_types_for_bundle_updates
@@ -17956,6 +18219,58 @@ class CableRouteEditor(QMainWindow):
                 result.append(name)
                 seen.add(key)
         return result
+
+    def export_room_asset_detail_excel(self):
+        default_path = "room_asset_detail.xlsx"
+        if self.current_json_path:
+            project_path = Path(self.current_json_path)
+            default_path = str(
+                project_path.with_suffix("").with_name(
+                    project_path.stem + "_room_asset_detail.xlsx"
+                )
+            )
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Room Asset Detail to Excel",
+            default_path,
+            "Excel workbook (*.xlsx)",
+        )
+        if not path:
+            return
+        assets_by_id = {
+            str(asset.get("id", "") or "").strip(): asset
+            for asset in self.store.data.get("assets", []) or []
+            if isinstance(asset, dict)
+            and str(asset.get("id", "") or "").strip()
+        }
+        categories_by_id = {
+            str(category.get("id", "") or "").strip(): str(
+                category.get("name", "") or ""
+            ).strip()
+            for category in self.store.data.get("asset_categories", []) or []
+            if isinstance(category, dict)
+            and str(category.get("id", "") or "").strip()
+        }
+        try:
+            destination, count = export_room_asset_detail_xlsx(
+                path,
+                self.store.data.get("room_types", []),
+                assets_by_id,
+                categories_by_id,
+                self.store.data.get("asset_bundles", []),
+            )
+        except (OSError, ValueError, XlsxError) as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self.set_status(
+            f"Exported {count} room asset detail row(s) to "
+            f"{Path(destination).name}"
+        )
+        QMessageBox.information(
+            self,
+            "Export complete",
+            f"Exported {count} room asset detail row(s) to:\n{destination}",
+        )
 
     def export_room_type_asset_matrix(self):
         path, _ = QFileDialog.getSaveFileName(

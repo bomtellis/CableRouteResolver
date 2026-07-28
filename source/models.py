@@ -16,8 +16,13 @@ from project_sqlite import (
     load_json,
 )
 from room_type_asset_staging import staged_changes as room_type_asset_staged_changes
-from asset_bundles import clean_bundle_assignments, normalise_asset_bundles
+from asset_bundles import (
+    clean_bundle_assignments,
+    normalise_asset_bundles,
+    resolve_room_type_asset_connections,
+)
 from asset_ports import (
+    asset_port_definitions,
     asset_input_ports,
     asset_output_ports,
     clean_asset_connections,
@@ -305,6 +310,20 @@ class JsonStore:
             asset.setdefault("id", "")
             asset.setdefault("name", asset.get("id", ""))
             asset.setdefault("qty", 1)
+            has_typed_inputs = isinstance(
+                asset.get("input_port_definitions"), (list, tuple)
+            ) or isinstance(asset.get("inputs"), (list, tuple))
+            has_typed_outputs = isinstance(
+                asset.get("output_port_definitions"), (list, tuple)
+            ) or isinstance(asset.get("outputs"), (list, tuple))
+            if has_typed_inputs:
+                asset["input_port_definitions"] = asset_port_definitions(
+                    asset, "input"
+                )
+            if has_typed_outputs:
+                asset["output_port_definitions"] = asset_port_definitions(
+                    asset, "output"
+                )
             asset["input_ports"] = asset_input_ports(asset)
             asset["output_ports"] = asset_output_ports(asset)
             # Keep the established field in sync for reports and older project
@@ -2647,7 +2666,10 @@ class JsonStore:
         summary = room_asset_port_summary(
             self.room_type_asset_rows(room_type),
             assets_by_id,
-            room_type.get("asset_connections", []),
+            resolve_room_type_asset_connections(
+                room_type,
+                self.data.get("asset_bundles", []),
+            ),
         )
         return int(summary["upstream_ports"])
 
@@ -2677,7 +2699,10 @@ class JsonStore:
         return room_asset_port_summary(
             self.room_type_asset_rows(room_type),
             assets_by_id,
-            room_type.get("asset_connections", []),
+            resolve_room_type_asset_connections(
+                room_type,
+                self.data.get("asset_bundles", []),
+            ),
         )
 
     def data_point_required_port_count(self, point: dict) -> int:
@@ -2690,7 +2715,9 @@ class JsonStore:
             manual_ports = 1
         room_type_id = str(point.get("room_type_id", "") or "").strip()
         asset_ports = self.room_type_cable_qty(room_type_id) if room_type_id else 0
-        return max(manual_ports, asset_ports)
+        # The room type's connection graph determines real upstream demand.
+        # Physical inputs remain on their assets even when internally served.
+        return asset_ports if room_type_id and asset_ports > 0 else manual_ports
 
     def count_deployed_data_points(self, point_names=None) -> int:
         """Return deployed port demand for the named placed data-point records.

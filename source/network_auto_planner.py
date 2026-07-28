@@ -20,6 +20,7 @@ import re
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from network_capacity import rough_cabinet_requirement
+from asset_ports import asset_input_ports, room_asset_network_demands
 from network_schema import (
     CATALYST_9600_LINE_CARDS,
     PLUGGABLE_OPTIC_PORT_TYPES,
@@ -274,6 +275,13 @@ class PortDemand:
     endpoint_instance_id: str = ""
     selected_network_port: str = ""
     selected_link_speed_mbps: int = 0
+    endpoint_input_port_id: str = ""
+    endpoint_input_port_name: str = ""
+    endpoint_input_connector_type: str = ""
+    endpoint_asset_chain: List[dict] = field(default_factory=list)
+    endpoint_asset_connections: List[dict] = field(default_factory=list)
+    endpoint_upstream_connection: dict = field(default_factory=dict)
+    endpoint_input_port_statuses: List[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -1000,87 +1008,139 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
         room_type_id = _text(point.get("room_type_id"))
         room_type = room_types.get(room_type_id, {})
         requested_ports = max(0, _int(point.get("qty"), 1))
-        templates: List[Tuple[str, str, float, float, float, float, float]] = []
+        templates: List[dict] = []
 
         if room_type:
-            for room_asset in _normalised_room_type_asset_rows(room_type):
-                if not isinstance(room_asset, dict):
-                    continue
-                asset_id = _text(room_asset.get("asset_id"))
-                asset = assets.get(asset_id, {})
-                asset_name = _text(asset.get("name")) or asset_id or "Generic endpoint"
-                quantity = max(0, _int(room_asset.get("qty"), 1))
-                data_points_per_asset = max(
-                    0,
-                    _int(
-                        asset.get(
-                            "data_points",
-                            asset.get("data_points_each", asset.get("cables", 1)),
-                        ),
-                        1,
-                    ),
-                )
-                power = _poe_power_for_asset(asset, settings)
-                divisor = max(1, data_points_per_asset)
-                north_south, east_west, _combined_bandwidth = _traffic_components(
-                    asset, settings
-                )
-                north_south_factor, east_west_factor = (
-                    _traffic_concurrency_factors(asset)
-                )
-                north_south_per_port = north_south * north_south_factor / divisor
-                east_west_per_port = east_west * east_west_factor / divisor
-                bandwidth_per_port = north_south_per_port + east_west_per_port
-                packets_per_port = max(
-                    0.0,
-                    _float(
-                        asset.get(
-                            "expected_packet_rate_pps",
-                            settings.get("default_expected_packet_rate_pps", 0.0),
-                        )
-                    ),
-                ) / divisor
-                for _ in range(quantity * data_points_per_asset):
-                    templates.append(
-                        (
-                            asset_id,
-                            asset_name,
-                            power,
-                            north_south_per_port,
-                            east_west_per_port,
-                            bandwidth_per_port,
-                            packets_per_port,
-                        )
+            room_asset_rows = _normalised_room_type_asset_rows(room_type)
+            for network_demand in room_asset_network_demands(
+                room_asset_rows,
+                assets,
+                room_type.get("asset_connections", room_type.get("connections", [])),
+            ):
+                head_asset_id = _text(network_demand.get("asset_id"))
+                head_asset = assets.get(head_asset_id, {})
+                chain_nodes = [
+                    dict(row)
+                    for row in network_demand.get("asset_nodes", [])
+                    if isinstance(row, dict)
+                ]
+                north_south_per_port = 0.0
+                east_west_per_port = 0.0
+                packets_per_port = 0.0
+                for chain_node in chain_nodes:
+                    chain_asset = assets.get(_text(chain_node.get("asset_id")), {})
+                    divisor = max(1, asset_input_ports(chain_asset))
+                    north_south, east_west, _combined = _traffic_components(
+                        chain_asset, settings
                     )
+                    north_factor, east_factor = _traffic_concurrency_factors(
+                        chain_asset
+                    )
+                    north_south_per_port += north_south * north_factor / divisor
+                    east_west_per_port += east_west * east_factor / divisor
+                    packets_per_port += max(
+                        0.0,
+                        _float(
+                            chain_asset.get(
+                                "expected_packet_rate_pps",
+                                settings.get(
+                                    "default_expected_packet_rate_pps", 0.0
+                                ),
+                            )
+                        ),
+                    ) / divisor
+                head_divisor = max(1, asset_input_ports(head_asset))
+                templates.append(
+                    {
+                        "asset_id": head_asset_id,
+                        "asset_name": (
+                            _text(network_demand.get("asset_name"))
+                            or head_asset_id
+                            or "Generic endpoint"
+                        ),
+                        "poe_w": _poe_power_for_asset(head_asset, settings)
+                        / head_divisor,
+                        "north_south_mbps": north_south_per_port,
+                        "east_west_mbps": east_west_per_port,
+                        "bandwidth_mbps": (
+                            north_south_per_port + east_west_per_port
+                        ),
+                        "packet_rate_pps": packets_per_port,
+                        "input_port_id": _text(
+                            network_demand.get("input_port_id")
+                        ),
+                        "input_port_name": _text(
+                            network_demand.get("input_port_name")
+                        ),
+                        "input_connector_type": _text(
+                            network_demand.get("input_connector_type")
+                        ),
+                        "asset_chain": chain_nodes,
+                        "asset_connections": [
+                            dict(row)
+                            for row in network_demand.get(
+                                "asset_connections", []
+                            )
+                            if isinstance(row, dict)
+                        ],
+                        "upstream_connection": dict(
+                            network_demand.get("upstream_connection", {})
+                        ),
+                        "input_port_statuses": [
+                            dict(row)
+                            for row in network_demand.get(
+                                "input_port_statuses", []
+                            )
+                            if isinstance(row, dict)
+                        ],
+                    }
+                )
         elif room_type_id:
             missing_room_types.add(room_type_id)
 
-        target_ports = max(requested_ports, len(templates))
+        # The room-type asset graph is authoritative for upstream demand. A
+        # phone-to-computer link produces one switch-port template while two
+        # separately connected assets naturally produce two templates.
+        target_ports = len(templates) if room_type and templates else requested_ports
         if target_ports <= 0:
             continue
         while len(templates) < target_ports:
+            north_south = max(
+                0.0,
+                _float(settings.get("default_north_south_bandwidth_mbps")),
+            )
+            east_west = max(
+                0.0,
+                _float(settings.get("default_east_west_bandwidth_mbps")),
+            )
             templates.append(
-                (
-                    "",
-                    "Generic network port",
-                    0.0,
-                    max(
-                        0.0,
-                        _float(settings.get("default_north_south_bandwidth_mbps")),
+                {
+                    "asset_id": "",
+                    "asset_name": "Generic network port",
+                    "poe_w": 0.0,
+                    "north_south_mbps": north_south,
+                    "east_west_mbps": east_west,
+                    "bandwidth_mbps": max(
+                        north_south + east_west,
+                        max(
+                            0.0,
+                            _float(
+                                settings.get("default_expected_bandwidth_mbps")
+                            ),
+                        ),
                     ),
-                    max(
-                        0.0,
-                        _float(settings.get("default_east_west_bandwidth_mbps")),
-                    ),
-                    max(
-                        0.0,
-                        _float(settings.get("default_expected_bandwidth_mbps")),
-                    ),
-                    max(
+                    "packet_rate_pps": max(
                         0.0,
                         _float(settings.get("default_expected_packet_rate_pps")),
                     ),
-                )
+                    "input_port_id": "",
+                    "input_port_name": "Network",
+                    "input_connector_type": "",
+                    "asset_chain": [],
+                    "asset_connections": [],
+                    "upstream_connection": {},
+                    "input_port_statuses": [],
+                }
             )
 
         endpoint = EndpointDemand(
@@ -1094,35 +1154,42 @@ def build_endpoint_demands(data: dict) -> Tuple[List[EndpointDemand], List[str]]
             extension_distance_m=max(0.0, _float(point.get("extension_distance_m"))),
             existing_comms_room=existing_sources.get(name, ""),
         )
-        for index, (
-            asset_id,
-            asset_name,
-            poe_w,
-            north_south_mbps,
-            east_west_mbps,
-            bandwidth_mbps,
-            packet_rate_pps,
-        ) in enumerate(
-            templates[:target_ports], start=1
-        ):
+        for index, template in enumerate(templates[:target_ports], start=1):
             endpoint.ports.append(
                 PortDemand(
                     endpoint_name=name,
                     endpoint_port=index,
-                    endpoint_asset_id=asset_id,
-                    endpoint_asset_name=asset_name,
+                    endpoint_asset_id=template["asset_id"],
+                    endpoint_asset_name=template["asset_name"],
                     department_id=department_id,
                     department_name=endpoint.department_name,
                     floor=endpoint.floor,
                     x=endpoint.x,
                     y=endpoint.y,
                     extension_distance_m=endpoint.extension_distance_m,
-                    poe_power_w=poe_w,
-                    expected_north_south_bandwidth_mbps=north_south_mbps,
-                    expected_east_west_bandwidth_mbps=east_west_mbps,
-                    expected_bandwidth_mbps=bandwidth_mbps,
-                    expected_packet_rate_pps=packet_rate_pps,
+                    poe_power_w=template["poe_w"],
+                    expected_north_south_bandwidth_mbps=template[
+                        "north_south_mbps"
+                    ],
+                    expected_east_west_bandwidth_mbps=template[
+                        "east_west_mbps"
+                    ],
+                    expected_bandwidth_mbps=template["bandwidth_mbps"],
+                    expected_packet_rate_pps=template["packet_rate_pps"],
                     room_type_id=room_type_id,
+                    endpoint_input_port_id=template["input_port_id"],
+                    endpoint_input_port_name=template["input_port_name"],
+                    endpoint_input_connector_type=template[
+                        "input_connector_type"
+                    ],
+                    endpoint_asset_chain=template["asset_chain"],
+                    endpoint_asset_connections=template["asset_connections"],
+                    endpoint_upstream_connection=template[
+                        "upstream_connection"
+                    ],
+                    endpoint_input_port_statuses=template[
+                        "input_port_statuses"
+                    ],
                 )
             )
         results.append(endpoint)
@@ -3112,6 +3179,21 @@ class DesignBuilder:
     def add_connection(self, from_instance: dict, from_port: str, to_instance: dict, to_port: str, medium: str, route_source: str = "", route_destination: str = "", **extra) -> dict:
         generate_patch_leads = bool(extra.pop("generate_patch_leads", True))
         requested_speed = max(0, _int(extra.pop("link_speed_mbps", 0)))
+        protection_group = _text(extra.get("protection_group"))
+        if protection_group and requested_speed <= 0:
+            # Active/active, independent and failover paths are one protected
+            # service. Once one path has selected an upgraded line rate, every
+            # later path must use that same rate rather than silently falling
+            # back to a slower compatible port.
+            requested_speed = max(
+                (
+                    max(0, _int(row.get("link_speed_mbps")))
+                    for row in self.connections
+                    if not bool(row.get("physical_connection"))
+                    and _text(row.get("protection_group")) == protection_group
+                ),
+                default=0,
+            )
         minimum_link_capacity = max(
             0.0, _float(extra.pop("minimum_link_capacity_mbps", 0.0))
         )
@@ -3286,8 +3368,10 @@ class DesignBuilder:
             self.connections.append(connection)
             created.append(connection)
             if generate_patch_leads and medium in {"copper", "fibre"}:
-                self.add_patch_lead(connection_id=connection_id, instance=from_instance, port=selected_from_port, medium=medium, peer_instance_id=_text(to_instance.get("id")), peer_port=selected_to_port, preferred_use="uplink")
-                self.add_patch_lead(connection_id=connection_id, instance=to_instance, port=selected_to_port, medium=medium, peer_instance_id=_text(from_instance.get("id")), peer_port=selected_from_port, preferred_use="input")
+                from_lead = self.add_patch_lead(connection_id=connection_id, instance=from_instance, port=selected_from_port, medium=medium, peer_instance_id=_text(to_instance.get("id")), peer_port=selected_to_port, preferred_use="uplink")
+                to_lead = self.add_patch_lead(connection_id=connection_id, instance=to_instance, port=selected_to_port, medium=medium, peer_instance_id=_text(from_instance.get("id")), peer_port=selected_from_port, preferred_use="input")
+                from_lead["link_speed_mbps"] = link_speed
+                to_lead["link_speed_mbps"] = link_speed
             if medium == "fibre":
                 self.total_fibre_m += length_m
             else:
@@ -3342,12 +3426,34 @@ class DesignBuilder:
         route_path: Sequence[str],
         **extra,
     ) -> dict:
+        selected_link_speed = max(0, int(item.selected_link_speed_mbps))
+        endpoint_asset_chain = [
+            {**deepcopy(row), "link_speed_mbps": selected_link_speed}
+            for row in item.endpoint_asset_chain
+            if isinstance(row, dict)
+        ]
+        endpoint_asset_connections = [
+            {**deepcopy(row), "link_speed_mbps": selected_link_speed}
+            for row in item.endpoint_asset_connections
+            if isinstance(row, dict)
+        ]
         assignment = {
             "id": _next_identifier(self.assignment_ids, "AUTO-EA-"),
             "endpoint_name": item.endpoint_name,
             "endpoint_port": item.endpoint_port,
             "endpoint_asset_id": item.endpoint_asset_id,
             "endpoint_asset_name": item.endpoint_asset_name,
+            "endpoint_input_port_id": item.endpoint_input_port_id,
+            "endpoint_input_port_name": item.endpoint_input_port_name,
+            "endpoint_input_connector_type": item.endpoint_input_connector_type,
+            "endpoint_asset_chain": endpoint_asset_chain,
+            "endpoint_asset_connections": endpoint_asset_connections,
+            "endpoint_upstream_connection": deepcopy(
+                item.endpoint_upstream_connection
+            ),
+            "endpoint_input_port_statuses": deepcopy(
+                item.endpoint_input_port_statuses
+            ),
             "department_id": item.department_id,
             "department_name": item.department_name,
             "room_type_id": item.room_type_id,
@@ -3366,7 +3472,7 @@ class DesignBuilder:
             ),
             "expected_bandwidth_mbps": round(item.expected_bandwidth_mbps, 6),
             "expected_packet_rate_pps": round(item.expected_packet_rate_pps, 3),
-            "link_speed_mbps": max(0, int(item.selected_link_speed_mbps)),
+            "link_speed_mbps": selected_link_speed,
             "copper_length_m": round(max(0.0, copper_length_m), 3),
             "route_path": list(route_path),
             "vlan_ids": [],
@@ -3460,7 +3566,7 @@ class DesignBuilder:
                     "on the imported wireless device after planning."
                 )
 
-        self.add_patch_lead(
+        endpoint_patch_lead = self.add_patch_lead(
             connection_id=endpoint_connection_id,
             assignment_id=assignment["id"],
             instance=instance,
@@ -3471,6 +3577,82 @@ class DesignBuilder:
             endpoint_name=item.endpoint_name,
             preferred_use="client",
         )
+        endpoint_patch_lead["link_speed_mbps"] = selected_link_speed
+        upstream_connection_asset_id = _text(
+            item.endpoint_upstream_connection.get("connection_asset_id")
+        )
+        upstream_connection_asset_name = _text(
+            item.endpoint_upstream_connection.get("connection_asset_name")
+        )
+        if upstream_connection_asset_id or upstream_connection_asset_name:
+            endpoint_patch_lead["connection_asset_id"] = (
+                upstream_connection_asset_id
+            )
+            endpoint_patch_lead["endpoint_external_source"] = True
+            endpoint_patch_lead["cable_specification"] = (
+                upstream_connection_asset_name
+                or upstream_connection_asset_id
+            )
+        for endpoint_link in endpoint_asset_connections:
+            if not isinstance(endpoint_link, dict):
+                continue
+            connection_asset_id = _text(
+                endpoint_link.get("connection_asset_id")
+            )
+            connection_asset_name = _text(
+                endpoint_link.get("connection_asset_name")
+            )
+            self.patch_leads.append(
+                {
+                    "id": _next_identifier(
+                        self.patch_lead_ids, "AUTO-PL-"
+                    ),
+                    "connection_id": "",
+                    "assignment_id": assignment["id"],
+                    "instance_id": "",
+                    "port": "",
+                    "peer_instance_id": "",
+                    "peer_port": "",
+                    "endpoint_name": item.endpoint_name,
+                    "endpoint_internal": True,
+                    "connection_asset_id": connection_asset_id,
+                    "from_endpoint_asset_id": _text(
+                        endpoint_link.get("from_asset_id")
+                    ),
+                    "from_endpoint_asset_node_id": _text(
+                        endpoint_link.get("from_node_id")
+                    ),
+                    "from_endpoint_port_id": _text(
+                        endpoint_link.get("from_output_id")
+                    ),
+                    "from_endpoint_port_name": _text(
+                        endpoint_link.get("from_output_name")
+                    ),
+                    "to_endpoint_asset_id": _text(
+                        endpoint_link.get("to_asset_id")
+                    ),
+                    "to_endpoint_asset_node_id": _text(
+                        endpoint_link.get("to_node_id")
+                    ),
+                    "to_endpoint_port_id": _text(
+                        endpoint_link.get("to_input_id")
+                    ),
+                    "to_endpoint_port_name": _text(
+                        endpoint_link.get("to_input_name")
+                    ),
+                    "port_type": "rj45",
+                    "port_use": "endpoint_chain",
+                    "medium": "copper",
+                    "link_speed_mbps": selected_link_speed,
+                    "cable_specification": (
+                        connection_asset_name
+                        or connection_asset_id
+                        or "Endpoint network patch lead"
+                    ),
+                    "length_m": 2.0,
+                    "auto_generated": True,
+                }
+            )
         if endpoint_instance is not None and endpoint_port:
             self.add_patch_lead(
                 connection_id=endpoint_connection_id,
@@ -3808,6 +3990,23 @@ def _annotate_access_uplink_capacities(
         )
         rows.append(result)
     return rows
+
+
+def _compatible_access_uplink_candidates(
+    candidates: Sequence[dict],
+) -> List[dict]:
+    """Return access assets that can provide every required physical uplink.
+
+    Compatibility is a physical-port constraint, so it still applies when the
+    endpoints do not declare a bandwidth profile and their calculated traffic
+    is zero.
+    """
+
+    return [
+        asset
+        for asset in candidates
+        if max(0, _int(asset.get("_planner_uplink_member_count"))) > 0
+    ]
 
 
 def _effective_asset_bandwidth_mbps(asset: dict) -> Optional[float]:
@@ -6874,68 +7073,71 @@ def _traditional_design(
             upstream_candidates,
             access_uplink_count,
         )
-        if bool(builder.settings.get("ignore_link_bandwidth_errors", False)):
-            for asset in room_candidates:
-                asset["_planner_uplink_capacity_mbps"] = None
+        all_room_candidates = list(room_candidates)
+        room_candidates = _compatible_access_uplink_candidates(
+            room_candidates
+        )
         room_bandwidth = sum(
             item.expected_bandwidth_mbps for item in port_items
         )
+        if not room_candidates:
+            raise NetworkPlanningError(
+                f"No access switch selected for {room_name} has compatible fibre "
+                f"uplinks to the configured {upstream_layer} switch assets.",
+                code="access_uplink_capacity",
+                details={
+                    "location_name": room_name,
+                    "from_role": "access_switch",
+                    "to_role": upstream_layer,
+                    "required_bandwidth_mbps": room_bandwidth,
+                    "max_compatible_capacity_mbps": 0.0,
+                    "shortfall_mbps": room_bandwidth,
+                    "current_location_switch_count": 0,
+                    "access_alternatives": [
+                        {
+                            "asset_id": _text(asset.get("id")),
+                            "name": _text(asset.get("name"))
+                            or _text(asset.get("id")),
+                            "capacity_mbps": max(
+                                0.0,
+                                _float(
+                                    asset.get(
+                                        "_planner_uplink_capacity_mbps"
+                                    )
+                                ),
+                            ),
+                            "speed_mbps": max(
+                                0,
+                                _int(
+                                    asset.get(
+                                        "_planner_uplink_speed_mbps"
+                                    )
+                                ),
+                            ),
+                            "max_members": max(
+                                0,
+                                _int(
+                                    asset.get(
+                                        "_planner_uplink_member_count"
+                                    )
+                                ),
+                            ),
+                            "meets_required": False,
+                        }
+                        for asset in all_room_candidates
+                    ],
+                },
+            )
+        if bool(builder.settings.get("ignore_link_bandwidth_errors", False)):
+            for asset in room_candidates:
+                asset["_planner_uplink_capacity_mbps"] = None
         if room_bandwidth > 0.0:
-            all_room_candidates = list(room_candidates)
             room_candidates = [
                 asset
                 for asset in room_candidates
                 if asset.get("_planner_uplink_capacity_mbps") is None
                 or _float(asset.get("_planner_uplink_capacity_mbps")) > 0.0
             ]
-            if not room_candidates:
-                raise NetworkPlanningError(
-                    f"No access switch selected for {room_name} has compatible fibre "
-                    f"uplinks to the configured {upstream_layer} switch assets.",
-                    code="access_uplink_capacity",
-                    details={
-                        "location_name": room_name,
-                        "from_role": "access_switch",
-                        "to_role": upstream_layer,
-                        "required_bandwidth_mbps": room_bandwidth,
-                        "max_compatible_capacity_mbps": 0.0,
-                        "shortfall_mbps": room_bandwidth,
-                        "current_location_switch_count": 0,
-                        "access_alternatives": [
-                            {
-                                "asset_id": _text(asset.get("id")),
-                                "name": _text(asset.get("name"))
-                                or _text(asset.get("id")),
-                                "capacity_mbps": max(
-                                    0.0,
-                                    _float(
-                                        asset.get(
-                                            "_planner_uplink_capacity_mbps"
-                                        )
-                                    ),
-                                ),
-                                "speed_mbps": max(
-                                    0,
-                                    _int(
-                                        asset.get(
-                                            "_planner_uplink_speed_mbps"
-                                        )
-                                    ),
-                                ),
-                                "max_members": max(
-                                    0,
-                                    _int(
-                                        asset.get(
-                                            "_planner_uplink_member_count"
-                                        )
-                                    ),
-                                ),
-                                "meets_required": False,
-                            }
-                            for asset in all_room_candidates
-                        ],
-                    },
-                )
         room_poe = sum(item.poe_power_w for item in port_items)
         room_packets = sum(
             item.expected_packet_rate_pps for item in port_items
@@ -8485,22 +8687,156 @@ def _external_network_asset(builder: DesignBuilder, record: dict, port_count: in
         lambda asset: max(_int(asset.get("number_of_ports")), _int(asset.get("connections_out"))) >= port_count,
     )
     if candidates:
-        return min(candidates, key=lambda asset: (_int(asset.get("rack_units")), _text(asset.get("id"))))
+        selected = min(
+            candidates,
+            key=lambda asset: (
+                max(1, _int(asset.get("rack_units"), 1)),
+                _text(asset.get("id")),
+            ),
+        )
+        selected["rack_units"] = max(1, _int(selected.get("rack_units"), 1))
+        return selected
     asset_id = f"AUTO-EXTERNAL-{_text(record.get('id')) or len(builder.asset_ids) + 1}"
+    medium = _text(record.get("medium")).lower() or "fibre"
+    port_type = "lc" if medium == "fibre" else "rj45"
+    service_ports = max(1, port_count)
+    fixed_optic_profile: dict = {}
+    fixed_optic_speed = 0
+    if medium == "fibre":
+        required_fibre_standard = (
+            _text(
+                record.get(
+                    "optic_fibre_standard",
+                    record.get("fibre_standard"),
+                )
+            ).upper()
+            or "OS2"
+        )
+        requested_speed = max(
+            0, int(math.ceil(max(0.0, _float(record.get("bandwidth_mbps")))))
+        )
+        profile_candidates = []
+        for candidate in builder.data.get("network_assets", []):
+            if (
+                not isinstance(candidate, dict)
+                or _asset_type(candidate) != "optical_transceiver"
+                or _text(candidate.get("optic_connector_type")).lower()
+                not in {"", "lc"}
+                or (
+                    _text(candidate.get("optic_fibre_standard")).upper()
+                    not in {"", required_fibre_standard}
+                )
+                or _text(candidate.get("optical_tx_power_dbm")) == ""
+                or _text(
+                    candidate.get("optical_receiver_sensitivity_dbm")
+                )
+                == ""
+            ):
+                continue
+            speeds = normalise_port_speeds(
+                candidate.get("supported_speeds_mbps")
+            )
+            adequate = [
+                speed
+                for speed in speeds
+                if not requested_speed or speed >= requested_speed
+            ]
+            if not adequate:
+                continue
+            profile_candidates.append(
+                (
+                    min(adequate),
+                    max(0.0, _float(candidate.get("optic_reach_m"))),
+                    _text(candidate.get("id")),
+                    candidate,
+                )
+            )
+        if profile_candidates:
+            fixed_optic_speed, _reach, _profile_id, fixed_optic_profile = min(
+                profile_candidates,
+                key=lambda row: row[:3],
+            )
+    service_port = {
+        "port_type": port_type,
+        "port_count": service_ports,
+        "port_use": "uplink",
+        "name_prefix": "Service",
+        "explicit_names": [
+            f"Service-{number}"
+            for number in range(1, service_ports + 1)
+        ],
+        "supported_speeds_mbps": (
+            [fixed_optic_speed] if fixed_optic_speed else []
+        ),
+    }
+    if fixed_optic_profile:
+        service_port.update(
+            {
+                "default_speed_mbps": fixed_optic_speed,
+                "transmit_power_dbm": fixed_optic_profile.get(
+                    "optical_tx_power_dbm", ""
+                ),
+                "receiver_sensitivity_dbm": fixed_optic_profile.get(
+                    "optical_receiver_sensitivity_dbm", ""
+                ),
+                "insertion_loss_db": fixed_optic_profile.get(
+                    "optical_insertion_loss_db", ""
+                ),
+                "return_loss_db": fixed_optic_profile.get(
+                    "optical_return_loss_db", ""
+                ),
+                "wavelength_nm": fixed_optic_profile.get(
+                    "optical_wavelength_nm", 0
+                ),
+                "fixed_optic_profile_asset_id": _text(
+                    fixed_optic_profile.get("id")
+                ),
+            }
+        )
     asset = {
         "id": asset_id,
         "name": _text(record.get("name")) or "External network",
         "asset_type": "external_network",
-        "number_of_ports": max(1, port_count),
-        "connections_in": max(1, port_count),
-        "connections_out": max(1, port_count),
-        "uplink_ports": max(1, port_count),
-        "input_connection_type": _text(record.get("medium")) or "fibre",
-        "output_connection_type": _text(record.get("medium")) or "fibre",
-        "uplink_connection_type": _text(record.get("medium")) or "fibre",
-        "rack_units": 0,
+        # One carrier-facing input plus the required protected service links.
+        "number_of_ports": service_ports + 1,
+        "connections_in": 1,
+        "connections_out": service_ports,
+        "uplink_ports": service_ports,
+        "input_connection_type": medium,
+        "output_connection_type": medium,
+        "uplink_connection_type": medium,
+        "port_definitions": [
+            {
+                "port_type": port_type,
+                "port_count": 1,
+                "port_use": "input",
+                "name_prefix": "Carrier",
+                "explicit_names": ["Carrier-1"],
+                "supported_speeds_mbps": [],
+            },
+            service_port,
+        ],
+        "rack_units": 1,
         "power_input_w": 0.0,
-        "notes": "Auto-generated external carrier / internet demarcation object.",
+        "fixed_optic_profile_asset_id": _text(
+            fixed_optic_profile.get("id")
+        ),
+        "optic_connector_type": _text(
+            fixed_optic_profile.get("optic_connector_type")
+        ),
+        "optic_fibre_standard": _text(
+            fixed_optic_profile.get("optic_fibre_standard")
+        ),
+        "notes": (
+            "Auto-generated 1U active external carrier / internet demarcation "
+            "device with a dedicated carrier-facing fibre input."
+            + (
+                " The fixed service interface uses the selected compatible "
+                "optic profile for light-budget validation."
+                if fixed_optic_profile
+                else ""
+            )
+        ),
         "auto_network_asset": True,
     }
     builder.data.setdefault("network_assets", []).append(asset)
@@ -9242,6 +9578,7 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                 "termination_mode": default_mode,
                 "rear_connector": default_rear if default_mode == "connectorised" else "splice",
                 "rear_connector_count": 0,
+                "installed": False,
                 "used_front_connectors": 0,
                 "used_front_connector_names": [],
                 "used_fibres": 0,
@@ -9405,8 +9742,11 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                         if _text(value)
                     }
                     existing_mode = _text(cassette.get("termination_mode")).lower()
+                    existing_front = _text(cassette.get("front_connector")).lower()
                     existing_rear = _text(cassette.get("rear_connector")).lower()
-                    cassette_used = bool(used_names)
+                    cassette_configured = bool(used_names) or bool(
+                        cassette.get("installed")
+                    )
                     existing_assignment = _text(
                         cassette.get("cassette_assignment_key")
                     )
@@ -9422,9 +9762,10 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                     compatible = (
                         assignment_compatible
                         and (
-                            not cassette_used
+                            not cassette_configured
                             or (
-                                existing_mode == termination_mode
+                                existing_front == front_key
+                                and existing_mode == termination_mode
                                 and (
                                     termination_mode != "connectorised"
                                     or existing_rear == rear_connector
@@ -9446,6 +9787,7 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
                     used_names.update(selected)
                     chunk_fibres = min(remaining_fibres, take * fibres_per_position)
                     cassette["position"] = cassette_index + 1
+                    cassette["installed"] = True
                     cassette["front_connector"] = front_key
                     cassette["front_connector_capacity"] = cassette_capacity
                     cassette["termination_mode"] = termination_mode
@@ -9678,6 +10020,148 @@ def _install_fibre_patch_panels(builder: DesignBuilder, spare_fraction: float) -
         backbone["protection_group"] = _text(logical.get("protection_group"))
 
 
+def _install_external_service_entry_panels(builder: DesignBuilder) -> None:
+    """Give each rack-mounted fibre carrier device its own service-entry panel."""
+    records_by_id = {
+        _text(row.get("id")): row
+        for row in builder.data.get("network_external_networks", [])
+        if isinstance(row, dict) and _text(row.get("id"))
+    }
+    external_instances = [
+        instance
+        for instance in builder.instances
+        if _text(instance.get("design_role")) == "external_network"
+        and _text(instance.get("rack_name"))
+        and _text(
+            records_by_id.get(
+                _text(instance.get("external_network_id")), {}
+            ).get("medium")
+        ).lower()
+        == "fibre"
+    ]
+    if not external_instances:
+        return
+
+    panel_asset = _fibre_patch_panel_asset(builder)
+    locations = {
+        _text(row.get("name")): row
+        for row in builder.data.get("locations", [])
+        if isinstance(row, dict) and _text(row.get("name"))
+    }
+    cassette_count = max(
+        1, min(4, _int(panel_asset.get("patch_panel_cassette_count"), 4))
+    )
+    cassette_capacity = 12
+    front_key = (
+        _text(panel_asset.get("patch_panel_cassette_front_connector")).lower()
+        or "lc_duplex"
+    )
+    connector_label = "SC" if front_key.startswith("sc_") else "LC"
+
+    for external in external_instances:
+        external_id = _text(external.get("id"))
+        record_id = _text(external.get("external_network_id"))
+        record = records_by_id.get(record_id, {})
+        rack_name = _text(external.get("rack_name"))
+        location_name = _text(external.get("location_name"))
+        location = locations.get(location_name) or {
+            "name": location_name,
+            "floor": _int(external.get("floor")),
+            "x": _float(external.get("x")),
+            "y": _float(external.get("y")),
+        }
+        panel_port = f"C1-{connector_label}-01"
+        cassettes = []
+        for cassette_index in range(1, cassette_count + 1):
+            used = cassette_index == 1
+            cassettes.append(
+                {
+                    "position": cassette_index,
+                    "front_connector": front_key,
+                    "front_connector_capacity": cassette_capacity,
+                    "termination_mode": "spliced",
+                    "rear_connector": "splice",
+                    "rear_connector_count": 0,
+                    "installed": used,
+                    "used_front_connectors": 1 if used else 0,
+                    "used_front_connector_names": [panel_port] if used else [],
+                    "used_fibres": 2 if used else 0,
+                    "cable_ids": [f"EXTERNAL-{record_id}"] if used else [],
+                    "associated_instance_ids": [external_id] if used else [],
+                    "cassette_assignment_key": f"external-service::{record_id}",
+                    "redundancy_role": "carrier",
+                }
+            )
+        panel = builder.add_instance(
+            panel_asset,
+            f"AUTO {_text(record.get('name')) or location_name} Dedicated Carrier Fibre Patch Panel",
+            location,
+            "fibre_patch_panel",
+            rack_name=rack_name,
+            target_rack_name=rack_name,
+            rack_start_u=0,
+            rack_size_u=max(
+                1, _int(builder.settings.get("default_rack_size_u"), 42)
+            ),
+            route_anchor=location_name,
+            termination_count=1,
+            available_connector_count=max(
+                0, _int(panel_asset.get("number_of_ports"), 48) - 1
+            ),
+            cabinet_patch_panel=True,
+            external_field_termination=True,
+            dedicated_external_fibre_panel=True,
+            fibre_patch_scope="external_service",
+            external_network_id=record_id,
+            external_equipment_instance_id=external_id,
+            associated_instance_ids=[external_id],
+            fibre_cassettes=cassettes,
+        )
+        service_speed = max(
+            (
+                max(0, _int(connection.get("link_speed_mbps")))
+                for connection in builder.connections
+                if not bool(connection.get("physical_connection"))
+                and _text(connection.get("external_network_id")) == record_id
+            ),
+            default=0,
+        )
+        physical = builder.add_connection(
+            panel,
+            panel_port,
+            external,
+            "Carrier-1",
+            "fibre",
+            generate_patch_leads=False,
+            topology_hidden=True,
+            physical_connection=True,
+            physical_segment="external_fibre_patch_cable",
+            external_service_entry=True,
+            external_network_id=record_id,
+            connection_role="input",
+            link_speed_mbps=service_speed,
+            cable_specification="OS2 carrier service-entry fibre patch lead",
+            fibre_count=2,
+            cabinet_to_field=True,
+        )
+        lead = builder.add_patch_lead(
+            connection_id=_text(physical.get("id")),
+            instance=external,
+            port="Carrier-1",
+            medium="fibre",
+            peer_instance_id=_text(panel.get("id")),
+            peer_port=panel_port,
+            preferred_use="input",
+            length_m=2.0,
+        )
+        lead["link_speed_mbps"] = service_speed
+        lead["external_service_entry"] = True
+        lead["external_network_id"] = record_id
+        record["fibre_patch_panel_instance_id"] = _text(panel.get("id"))
+        record["fibre_patch_panel_port"] = panel_port
+        record["external_equipment_rack_name"] = rack_name
+
+
 def _copper_patch_panel_asset(builder: DesignBuilder) -> dict:
     candidates = _candidate_assets(
         builder.data,
@@ -9768,6 +10252,7 @@ def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) 
         if not (
             bool(lead.get("auto_generated"))
             and _text(lead.get("assignment_id")) in panelised_assignment_ids
+            and not bool(lead.get("endpoint_internal"))
         )
     ]
 
@@ -10023,10 +10508,13 @@ def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) 
                     physical_connection=True,
                     physical_segment="copper_patch_cable",
                     assignment_id=assignment_id,
+                    link_speed_mbps=max(
+                        0, _int(assignment.get("link_speed_mbps"))
+                    ),
                     cable_specification="Category 6A copper patch lead",
                     length_m=0.3,
                 )
-                builder.add_patch_lead(
+                panel_patch_lead = builder.add_patch_lead(
                     connection_id=_text(patch_connection.get("id")),
                     assignment_id=assignment_id,
                     instance=switch,
@@ -10037,6 +10525,9 @@ def _install_copper_patch_panels(builder: DesignBuilder, spare_fraction: float) 
                     endpoint_name=_text(assignment.get("endpoint_name")),
                     preferred_use="client",
                     length_m=0.3,
+                )
+                panel_patch_lead["link_speed_mbps"] = max(
+                    0, _int(assignment.get("link_speed_mbps"))
                 )
 
     if der_capacity_issues:
@@ -10208,6 +10699,40 @@ def _repack_generated_racks(builder: DesignBuilder) -> None:
     bottom. Rack support assets are real installed instances and therefore
     appear in the rack elevation, but remain absent from logical topology.
     """
+    # The planner performs one provisional pack before fibre termination and a
+    # final pack after it. Remove support generated by the provisional pass so
+    # the operation is deterministic and does not duplicate managers, UPSs,
+    # PDUs or their power schedule rows.
+    support_roles = {"rack_ups", "rack_pdu", "cable_management"}
+    removed_support_ids = {
+        _text(instance.get("id"))
+        for instance in builder.instances
+        if _text(instance.get("design_role")) in support_roles
+    }
+    if removed_support_ids:
+        removed_power_ids = {
+            _text(row.get("id"))
+            for row in builder.power_connections
+            if _text(row.get("from_instance_id")) in removed_support_ids
+            or _text(row.get("to_instance_id")) in removed_support_ids
+        }
+        builder.instances[:] = [
+            instance
+            for instance in builder.instances
+            if _text(instance.get("id")) not in removed_support_ids
+        ]
+        builder.power_connections[:] = [
+            row
+            for row in builder.power_connections
+            if _text(row.get("id")) not in removed_power_ids
+        ]
+        builder.instance_ids.difference_update(removed_support_ids)
+        builder.power_connection_ids.difference_update(removed_power_ids)
+        for instance in builder.instances:
+            instance.pop("power_pdu_instance_ids", None)
+            instance.pop("power_feed_count", None)
+            instance.pop("upstream_power_source_id", None)
+
     assets = {
         _text(row.get("id")): row
         for row in builder.data.get("network_assets", [])
@@ -11818,6 +12343,10 @@ def generate_network_design(
     # panels share the location racks without ever exceeding the configured U.
     progress(68, "Installing patch panels, UPS equipment and rack PDUs...")
     _install_copper_patch_panels(builder, spare_fraction)
+    # Establish the real cabinet placement before deciding whether an
+    # active-to-active fibre link needs fixed patch-panel termination.
+    _repack_generated_racks(builder)
+    _install_external_service_entry_panels(builder)
     _install_fibre_patch_panels(builder, spare_fraction)
     _repack_generated_racks(builder)
     rack_policy_summary = _apply_rack_connection_policy(builder)

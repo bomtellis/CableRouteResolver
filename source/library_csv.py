@@ -18,6 +18,9 @@ ASSET_CSV_FIELDS = (
     "qty",
     "input_ports",
     "output_ports",
+    "input_port_definitions",
+    "output_port_definitions",
+    "is_connection_asset",
     "data_points",
     "capability_keywords",
 )

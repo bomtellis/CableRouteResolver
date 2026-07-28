@@ -69,6 +69,7 @@ def normalise_asset_bundles(bundles, valid_asset_ids=None) -> list[dict]:
                 "name": _text(value.get("name")) or bundle_id,
                 "description": _text(value.get("description")),
                 "assets": rows,
+                "placeholder": not bool(rows),
                 "connections": clean_asset_connections(
                     value.get("connections", value.get("asset_connections", [])),
                     row_ids,
@@ -185,9 +186,24 @@ def merge_asset_connections(existing_connections, added_connections) -> list[dic
     )
 
 
-def merge_selected_bundle_connections(existing_connections, bundles) -> list[dict]:
-    """Apply selected bundle connection recipes and multipliers."""
+def merge_selected_bundle_connections(
+    existing_connections,
+    bundles,
+    existing_asset_rows=None,
+) -> list[dict]:
+    """Apply selected bundle connection recipes and multipliers.
+
+    Instance-aware rows are copied once per bundle occurrence and their local
+    occurrence numbers are offset into the room's combined asset list. Legacy
+    rows without occurrence numbers retain the established quantity scaling.
+    ``existing_asset_rows`` should describe the room before the new bundles are
+    inserted, so new occurrences do not collide with existing ones.
+    """
     result = clean_asset_connections(existing_connections)
+    instance_offsets = {
+        row["asset_id"]: int(row.get("qty", 1) or 1)
+        for row in clean_asset_rows(existing_asset_rows)
+    }
     for bundle in bundles or []:
         if not isinstance(bundle, dict):
             continue
@@ -195,17 +211,137 @@ def merge_selected_bundle_connections(existing_connections, bundles) -> list[dic
             bundle_qty = max(1, int(bundle.get("bundle_qty", 1) or 1))
         except (TypeError, ValueError):
             bundle_qty = 1
-        scaled = [
-            {
-                **connection,
-                "qty": int(connection.get("qty", 1) or 1) * bundle_qty,
-            }
-            for connection in clean_asset_connections(
-                bundle.get("connections", bundle.get("asset_connections", []))
-            )
-        ]
+        asset_counts = {
+            row["asset_id"]: int(row.get("qty", 1) or 1)
+            for row in clean_asset_rows(bundle.get("assets", []))
+        }
+        recipes = clean_asset_connections(
+            bundle.get("connections", bundle.get("asset_connections", []))
+        )
+        scaled = []
+        for connection in recipes:
+            if not connection.get("from_asset_instance") and not connection.get(
+                "to_asset_instance"
+            ):
+                # "All instances / automatic" is a per-occurrence recipe.
+                # Prefer the target count (for example one power lead per
+                # powered asset); fall back to the source count when only the
+                # source is a tracked bundle asset.
+                automatic_instances = asset_counts.get(
+                    _text(connection.get("to_asset_id")),
+                    asset_counts.get(
+                        _text(connection.get("from_asset_id")),
+                        1,
+                    ),
+                )
+                scaled.append(
+                    {
+                        **connection,
+                        "qty": int(connection.get("qty", 1) or 1)
+                        * max(1, int(automatic_instances or 1))
+                        * bundle_qty,
+                    }
+                )
+        for bundle_index in range(bundle_qty):
+            for connection in recipes:
+                from_instance = int(
+                    connection.get("from_asset_instance", 0) or 0
+                )
+                to_instance = int(connection.get("to_asset_instance", 0) or 0)
+                if not from_instance and not to_instance:
+                    continue
+                row = dict(connection)
+                from_asset_id = _text(row.get("from_asset_id"))
+                to_asset_id = _text(row.get("to_asset_id"))
+                automatic_instances = (
+                    asset_counts.get(to_asset_id, 1)
+                    if to_asset_id and not to_instance
+                    else (
+                        asset_counts.get(from_asset_id, 1)
+                        if from_asset_id and not from_instance
+                        else 1
+                    )
+                )
+                row["qty"] = int(row.get("qty", 1) or 1) * max(
+                    1, int(automatic_instances or 1)
+                )
+                if from_asset_id and from_instance:
+                    row["from_asset_instance"] = (
+                        instance_offsets.get(from_asset_id, 0)
+                        + (bundle_index * asset_counts.get(from_asset_id, 0))
+                        + from_instance
+                    )
+                if to_asset_id and to_instance:
+                    row["to_asset_instance"] = (
+                        instance_offsets.get(to_asset_id, 0)
+                        + (bundle_index * asset_counts.get(to_asset_id, 0))
+                        + to_instance
+                    )
+                scaled.append(row)
         result = merge_asset_connections(result, scaled)
+        for asset_id, quantity in asset_counts.items():
+            instance_offsets[asset_id] = (
+                instance_offsets.get(asset_id, 0) + (quantity * bundle_qty)
+            )
     return result
+
+
+def _connection_key(connection: dict) -> tuple:
+    return (
+        _text(connection.get("from_asset_id")),
+        int(connection.get("from_asset_instance", 0) or 0),
+        _text(connection.get("from_output_id")),
+        _text(connection.get("to_asset_id")),
+        int(connection.get("to_asset_instance", 0) or 0),
+        _text(connection.get("to_input_id")),
+        _text(connection.get("port_type")),
+        _text(connection.get("connection_asset_id")),
+    )
+
+
+def resolve_room_type_asset_connections(room_type, asset_bundles=None) -> list[dict]:
+    """Return the effective saved and bundle-derived connection recipes.
+
+    Current room types normally contain materialised copies of their bundle
+    connections. Older projects can contain only the bundle assignment. Bundle
+    quantities therefore act as a minimum for each identical connection,
+    rather than being added again to an already materialised room recipe.
+    """
+
+    if not isinstance(room_type, dict):
+        return []
+    direct = clean_asset_connections(
+        room_type.get("asset_connections", room_type.get("connections", []))
+    )
+    bundles = normalise_asset_bundles(asset_bundles)
+    bundles_by_id = {bundle["id"]: bundle for bundle in bundles}
+    selected = []
+    for assignment in clean_bundle_assignments(
+        room_type.get("asset_bundle_assignments", []),
+        bundles_by_id,
+    ):
+        bundle = bundles_by_id.get(assignment["bundle_id"])
+        if bundle:
+            selected.append({**bundle, "bundle_qty": assignment["qty"]})
+    expected = merge_selected_bundle_connections([], selected)
+    if not expected:
+        return direct
+
+    result = [dict(connection) for connection in direct]
+    result_by_key = {_connection_key(connection): connection for connection in result}
+    for connection in expected:
+        key = _connection_key(connection)
+        current = result_by_key.get(key)
+        if current is None:
+            current = dict(connection)
+            result.append(current)
+            result_by_key[key] = current
+        else:
+            current["qty"] = max(
+                int(current.get("qty", 0) or 0),
+                int(connection.get("qty", 0) or 0),
+            )
+    return clean_asset_connections(result)
 
 
 def sync_room_types_for_bundle_updates(
@@ -239,12 +375,21 @@ def sync_room_types_for_bundle_updates(
             continue
 
         deltas = {}
-        connection_deltas = {}
+        old_selected_bundles = []
+        new_selected_bundles = []
         for assignment in assignments:
             bundle_id = assignment["bundle_id"]
             multiplier = assignment["qty"]
             old_bundle = old_by_id.get(bundle_id)
             new_bundle = new_by_id.get(bundle_id)
+            if old_bundle:
+                old_selected_bundles.append(
+                    {**old_bundle, "bundle_qty": multiplier}
+                )
+            if new_bundle:
+                new_selected_bundles.append(
+                    {**new_bundle, "bundle_qty": multiplier}
+                )
             old_assets = {
                 row["asset_id"]: row["qty"]
                 for row in clean_asset_rows(
@@ -263,26 +408,30 @@ def sync_room_types_for_bundle_updates(
                 ) * multiplier
                 if delta:
                     deltas[asset_id] = deltas.get(asset_id, 0) + delta
-            old_connections = {
-                (row["from_asset_id"], row["to_asset_id"]): row["qty"]
-                for row in clean_asset_connections(
-                    old_bundle.get("connections", []) if old_bundle else []
-                )
-            }
-            new_connections = {
-                (row["from_asset_id"], row["to_asset_id"]): row["qty"]
-                for row in clean_asset_connections(
-                    new_bundle.get("connections", []) if new_bundle else []
-                )
-            }
-            for pair in set(old_connections) | set(new_connections):
-                delta = (
-                    new_connections.get(pair, 0) - old_connections.get(pair, 0)
-                ) * multiplier
-                if delta:
-                    connection_deltas[pair] = (
-                        connection_deltas.get(pair, 0) + delta
-                    )
+
+        old_bundle_connections = {
+            _connection_key(row): row
+            for row in merge_selected_bundle_connections(
+                [], old_selected_bundles
+            )
+        }
+        new_bundle_connections = {
+            _connection_key(row): row
+            for row in merge_selected_bundle_connections(
+                [], new_selected_bundles
+            )
+        }
+        connection_deltas = {}
+        connection_templates = {}
+        for key in set(old_bundle_connections) | set(new_bundle_connections):
+            old_row = old_bundle_connections.get(key, {})
+            new_row = new_bundle_connections.get(key, {})
+            delta = int(new_row.get("qty", 0) or 0) - int(
+                old_row.get("qty", 0) or 0
+            )
+            if delta:
+                connection_deltas[key] = delta
+                connection_templates[key] = dict(new_row or old_row)
 
         rows = clean_asset_rows(room_type.get("assets", []))
         rows_by_id = {row["asset_id"]: row for row in rows}
@@ -290,8 +439,8 @@ def sync_room_types_for_bundle_updates(
         connections = clean_asset_connections(
             room_type.get("asset_connections", room_type.get("connections", []))
         )
-        connections_by_pair = {
-            (row["from_asset_id"], row["to_asset_id"]): row
+        connections_by_key = {
+            _connection_key(row): row
             for row in connections
         }
         before_connections = deepcopy(connections)
@@ -310,24 +459,21 @@ def sync_room_types_for_bundle_updates(
                 rows.remove(existing)
                 rows_by_id.pop(asset_id, None)
 
-        for pair, delta in connection_deltas.items():
-            existing = connections_by_pair.get(pair)
+        for key, delta in connection_deltas.items():
+            existing = connections_by_key.get(key)
             if existing is None:
                 if delta > 0:
-                    row = {
-                        "from_asset_id": pair[0],
-                        "to_asset_id": pair[1],
-                        "qty": delta,
-                    }
+                    row = dict(connection_templates[key])
+                    row["qty"] = delta
                     connections.append(row)
-                    connections_by_pair[pair] = row
+                    connections_by_key[key] = row
                 continue
             updated_quantity = int(existing.get("qty", 1) or 1) + delta
             if updated_quantity > 0:
                 existing["qty"] = updated_quantity
             else:
                 connections.remove(existing)
-                connections_by_pair.pop(pair, None)
+                connections_by_key.pop(key, None)
 
         connections = clean_asset_connections(
             connections,
