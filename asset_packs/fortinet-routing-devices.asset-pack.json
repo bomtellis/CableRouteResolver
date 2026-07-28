@@ -1,0 +1,208 @@
+{
+  "format": "cable-route-resolver-asset-pack",
+  "version": 1,
+  "library_type": "network_assets",
+  "name": "Fortinet FortiGate routing and edge security devices",
+  "assets": [
+    {
+      "id": "FORTINET-FG-90G",
+      "name": "Fortinet FortiGate 90G",
+      "asset_type": "firewall",
+      "asset_group": "router",
+      "manufacturer": "Fortinet",
+      "model": "FG-90G",
+      "network_layer": "edge",
+      "number_of_ports": 10,
+      "connections_in": 2,
+      "connections_out": 8,
+      "uplink_ports": 2,
+      "input_connection_type": "copper",
+      "output_connection_type": "copper",
+      "uplink_connection_type": "fibre",
+      "bandwidth_capacity_gbps": 2.2,
+      "firewall_throughput_gbps": 28.0,
+      "ngfw_throughput_gbps": 2.5,
+      "threat_protection_throughput_gbps": 2.2,
+      "packet_throughput_mpps": 0.0,
+      "power_input_w": 0.0,
+      "power_feed_count": 2,
+      "redundant_power_supplies": false,
+      "rack_units": 0,
+      "switch_rack_unit_allowance": 1,
+      "port_definitions": [
+        {
+          "port_type": "rj45",
+          "port_count": 2,
+          "port_use": "input",
+          "name_prefix": "WAN",
+          "supported_speeds_mbps": [1000]
+        },
+        {
+          "port_type": "rj45",
+          "port_count": 6,
+          "port_use": "downlink",
+          "name_prefix": "LAN",
+          "supported_speeds_mbps": [10, 100, 1000]
+        },
+        {
+          "port_type": "sfp+",
+          "port_count": 2,
+          "port_use": "uplink",
+          "name_prefix": "Shared-10GE",
+          "supported_speeds_mbps": [1000, 10000]
+        }
+      ],
+      "supports_stacking": false,
+      "max_stack_members": 1,
+      "notes": "FortiGate branch NGFW / SD-WAN edge device. Planner capacity uses Fortinet threat-protection throughput as the conservative routed-security capacity. The two 10GE interfaces are shared-media pairs; verify the chosen copper or SFP+ presentation for the ordered hardware and FortiOS configuration.",
+      "source_urls": [
+        "https://www.fortinet.com/resources/data-sheets/fortigate-90g-series",
+        "https://www.fortinet.com/content/dam/fortinet/assets/data-sheets/Fortinet_Product_Matrix.pdf",
+        "https://www.fortinet.com/content/dam/fortinet/assets/data-sheets/og-next-generation-firewall.pdf"
+      ]
+    },
+    {
+      "id": "FORTINET-FG-120G",
+      "name": "Fortinet FortiGate 120G",
+      "asset_type": "firewall",
+      "asset_group": "router",
+      "manufacturer": "Fortinet",
+      "model": "FG-120G",
+      "network_layer": "edge",
+      "number_of_ports": 30,
+      "connections_in": 2,
+      "connections_out": 28,
+      "uplink_ports": 4,
+      "input_connection_type": "copper",
+      "output_connection_type": "copper",
+      "uplink_connection_type": "fibre",
+      "bandwidth_capacity_gbps": 2.8,
+      "firewall_throughput_gbps": 39.0,
+      "ngfw_throughput_gbps": 3.1,
+      "threat_protection_throughput_gbps": 2.8,
+      "packet_throughput_mpps": 0.0,
+      "power_input_w": 0.0,
+      "power_feed_count": 2,
+      "redundant_power_supplies": true,
+      "rack_units": 1,
+      "switch_rack_unit_allowance": 1,
+      "port_definitions": [
+        {
+          "port_type": "rj45",
+          "port_count": 2,
+          "port_use": "input",
+          "name_prefix": "WAN",
+          "supported_speeds_mbps": [10, 100, 1000]
+        },
+        {
+          "port_type": "rj45",
+          "port_count": 16,
+          "port_use": "downlink",
+          "name_prefix": "GE-RJ45",
+          "supported_speeds_mbps": [10, 100, 1000]
+        },
+        {
+          "port_type": "sfp",
+          "port_count": 8,
+          "port_use": "downlink",
+          "name_prefix": "GE-SFP",
+          "supported_speeds_mbps": [1000]
+        },
+        {
+          "port_type": "sfp+",
+          "port_count": 4,
+          "port_use": "uplink",
+          "name_prefix": "10GE-SFP+",
+          "supported_speeds_mbps": [1000, 10000]
+        }
+      ],
+      "supports_stacking": false,
+      "max_stack_members": 1,
+      "notes": "FortiGate 1U campus/branch NGFW / SD-WAN edge device. Planner capacity uses Fortinet threat-protection throughput as the conservative routed-security capacity. Port roles are logical and may be reconfigured in FortiOS subject to interface and shared-media constraints.",
+      "source_urls": [
+        "https://www.fortinet.com/products/next-generation-firewall",
+        "https://www.fortinet.com/content/dam/fortinet/assets/data-sheets/Fortinet_Product_Matrix.pdf",
+        "https://www.fortinet.com/content/dam/fortinet/assets/data-sheets/og-next-generation-firewall.pdf"
+      ]
+    },
+    {
+      "id": "FORTINET-FG-200G",
+      "name": "Fortinet FortiGate 200G",
+      "asset_type": "firewall",
+      "asset_group": "router",
+      "manufacturer": "Fortinet",
+      "model": "FG-200G",
+      "network_layer": "edge",
+      "number_of_ports": 30,
+      "connections_in": 2,
+      "connections_out": 28,
+      "uplink_ports": 8,
+      "input_connection_type": "copper",
+      "output_connection_type": "copper",
+      "uplink_connection_type": "fibre",
+      "bandwidth_capacity_gbps": 6.0,
+      "firewall_throughput_gbps": 39.0,
+      "ngfw_throughput_gbps": 7.0,
+      "threat_protection_throughput_gbps": 6.0,
+      "packet_throughput_mpps": 0.0,
+      "power_input_w": 0.0,
+      "power_feed_count": 2,
+      "redundant_power_supplies": true,
+      "rack_units": 1,
+      "switch_rack_unit_allowance": 1,
+      "port_definitions": [
+        {
+          "port_type": "rj45",
+          "port_count": 2,
+          "port_use": "input",
+          "name_prefix": "WAN",
+          "supported_speeds_mbps": [10, 100, 1000]
+        },
+        {
+          "port_type": "rj45",
+          "port_count": 8,
+          "port_use": "downlink",
+          "name_prefix": "GE-RJ45",
+          "supported_speeds_mbps": [10, 100, 1000]
+        },
+        {
+          "port_type": "rj45",
+          "port_count": 8,
+          "port_use": "downlink",
+          "name_prefix": "5GE-RJ45",
+          "supported_speeds_mbps": [100, 1000, 2500, 5000]
+        },
+        {
+          "port_type": "sfp",
+          "port_count": 4,
+          "port_use": "downlink",
+          "name_prefix": "GE-SFP",
+          "supported_speeds_mbps": [1000]
+        },
+        {
+          "port_type": "sfp+",
+          "port_count": 8,
+          "port_use": "uplink",
+          "name_prefix": "10GE-SFP+",
+          "supported_speeds_mbps": [1000, 10000]
+        }
+      ],
+      "supports_stacking": false,
+      "max_stack_members": 1,
+      "notes": "FortiGate 1U campus NGFW / SD-WAN edge device. Planner capacity uses Fortinet threat-protection throughput as the conservative routed-security capacity. Two GE RJ45 interfaces are represented as logical WAN inputs; FortiOS ports remain reconfigurable subject to interface capabilities.",
+      "source_urls": [
+        "https://www.fortinet.com/resources/data-sheets/fortigate-200g-series",
+        "https://www.fortinet.com/content/dam/fortinet/assets/data-sheets/Fortinet_Product_Matrix.pdf",
+        "https://www.fortinet.com/content/dam/fortinet/assets/data-sheets/og-next-generation-firewall.pdf"
+      ]
+    }
+  ],
+  "related": {},
+  "metadata": {
+    "vendor": "Fortinet",
+    "category": "Routing, NGFW and SD-WAN edge devices",
+    "specification_basis": "Official Fortinet Product Matrix and NGFW Ordering Guide, reviewed 2026-07-19",
+    "capacity_policy": "bandwidth_capacity_gbps uses threat-protection throughput; raw firewall and NGFW figures are retained separately",
+    "warning": "Manufacturer performance values are up to figures and vary with configuration. Confirm exact SKU, transceivers, power draw, regional compliance and FortiOS support before procurement."
+  }
+}
