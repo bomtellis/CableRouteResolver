@@ -7,7 +7,7 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QItemSelectionModel, QSortFilterProxyModel
+from PySide6.QtCore import Qt, QItemSelectionModel, QSortFilterProxyModel, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -45,9 +45,15 @@ from asset_library_io import (
     write_asset_pack,
 )
 from asset_import_dialog import AssetImportMarshallingDialog
+from asset_ports import (
+    asset_input_ports,
+    clean_asset_connections,
+    room_asset_port_summary,
+)
 from asset_bundles import (
     clean_bundle_assignments,
     merge_bundle_assignments,
+    merge_selected_bundle_connections,
     merge_selected_bundles,
     normalise_asset_bundles,
     unlink_bundle_assignment,
@@ -133,6 +139,110 @@ class CheckableListWidget(QListWidget):
             event.accept()
             return
         super().mousePressEvent(event)
+
+
+class AssetConnectionsEditor(QWidget):
+    """Editor for explicit output-to-input asset connection rows."""
+
+    connectionsChanged = Signal()
+
+    def __init__(self, parent=None, asset_labels=None, connections=None):
+        super().__init__(parent)
+        self.asset_labels = {
+            str(asset_id or "").strip(): str(label or asset_id).strip()
+            for asset_id, label in (asset_labels or {}).items()
+            if str(asset_id or "").strip()
+        }
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(
+            ["From asset output", "To asset input", "Connections"]
+        )
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setColumnWidth(2, 110)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        layout.addWidget(self.table)
+        buttons = QHBoxLayout()
+        add_button = QPushButton("Add connection")
+        remove_button = QPushButton("Remove selected")
+        add_button.clicked.connect(self.add_connection)
+        remove_button.clicked.connect(self.remove_selected)
+        buttons.addWidget(add_button)
+        buttons.addWidget(remove_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        for connection in clean_asset_connections(connections):
+            self.add_connection(connection)
+
+    def _asset_combo(self, selected_id=""):
+        combo = QComboBox()
+        for asset_id in sorted(
+            self.asset_labels,
+            key=lambda value: (
+                self.asset_labels[value].casefold(),
+                value.casefold(),
+            ),
+        ):
+            combo.addItem(f"{asset_id} - {self.asset_labels[asset_id]}", asset_id)
+        index = combo.findData(str(selected_id or "").strip())
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        combo.currentIndexChanged.connect(
+            lambda *_: self.connectionsChanged.emit()
+        )
+        return combo
+
+    def add_connection(self, connection=None):
+        connection = dict(connection or {})
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setCellWidget(
+            row, 0, self._asset_combo(connection.get("from_asset_id", ""))
+        )
+        self.table.setCellWidget(
+            row, 1, self._asset_combo(connection.get("to_asset_id", ""))
+        )
+        quantity = QSpinBox()
+        quantity.setRange(1, 100000)
+        quantity.setValue(max(1, _safe_int(connection.get("qty", 1), 1)))
+        quantity.valueChanged.connect(
+            lambda *_: self.connectionsChanged.emit()
+        )
+        self.table.setCellWidget(row, 2, quantity)
+        self.connectionsChanged.emit()
+
+    def remove_selected(self):
+        for row in sorted(
+            {index.row() for index in self.table.selectionModel().selectedRows()},
+            reverse=True,
+        ):
+            self.table.removeRow(row)
+        self.connectionsChanged.emit()
+
+    def connections(self, valid_asset_ids=None):
+        rows = []
+        for row in range(self.table.rowCount()):
+            from_combo = self.table.cellWidget(row, 0)
+            to_combo = self.table.cellWidget(row, 1)
+            quantity = self.table.cellWidget(row, 2)
+            if not isinstance(from_combo, QComboBox) or not isinstance(to_combo, QComboBox):
+                continue
+            rows.append(
+                {
+                    "from_asset_id": str(from_combo.currentData() or "").strip(),
+                    "to_asset_id": str(to_combo.currentData() or "").strip(),
+                    "qty": int(quantity.value()) if isinstance(quantity, QSpinBox) else 1,
+                }
+            )
+        return clean_asset_connections(rows, valid_asset_ids)
+
+    def set_connections(self, connections):
+        self.table.setRowCount(0)
+        for connection in clean_asset_connections(connections):
+            self.add_connection(connection)
+        self.connectionsChanged.emit()
 
 
 class PointEditorDialog(QDialog):
@@ -1888,20 +1998,38 @@ class AssetEditorDialog(QDialog):
         self.qty_spin.setRange(1, 100000)
         self.qty_spin.setValue(int(self.seed.get("qty", 1) or 1))
 
-        self.data_points_spin = QSpinBox()
-        self.data_points_spin.setRange(0, 100000)
+        self.input_ports_spin = QSpinBox()
+        self.input_ports_spin.setRange(0, 100000)
 
-        data_points = self.seed.get(
-            "data_points",
-            self.seed.get("data_points_each", self.seed.get("cables", 1)),
+        input_ports = self.seed.get(
+            "input_ports",
+            self.seed.get(
+                "data_points",
+                self.seed.get("data_points_each", self.seed.get("cables", 1)),
+            ),
         )
 
         try:
-            data_points = int(data_points)
+            input_ports = int(input_ports)
         except (TypeError, ValueError):
-            data_points = 1
+            input_ports = 1
 
-        self.data_points_spin.setValue(data_points)
+        self.input_ports_spin.setValue(input_ports)
+        self.input_ports_spin.setToolTip(
+            "Ports on this asset that need an upstream connection."
+        )
+
+        self.output_ports_spin = QSpinBox()
+        self.output_ports_spin.setRange(0, 100000)
+        try:
+            output_ports = int(self.seed.get("output_ports", 0) or 0)
+        except (TypeError, ValueError):
+            output_ports = 0
+        self.output_ports_spin.setValue(max(0, output_ports))
+        self.output_ports_spin.setToolTip(
+            "Ports that can feed another wired asset. Assets with both input and "
+            "output ports can be daisy chained to reduce upstream port demand."
+        )
 
         self.north_south_concurrency_spin = QDoubleSpinBox()
         self.north_south_concurrency_spin.setRange(0.0, 100.0)
@@ -1974,7 +2102,8 @@ class AssetEditorDialog(QDialog):
         form.addRow("Connection type", self.connection_type_combo)
         form.addRow("Category", self.category_combo)
         form.addRow("Quantity", self.qty_spin)
-        form.addRow("Data points per item", self.data_points_spin)
+        form.addRow("Input ports per item", self.input_ports_spin)
+        form.addRow("Output ports per item", self.output_ports_spin)
         form.addRow("North-south concurrency", self.north_south_concurrency_spin)
         form.addRow("East-west concurrency", self.east_west_concurrency_spin)
 
@@ -2006,7 +2135,9 @@ class AssetEditorDialog(QDialog):
                 "connection_type": self.connection_type_combo.currentText().strip(),
                 "category_id": str(self.category_combo.currentData() or "").strip(),
                 "qty": int(self.qty_spin.value()),
-                "data_points": int(self.data_points_spin.value()),
+                "input_ports": int(self.input_ports_spin.value()),
+                "output_ports": int(self.output_ports_spin.value()),
+                "data_points": int(self.input_ports_spin.value()),
                 "north_south_concurrency_factor": round(
                     float(self.north_south_concurrency_spin.value()) / 100.0, 6
                 ),
@@ -2132,8 +2263,8 @@ class AssetDeploymentLocationsDialog(QDialog):
                 "Floor",
                 "Room type",
                 "Qty per room",
-                "Data points",
-                "Data points each",
+                "Input ports",
+                "Input ports each",
                 "X",
                 "Y",
                 "Departments",
@@ -2160,8 +2291,8 @@ class AssetDeploymentLocationsDialog(QDialog):
                 "Floors",
                 "Qty per room",
                 "Deployed items",
-                "Data points",
-                "Data points each",
+                "Input ports",
+                "Input ports each",
                 "Departments",
                 "Example room",
             ]
@@ -2855,7 +2986,8 @@ class ExpandAssetDialog(QDialog):
         for label, replacement in zip(self.replacement_labels, self.replacements):
             label.setText(
                 f"{replacement.get('id', '')} - {replacement.get('name', '')}\n"
-                f"Data points each: {replacement.get('data_points', 1)} | "
+                f"Ports: {replacement.get('input_ports', replacement.get('data_points', 1))} in / "
+                f"{replacement.get('output_ports', 0)} out | "
                 f"Connection: {replacement.get('connection_type', 'wired')}"
             )
 
@@ -2962,7 +3094,7 @@ class AssetsEditorWindow(QMainWindow):
         search_row.addWidget(self.asset_filter_count_label)
         layout.addLayout(search_row)
 
-        self.table = QTableWidget(0, 12)
+        self.table = QTableWidget(0, 13)
         self.table.setHorizontalHeaderLabels(
             [
                 "Name",
@@ -2971,8 +3103,9 @@ class AssetsEditorWindow(QMainWindow):
                 "Connection",
                 "Category",
                 "Library Qty",
-                "Data points each",
-                "Library total",
+                "Input ports each",
+                "Output ports each",
+                "Library input total",
                 "Capabilities",
                 "Deployed rooms",
                 "Deployed items",
@@ -3039,10 +3172,13 @@ class AssetsEditorWindow(QMainWindow):
 
             qty = int(asset.get("qty", 1) or 1)
             dp_value = asset.get(
-                "data_points",
+                "input_ports",
                 asset.get(
-                    "data_points_each",
-                    asset.get("cables", 1),
+                    "data_points",
+                    asset.get(
+                        "data_points_each",
+                        asset.get("cables", 1),
+                    ),
                 ),
             )
 
@@ -3050,6 +3186,10 @@ class AssetsEditorWindow(QMainWindow):
                 dp = int(dp_value)
             except (TypeError, ValueError):
                 dp = 1
+            try:
+                output_ports = max(0, int(asset.get("output_ports", 0) or 0))
+            except (TypeError, ValueError):
+                output_ports = 0
 
             category_id = str(
                 asset.get(
@@ -3089,6 +3229,7 @@ class AssetsEditorWindow(QMainWindow):
                 str(category_name),
                 str(qty),
                 str(dp),
+                str(output_ports),
                 str(qty * dp),
                 capabilities,
                 str(deployed_rooms),
@@ -3098,7 +3239,7 @@ class AssetsEditorWindow(QMainWindow):
 
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                if col in (9, 10, 11):
+                if col in (10, 11, 12):
                     item.setToolTip(
                         "Calculated from placed data points with a room type. "
                         "Deployed items = placed rooms using this asset × quantity in the room type."
@@ -3564,12 +3705,12 @@ class AssetsEditorWindow(QMainWindow):
 
 
 class AssetBundleEditorDialog(QDialog):
-    """Create one reusable bundle with per-room asset quantities."""
+    """Create one reusable bundle with asset quantities and connections."""
 
     def __init__(self, parent, seed=None, asset_options=None, default_id="AB1"):
         super().__init__(parent)
         self.setWindowTitle("Asset Bundle")
-        self.resize(980, 620)
+        self.resize(980, 780)
         self.seed = dict(seed or {})
         self.asset_options = list(asset_options or [])
         self.default_id = default_id
@@ -3688,6 +3829,19 @@ class AssetBundleEditorDialog(QDialog):
             for asset_id in self._asset_names_by_id
         }
         self._asset_search_rows = []
+        layout.addWidget(
+            QLabel(
+                "Bundle connections (each row connects an asset output to another "
+                "asset input; quantities scale with the bundle quantity)"
+            )
+        )
+        self.connections_editor = AssetConnectionsEditor(
+            self,
+            self._asset_names_by_id,
+            self.seed.get("connections", self.seed.get("asset_connections", [])),
+        )
+        self.connections_editor.setMinimumHeight(180)
+        layout.addWidget(self.connections_editor)
         self._refresh_asset_tables()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -3847,11 +4001,22 @@ class AssetBundleEditorDialog(QDialog):
                 self, "Asset Bundle", "Select at least one asset."
             )
             return
+        selected_ids = [row["asset_id"] for row in rows]
+        all_connections = self.connections_editor.connections()
+        connections = self.connections_editor.connections(selected_ids)
+        if len(connections) != len(all_connections):
+            QMessageBox.information(
+                self,
+                "Asset Bundle",
+                "Every connection must use assets selected in this bundle.",
+            )
+            return
         self.result = {
             "id": bundle_id,
             "name": name,
             "description": self.description_edit.toPlainText().strip(),
             "assets": rows,
+            "connections": connections,
         }
         super().accept()
 
@@ -3876,9 +4041,9 @@ class AssetBundleManagerDialog(QDialog):
         )
         description.setWordWrap(True)
         layout.addWidget(description)
-        self.table = QTableWidget(0, 4)
+        self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ["Bundle ID", "Name", "Asset lines", "Total quantity"]
+            ["Bundle ID", "Name", "Asset lines", "Total quantity", "Connections"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -3919,6 +4084,10 @@ class AssetBundleManagerDialog(QDialog):
                 bundle.get("name", ""),
                 len(assets),
                 sum(int(item.get("qty", 1) or 1) for item in assets),
+                sum(
+                    int(item.get("qty", 1) or 1)
+                    for item in bundle.get("connections", []) or []
+                ),
             ]
             for column, value in enumerate(values):
                 self.table.setItem(row, column, QTableWidgetItem(str(value)))
@@ -4105,7 +4274,7 @@ class RoomTypeEditorDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Room Type")
-        self.resize(1120, 560)
+        self.resize(1120, 760)
         self.seed = seed or {}
         self.default_id = default_id
         self.asset_options = list(asset_options or [])
@@ -4175,7 +4344,7 @@ class RoomTypeEditorDialog(QDialog):
                 "ADB_Code",
                 "Asset",
                 "Requested by",
-                "Data points each",
+                "Input ports each",
                 "Qty in room",
                 "Total",
             ]
@@ -4235,7 +4404,7 @@ class RoomTypeEditorDialog(QDialog):
             group = str(
                 asset.get("Group", asset.get("group", "")) or ""
             ).strip()
-            dp = int(asset.get("data_points", 1))
+            dp = asset_input_ports(asset)
             room_qty = int(self.asset_rows_by_id.get(asset_id, {}).get("qty", 1) or 1)
             requested_by = str(
                 self.asset_rows_by_id.get(asset_id, {}).get("requested_by", "") or ""
@@ -4292,6 +4461,25 @@ class RoomTypeEditorDialog(QDialog):
 
         layout.addWidget(QLabel("Select assets required in this room type"))
         layout.addWidget(self.assets_table, 1)
+        layout.addWidget(
+            QLabel(
+                "Room-type connections (connect an asset output to another asset input)"
+            )
+        )
+        self.connections_editor = AssetConnectionsEditor(
+            self,
+            {
+                asset_id: asset_name
+                for asset_id, asset_name in self.asset_options
+            },
+            self.seed.get(
+                "asset_connections",
+                self.seed.get("connections", []),
+            ),
+        )
+        self.connections_editor.setMinimumHeight(170)
+        self.connections_editor.connectionsChanged.connect(self._refresh_total)
+        layout.addWidget(self.connections_editor)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -4316,6 +4504,12 @@ class RoomTypeEditorDialog(QDialog):
         self.bundle_assignments = merge_bundle_assignments(
             self.bundle_assignments,
             dialog.result,
+        )
+        self.connections_editor.set_connections(
+            merge_selected_bundle_connections(
+                self.connections_editor.connections(),
+                dialog.result,
+            )
         )
         self._refresh_unlink_bundle_button()
         merged_by_id = {row["asset_id"]: row for row in merged}
@@ -4476,7 +4670,7 @@ class RoomTypeEditorDialog(QDialog):
         return result
 
     def _refresh_total(self, *_):
-        total = 0
+        assignments = []
 
         self.assets_table.blockSignals(True)
         try:
@@ -4499,7 +4693,12 @@ class RoomTypeEditorDialog(QDialog):
                 row_total = 0
                 if use_item.checkState() == Qt.Checked:
                     row_total = dp * qty
-                    total += row_total
+                    assignments.append(
+                        {
+                            "asset_id": str(use_item.data(Qt.UserRole)).strip(),
+                            "qty": qty,
+                        }
+                    )
 
                 total_item = self.assets_table.item(row, 8)
                 if total_item is None:
@@ -4510,7 +4709,20 @@ class RoomTypeEditorDialog(QDialog):
         finally:
             self.assets_table.blockSignals(False)
 
-        self.total_label.setText(f"Total data points / cables: {total}")
+        summary = room_asset_port_summary(
+            assignments,
+            self.assets_by_id,
+            self.connections_editor.connections(
+                [row["asset_id"] for row in assignments]
+            ),
+        )
+        text = f"Upstream ports / cables: {summary['upstream_ports']}"
+        if summary["daisy_chain_links"]:
+            text += (
+                f" ({summary['input_ports']} asset input ports; "
+                f"{summary['daisy_chain_links']} served by daisy chaining)"
+            )
+        self.total_label.setText(text)
 
     def accept(self):
         try:
@@ -4522,6 +4734,13 @@ class RoomTypeEditorDialog(QDialog):
                 raise ValueError("Room type name is required")
 
             asset_rows = self._checked_asset_rows()
+            selected_ids = [row["asset_id"] for row in asset_rows]
+            all_connections = self.connections_editor.connections()
+            asset_connections = self.connections_editor.connections(selected_ids)
+            if len(asset_connections) != len(all_connections):
+                raise ValueError(
+                    "Every room-type connection must use an asset selected in this room type."
+                )
 
             self.result = {
                 "id": room_type_id,
@@ -4529,6 +4748,7 @@ class RoomTypeEditorDialog(QDialog):
                 "scenario_group": str(self.seed.get("scenario_group", self.seed.get("deployment_group", self.seed.get("room_type_group", ""))) or "").strip(),
                 "assets": asset_rows,
                 "asset_ids": [row["asset_id"] for row in asset_rows],
+                "asset_connections": asset_connections,
                 "asset_bundle_assignments": clean_bundle_assignments(
                     self.bundle_assignments,
                     [bundle["id"] for bundle in self.asset_bundles],
@@ -4589,7 +4809,7 @@ class RoomTypesEditorWindow(QMainWindow):
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(
-            ["Name", "Items", "Total data points"]
+            ["Name", "Items", "Upstream ports"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -4670,15 +4890,16 @@ class RoomTypesEditorWindow(QMainWindow):
         ]
 
     def _room_total(self, room_type):
-        total = 0
-        for row in self._room_asset_rows(room_type):
-            asset = self.assets_by_id.get(row["asset_id"])
-            if not asset:
-                continue
-            room_qty = int(row.get("qty", 1) or 1)
-            dp = max(0, _safe_int(asset.get("data_points", 1), 0))
-            total += room_qty * dp
-        return total
+        return int(
+            room_asset_port_summary(
+                self._room_asset_rows(room_type),
+                self.assets_by_id,
+                room_type.get(
+                    "asset_connections",
+                    room_type.get("connections", []),
+                ),
+            )["upstream_ports"]
+        )
 
     def _refresh_table(self):
         self.table.setRowCount(0)
@@ -5078,7 +5299,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
                 "ADB_Code",
                 "Requested by",
                 "Qty",
-                "Data points each",
+                "Input ports each",
                 "Total",
             ]
         )
@@ -5390,14 +5611,22 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         data_ports_by_asset_id,
         *,
         bundle_assignments=None,
+        asset_connections=None,
     ):
         if not self.on_assignments_changed:
             return
-        if bundle_assignments is None:
+        if bundle_assignments is None and asset_connections is None:
             updated = self.on_assignments_changed(
                 room_type_id,
                 asset_rows,
                 data_ports_by_asset_id,
+            )
+        elif asset_connections is None:
+            updated = self.on_assignments_changed(
+                room_type_id,
+                asset_rows,
+                data_ports_by_asset_id,
+                bundle_assignments,
             )
         else:
             updated = self.on_assignments_changed(
@@ -5405,6 +5634,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
                 asset_rows,
                 data_ports_by_asset_id,
                 bundle_assignments,
+                asset_connections,
             )
         if isinstance(updated, dict):
             self.staging_state = deepcopy(updated)
@@ -5659,7 +5889,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             asset_id = asset_row["asset_id"]
             qty = max(1, int(asset_row.get("qty", 1) or 1))
             asset = self.assets_by_id.get(asset_id, {})
-            data_points = max(0, _safe_int(asset.get("data_points", 1), 0))
+            data_points = asset_input_ports(asset)
             total = qty * data_points
             total_assets += qty
             total_points += total
@@ -5706,8 +5936,22 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             self.asset_table.setItem(0, 0, QTableWidgetItem("No assets assigned"))
             self.asset_table.setSpan(0, 0, 1, 9)
 
+        port_summary = room_asset_port_summary(
+            rows,
+            self.assets_by_id,
+            room_type.get(
+                "asset_connections",
+                room_type.get("connections", []),
+            ),
+        )
         self.summary_label.setText(
-            f"{len(rows)} asset line(s) | {total_assets} asset instance(s) per room type | {total_points} data point(s) per room type"
+            f"{len(rows)} asset line(s) | {total_assets} asset instance(s) per room type | "
+            f"{total_points} input port(s) | {port_summary['upstream_ports']} upstream port(s)"
+            + (
+                f" ({port_summary['daisy_chain_links']} daisy-chain link(s))"
+                if port_summary["daisy_chain_links"]
+                else ""
+            )
         )
         self.mark_button.setEnabled(not completed)
         self.clear_button.setEnabled(completed)
@@ -5720,20 +5964,45 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
     def _asset_values_changed(self, *_):
         total_assets = 0
         total_points = 0
+        assignments = []
+        preview_assets = {
+            asset_id: dict(asset)
+            for asset_id, asset in self.assets_by_id.items()
+        }
         for metadata in self._asset_row_widgets:
             qty = int(metadata["qty_spin"].value())
             ports = int(metadata["ports_spin"].value())
+            asset_id = self._text(metadata["asset_id"])
             total = qty * ports
             total_assets += qty
             total_points += total
+            assignments.append({"asset_id": asset_id, "qty": qty})
+            preview_assets.setdefault(asset_id, {})["input_ports"] = ports
+            preview_assets[asset_id]["data_points"] = ports
             total_item = self.asset_table.item(int(metadata["row"]), 8)
             if total_item is None:
                 total_item = QTableWidgetItem("0")
                 total_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.asset_table.setItem(int(metadata["row"]), 8, total_item)
             total_item.setText(str(total))
+        port_summary = room_asset_port_summary(
+            assignments,
+            preview_assets,
+            self._current_room_type().get(
+                "asset_connections",
+                self._current_room_type().get("connections", []),
+            )
+            if self._current_room_type()
+            else [],
+        )
         self.summary_label.setText(
-            f"{len(self._asset_row_widgets)} asset line(s) | {total_assets} asset instance(s) per room type | {total_points} data point(s) per room type"
+            f"{len(self._asset_row_widgets)} asset line(s) | {total_assets} asset instance(s) per room type | "
+            f"{total_points} input port(s) | {port_summary['upstream_ports']} upstream port(s)"
+            + (
+                f" ({port_summary['daisy_chain_links']} daisy-chain link(s))"
+                if port_summary["daisy_chain_links"]
+                else ""
+            )
         )
         self._set_dirty(True)
 
@@ -5836,6 +6105,10 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         target["asset_bundle_assignments"] = clean_bundle_assignments(
             source.get("asset_bundle_assignments", [])
         )
+        target["asset_connections"] = clean_asset_connections(
+            source.get("asset_connections", source.get("connections", [])),
+            [row["asset_id"] for row in copied_rows],
+        )
         if target_id in self.review_state:
             self.review_state.pop(target_id, None)
             self._emit_state_changed()
@@ -5844,6 +6117,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             copied_rows,
             {},
             bundle_assignments=target["asset_bundle_assignments"],
+            asset_connections=target["asset_connections"],
         )
 
         self.current_index = target_index
@@ -5861,6 +6135,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         for asset_id, ports in data_ports_by_asset_id.items():
             asset = self.assets_by_id.get(asset_id)
             if isinstance(asset, dict):
+                asset["input_ports"] = ports
                 asset["data_points"] = ports
         if room_type_id in self.review_state:
             self.review_state.pop(room_type_id, None)
@@ -6190,7 +6465,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                 "ADB_Code",
                 "Requested by",
                 "Qty",
-                "Data points each",
+                "Input ports each",
                 "Total",
                 "Open RFIs",
                 "RFI queries",
@@ -6635,6 +6910,13 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             room_type.get("asset_bundle_assignments", []),
             dialog.result,
         )
+        room_type["asset_connections"] = merge_selected_bundle_connections(
+            room_type.get(
+                "asset_connections",
+                room_type.get("connections", []),
+            ),
+            dialog.result,
+        )
         room_type_id = self._room_id(room_type)
         self.review_state.pop(room_type_id, None)
         self._capture_staging_state(
@@ -6642,6 +6924,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             rows,
             {},
             bundle_assignments=room_type["asset_bundle_assignments"],
+            asset_connections=room_type["asset_connections"],
         )
 
         bundle_names = ", ".join(
@@ -6716,9 +6999,21 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         rows = [row for row in rows if row["asset_id"] not in asset_ids]
         room_type["assets"] = rows
         room_type["asset_ids"] = [row["asset_id"] for row in rows]
+        room_type["asset_connections"] = clean_asset_connections(
+            room_type.get(
+                "asset_connections",
+                room_type.get("connections", []),
+            ),
+            room_type["asset_ids"],
+        )
         room_type_id = self._room_id(room_type)
         self.review_state.pop(room_type_id, None)
-        self._capture_staging_state(room_type_id, rows, ports)
+        self._capture_staging_state(
+            room_type_id,
+            rows,
+            ports,
+            asset_connections=room_type["asset_connections"],
+        )
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         for removal in removal_rows:
             asset_id = removal["asset_id"]

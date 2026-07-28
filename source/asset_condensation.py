@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime
 import re
 
+from asset_ports import clean_asset_connections
 
 def _text(value) -> str:
     return str(value if value is not None else "").strip()
@@ -119,6 +120,51 @@ def condense_assets(data: dict, main_asset_id: str, condensed_asset_ids) -> dict
 
         room_type["assets"] = after
         room_type["asset_ids"] = [row["asset_id"] for row in after]
+        room_type["asset_connections"] = clean_asset_connections(
+            [
+                {
+                    **connection,
+                    "from_asset_id": (
+                        main_id
+                        if _text(
+                            connection.get(
+                                "from_asset_id",
+                                connection.get("from", ""),
+                            )
+                        )
+                        in source_set
+                        else _text(
+                            connection.get(
+                                "from_asset_id",
+                                connection.get("from", ""),
+                            )
+                        )
+                    ),
+                    "to_asset_id": (
+                        main_id
+                        if _text(
+                            connection.get(
+                                "to_asset_id",
+                                connection.get("to", ""),
+                            )
+                        )
+                        in source_set
+                        else _text(
+                            connection.get(
+                                "to_asset_id",
+                                connection.get("to", ""),
+                            )
+                        )
+                    ),
+                }
+                for connection in room_type.get(
+                    "asset_connections",
+                    room_type.get("connections", []),
+                )
+                if isinstance(connection, dict)
+            ],
+            room_type["asset_ids"],
+        )
         room_changes.append(
             {
                 "room_type_id": _text(room_type.get("id")),
@@ -131,6 +177,50 @@ def condense_assets(data: dict, main_asset_id: str, condensed_asset_ids) -> dict
     data["assets"] = [
         row for row in assets if _text(row.get("id")) not in source_set
     ]
+
+    for bundle in data.get("asset_bundles", []) or []:
+        if not isinstance(bundle, dict):
+            continue
+        before_rows = _assignment_rows(bundle)
+        if not any(row["asset_id"] in source_set for row in before_rows):
+            continue
+        quantities = {}
+        order = []
+        for row in before_rows:
+            asset_id = main_id if row["asset_id"] in source_set else row["asset_id"]
+            if asset_id not in quantities:
+                quantities[asset_id] = 0
+                order.append(asset_id)
+            quantities[asset_id] += row["qty"]
+        bundle["assets"] = [
+            {"asset_id": asset_id, "qty": quantities[asset_id]}
+            for asset_id in order
+        ]
+        bundle["connections"] = clean_asset_connections(
+            [
+                {
+                    "from_asset_id": (
+                        main_id
+                        if _text(connection.get("from_asset_id", connection.get("from", "")))
+                        in source_set
+                        else _text(connection.get("from_asset_id", connection.get("from", "")))
+                    ),
+                    "to_asset_id": (
+                        main_id
+                        if _text(connection.get("to_asset_id", connection.get("to", "")))
+                        in source_set
+                        else _text(connection.get("to_asset_id", connection.get("to", "")))
+                    ),
+                    "qty": connection.get("qty", 1),
+                }
+                for connection in bundle.get(
+                    "connections",
+                    bundle.get("asset_connections", []),
+                )
+                if isinstance(connection, dict)
+            ],
+            order,
+        )
 
     for group in data.get("asset_scenario_groups", []) or []:
         if not isinstance(group, dict):

@@ -382,6 +382,11 @@ def _room_type_sections(store: JsonStore):
                 _natural_key(row["asset_id"]),
             )
         )
+        input_ports_per_room = room_ports_per_room
+        input_port_total = room_port_total
+        port_summary = store.room_type_port_summary(room_type_id)
+        room_ports_per_room = int(port_summary["upstream_ports"])
+        room_port_total = placed_rooms * room_ports_per_room
         total_assets += room_asset_total
         total_ports += room_port_total
         room_totals.append(
@@ -391,8 +396,11 @@ def _room_type_sections(store: JsonStore):
                 "placed_rooms": placed_rooms,
                 "assets_per_room": room_assets_per_room,
                 "ports_per_room": room_ports_per_room,
+                "input_ports_per_room": input_ports_per_room,
                 "asset_total": room_asset_total,
                 "port_total": room_port_total,
+                "input_port_total": input_port_total,
+                "daisy_chain_links": int(port_summary["daisy_chain_links"]),
             }
         )
         room_rows.append(
@@ -403,8 +411,11 @@ def _room_type_sections(store: JsonStore):
                 "assets": rows,
                 "assets_per_room": room_assets_per_room,
                 "ports_per_room": room_ports_per_room,
+                "input_ports_per_room": input_ports_per_room,
                 "asset_total": room_asset_total,
                 "port_total": room_port_total,
+                "input_port_total": input_port_total,
+                "daisy_chain_links": int(port_summary["daisy_chain_links"]),
             }
         )
 
@@ -425,10 +436,10 @@ def _room_asset_table_rows(room: Mapping, styles):
         _p("Grouping", styles["header"]),
         _p("Make / model", styles["header"]),
         _p("Qty per room", styles["header"]),
-        _p("Ports each", styles["header"]),
-        _p("Ports per room", styles["header"]),
+        _p("Input ports each", styles["header"]),
+        _p("Input ports per room", styles["header"]),
         _p("Asset total", styles["header"]),
-        _p("Port total", styles["header"]),
+        _p("Input port total", styles["header"]),
     ]]
     group_rows = []
     current_category_id = object()
@@ -461,9 +472,9 @@ def _room_asset_table_rows(room: Mapping, styles):
         _p("", styles["header"]),
         _p(room["assets_per_room"], styles["header"]),
         _p("", styles["header"]),
-        _p(room["ports_per_room"], styles["header"]),
+        _p(room["input_ports_per_room"], styles["header"]),
         _p(room["asset_total"], styles["header"]),
-        _p(room["port_total"], styles["header"]),
+        _p(room["input_port_total"], styles["header"]),
     ])
     return rows, group_rows
 
@@ -1017,7 +1028,7 @@ def export_project_summary_pdf(
                     ("Room types configured", len(room_report["room_rows"])),
                     ("Placed rooms with room types", placed_rooms),
                     ("Endpoint assets required", room_report["total_assets"]),
-                    ("Data ports required", room_report["total_ports"]),
+                    ("Upstream data ports required", room_report["total_ports"]),
                     ("Use cases configured", len(scenarios)),
                     ("Network asset instances", sum(network["type_counts"].values())),
                     ("Network racks", len(network["rack_usage"])),
@@ -1039,7 +1050,7 @@ def export_project_summary_pdf(
             _p("Room type", styles["header"]),
             _p("Placed rooms", styles["header"]),
             _p("Assets per room", styles["header"]),
-            _p("Data ports per room", styles["header"]),
+            _p("Upstream ports per room", styles["header"]),
         ]]
         for room in room_report["room_totals"]:
             total_placed_rooms += room["placed_rooms"]

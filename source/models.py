@@ -17,6 +17,12 @@ from project_sqlite import (
 )
 from room_type_asset_staging import staged_changes as room_type_asset_staged_changes
 from asset_bundles import clean_bundle_assignments, normalise_asset_bundles
+from asset_ports import (
+    asset_input_ports,
+    asset_output_ports,
+    clean_asset_connections,
+    room_asset_port_summary,
+)
 
 
 DEFAULT_JSON = {
@@ -299,12 +305,11 @@ class JsonStore:
             asset.setdefault("id", "")
             asset.setdefault("name", asset.get("id", ""))
             asset.setdefault("qty", 1)
-            asset["data_points"] = int(
-                asset.get(
-                    "data_points",
-                    asset.get("data_points_each", asset.get("cables", 1)),
-                )
-            )
+            asset["input_ports"] = asset_input_ports(asset)
+            asset["output_ports"] = asset_output_ports(asset)
+            # Keep the established field in sync for reports and older project
+            # versions that still call endpoint inputs "data points".
+            asset["data_points"] = asset["input_ports"]
             asset.setdefault("connection_type", asset.get("type_of_connection", "wired"))
             asset.setdefault("category_id", asset.get("category", ""))
             asset.setdefault("ADB_Code", asset.get("adb_code", ""))
@@ -438,6 +443,13 @@ class JsonStore:
                 for row in room_type.get("assets", [])
                 if str(row.get("asset_id", "")).strip()
             ]
+            room_type["asset_connections"] = clean_asset_connections(
+                room_type.get(
+                    "asset_connections",
+                    room_type.get("connections", []),
+                ),
+                room_type["asset_ids"],
+            )
             room_type["asset_bundle_assignments"] = clean_bundle_assignments(
                 room_type.get("asset_bundle_assignments", []),
                 [
@@ -548,6 +560,13 @@ class JsonStore:
             kept_rows = [
                 row for row in rows if str(row.get("asset_id", "") or "").strip() in valid_asset_ids
             ]
+            room_type["asset_connections"] = clean_asset_connections(
+                room_type.get(
+                    "asset_connections",
+                    room_type.get("connections", []),
+                ),
+                [row["asset_id"] for row in kept_rows],
+            )
             removed_ids = [
                 str(row.get("asset_id", "") or "").strip()
                 for row in rows
@@ -564,6 +583,11 @@ class JsonStore:
                     "asset_ids": removed_ids,
                 }
             )
+
+        self.data["asset_bundles"] = normalise_asset_bundles(
+            self.data.get("asset_bundles", []),
+            valid_asset_ids,
+        )
 
         staging_purged_count = 0
         staging = self.data.get("room_type_asset_staging", {})
@@ -2620,22 +2644,41 @@ class JsonStore:
             if str(asset.get("id", "")).strip()
         }
 
-        total = 0
-        for row in self.room_type_asset_rows(room_type):
-            asset = assets_by_id.get(row["asset_id"])
-            if not asset:
-                continue
+        summary = room_asset_port_summary(
+            self.room_type_asset_rows(room_type),
+            assets_by_id,
+            room_type.get("asset_connections", []),
+        )
+        return int(summary["upstream_ports"])
 
-            room_asset_qty = int(row.get("qty", 1) or 1)
-            data_points = int(
-                asset.get(
-                    "data_points",
-                    asset.get("data_points_each", asset.get("cables", 1)),
-                )
-            )
-            total += room_asset_qty * data_points
-
-        return max(0, int(total))
+    def room_type_port_summary(self, room_type_id: str) -> dict:
+        """Return input/output/link/upstream port totals for a room type."""
+        room_type_id = str(room_type_id or "").strip()
+        room_type = next(
+            (
+                item
+                for item in self.data.get("room_types", [])
+                if str(item.get("id", "")).strip() == room_type_id
+            ),
+            None,
+        )
+        if not room_type:
+            return {
+                "input_ports": 0,
+                "output_ports": 0,
+                "daisy_chain_links": 0,
+                "upstream_ports": 0,
+            }
+        assets_by_id = {
+            str(asset.get("id", "")).strip(): asset
+            for asset in self.data.get("assets", [])
+            if str(asset.get("id", "")).strip()
+        }
+        return room_asset_port_summary(
+            self.room_type_asset_rows(room_type),
+            assets_by_id,
+            room_type.get("asset_connections", []),
+        )
 
     def data_point_required_port_count(self, point: dict) -> int:
         """Return manual or room-type asset port demand, whichever is greater."""

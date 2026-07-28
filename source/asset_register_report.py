@@ -26,13 +26,14 @@ ASSET_REGISTER_COLUMNS = (
     {"id": "category", "label": "Category", "header": "Category", "width_mm": 28},
     {"id": "connection", "label": "Connection", "header": "Connection", "width_mm": 20},
     {"id": "quantity", "label": "Library quantity", "header": "Library<br/>qty", "width_mm": 12, "numeric": True},
-    {"id": "data_points_each", "label": "Data points each", "header": "Data points<br/>each", "width_mm": 14, "numeric": True},
-    {"id": "library_data_points", "label": "Library data points", "header": "Library data<br/>points", "width_mm": 16, "numeric": True},
+    {"id": "data_points_each", "label": "Input ports each", "header": "Input ports<br/>each", "width_mm": 14, "numeric": True},
+    {"id": "output_ports_each", "label": "Output ports each", "header": "Output ports<br/>each", "width_mm": 14, "numeric": True},
+    {"id": "library_data_points", "label": "Library input ports", "header": "Library input<br/>ports", "width_mm": 16, "numeric": True},
     {"id": "north_south", "label": "North-south concurrency", "header": "N-S<br/>concurrency", "width_mm": 14, "numeric": True},
     {"id": "east_west", "label": "East-west concurrency", "header": "E-W<br/>concurrency", "width_mm": 14, "numeric": True},
     {"id": "deployed_rooms", "label": "Deployed rooms", "header": "Deployed<br/>rooms", "width_mm": 15, "numeric": True},
     {"id": "deployed_items", "label": "Deployed items", "header": "Deployed<br/>items", "width_mm": 15, "numeric": True},
-    {"id": "deployed_data_points", "label": "Deployed data points", "header": "Deployed data<br/>points", "width_mm": 17, "numeric": True},
+    {"id": "deployed_data_points", "label": "Deployed input ports", "header": "Deployed input<br/>ports", "width_mm": 17, "numeric": True},
     {"id": "capabilities", "label": "Capabilities / functions", "header": "Capabilities / functions", "width_mm": 52},
 )
 
@@ -153,6 +154,9 @@ def asset_register_rows(project_data: Mapping) -> list[dict]:
                 ),
                 "quantity": quantity,
                 "data_points_each": data_points_each,
+                "output_ports_each": max(
+                    0, _int(asset.get("output_ports", 0), 0)
+                ),
                 "library_data_points": quantity * data_points_each,
                 "north_south": _factor_percent(
                     asset.get("north_south_concurrency_factor", 1.0)

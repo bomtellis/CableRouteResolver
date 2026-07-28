@@ -152,6 +152,7 @@ from room_type_asset_staging import (
     remember_room_type_revision_change,
     should_mirror_rfi_audit_to_revision,
 )
+from workbook_comparison_dialog import WorkbookComparisonDialog
 
 try:
     import pulp
@@ -3268,6 +3269,7 @@ class CableRouteEditor(QMainWindow):
         asset_rows,
         data_ports_by_asset_id,
         bundle_assignments=None,
+        asset_connections=None,
     ):
         room_type_id = str(room_type_id or "").strip()
         if not room_type_id:
@@ -3337,6 +3339,13 @@ class CableRouteEditor(QMainWindow):
                         if isinstance(bundle, dict)
                     ],
                 )
+            if asset_connections is not None:
+                from asset_ports import clean_asset_connections
+
+                room_type["asset_connections"] = clean_asset_connections(
+                    asset_connections,
+                    room_type["asset_ids"],
+                )
 
         ports_by_asset = {
             str(asset_id or "").strip(): ports
@@ -3353,6 +3362,7 @@ class CableRouteEditor(QMainWindow):
                 ports = int(ports_by_asset[asset_id] or 0)
             except (TypeError, ValueError):
                 ports = 0
+            asset["input_ports"] = max(0, ports)
             asset["data_points"] = max(0, ports)
 
         after_quantities = self._room_type_asset_quantities(room_type)
@@ -3574,6 +3584,7 @@ class CableRouteEditor(QMainWindow):
                 after_ports={asset_id: target_value},
                 asset_names=asset_names,
             )
+            asset["input_ports"] = target_value
             asset["data_points"] = target_value
 
         if staging:
@@ -3652,6 +3663,7 @@ class CableRouteEditor(QMainWindow):
                     value = max(0, int(record.get("before_data_points", 0) or 0))
                 except (TypeError, ValueError):
                     value = 0
+                asset["input_ports"] = value
                 asset["data_points"] = value
             assets.pop(asset_id, None)
 
@@ -3916,6 +3928,14 @@ class CableRouteEditor(QMainWindow):
 
         tools_menu.addSeparator()
 
+        workbook_comparison_action = tools_menu.addAction(
+            "Compare Excel Room Asset Schedules..."
+        )
+        set_action_icon(workbook_comparison_action, "file-earmark-spreadsheet")
+        workbook_comparison_action.triggered.connect(
+            self.show_workbook_comparison_dialog
+        )
+
         export_room_type_matrix_action = tools_menu.addAction("Export Room Type Asset Matrix")
         set_action_icon(export_room_type_matrix_action, "database")
         export_room_type_matrix_action.triggered.connect(self.export_room_type_asset_matrix)
@@ -3946,6 +3966,9 @@ class CableRouteEditor(QMainWindow):
 
     def show_layer_visibility_dialog(self):
         LayerVisibilityDialog(self, self).exec()
+
+    def show_workbook_comparison_dialog(self):
+        WorkbookComparisonDialog(self).exec()
 
     def show_renderer_performance_dialog(self):
         RendererPerformanceDialog(self, self).exec()

@@ -6,6 +6,8 @@ from copy import deepcopy
 from datetime import datetime
 import re
 
+from asset_ports import room_asset_port_summary
+
 
 def _text(value) -> str:
     return str(value if value is not None else "").strip()
@@ -44,21 +46,12 @@ def _room_port_count(data: dict, room_type: dict) -> tuple[int, int]:
         if isinstance(asset, dict) and _text(asset.get("id"))
     }
     rows = _room_asset_rows(room_type)
-    total = 0
-    for row in rows:
-        asset = assets.get(row["asset_id"], {})
-        ports_each = max(
-            0,
-            _safe_int(
-                asset.get(
-                    "data_points",
-                    asset.get("data_points_each", asset.get("cables", 1)),
-                ),
-                1,
-            ),
-        )
-        total += row["qty"] * ports_each
-    return len(rows), total
+    summary = room_asset_port_summary(
+        rows,
+        assets,
+        room_type.get("asset_connections", room_type.get("connections", [])),
+    )
+    return len(rows), int(summary["upstream_ports"])
 
 
 def _next_rfi_number(queries) -> int:

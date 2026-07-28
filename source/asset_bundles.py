@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from asset_ports import clean_asset_connections
+
 
 def _text(value) -> str:
     return str(value if value is not None else "").strip()
@@ -59,6 +61,7 @@ def normalise_asset_bundles(bundles, valid_asset_ids=None) -> list[dict]:
         rows = clean_asset_rows(value.get("assets", value.get("asset_ids", [])))
         if valid is not None:
             rows = [row for row in rows if row["asset_id"] in valid]
+        row_ids = {row["asset_id"] for row in rows}
         used_ids.add(bundle_id)
         result.append(
             {
@@ -66,6 +69,10 @@ def normalise_asset_bundles(bundles, valid_asset_ids=None) -> list[dict]:
                 "name": _text(value.get("name")) or bundle_id,
                 "description": _text(value.get("description")),
                 "assets": rows,
+                "connections": clean_asset_connections(
+                    value.get("connections", value.get("asset_connections", [])),
+                    row_ids,
+                ),
             }
         )
     return result
@@ -168,6 +175,39 @@ def merge_selected_bundles(existing_rows, bundles) -> list[dict]:
     return result
 
 
+def merge_asset_connections(existing_connections, added_connections) -> list[dict]:
+    """Add connection quantities while preserving their first-seen order."""
+    return clean_asset_connections(
+        [
+            *clean_asset_connections(existing_connections),
+            *clean_asset_connections(added_connections),
+        ]
+    )
+
+
+def merge_selected_bundle_connections(existing_connections, bundles) -> list[dict]:
+    """Apply selected bundle connection recipes and multipliers."""
+    result = clean_asset_connections(existing_connections)
+    for bundle in bundles or []:
+        if not isinstance(bundle, dict):
+            continue
+        try:
+            bundle_qty = max(1, int(bundle.get("bundle_qty", 1) or 1))
+        except (TypeError, ValueError):
+            bundle_qty = 1
+        scaled = [
+            {
+                **connection,
+                "qty": int(connection.get("qty", 1) or 1) * bundle_qty,
+            }
+            for connection in clean_asset_connections(
+                bundle.get("connections", bundle.get("asset_connections", []))
+            )
+        ]
+        result = merge_asset_connections(result, scaled)
+    return result
+
+
 def sync_room_types_for_bundle_updates(
     room_types,
     old_bundles,
@@ -199,6 +239,7 @@ def sync_room_types_for_bundle_updates(
             continue
 
         deltas = {}
+        connection_deltas = {}
         for assignment in assignments:
             bundle_id = assignment["bundle_id"]
             multiplier = assignment["qty"]
@@ -222,10 +263,38 @@ def sync_room_types_for_bundle_updates(
                 ) * multiplier
                 if delta:
                     deltas[asset_id] = deltas.get(asset_id, 0) + delta
+            old_connections = {
+                (row["from_asset_id"], row["to_asset_id"]): row["qty"]
+                for row in clean_asset_connections(
+                    old_bundle.get("connections", []) if old_bundle else []
+                )
+            }
+            new_connections = {
+                (row["from_asset_id"], row["to_asset_id"]): row["qty"]
+                for row in clean_asset_connections(
+                    new_bundle.get("connections", []) if new_bundle else []
+                )
+            }
+            for pair in set(old_connections) | set(new_connections):
+                delta = (
+                    new_connections.get(pair, 0) - old_connections.get(pair, 0)
+                ) * multiplier
+                if delta:
+                    connection_deltas[pair] = (
+                        connection_deltas.get(pair, 0) + delta
+                    )
 
         rows = clean_asset_rows(room_type.get("assets", []))
         rows_by_id = {row["asset_id"]: row for row in rows}
         before = deepcopy(rows)
+        connections = clean_asset_connections(
+            room_type.get("asset_connections", room_type.get("connections", []))
+        )
+        connections_by_pair = {
+            (row["from_asset_id"], row["to_asset_id"]): row
+            for row in connections
+        }
+        before_connections = deepcopy(connections)
         for asset_id, delta in deltas.items():
             existing = rows_by_id.get(asset_id)
             if existing is None:
@@ -241,6 +310,29 @@ def sync_room_types_for_bundle_updates(
                 rows.remove(existing)
                 rows_by_id.pop(asset_id, None)
 
+        for pair, delta in connection_deltas.items():
+            existing = connections_by_pair.get(pair)
+            if existing is None:
+                if delta > 0:
+                    row = {
+                        "from_asset_id": pair[0],
+                        "to_asset_id": pair[1],
+                        "qty": delta,
+                    }
+                    connections.append(row)
+                    connections_by_pair[pair] = row
+                continue
+            updated_quantity = int(existing.get("qty", 1) or 1) + delta
+            if updated_quantity > 0:
+                existing["qty"] = updated_quantity
+            else:
+                connections.remove(existing)
+                connections_by_pair.pop(pair, None)
+
+        connections = clean_asset_connections(
+            connections,
+            [row["asset_id"] for row in rows],
+        )
         remaining_assignments = clean_bundle_assignments(
             assignments,
             new_by_id,
@@ -249,7 +341,13 @@ def sync_room_types_for_bundle_updates(
         if rows != before:
             room_type["assets"] = rows
             room_type["asset_ids"] = [row["asset_id"] for row in rows]
-        if rows != before or remaining_assignments != assignments:
+        if connections != before_connections:
+            room_type["asset_connections"] = connections
+        if (
+            rows != before
+            or connections != before_connections
+            or remaining_assignments != assignments
+        ):
             changed_room_ids.append(
                 _text(room_type.get("id")) or f"Room type {room_index}"
             )
