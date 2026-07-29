@@ -1,11 +1,29 @@
-"""Long-table Excel export for room-type asset details."""
+"""Excel and PDF exports for room-type asset details."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
+from html import escape
+from pathlib import Path
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+)
 
 from asset_bundles import resolve_room_type_asset_connections
 from asset_ports import asset_input_ports, room_asset_port_summary
+from project_summary_report import (
+    _room_asset_table_rows as _project_room_asset_table_rows,
+    _styles as _project_report_styles,
+    _table as _project_report_table,
+)
 from xlsx_workbook import WorksheetSpec, write_xlsx
 
 
@@ -178,6 +196,198 @@ def room_asset_detail_rows(
     return rows
 
 
+def categorised_room_asset_breakdowns(
+    room_types,
+    assets_by_id=None,
+    asset_categories_by_id=None,
+    asset_bundles=None,
+) -> list[dict]:
+    """Return room details in the project report's categorised table shape."""
+
+    assets_by_id = dict(assets_by_id or {})
+    asset_categories_by_id = dict(asset_categories_by_id or {})
+    category_order = {
+        str(category_id or "").strip(): index
+        for index, category_id in enumerate(asset_categories_by_id)
+    }
+    header_index = {
+        header: ROOM_ASSET_DETAIL_HEADERS.index(header)
+        for header in ROOM_ASSET_DETAIL_HEADERS
+    }
+    result = []
+    for room_type in room_types or []:
+        if not isinstance(room_type, Mapping):
+            continue
+        detail_rows = room_asset_detail_rows(
+            [room_type],
+            assets_by_id,
+            asset_categories_by_id,
+            asset_bundles,
+        )
+        assets = []
+        for detail_row in detail_rows:
+            asset_id = _text(detail_row[header_index["Asset ID"]])
+            asset = assets_by_id.get(asset_id, {}) or {}
+            category_id = _text(detail_row[header_index["Category ID"]])
+            quantity = max(
+                0,
+                int(detail_row[header_index["Quantity"]] or 0),
+            )
+            ports_each = max(
+                0,
+                int(detail_row[header_index["Physical Inputs Each"]] or 0),
+            )
+            manufacturer = _text(asset.get("manufacturer"))
+            model = _text(asset.get("model"))
+            record_type = detail_row[header_index["Record Type"]]
+            assets.append(
+                {
+                    "asset_id": asset_id,
+                    "asset_name": _text(
+                        detail_row[header_index["Description"]]
+                    ),
+                    "category_id": category_id,
+                    "category_name": _text(
+                        detail_row[header_index["Category"]]
+                    )
+                    or "Uncategorised",
+                    "category_order": category_order.get(
+                        category_id,
+                        len(category_order),
+                    ),
+                    "adb_code": _text(detail_row[header_index["ADB Code"]]),
+                    "group": _text(detail_row[header_index["Group"]])
+                    or (
+                        "Calculated connection cable"
+                        if record_type == "Calculated connection cable"
+                        else ""
+                    ),
+                    "make_model": " ".join(
+                        part for part in (manufacturer, model) if part
+                    ),
+                    "qty_per_room": quantity,
+                    "ports_each": ports_each,
+                    "port_per_room": quantity * ports_each,
+                    "asset_subtotal": quantity,
+                    "port_subtotal": quantity * ports_each,
+                    "record_type": (
+                        "connection_cable"
+                        if record_type == "Calculated connection cable"
+                        else "assigned_asset"
+                    ),
+                }
+            )
+        assets.sort(
+            key=lambda row: (
+                row["category_order"],
+                row["category_name"].casefold(),
+                row["asset_id"].casefold(),
+            )
+        )
+        result.append(
+            {
+                "room_type_id": _text(room_type.get("id")),
+                "room_name": _text(room_type.get("name"))
+                or _text(room_type.get("id"))
+                or "Unnamed room type",
+                "scenario_group": _text(room_type.get("scenario_group")),
+                "placed_rooms": 1,
+                "assets": assets,
+                "assets_per_room": sum(
+                    row["qty_per_room"] for row in assets
+                ),
+                "input_ports_per_room": sum(
+                    row["port_per_room"] for row in assets
+                ),
+                "asset_total": sum(row["asset_subtotal"] for row in assets),
+                "input_port_total": sum(
+                    row["port_subtotal"] for row in assets
+                ),
+            }
+        )
+    return result
+
+
+_CATEGORISED_BREAKDOWN_HEADERS = (
+    "Asset ID",
+    "Description",
+    "ADB code",
+    "Grouping",
+    "Make / model",
+    "Qty per room",
+    "Input ports each",
+    "Input ports per room",
+    "Asset total",
+    "Input port total",
+)
+
+
+def _categorised_breakdown_worksheet(room_breakdowns) -> WorksheetSpec:
+    rows = []
+    title_rows = set()
+    section_rows = set()
+    header_rows = set()
+    for room_index, room in enumerate(room_breakdowns):
+        if room_index:
+            rows.append([])
+        title_rows.add(len(rows))
+        room_label = (
+            f"{room['room_type_id']} - {room['room_name']}"
+            if room["room_type_id"]
+            else room["room_name"]
+        )
+        rows.append([room_label])
+        if room.get("scenario_group"):
+            rows.append(["Scenario group", room["scenario_group"]])
+        header_rows.add(len(rows))
+        rows.append(list(_CATEGORISED_BREAKDOWN_HEADERS))
+
+        current_category_id = object()
+        for asset in room["assets"]:
+            if asset["category_id"] != current_category_id:
+                section_rows.add(len(rows))
+                rows.append([f"Category: {asset['category_name']}"])
+                current_category_id = asset["category_id"]
+            rows.append(
+                [
+                    asset["asset_id"],
+                    asset["asset_name"],
+                    asset["adb_code"],
+                    asset["group"],
+                    asset["make_model"],
+                    asset["qty_per_room"],
+                    asset["ports_each"],
+                    asset["port_per_room"],
+                    asset["asset_subtotal"],
+                    asset["port_subtotal"],
+                ]
+            )
+        if not room["assets"]:
+            rows.append(["No assets are assigned to this room type."])
+        header_rows.add(len(rows))
+        rows.append(
+            [
+                "Total",
+                "",
+                "",
+                "",
+                "",
+                room["assets_per_room"],
+                "",
+                room["input_ports_per_room"],
+                room["asset_total"],
+                room["input_port_total"],
+            ]
+        )
+    return WorksheetSpec(
+        name="Categorised Breakdown",
+        rows=rows,
+        title_rows=title_rows,
+        section_rows=section_rows,
+        header_rows=header_rows,
+    )
+
+
 def export_room_asset_detail_xlsx(
     path,
     room_types,
@@ -193,9 +403,16 @@ def export_room_asset_detail_xlsx(
         asset_categories_by_id,
         asset_bundles,
     )
+    room_breakdowns = categorised_room_asset_breakdowns(
+        room_types,
+        assets_by_id,
+        asset_categories_by_id,
+        asset_bundles,
+    )
     destination = write_xlsx(
         path,
         [
+            _categorised_breakdown_worksheet(room_breakdowns),
             WorksheetSpec(
                 name="Room Asset Detail",
                 rows=[ROOM_ASSET_DETAIL_HEADERS, *detail_rows],
@@ -206,3 +423,125 @@ def export_room_asset_detail_xlsx(
         ],
     )
     return destination, len(detail_rows)
+
+
+def _pdf_footer(canvas, document) -> None:
+    canvas.saveState()
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(colors.HexColor("#5b6573"))
+    canvas.drawString(
+        document.leftMargin,
+        9 * mm,
+        "CableRouteResolver room type asset breakdown",
+    )
+    canvas.drawRightString(
+        document.pagesize[0] - document.rightMargin,
+        9 * mm,
+        f"Page {document.page}",
+    )
+    canvas.restoreState()
+
+
+def export_room_asset_detail_pdf(
+    path,
+    room_types,
+    assets_by_id=None,
+    asset_categories_by_id=None,
+    asset_bundles=None,
+) -> tuple[str, int]:
+    """Write a room-by-room PDF asset breakdown."""
+
+    selected_room_types = [
+        dict(room_type)
+        for room_type in room_types or []
+        if isinstance(room_type, Mapping)
+    ]
+    room_breakdowns = categorised_room_asset_breakdowns(
+        selected_room_types,
+        assets_by_id,
+        asset_categories_by_id,
+        asset_bundles,
+    )
+    destination = Path(path)
+    if destination.suffix.casefold() != ".pdf":
+        destination = destination.with_suffix(".pdf")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    styles = _project_report_styles()
+    document = SimpleDocTemplate(
+        str(destination),
+        pagesize=landscape(A4),
+        leftMargin=14 * mm,
+        rightMargin=14 * mm,
+        topMargin=15 * mm,
+        bottomMargin=18 * mm,
+        title="Room Type Asset Breakdown",
+        author="CableRouteResolver",
+    )
+    styles["_max_table_width"] = document.width
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    story = [
+        Paragraph("Room Type Asset Breakdown", styles["title"]),
+        Paragraph(
+            f"Generated: {generated} | Selected room types: "
+            f"{len(room_breakdowns)}",
+            styles["body"],
+        ),
+        Spacer(1, 4 * mm),
+    ]
+
+    for room_index, room in enumerate(room_breakdowns):
+        if room_index:
+            story.append(PageBreak())
+        room_label = (
+            f"{escape(room['room_type_id'])} - {escape(room['room_name'])}"
+            if room["room_type_id"]
+            else escape(room["room_name"])
+        )
+        story.append(Paragraph(room_label, styles["h2"]))
+        story.append(
+            Paragraph(
+                "Scenario group: "
+                + escape(room.get("scenario_group") or "Not assigned"),
+                styles["body"],
+            )
+        )
+        story.append(Spacer(1, 3 * mm))
+        if not room["assets"]:
+            story.append(
+                Paragraph(
+                    "No assets are assigned to this room type.",
+                    styles["body"],
+                )
+            )
+        table_rows, group_rows = _project_room_asset_table_rows(room, styles)
+        story.append(
+            _project_report_table(
+                table_rows,
+                [
+                    27 * mm,
+                    48 * mm,
+                    24 * mm,
+                    28 * mm,
+                    34 * mm,
+                    18 * mm,
+                    18 * mm,
+                    22 * mm,
+                    22 * mm,
+                    22 * mm,
+                ],
+                styles,
+                numeric_columns=(5, 6, 7, 8, 9),
+                total_rows=(-1,),
+                group_rows=group_rows,
+            )
+        )
+
+    document.build(
+        story,
+        onFirstPage=_pdf_footer,
+        onLaterPages=_pdf_footer,
+    )
+    return str(destination), sum(
+        len(room["assets"]) for room in room_breakdowns
+    )

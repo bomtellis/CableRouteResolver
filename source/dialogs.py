@@ -75,7 +75,10 @@ from library_csv import (
     export_room_types_csv as write_room_types_csv,
 )
 from room_type_asset_staging import room_type_matches_filter, suggested_commit_message
-from room_asset_detail_export import export_room_asset_detail_xlsx
+from room_asset_detail_export import (
+    export_room_asset_detail_pdf,
+    export_room_asset_detail_xlsx,
+)
 from xlsx_workbook import XlsxError
 
 
@@ -5880,6 +5883,382 @@ class RoomTypeEditorDialog(QDialog):
             QMessageBox.critical(self, "Invalid room type", str(exc))
 
 
+class RoomTypeExportSelectionDialog(QDialog):
+    """Choose room types for an asset-breakdown export."""
+
+    def __init__(self, parent, room_types, preselected_indices=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Room Types to Export")
+        self.resize(900, 520)
+        self.room_types = [
+            dict(room_type)
+            for room_type in room_types or []
+            if isinstance(room_type, dict)
+        ]
+        self._selected_indices = [
+            index
+            for index in sorted(set(preselected_indices or []))
+            if 0 <= index < len(self.room_types)
+        ]
+
+        layout = QVBoxLayout(self)
+        description = QLabel(
+            "Move the room types to include from Available room types to "
+            "Selected room types."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search by room type ID or name...")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_completer = QCompleter(
+            [self._room_label(index) for index in range(len(self.room_types))],
+            self,
+        )
+        self.search_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.search_completer.setFilterMode(Qt.MatchContains)
+        self.search_completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.search_edit.setCompleter(self.search_completer)
+        layout.addWidget(self.search_edit)
+
+        paste_layout = QHBoxLayout()
+        paste_field_layout = QVBoxLayout()
+        paste_label = QLabel(
+            "Paste room type IDs or exact names from Excel "
+            "(one row or cell per room type)"
+        )
+        paste_field_layout.addWidget(paste_label)
+        self.room_list_edit = QPlainTextEdit()
+        self.room_list_edit.setPlaceholderText(
+            "Paste an Excel column here, for example:\n"
+            "OFFICE\nMEETING\nGeneral Store"
+        )
+        self.room_list_edit.setMaximumHeight(90)
+        paste_field_layout.addWidget(self.room_list_edit)
+        self.list_match_status_label = QLabel()
+        self.list_match_status_label.setWordWrap(True)
+        paste_field_layout.addWidget(self.list_match_status_label)
+        paste_layout.addLayout(paste_field_layout, 1)
+
+        paste_actions = QVBoxLayout()
+        paste_actions.addWidget(QLabel(""))
+        self.add_list_button = QPushButton("Add Listed Room Types")
+        self.clear_list_button = QPushButton("Clear List")
+        self.add_list_button.setMinimumWidth(150)
+        self.clear_list_button.setMinimumWidth(150)
+        self.add_list_button.setEnabled(False)
+        paste_actions.addWidget(self.add_list_button)
+        paste_actions.addWidget(self.clear_list_button)
+        paste_actions.addStretch(1)
+        paste_layout.addLayout(paste_actions)
+        layout.addLayout(paste_layout)
+
+        chooser_layout = QHBoxLayout()
+
+        available_layout = QVBoxLayout()
+        available_layout.addWidget(QLabel("Available room types"))
+        self.available_table = QTableWidget(0, 1)
+        self.available_table.setHorizontalHeaderLabels(["Room type"])
+        self.available_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.available_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.available_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.available_table.setAlternatingRowColors(True)
+        self.available_table.verticalHeader().setVisible(False)
+        self.available_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        available_layout.addWidget(self.available_table, 1)
+        chooser_layout.addLayout(available_layout, 1)
+
+        transfer_layout = QVBoxLayout()
+        transfer_layout.addStretch(1)
+        self.add_button = QPushButton("Add >")
+        self.add_all_button = QPushButton("Add All >>")
+        self.remove_button = QPushButton("< Remove")
+        self.remove_all_button = QPushButton("<< Remove All")
+        self.add_button.setToolTip("Add the selected available room type(s)")
+        self.add_all_button.setToolTip(
+            "Add every available room type visible in the current search"
+        )
+        self.remove_button.setToolTip("Remove the selected room type(s)")
+        self.remove_all_button.setToolTip("Remove every selected room type")
+        for button in (
+            self.add_button,
+            self.add_all_button,
+            self.remove_button,
+            self.remove_all_button,
+        ):
+            button.setMinimumWidth(115)
+            transfer_layout.addWidget(button)
+        transfer_layout.addStretch(1)
+        chooser_layout.addLayout(transfer_layout)
+
+        selected_layout = QVBoxLayout()
+        selected_layout.addWidget(QLabel("Selected room types"))
+        self.selected_table = QTableWidget(0, 1)
+        self.selected_table.setHorizontalHeaderLabels(["Room type"])
+        self.selected_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.selected_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.selected_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.selected_table.setAlternatingRowColors(True)
+        self.selected_table.verticalHeader().setVisible(False)
+        self.selected_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        selected_layout.addWidget(self.selected_table, 1)
+        chooser_layout.addLayout(selected_layout, 1)
+
+        layout.addLayout(chooser_layout, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Continue to Export")
+        buttons.accepted.connect(self._accept_selection)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.search_edit.textChanged.connect(self._apply_filter)
+        self.room_list_edit.textChanged.connect(self._refresh_list_button)
+        self.add_list_button.clicked.connect(self._add_listed_room_types)
+        self.clear_list_button.clicked.connect(self._clear_room_list)
+        self.add_button.clicked.connect(self._move_selected_right)
+        self.add_all_button.clicked.connect(self._move_all_right)
+        self.remove_button.clicked.connect(self._move_selected_left)
+        self.remove_all_button.clicked.connect(self._move_all_left)
+        self.available_table.doubleClicked.connect(self._move_selected_right)
+        self.selected_table.doubleClicked.connect(self._move_selected_left)
+        self.available_table.itemSelectionChanged.connect(
+            self._refresh_transfer_buttons
+        )
+        self.selected_table.itemSelectionChanged.connect(
+            self._refresh_transfer_buttons
+        )
+        self._refresh_tables()
+        self.search_edit.setFocus()
+
+    def _room_label(self, index):
+        room_type = self.room_types[index]
+        room_type_id = str(room_type.get("id", "") or "").strip()
+        name = str(room_type.get("name", "") or "").strip() or "Unnamed room type"
+        return f"{name} [{room_type_id}]" if room_type_id else name
+
+    @staticmethod
+    def _pasted_room_tokens(value):
+        text = str(value or "").strip()
+        if not text:
+            return []
+        tokens = re.split(r"[\t\r\n]+", text)
+        if len(tokens) == 1:
+            tokens = re.split(r"[;,]+", text)
+        result = []
+        for token in tokens:
+            cleaned = str(token or "").strip().strip("\"'")
+            if cleaned and cleaned not in result:
+                result.append(cleaned)
+        return result
+
+    def _match_pasted_room_types(self, value):
+        id_matches = {}
+        name_matches = {}
+        label_matches = {}
+        for index, room_type in enumerate(self.room_types):
+            room_type_id = str(room_type.get("id", "") or "").strip()
+            name = str(room_type.get("name", "") or "").strip()
+            if room_type_id:
+                id_matches.setdefault(room_type_id.casefold(), []).append(index)
+            if name:
+                name_matches.setdefault(name.casefold(), []).append(index)
+            label_matches.setdefault(
+                self._room_label(index).casefold(), []
+            ).append(index)
+
+        matched = []
+        unmatched = []
+        ambiguous = {}
+        for token in self._pasted_room_tokens(value):
+            key = token.casefold()
+            candidates = id_matches.get(key) or label_matches.get(key)
+            if not candidates:
+                bracket_match = re.search(r"\[([^\]]+)\]\s*$", token)
+                if bracket_match:
+                    candidates = id_matches.get(
+                        bracket_match.group(1).strip().casefold()
+                    )
+            if not candidates:
+                candidates = name_matches.get(key)
+            candidates = list(candidates or [])
+            if len(candidates) == 1:
+                if candidates[0] not in matched:
+                    matched.append(candidates[0])
+            elif len(candidates) > 1:
+                ambiguous[token] = [
+                    self._room_label(index) for index in candidates
+                ]
+            else:
+                unmatched.append(token)
+        return matched, unmatched, ambiguous
+
+    def _refresh_list_button(self):
+        self.add_list_button.setEnabled(
+            bool(self.room_list_edit.toPlainText().strip())
+        )
+
+    def _clear_room_list(self):
+        self.room_list_edit.clear()
+        self.list_match_status_label.clear()
+        self.list_match_status_label.setStyleSheet("")
+
+    def _add_listed_room_types(self):
+        matched, unmatched, ambiguous = self._match_pasted_room_types(
+            self.room_list_edit.toPlainText()
+        )
+        for index in matched:
+            if index not in self._selected_indices:
+                self._selected_indices.append(index)
+        self._selected_indices.sort()
+        self._refresh_tables()
+
+        issue_count = len(unmatched) + len(ambiguous)
+        matched_label = (
+            f"Matched {len(matched)} room type(s)"
+            if matched
+            else "No room types matched"
+        )
+        if not issue_count:
+            self.list_match_status_label.setText(
+                f"{matched_label}. All pasted entries were recognised."
+            )
+            self.list_match_status_label.setStyleSheet("color: #287233;")
+            return
+
+        issue_parts = []
+        if unmatched:
+            issue_parts.append(f"{len(unmatched)} unmatched")
+        if ambiguous:
+            issue_parts.append(f"{len(ambiguous)} ambiguous")
+        self.list_match_status_label.setText(
+            f"{matched_label}; {', '.join(issue_parts)}. "
+            "Review the warning and correct the pasted list."
+        )
+        self.list_match_status_label.setStyleSheet("color: #9a6700;")
+
+        details = []
+        if unmatched:
+            details.append("Unmatched entries:\n- " + "\n- ".join(unmatched))
+        if ambiguous:
+            ambiguous_lines = []
+            for token, labels in ambiguous.items():
+                ambiguous_lines.append(
+                    f"- {token}: {', '.join(labels)}"
+                )
+            details.append(
+                "Ambiguous entries (use the room type ID instead):\n"
+                + "\n".join(ambiguous_lines)
+            )
+        QMessageBox.warning(
+            self,
+            "Some Room Types Were Not Added",
+            "\n\n".join(details),
+        )
+
+    def _refresh_tables(self):
+        self.available_table.setRowCount(0)
+        self.selected_table.setRowCount(0)
+        selected_indices = set(self._selected_indices)
+        for index in range(len(self.room_types)):
+            if index in selected_indices:
+                continue
+            row = self.available_table.rowCount()
+            self.available_table.insertRow(row)
+            item = QTableWidgetItem(self._room_label(index))
+            item.setData(Qt.UserRole, index)
+            self.available_table.setItem(row, 0, item)
+        for index in self._selected_indices:
+            row = self.selected_table.rowCount()
+            self.selected_table.insertRow(row)
+            item = QTableWidgetItem(self._room_label(index))
+            item.setData(Qt.UserRole, index)
+            self.selected_table.setItem(row, 0, item)
+        self._apply_filter(self.search_edit.text())
+
+    def _apply_filter(self, text):
+        query = str(text or "").strip().casefold()
+        for row in range(self.available_table.rowCount()):
+            item = self.available_table.item(row, 0)
+            self.available_table.setRowHidden(
+                row,
+                bool(query and query not in item.text().casefold()),
+            )
+        self._refresh_transfer_buttons()
+
+    @staticmethod
+    def _selected_table_indices(table):
+        indices = []
+        for model_index in table.selectionModel().selectedRows():
+            item = table.item(model_index.row(), 0)
+            value = item.data(Qt.UserRole) if item is not None else None
+            if isinstance(value, int):
+                indices.append(value)
+        return sorted(indices)
+
+    def _move_selected_right(self, *_):
+        for index in self._selected_table_indices(self.available_table):
+            if index not in self._selected_indices:
+                self._selected_indices.append(index)
+        self._selected_indices.sort()
+        self._refresh_tables()
+
+    def _move_all_right(self, *_):
+        for row in range(self.available_table.rowCount()):
+            if self.available_table.isRowHidden(row):
+                continue
+            item = self.available_table.item(row, 0)
+            index = item.data(Qt.UserRole) if item is not None else None
+            if isinstance(index, int) and index not in self._selected_indices:
+                self._selected_indices.append(index)
+        self._selected_indices.sort()
+        self._refresh_tables()
+
+    def _move_selected_left(self, *_):
+        removed = set(self._selected_table_indices(self.selected_table))
+        self._selected_indices = [
+            index for index in self._selected_indices if index not in removed
+        ]
+        self._refresh_tables()
+
+    def _move_all_left(self, *_):
+        self._selected_indices = []
+        self._refresh_tables()
+
+    def _refresh_transfer_buttons(self):
+        self.add_button.setEnabled(
+            bool(self._selected_table_indices(self.available_table))
+        )
+        self.add_all_button.setEnabled(
+            any(
+                not self.available_table.isRowHidden(row)
+                for row in range(self.available_table.rowCount())
+            )
+        )
+        self.remove_button.setEnabled(
+            bool(self._selected_table_indices(self.selected_table))
+        )
+        self.remove_all_button.setEnabled(bool(self._selected_indices))
+
+    def selected_room_types(self):
+        return [self.room_types[index] for index in self._selected_indices]
+
+    def _accept_selection(self):
+        if not self._selected_indices:
+            QMessageBox.information(
+                self,
+                "Select Room Types to Export",
+                "Select at least one room type.",
+            )
+            return
+        self.accept()
+
+
 class RoomTypesEditorWindow(QMainWindow):
     def __init__(
         self,
@@ -5957,7 +6336,17 @@ class RoomTypesEditorWindow(QMainWindow):
         condense_btn = QPushButton("Condense room types...")
         export_csv_btn = QPushButton("Export CSV...")
         export_assignments_csv_btn = QPushButton("Export assigned assets CSV...")
-        export_asset_detail_excel_btn = QPushButton("Export asset detail Excel...")
+        self.export_asset_detail_button = QPushButton(
+            "Export selected asset breakdown..."
+        )
+        export_asset_detail_menu = QMenu(self.export_asset_detail_button)
+        self.export_asset_detail_pdf_action = export_asset_detail_menu.addAction(
+            "PDF..."
+        )
+        self.export_asset_detail_excel_action = export_asset_detail_menu.addAction(
+            "Excel..."
+        )
+        self.export_asset_detail_button.setMenu(export_asset_detail_menu)
         save_btn = QPushButton("Save")
 
         add_btn.clicked.connect(self.add_room_type)
@@ -5969,8 +6358,11 @@ class RoomTypesEditorWindow(QMainWindow):
         export_assignments_csv_btn.clicked.connect(
             self.export_room_type_asset_assignments_csv
         )
-        export_asset_detail_excel_btn.clicked.connect(
-            self.export_room_asset_detail_excel
+        self.export_asset_detail_pdf_action.triggered.connect(
+            self.export_selected_room_asset_detail_pdf
+        )
+        self.export_asset_detail_excel_action.triggered.connect(
+            self.export_selected_room_asset_detail_excel
         )
         save_btn.clicked.connect(self.save)
 
@@ -5981,7 +6373,7 @@ class RoomTypesEditorWindow(QMainWindow):
         buttons.addWidget(condense_btn)
         buttons.addWidget(export_csv_btn)
         buttons.addWidget(export_assignments_csv_btn)
-        buttons.addWidget(export_asset_detail_excel_btn)
+        buttons.addWidget(self.export_asset_detail_button)
         buttons.addStretch(1)
         buttons.addWidget(save_btn)
 
@@ -6284,11 +6676,61 @@ class RoomTypesEditorWindow(QMainWindow):
             f"Exported {count} room type asset assignment(s) to:\n{path}",
         )
 
-    def export_room_asset_detail_excel(self):
+    def _selected_room_types_for_export(self):
+        preselected_indices = sorted(
+            {
+                index.row()
+                for index in self.table.selectionModel().selectedRows()
+                if 0 <= index.row() < len(self.items)
+            }
+        )
+        dialog = RoomTypeExportSelectionDialog(
+            self,
+            self.items,
+            preselected_indices=preselected_indices,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return []
+        return dialog.selected_room_types()
+
+    def export_selected_room_asset_detail_pdf(self):
+        selected_room_types = self._selected_room_types_for_export()
+        if not selected_room_types:
+            return
         path, _selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Export Room Asset Detail to Excel",
-            "room_asset_detail.xlsx",
+            "Export Selected Room Type Asset Breakdown to PDF",
+            "selected_room_type_asset_breakdown.pdf",
+            "PDF files (*.pdf)",
+        )
+        if not path:
+            return
+        try:
+            destination, count = export_room_asset_detail_pdf(
+                path,
+                selected_room_types,
+                self.assets_by_id,
+                self.asset_categories_by_id,
+                self.asset_bundles,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Export complete",
+            f"Exported {len(selected_room_types)} selected room type(s) and "
+            f"{count} asset detail row(s) to:\n{destination}",
+        )
+
+    def export_selected_room_asset_detail_excel(self):
+        selected_room_types = self._selected_room_types_for_export()
+        if not selected_room_types:
+            return
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Selected Room Type Asset Breakdown to Excel",
+            "selected_room_type_asset_breakdown.xlsx",
             "Excel workbook (*.xlsx)",
         )
         if not path:
@@ -6296,7 +6738,7 @@ class RoomTypesEditorWindow(QMainWindow):
         try:
             destination, count = export_room_asset_detail_xlsx(
                 path,
-                self.items,
+                selected_room_types,
                 self.assets_by_id,
                 self.asset_categories_by_id,
                 self.asset_bundles,
@@ -6307,8 +6749,13 @@ class RoomTypesEditorWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Export complete",
-            f"Exported {count} room asset detail row(s) to:\n{destination}",
+            f"Exported {len(selected_room_types)} selected room type(s) and "
+            f"{count} asset detail row(s) to:\n{destination}",
         )
+
+    def export_room_asset_detail_excel(self):
+        """Retain the previous public slot while exporting selected rows."""
+        self.export_selected_room_asset_detail_excel()
 
     def save(self):
         self.on_save(self.items)
@@ -7688,60 +8135,90 @@ class BulkAssetAdditionDialog(QDialog):
     def __init__(self, parent, choices):
         super().__init__(parent)
         self.setWindowTitle("Add Assets")
-        self.resize(680, 560)
+        self.resize(980, 600)
         self.choices = list(choices or [])
+        self._asset_display_by_id = {
+            str(asset_id or "").strip(): str(display or "").strip()
+            for asset_id, display in self.choices
+            if str(asset_id or "").strip()
+        }
+        self._asset_order = list(self._asset_display_by_id)
+        self._selected_asset_ids = []
+        self._selected_quantities = {
+            asset_id: 1 for asset_id in self._asset_order
+        }
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Select one or more unassigned assets"))
+        description = QLabel(
+            "Move one or more unassigned assets from Available assets to "
+            "Selected assets. Set the required quantity on the right."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search by asset ID or description...")
         self.search_edit.setClearButtonEnabled(True)
         layout.addWidget(self.search_edit)
 
-        self.asset_table = QTableWidget(0, 3)
-        self.asset_table.setHorizontalHeaderLabels(["Add", "Asset", "Quantity"])
-        self.asset_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.asset_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.asset_table.setAlternatingRowColors(True)
-        self.asset_table.verticalHeader().setVisible(False)
-        header = self.asset_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        for asset_id, display in self.choices:
-            row = self.asset_table.rowCount()
-            self.asset_table.insertRow(row)
+        chooser_layout = QHBoxLayout()
 
-            check_item = QTableWidgetItem()
-            check_item.setFlags(
-                Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
-            )
-            check_item.setCheckState(Qt.Unchecked)
-            check_item.setData(Qt.UserRole, asset_id)
-            self.asset_table.setItem(row, 0, check_item)
+        available_layout = QVBoxLayout()
+        available_layout.addWidget(QLabel("Available assets"))
+        self.available_table = QTableWidget(0, 1)
+        self.available_table.setHorizontalHeaderLabels(["Asset"])
+        self.available_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.available_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.available_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.available_table.setAlternatingRowColors(True)
+        self.available_table.verticalHeader().setVisible(False)
+        self.available_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        available_layout.addWidget(self.available_table, 1)
+        chooser_layout.addLayout(available_layout, 1)
 
-            display_item = QTableWidgetItem(display)
-            display_item.setData(Qt.UserRole, asset_id)
-            self.asset_table.setItem(row, 1, display_item)
+        transfer_layout = QVBoxLayout()
+        transfer_layout.addStretch(1)
+        self.add_button = QPushButton("Add >")
+        self.add_all_button = QPushButton("Add All >>")
+        self.remove_button = QPushButton("< Remove")
+        self.remove_all_button = QPushButton("<< Remove All")
+        self.add_button.setToolTip("Add the selected available asset(s)")
+        self.add_all_button.setToolTip(
+            "Add every available asset visible in the current search"
+        )
+        self.remove_button.setToolTip("Remove the selected asset(s)")
+        self.remove_all_button.setToolTip("Remove every selected asset")
+        for button in (
+            self.add_button,
+            self.add_all_button,
+            self.remove_button,
+            self.remove_all_button,
+        ):
+            button.setMinimumWidth(115)
+            transfer_layout.addWidget(button)
+        transfer_layout.addStretch(1)
+        chooser_layout.addLayout(transfer_layout)
 
-            quantity_spin = QSpinBox()
-            quantity_spin.setRange(1, 100000)
-            quantity_spin.setValue(1)
-            quantity_spin.setEnabled(False)
-            quantity_spin.setToolTip("Quantity to add for this room type")
-            self.asset_table.setCellWidget(row, 2, quantity_spin)
-        self.asset_table.itemChanged.connect(self._selection_changed)
-        layout.addWidget(self.asset_table, 1)
+        selected_layout = QVBoxLayout()
+        selected_layout.addWidget(QLabel("Selected assets"))
+        self.selected_table = QTableWidget(0, 2)
+        self.selected_table.setHorizontalHeaderLabels(["Asset", "Quantity"])
+        self.selected_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.selected_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.selected_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.selected_table.setAlternatingRowColors(True)
+        self.selected_table.verticalHeader().setVisible(False)
+        selected_header = self.selected_table.horizontalHeader()
+        selected_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        selected_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        selected_layout.addWidget(self.selected_table, 1)
+        chooser_layout.addLayout(selected_layout, 1)
 
-        selection_row = QHBoxLayout()
-        select_all_btn = QPushButton("Select All Visible")
-        clear_btn = QPushButton("Clear Selection")
-        select_all_btn.clicked.connect(self._select_all_visible)
-        clear_btn.clicked.connect(self._clear_selection)
-        selection_row.addWidget(select_all_btn)
-        selection_row.addWidget(clear_btn)
-        selection_row.addStretch(1)
-        layout.addLayout(selection_row)
+        layout.addLayout(chooser_layout, 1)
+
+        # Retain the old public name for callers that inspect the available table.
+        self.asset_table = self.available_table
 
         form = QFormLayout()
         self.requested_by_edit = QLineEdit()
@@ -7761,45 +8238,147 @@ class BulkAssetAdditionDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.search_edit.textChanged.connect(self._apply_filter)
+        self.add_button.clicked.connect(self._move_selected_right)
+        self.add_all_button.clicked.connect(self._move_all_right)
+        self.remove_button.clicked.connect(self._move_selected_left)
+        self.remove_all_button.clicked.connect(self._move_all_left)
+        self.available_table.doubleClicked.connect(self._move_selected_right)
+        self.selected_table.doubleClicked.connect(self._move_selected_left)
+        self.available_table.itemSelectionChanged.connect(
+            self._refresh_transfer_buttons
+        )
+        self.selected_table.itemSelectionChanged.connect(
+            self._refresh_transfer_buttons
+        )
+        self._refresh_asset_tables()
+        self.search_edit.setFocus()
 
     def _apply_filter(self, text):
         query = str(text or "").strip().casefold()
-        for row in range(self.asset_table.rowCount()):
-            display_item = self.asset_table.item(row, 1)
-            self.asset_table.setRowHidden(
+        for row in range(self.available_table.rowCount()):
+            display_item = self.available_table.item(row, 0)
+            self.available_table.setRowHidden(
                 row,
                 bool(query and query not in display_item.text().casefold()),
             )
+        self._refresh_transfer_buttons()
 
-    def _selection_changed(self, item):
-        if item.column() != 0:
-            return
-        quantity_spin = self.asset_table.cellWidget(item.row(), 2)
-        if quantity_spin is not None:
-            quantity_spin.setEnabled(item.checkState() == Qt.Checked)
+    def _capture_selected_quantities(self):
+        for row in range(self.selected_table.rowCount()):
+            item = self.selected_table.item(row, 0)
+            quantity_spin = self.selected_table.cellWidget(row, 1)
+            asset_id = str(item.data(Qt.UserRole) or "").strip() if item else ""
+            if asset_id and isinstance(quantity_spin, QSpinBox):
+                self._selected_quantities[asset_id] = int(quantity_spin.value())
 
-    def _select_all_visible(self):
-        for row in range(self.asset_table.rowCount()):
-            if not self.asset_table.isRowHidden(row):
-                self.asset_table.item(row, 0).setCheckState(Qt.Checked)
+    def _refresh_asset_tables(self):
+        self._capture_selected_quantities()
+        self.available_table.setRowCount(0)
+        self.selected_table.setRowCount(0)
+        selected_ids = set(self._selected_asset_ids)
 
-    def _clear_selection(self):
-        for row in range(self.asset_table.rowCount()):
-            self.asset_table.item(row, 0).setCheckState(Qt.Unchecked)
+        for asset_id in self._asset_order:
+            if asset_id in selected_ids:
+                continue
+            row = self.available_table.rowCount()
+            self.available_table.insertRow(row)
+            item = QTableWidgetItem(self._asset_display_by_id[asset_id])
+            item.setData(Qt.UserRole, asset_id)
+            self.available_table.setItem(row, 0, item)
+
+        for asset_id in self._selected_asset_ids:
+            row = self.selected_table.rowCount()
+            self.selected_table.insertRow(row)
+            item = QTableWidgetItem(self._asset_display_by_id[asset_id])
+            item.setData(Qt.UserRole, asset_id)
+            self.selected_table.setItem(row, 0, item)
+
+            quantity_spin = QSpinBox()
+            quantity_spin.setRange(1, 100000)
+            quantity_spin.setValue(
+                max(1, int(self._selected_quantities.get(asset_id, 1) or 1))
+            )
+            quantity_spin.setToolTip("Quantity to add for this room type")
+            quantity_spin.valueChanged.connect(
+                lambda value, selected_id=asset_id: self._quantity_changed(
+                    selected_id, value
+                )
+            )
+            self.selected_table.setCellWidget(row, 1, quantity_spin)
+
+        self._apply_filter(self.search_edit.text())
+
+    @staticmethod
+    def _selected_ids(table):
+        asset_ids = []
+        for index in table.selectionModel().selectedRows():
+            item = table.item(index.row(), 0)
+            asset_id = str(item.data(Qt.UserRole) or "").strip() if item else ""
+            if asset_id:
+                asset_ids.append(asset_id)
+        return asset_ids
+
+    def _quantity_changed(self, asset_id, value):
+        self._selected_quantities[asset_id] = max(1, int(value or 1))
+
+    def _move_selected_right(self, *_):
+        for asset_id in self._selected_ids(self.available_table):
+            if asset_id not in self._selected_asset_ids:
+                self._selected_asset_ids.append(asset_id)
+        self._refresh_asset_tables()
+
+    def _move_all_right(self, *_):
+        visible_ids = []
+        for row in range(self.available_table.rowCount()):
+            if self.available_table.isRowHidden(row):
+                continue
+            item = self.available_table.item(row, 0)
+            asset_id = str(item.data(Qt.UserRole) or "").strip() if item else ""
+            if asset_id:
+                visible_ids.append(asset_id)
+        for asset_id in visible_ids:
+            if asset_id not in self._selected_asset_ids:
+                self._selected_asset_ids.append(asset_id)
+        self._refresh_asset_tables()
+
+    def _move_selected_left(self, *_):
+        removed_ids = set(self._selected_ids(self.selected_table))
+        if removed_ids:
+            self._selected_asset_ids = [
+                asset_id
+                for asset_id in self._selected_asset_ids
+                if asset_id not in removed_ids
+            ]
+        self._refresh_asset_tables()
+
+    def _move_all_left(self, *_):
+        self._selected_asset_ids = []
+        self._refresh_asset_tables()
+
+    def _refresh_transfer_buttons(self):
+        self.add_button.setEnabled(
+            bool(self._selected_ids(self.available_table))
+        )
+        self.add_all_button.setEnabled(
+            any(
+                not self.available_table.isRowHidden(row)
+                for row in range(self.available_table.rowCount())
+            )
+        )
+        self.remove_button.setEnabled(
+            bool(self._selected_ids(self.selected_table))
+        )
+        self.remove_all_button.setEnabled(bool(self._selected_asset_ids))
 
     def selected_asset_rows(self):
-        selected = []
-        for row in range(self.asset_table.rowCount()):
-            check_item = self.asset_table.item(row, 0)
-            if check_item.checkState() != Qt.Checked:
-                continue
-            asset_id = str(check_item.data(Qt.UserRole) or "").strip()
-            quantity_spin = self.asset_table.cellWidget(row, 2)
-            if asset_id and quantity_spin is not None:
-                selected.append(
-                    {"asset_id": asset_id, "qty": int(quantity_spin.value())}
-                )
-        return selected
+        self._capture_selected_quantities()
+        return [
+            {
+                "asset_id": asset_id,
+                "qty": int(self._selected_quantities.get(asset_id, 1)),
+            }
+            for asset_id in self._selected_asset_ids
+        ]
 
     def selected_asset_ids(self):
         return [row["asset_id"] for row in self.selected_asset_rows()]
