@@ -27,6 +27,88 @@ def _text(value) -> str:
     return str(value if value is not None else "").strip()
 
 
+def _adb_code(row) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return _text(row.get("ADB_Code") or row.get("adb_code", ""))
+
+
+def _existing_asset_match(source, existing) -> dict:
+    """Suggest an existing project asset using ID and ADB-code matches."""
+    source_id = _text(source.get("id")) if isinstance(source, dict) else ""
+    source_adb = _adb_code(source)
+    source_adb_key = source_adb.casefold()
+    existing_rows = [
+        row
+        for row in existing
+        if isinstance(row, dict) and _text(row.get("id"))
+    ]
+    existing_by_id = {
+        _text(row.get("id")): row
+        for row in existing_rows
+    }
+    adb_matches = [
+        row
+        for row in existing_rows
+        if source_adb_key and _adb_code(row).casefold() == source_adb_key
+    ]
+    adb_match_ids = [_text(row.get("id")) for row in adb_matches]
+    id_match = existing_by_id.get(source_id)
+
+    if id_match is not None:
+        existing_adb = _adb_code(id_match)
+        conflicting_adb_ids = [
+            asset_id for asset_id in adb_match_ids if asset_id != source_id
+        ]
+        id_adb_conflict = bool(
+            source_adb
+            and existing_adb
+            and source_adb.casefold() != existing_adb.casefold()
+        )
+        if conflicting_adb_ids or id_adb_conflict:
+            details = [f"ID matches {source_id}"]
+            if conflicting_adb_ids:
+                details.append(
+                    f"ADB {source_adb} matches {', '.join(conflicting_adb_ids)}"
+                )
+            elif id_adb_conflict:
+                details.append(
+                    f"existing ADB is {existing_adb}"
+                )
+            return {
+                "target_id": "",
+                "status": "Conflict: " + "; ".join(details),
+                "requires_choice": True,
+            }
+        status = f"Matched ID and ADB {source_adb}" if source_adb else "Matched ID"
+        return {
+            "target_id": source_id,
+            "status": status,
+            "requires_choice": False,
+        }
+
+    if len(adb_matches) == 1:
+        target_id = adb_match_ids[0]
+        return {
+            "target_id": target_id,
+            "status": f"Matched ADB {source_adb} to {target_id}",
+            "requires_choice": False,
+        }
+    if len(adb_matches) > 1:
+        return {
+            "target_id": "",
+            "status": (
+                f"ADB {source_adb} matches {len(adb_matches)} existing assets"
+            ),
+            "requires_choice": True,
+        }
+    return {
+        "target_id": "",
+        "status": "No existing ID or ADB match",
+        "requires_choice": False,
+    }
+
+
 def _new_id_proposal(source_id: str, reserved: set[str]) -> str:
     if source_id and source_id not in reserved:
         return source_id
@@ -50,11 +132,13 @@ class AssetImportMarshallingDialog(QDialog):
         *,
         asset_label="asset",
         reserved_ids=None,
+        match_adb_codes=False,
     ):
         super().__init__(parent)
         self.incoming = [dict(row) for row in incoming if isinstance(row, dict)]
         self.existing = [dict(row) for row in existing if isinstance(row, dict)]
         self.asset_label = asset_label
+        self.match_adb_codes = bool(match_adb_codes)
         self.reserved_ids = {
             _text(asset_id) for asset_id in (reserved_ids or []) if _text(asset_id)
         }
@@ -62,18 +146,39 @@ class AssetImportMarshallingDialog(QDialog):
         self._row_controls = []
 
         self.setWindowTitle("Marshal imported assets")
-        self.resize(980, 560)
+        self.resize(1180 if self.match_adb_codes else 980, 560)
         layout = QVBoxLayout(self)
         intro = QLabel(
             "Choose how each row is handled. Map keeps an existing local definition, "
             "Create adds the imported definition under the selected ID, and Reject ignores the row."
+            + (
+                " Matching checks both asset ID and ADB code."
+                if self.match_adb_codes
+                else ""
+            )
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        self.table = QTableWidget(len(self.incoming), 4)
+        self._action_column = 4 if self.match_adb_codes else 2
+        self._target_column = 5 if self.match_adb_codes else 3
+        self.table = QTableWidget(
+            len(self.incoming),
+            6 if self.match_adb_codes else 4,
+        )
         self.table.setHorizontalHeaderLabels(
-            ["Source ID", "Imported name", "Action", "Local asset"]
+            (
+                [
+                    "Source ID",
+                    "Imported name",
+                    "ADB code",
+                    "Existing match",
+                    "Action",
+                    "Local asset",
+                ]
+                if self.match_adb_codes
+                else ["Source ID", "Imported name", "Action", "Local asset"]
+            )
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -81,19 +186,30 @@ class AssetImportMarshallingDialog(QDialog):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        if self.match_adb_codes:
+            header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setSectionResizeMode(
+            self._action_column, QHeaderView.ResizeToContents
+        )
+        header.setSectionResizeMode(self._target_column, QHeaderView.Stretch)
         layout.addWidget(self.table, 1)
 
         existing_options = sorted(
             (
-                (_text(row.get("id")), _text(row.get("name")))
+                (
+                    _text(row.get("id")),
+                    _text(row.get("name")),
+                    _adb_code(row),
+                )
                 for row in self.existing
                 if _text(row.get("id"))
             ),
             key=lambda item: (item[1].casefold(), item[0].casefold()),
         )
-        existing_ids = {asset_id for asset_id, _name in existing_options}
+        existing_ids = {
+            asset_id for asset_id, _name, _adb in existing_options
+        }
         reserved = set(existing_ids) | self.reserved_ids
         proposals = {}
         for row in self.incoming:
@@ -109,28 +225,52 @@ class AssetImportMarshallingDialog(QDialog):
             self.table.setItem(row_index, 0, source_item)
             self.table.setItem(row_index, 1, QTableWidgetItem(_text(source.get("name"))))
 
+            match = (
+                _existing_asset_match(source, self.existing)
+                if self.match_adb_codes
+                else {
+                    "target_id": source_id if source_id in existing_ids else "",
+                    "status": "",
+                    "requires_choice": False,
+                }
+            )
+            if self.match_adb_codes:
+                self.table.setItem(
+                    row_index, 2, QTableWidgetItem(_adb_code(source))
+                )
+                self.table.setItem(
+                    row_index, 3, QTableWidgetItem(match["status"])
+                )
+
             action_combo = QComboBox()
             if existing_options:
                 action_combo.addItem("Map to existing", IMPORT_ACTION_MAP)
             action_combo.addItem("Create new", IMPORT_ACTION_CREATE)
             action_combo.addItem("Reject row", IMPORT_ACTION_REJECT)
             default_action = (
-                IMPORT_ACTION_MAP if source_id in existing_ids else IMPORT_ACTION_CREATE
+                IMPORT_ACTION_MAP
+                if match["target_id"] or match["requires_choice"]
+                else IMPORT_ACTION_CREATE
             )
             action_combo.setCurrentIndex(action_combo.findData(default_action))
-            self.table.setCellWidget(row_index, 2, action_combo)
+            self.table.setCellWidget(
+                row_index, self._action_column, action_combo
+            )
 
             target_combo = QComboBox()
-            self.table.setCellWidget(row_index, 3, target_combo)
+            self.table.setCellWidget(
+                row_index, self._target_column, target_combo
+            )
             control = {
                 "source_id": source_id,
                 "action": action_combo,
                 "target": target_combo,
                 "existing": existing_options,
                 "values": {
-                    IMPORT_ACTION_MAP: source_id if source_id in existing_ids else "",
+                    IMPORT_ACTION_MAP: match["target_id"],
                     IMPORT_ACTION_CREATE: proposals[source_id],
                 },
+                "requires_explicit_map_target": match["requires_choice"],
                 "current_action": "",
             }
             self._row_controls.append(control)
@@ -160,10 +300,14 @@ class AssetImportMarshallingDialog(QDialog):
         if action == IMPORT_ACTION_MAP:
             target.setEnabled(True)
             target.setEditable(False)
-            for asset_id, name in control["existing"]:
-                label = f"{asset_id} - {name}" if name else asset_id
-                target.addItem(label, asset_id)
             selected = control["values"].get(IMPORT_ACTION_MAP, "")
+            if control["requires_explicit_map_target"] and not selected:
+                target.addItem("Choose an existing asset...", "")
+            for asset_id, name, adb_code in control["existing"]:
+                label = f"{asset_id} - {name}" if name else asset_id
+                if self.match_adb_codes and adb_code:
+                    label += f" [ADB: {adb_code}]"
+                target.addItem(label, asset_id)
             index = target.findData(selected)
             target.setCurrentIndex(index if index >= 0 else 0)
         elif action == IMPORT_ACTION_CREATE:

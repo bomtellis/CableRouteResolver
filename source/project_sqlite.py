@@ -708,22 +708,58 @@ class SQLiteProjectFile:
                 ).fetchone()
             )
             initial_revision_created = False
-            for (payload,) in connection.execute(
-                """
-                SELECT payload FROM project_sections
-                WHERE section_key = 'revision_change_log'
-                ORDER BY chunk_index
-                """
-            ):
-                rows = _unpack(payload)
-                if not isinstance(rows, list):
-                    continue
-                existing_change_ids.update(
-                    _text(item.get("id"))
-                    for item in rows
-                    if isinstance(item, dict) and _text(item.get("id"))
+            change_log = data.get("revision_change_log", []) or []
+            if not isinstance(change_log, list):
+                change_log = []
+            persisted_change_count = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(SUM(record_count), 0)
+                    FROM project_sections
+                    WHERE section_key = 'revision_change_log'
+                    """
+                ).fetchone()[0]
+                or 0
+            )
+            append_only = persisted_change_count <= len(change_log)
+            if append_only and persisted_change_count:
+                last_persisted = connection.execute(
+                    """
+                    SELECT record_id
+                    FROM project_record_index
+                    WHERE section_key = 'revision_change_log'
+                    ORDER BY chunk_index DESC, item_index DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                boundary_item = change_log[persisted_change_count - 1]
+                append_only = bool(
+                    last_persisted
+                    and isinstance(boundary_item, dict)
+                    and _text(last_persisted[0])
+                    and _text(last_persisted[0]) == _text(boundary_item.get("id"))
                 )
-            for item in data.get("revision_change_log", []) or []:
+
+            if append_only:
+                candidate_changes = change_log[persisted_change_count:]
+            else:
+                # Fall back to ID comparison for imported or manually edited
+                # histories. This still avoids decoding compressed audit chunks.
+                existing_change_ids.update(
+                    _text(record_id)
+                    for (record_id,) in connection.execute(
+                        """
+                        SELECT record_id
+                        FROM project_record_index
+                        WHERE section_key = 'revision_change_log'
+                          AND record_id <> ''
+                        """
+                    )
+                    if _text(record_id)
+                )
+                candidate_changes = change_log
+
+            for item in candidate_changes:
                 if not isinstance(item, dict):
                     continue
                 event_id = _text(item.get("id"))
@@ -954,8 +990,13 @@ class SQLiteProjectFile:
             compaction_error=compaction_error,
         )
 
-    def verify(self) -> List[str]:
-        """Return validation errors; an empty list means the database is sound."""
+    def verify(self, *, full: bool = True) -> List[str]:
+        """Return validation errors; an empty list means the database is sound.
+
+        ``full=False`` performs the structural checks appropriate immediately
+        after an atomic save. The full integrity and revision-blob scans remain
+        available for explicit database validation and migration.
+        """
 
         errors: List[str] = []
         if not is_sqlite_project(self.path):
@@ -963,9 +1004,10 @@ class SQLiteProjectFile:
         connection = sqlite3.connect(str(self.path))
         try:
             _configure_connection(connection, writable=False)
-            quick_check = connection.execute("PRAGMA quick_check").fetchone()
-            if not quick_check or str(quick_check[0]).lower() != "ok":
-                errors.append(f"SQLite quick check failed: {quick_check}")
+            if full:
+                quick_check = connection.execute("PRAGMA quick_check").fetchone()
+                if not quick_check or str(quick_check[0]).lower() != "ok":
+                    errors.append(f"SQLite quick check failed: {quick_check}")
             meta = dict(connection.execute("SELECT key, value FROM project_meta"))
             if meta.get("format_name") != FORMAT_NAME:
                 errors.append("Project format marker is missing or invalid.")
@@ -980,7 +1022,7 @@ class SQLiteProjectFile:
                     connection.execute("SELECT 1 FROM project_revisions LIMIT 1").fetchone()
                 except sqlite3.DatabaseError as exc:
                     errors.append(f"Revision history is not readable: {exc}")
-            if connection.execute(
+            if full and connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_revision_sections'"
             ).fetchone():
                 missing_blobs = connection.execute(

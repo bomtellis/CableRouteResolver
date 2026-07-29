@@ -157,6 +157,101 @@ def staged_changes(staging) -> list[dict]:
     )
 
 
+def suggested_commit_message(changes, *, detail_limit=6) -> str:
+    """Build an editable commit-message suggestion from coalesced staged changes."""
+    rows = [row for row in (changes or []) if isinstance(row, dict)]
+    if not rows:
+        return ""
+
+    action_labels = {
+        "added": ("added", "add"),
+        "changed": ("updated", "update"),
+        "removed": ("removed", "remove"),
+    }
+    counts = {"added": 0, "changed": 0, "removed": 0}
+    room_keys = set()
+    for row in rows:
+        action = _text(row.get("change_type")).casefold()
+        if action in counts:
+            counts[action] += 1
+        room_id = _text(row.get("room_type_id"))
+        room_name = _text(row.get("room_type_name"))
+        if room_id or room_name:
+            room_keys.add((room_id.casefold(), room_name.casefold()))
+
+    count_parts = []
+    for action in ("added", "changed", "removed"):
+        count = counts[action]
+        if count:
+            count_parts.append(f"{action_labels[action][0]} {count}")
+    if not count_parts:
+        count_parts.append(f"updated {len(rows)}")
+    if len(count_parts) > 1:
+        count_summary = ", ".join(count_parts[:-1]) + f" and {count_parts[-1]}"
+    else:
+        count_summary = count_parts[0]
+    room_summary = (
+        f" across {len(room_keys)} room type"
+        f"{'' if len(room_keys) == 1 else 's'}"
+        if room_keys
+        else ""
+    )
+    headline = f"Room asset review: {count_summary}{room_summary}"
+
+    details = []
+    limit = max(0, int(detail_limit or 0))
+    for row in rows[:limit]:
+        action = _text(row.get("change_type")).casefold()
+        verb = action_labels.get(action, ("updated", "update"))[1]
+        room_id = _text(row.get("room_type_id"))
+        room_name = _text(row.get("room_type_name"))
+        room_label = room_id or room_name
+        asset_id = _text(row.get("asset_id"))
+        asset_name = _text(row.get("asset_name"))
+        asset_label = asset_id
+        if asset_name and asset_name.casefold() != asset_id.casefold():
+            asset_label = f"{asset_id} ({asset_name})" if asset_id else asset_name
+        asset_label = asset_label or "asset"
+        before = row.get("before") if isinstance(row.get("before"), dict) else {}
+        after = row.get("after") if isinstance(row.get("after"), dict) else {}
+
+        if _text(row.get("scope")).casefold() == "asset":
+            before_points = int(before.get("data_points", 0) or 0)
+            after_points = int(after.get("data_points", 0) or 0)
+            detail = (
+                f"{asset_label}: data points {before_points} \u2192 {after_points}"
+            )
+        elif action == "added":
+            detail = f"{room_label}: add {asset_label} x{int(after.get('qty', 1) or 1)}"
+        elif action == "removed":
+            detail = (
+                f"{room_label}: remove {asset_label} x"
+                f"{int(before.get('qty', 1) or 1)}"
+            )
+        else:
+            changes_text = []
+            before_qty = int(before.get("qty", 1) or 1)
+            after_qty = int(after.get("qty", 1) or 1)
+            if before_qty != after_qty:
+                changes_text.append(f"qty {before_qty} \u2192 {after_qty}")
+            before_requester = _text(before.get("requested_by"))
+            after_requester = _text(after.get("requested_by"))
+            if before_requester != after_requester:
+                changes_text.append(
+                    f"requested by {before_requester or 'none'} \u2192 "
+                    f"{after_requester or 'none'}"
+                )
+            detail = f"{room_label}: {verb} {asset_label}"
+            if changes_text:
+                detail += f" ({', '.join(changes_text)})"
+        details.append(detail.lstrip(": "))
+
+    remaining = len(rows) - len(details)
+    if remaining > 0:
+        details.append(f"plus {remaining} more change{'' if remaining == 1 else 's'}")
+    return f"{headline}\n" + "; ".join(details)
+
+
 def update_staging(
     staging,
     *,

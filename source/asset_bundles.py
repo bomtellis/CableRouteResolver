@@ -176,6 +176,254 @@ def merge_selected_bundles(existing_rows, bundles) -> list[dict]:
     return result
 
 
+def reconcile_bundle_assignments(room_type, bundles, assignments) -> dict:
+    """Apply the delta between current and requested linked bundle quantities."""
+
+    if not isinstance(room_type, dict):
+        raise ValueError("A room type is required.")
+    normalised_bundles = normalise_asset_bundles(bundles)
+    bundles_by_id = {
+        bundle["id"]: bundle for bundle in normalised_bundles
+    }
+    current_assignments = clean_bundle_assignments(
+        room_type.get("asset_bundle_assignments", []),
+        bundles_by_id,
+    )
+    requested_assignments = clean_bundle_assignments(
+        assignments,
+        bundles_by_id,
+    )
+
+    def selected_bundle_rows(values):
+        selected = []
+        for assignment in values:
+            bundle = bundles_by_id.get(assignment["bundle_id"])
+            if bundle:
+                selected.append(
+                    {**bundle, "bundle_qty": assignment["qty"]}
+                )
+        return selected
+
+    def asset_contributions(values):
+        contributions = {}
+        for assignment in values:
+            bundle = bundles_by_id.get(assignment["bundle_id"], {})
+            multiplier = int(assignment.get("qty", 1) or 1)
+            for row in clean_asset_rows(bundle.get("assets", [])):
+                asset_id = row["asset_id"]
+                contributions[asset_id] = contributions.get(asset_id, 0) + (
+                    int(row.get("qty", 1) or 1) * multiplier
+                )
+        return contributions
+
+    current_assets = asset_contributions(current_assignments)
+    requested_assets = asset_contributions(requested_assignments)
+    rows = deepcopy(clean_asset_rows(room_type.get("assets", [])))
+    rows_by_id = {row["asset_id"]: row for row in rows}
+    for asset_id in set(current_assets) | set(requested_assets):
+        delta = requested_assets.get(asset_id, 0) - current_assets.get(
+            asset_id, 0
+        )
+        existing = rows_by_id.get(asset_id)
+        if existing is None:
+            if delta > 0:
+                added = {"asset_id": asset_id, "qty": delta}
+                rows.append(added)
+                rows_by_id[asset_id] = added
+            continue
+        updated = int(existing.get("qty", 1) or 1) + delta
+        if updated > 0:
+            existing["qty"] = updated
+        else:
+            rows.remove(existing)
+            rows_by_id.pop(asset_id, None)
+    rows = clean_asset_rows(rows)
+
+    current_connections = {
+        _connection_key(row): row
+        for row in merge_selected_bundle_connections(
+            [], selected_bundle_rows(current_assignments)
+        )
+    }
+    requested_connections = {
+        _connection_key(row): row
+        for row in merge_selected_bundle_connections(
+            [], selected_bundle_rows(requested_assignments)
+        )
+    }
+    connections = clean_asset_connections(
+        room_type.get("asset_connections", room_type.get("connections", []))
+    )
+    connections_by_key = {
+        _connection_key(row): row for row in connections
+    }
+    for key in set(current_connections) | set(requested_connections):
+        old_row = current_connections.get(key, {})
+        new_row = requested_connections.get(key, {})
+        delta = int(new_row.get("qty", 0) or 0) - int(
+            old_row.get("qty", 0) or 0
+        )
+        existing = connections_by_key.get(key)
+        if existing is None:
+            if delta > 0:
+                added = dict(new_row)
+                added["qty"] = delta
+                connections.append(added)
+                connections_by_key[key] = added
+            continue
+        updated = int(existing.get("qty", 1) or 1) + delta
+        if updated > 0:
+            existing["qty"] = updated
+        else:
+            connections.remove(existing)
+            connections_by_key.pop(key, None)
+    connections = clean_asset_connections(
+        connections,
+        [row["asset_id"] for row in rows],
+    )
+
+    result = deepcopy(room_type)
+    result["assets"] = rows
+    result["asset_ids"] = [row["asset_id"] for row in rows]
+    result["asset_bundle_assignments"] = requested_assignments
+    result["asset_connections"] = connections
+    return result
+
+
+def replace_bundle_assignment(
+    room_type,
+    bundles,
+    replaced_bundle_id,
+    replacement_bundle_id,
+    replacement_qty=1,
+) -> dict:
+    """Replace one linked bundle while preserving unrelated room quantities."""
+
+    if not isinstance(room_type, dict):
+        raise ValueError("A room type is required.")
+    bundles_by_id = {
+        bundle["id"]: bundle for bundle in normalise_asset_bundles(bundles)
+    }
+    old_id = _text(replaced_bundle_id)
+    new_id = _text(replacement_bundle_id)
+    old_bundle = bundles_by_id.get(old_id)
+    new_bundle = bundles_by_id.get(new_id)
+    if old_bundle is None:
+        raise ValueError(f"Linked bundle {old_id or '(blank)'} was not found.")
+    if new_bundle is None:
+        raise ValueError(f"Replacement bundle {new_id or '(blank)'} was not found.")
+    try:
+        new_qty = max(1, int(replacement_qty or 1))
+    except (TypeError, ValueError):
+        new_qty = 1
+
+    assignments = clean_bundle_assignments(
+        room_type.get("asset_bundle_assignments", []),
+        bundles_by_id,
+    )
+    old_assignment = next(
+        (
+            assignment
+            for assignment in assignments
+            if assignment["bundle_id"] == old_id
+        ),
+        None,
+    )
+    if old_assignment is None:
+        raise ValueError(f"Room type is not linked to bundle {old_id}.")
+    old_qty = int(old_assignment.get("qty", 1) or 1)
+
+    old_assets = {
+        row["asset_id"]: int(row.get("qty", 1) or 1) * old_qty
+        for row in clean_asset_rows(old_bundle.get("assets", []))
+    }
+    new_assets = {
+        row["asset_id"]: int(row.get("qty", 1) or 1) * new_qty
+        for row in clean_asset_rows(new_bundle.get("assets", []))
+    }
+    rows = deepcopy(clean_asset_rows(room_type.get("assets", [])))
+    rows_by_id = {row["asset_id"]: row for row in rows}
+    for asset_id in set(old_assets) | set(new_assets):
+        delta = new_assets.get(asset_id, 0) - old_assets.get(asset_id, 0)
+        existing = rows_by_id.get(asset_id)
+        if existing is None:
+            if delta > 0:
+                added = {"asset_id": asset_id, "qty": delta}
+                rows.append(added)
+                rows_by_id[asset_id] = added
+            continue
+        updated = int(existing.get("qty", 1) or 1) + delta
+        if updated > 0:
+            existing["qty"] = updated
+        else:
+            rows.remove(existing)
+            rows_by_id.pop(asset_id, None)
+    rows = clean_asset_rows(rows)
+
+    old_connections = {
+        _connection_key(row): row
+        for row in merge_selected_bundle_connections(
+            [],
+            [{**old_bundle, "bundle_qty": old_qty}],
+        )
+    }
+    new_connections = {
+        _connection_key(row): row
+        for row in merge_selected_bundle_connections(
+            [],
+            [{**new_bundle, "bundle_qty": new_qty}],
+        )
+    }
+    connections = clean_asset_connections(
+        room_type.get("asset_connections", room_type.get("connections", []))
+    )
+    connections_by_key = {
+        _connection_key(row): row for row in connections
+    }
+    for key in set(old_connections) | set(new_connections):
+        old_connection = old_connections.get(key, {})
+        new_connection = new_connections.get(key, {})
+        delta = int(new_connection.get("qty", 0) or 0) - int(
+            old_connection.get("qty", 0) or 0
+        )
+        existing = connections_by_key.get(key)
+        if existing is None:
+            if delta > 0:
+                added = dict(new_connection)
+                added["qty"] = delta
+                connections.append(added)
+                connections_by_key[key] = added
+            continue
+        updated = int(existing.get("qty", 1) or 1) + delta
+        if updated > 0:
+            existing["qty"] = updated
+        else:
+            connections.remove(existing)
+            connections_by_key.pop(key, None)
+    connections = clean_asset_connections(
+        connections,
+        [row["asset_id"] for row in rows],
+    )
+
+    remaining = [
+        assignment
+        for assignment in assignments
+        if assignment["bundle_id"] != old_id
+    ]
+    replacement_assignment = {"bundle_id": new_id, "qty": new_qty}
+    updated_assignments = clean_bundle_assignments(
+        [*remaining, replacement_assignment],
+        bundles_by_id,
+    )
+
+    result = deepcopy(room_type)
+    result["assets"] = rows
+    result["asset_ids"] = [row["asset_id"] for row in rows]
+    result["asset_bundle_assignments"] = updated_assignments
+    result["asset_connections"] = connections
+    return result
+
+
 def merge_asset_connections(existing_connections, added_connections) -> list[dict]:
     """Add connection quantities while preserving their first-seen order."""
     return clean_asset_connections(

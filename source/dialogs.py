@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QItemSelectionModel, QSortFilterProxyModel, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -64,6 +65,8 @@ from asset_bundles import (
     merge_selected_bundle_connections,
     merge_selected_bundles,
     normalise_asset_bundles,
+    reconcile_bundle_assignments,
+    replace_bundle_assignment,
     unlink_bundle_assignment,
 )
 from library_csv import (
@@ -71,13 +74,13 @@ from library_csv import (
     export_room_type_asset_assignments_csv as write_room_type_asset_assignments_csv,
     export_room_types_csv as write_room_types_csv,
 )
-from room_type_asset_staging import room_type_matches_filter
+from room_type_asset_staging import room_type_matches_filter, suggested_commit_message
 from room_asset_detail_export import export_room_asset_detail_xlsx
 from xlsx_workbook import XlsxError
 
 
 def _deferred_network_port_text(summary: dict) -> str:
-    """Describe physical Network inputs omitted from upstream demand."""
+    """Summarise physical Network inputs omitted from upstream demand."""
     deferred = [
         row
         for row in summary.get("network_input_ports", [])
@@ -85,6 +88,35 @@ def _deferred_network_port_text(summary: dict) -> str:
     ]
     if not deferred:
         return ""
+    descriptions = _deferred_network_port_descriptions(deferred)
+    port_label = "port" if len(deferred) == 1 else "ports"
+    text = f" | Deferred upstream: {len(deferred)} {port_label}"
+    if descriptions:
+        preview = "; ".join(descriptions)
+        max_preview_chars = 96
+        if len(preview) > max_preview_chars:
+            preview = preview[: max_preview_chars - 3].rstrip() + "..."
+        text += f" ({preview})"
+    return text
+
+
+def _deferred_network_port_tooltip(summary: dict) -> str:
+    """Return complete deferred-port explanations for compact summary labels."""
+    deferred = [
+        row
+        for row in summary.get("network_input_ports", [])
+        if isinstance(row, dict) and not bool(row.get("counted_upstream", True))
+    ]
+    if not deferred:
+        return ""
+    descriptions = _deferred_network_port_descriptions(deferred)
+    port_label = "port" if len(deferred) == 1 else "ports"
+    header = f"Deferred upstream: {len(deferred)} {port_label}"
+    return "\n".join((header, *descriptions)) if descriptions else header
+
+
+def _deferred_network_port_descriptions(deferred: list[dict]) -> list[str]:
+    """Format deferred-port labels and reasons."""
     descriptions = []
     for row in deferred:
         label = " ".join(
@@ -96,8 +128,10 @@ def _deferred_network_port_text(summary: dict) -> str:
             if value
         )
         reason = str(row.get("reason", "") or "").strip()
-        descriptions.append(f"{label}: {reason}" if label else reason)
-    return " | Deferred upstream: " + "; ".join(descriptions)
+        description = f"{label}: {reason}" if label and reason else label or reason
+        if description:
+            descriptions.append(description)
+    return descriptions
 
 
 def _final_network_ports_by_asset(summary: dict) -> tuple[dict, dict]:
@@ -4155,6 +4189,7 @@ class AssetsEditorWindow(QMainWindow):
             self.items,
             asset_label="asset",
             reserved_ids=self.retired_asset_ids,
+            match_adb_codes=True,
         )
         if marshalling.exec() != QDialog.Accepted:
             return
@@ -4260,6 +4295,7 @@ class AssetBundleEditorDialog(QDialog):
         asset_options=None,
         default_id="AB1",
         assets_by_id=None,
+        asset_categories_by_id=None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Asset Bundle")
@@ -4268,6 +4304,7 @@ class AssetBundleEditorDialog(QDialog):
         self.seed = dict(seed or {})
         self.asset_options = list(asset_options or [])
         self.assets_by_id = dict(assets_by_id or {})
+        self.asset_categories_by_id = dict(asset_categories_by_id or {})
         self.default_id = default_id
         self.result = None
 
@@ -4295,7 +4332,7 @@ class AssetBundleEditorDialog(QDialog):
         search_row.addWidget(QLabel("Search assets"))
         self.asset_search_edit = QLineEdit()
         self.asset_search_edit.setPlaceholderText(
-            "Type an asset ID or name to filter..."
+            "Type an asset ID, name, category, or ADB code to filter..."
         )
         self.asset_search_edit.setClearButtonEnabled(True)
         search_row.addWidget(self.asset_search_edit, 1)
@@ -4474,7 +4511,7 @@ class AssetBundleEditorDialog(QDialog):
             self._asset_search_rows.append(
                 {
                     "row": row,
-                    "search_text": self._asset_label(asset_id).casefold(),
+                    "search_text": self._asset_search_text(asset_id),
                 }
             )
 
@@ -4498,6 +4535,26 @@ class AssetBundleEditorDialog(QDialog):
 
         self._filter_assets(self.asset_search_edit.text())
         self._refresh_transfer_buttons()
+
+    def _asset_search_text(self, asset_id):
+        asset = self.assets_by_id.get(asset_id, {})
+        category_id = str(
+            asset.get("category_id", asset.get("category", "")) or ""
+        ).strip()
+        category_name = str(
+            self.asset_categories_by_id.get(category_id, category_id) or ""
+        ).strip()
+        adb_code = str(
+            asset.get("ADB_Code", asset.get("adb_code", "")) or ""
+        ).strip()
+        return " ".join(
+            (
+                self._asset_label(asset_id),
+                adb_code,
+                category_id,
+                category_name,
+            )
+        ).casefold()
 
     def _bundle_quantity_changed(self, asset_id, value):
         self._selected_quantities[asset_id] = int(value)
@@ -4620,12 +4677,20 @@ class AssetBundleEditorDialog(QDialog):
 class AssetBundleManagerDialog(QDialog):
     """Manage reusable asset bundles independently of scenario groups."""
 
-    def __init__(self, parent, bundles=None, asset_options=None, assets_by_id=None):
+    def __init__(
+        self,
+        parent,
+        bundles=None,
+        asset_options=None,
+        assets_by_id=None,
+        asset_categories_by_id=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Asset Bundles")
         self.resize(820, 540)
         self.asset_options = list(asset_options or [])
         self.assets_by_id = dict(assets_by_id or {})
+        self.asset_categories_by_id = dict(asset_categories_by_id or {})
         self.items = normalise_asset_bundles(
             bundles or [], [asset_id for asset_id, _name in self.asset_options]
         )
@@ -4701,6 +4766,7 @@ class AssetBundleManagerDialog(QDialog):
             asset_options=self.asset_options,
             default_id=default_id,
             assets_by_id=self.assets_by_id,
+            asset_categories_by_id=self.asset_categories_by_id,
         )
         return dialog.result if dialog.exec() == QDialog.Accepted else None
 
@@ -4866,6 +4932,390 @@ class AssetBundleSelectionDialog(QDialog):
             )
             return
         self.result = deepcopy(selected)
+        super().accept()
+
+
+class AssetBundleAssignmentDialog(QDialog):
+    """Add, update, and remove room bundle assignments in one dialog."""
+
+    def __init__(
+        self,
+        parent,
+        assignments=None,
+        bundles=None,
+        assets_by_id=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Manage Room Asset Bundles")
+        self.resize(980, 600)
+        self.bundles = normalise_asset_bundles(bundles or [])
+        self.bundles_by_id = {
+            bundle["id"]: bundle for bundle in self.bundles
+        }
+        self.assets_by_id = dict(assets_by_id or {})
+        self.original_assignments = clean_bundle_assignments(
+            assignments,
+            self.bundles_by_id,
+        )
+        self.original_order = [
+            assignment["bundle_id"]
+            for assignment in self.original_assignments
+        ]
+        self.applied = {
+            assignment["bundle_id"]: int(assignment["qty"])
+            for assignment in self.original_assignments
+        }
+        self.result = None
+
+        layout = QVBoxLayout(self)
+        description = QLabel(
+            "Move bundles between Available and Applied. Quantities on the "
+            "right are the number of bundle instances applied to this room type."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        columns = QHBoxLayout()
+        layout.addLayout(columns, 1)
+
+        available_column = QVBoxLayout()
+        available_column.addWidget(QLabel("Available bundles"))
+        self.available_list = QListWidget()
+        self.available_list.setSelectionMode(
+            QAbstractItemView.ExtendedSelection
+        )
+        self.available_list.itemDoubleClicked.connect(self._move_right)
+        available_column.addWidget(self.available_list, 1)
+        columns.addLayout(available_column, 1)
+
+        transfer_column = QVBoxLayout()
+        transfer_column.addStretch(1)
+        self.all_left_button = QPushButton("All left")
+        self.left_button = QPushButton("Left")
+        self.right_button = QPushButton("Right")
+        self.all_right_button = QPushButton("All right")
+        self.all_left_button.setToolTip("Remove every applied bundle")
+        self.left_button.setToolTip("Remove the selected applied bundle(s)")
+        self.right_button.setToolTip("Apply the selected available bundle(s)")
+        self.all_right_button.setToolTip("Apply every available bundle")
+        self.all_left_button.clicked.connect(self._move_all_left)
+        self.left_button.clicked.connect(self._move_left)
+        self.right_button.clicked.connect(self._move_right)
+        self.all_right_button.clicked.connect(self._move_all_right)
+        for button in (
+            self.all_left_button,
+            self.left_button,
+            self.right_button,
+            self.all_right_button,
+        ):
+            button.setMinimumWidth(105)
+            transfer_column.addWidget(button)
+        transfer_column.addStretch(1)
+        columns.addLayout(transfer_column)
+
+        applied_column = QVBoxLayout()
+        applied_column.addWidget(QLabel("Applied bundles"))
+        self.applied_table = QTableWidget(0, 2)
+        self.applied_table.setHorizontalHeaderLabels(["Bundle", "Qty applied"])
+        self.applied_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.applied_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.applied_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.applied_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        self.applied_table.setColumnWidth(1, 120)
+        self.applied_table.itemDoubleClicked.connect(self._move_left)
+        applied_column.addWidget(self.applied_table, 1)
+        columns.addLayout(applied_column, 1)
+
+        reason_label = QLabel("Bundle change reason")
+        self.reason_edit = QPlainTextEdit()
+        self.reason_edit.setPlaceholderText(
+            "Required when bundle assignments or quantities are changed"
+        )
+        self.reason_edit.setMaximumHeight(90)
+        layout.addWidget(reason_label)
+        layout.addWidget(self.reason_edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.button(QDialogButtonBox.Ok).setText("Apply bundle changes")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._refresh()
+
+    def _bundle_label(self, bundle):
+        bundle_id = str(bundle.get("id", "") or "").strip()
+        name = str(bundle.get("name", "") or bundle_id).strip()
+        return f"{name} [{bundle_id}]"
+
+    def _bundle_tooltip(self, bundle):
+        details = []
+        for row in bundle.get("assets", []) or []:
+            asset_id = str(row.get("asset_id", "") or "").strip()
+            asset_name = str(
+                self.assets_by_id.get(asset_id, {}).get("name", asset_id)
+                or asset_id
+            ).strip()
+            details.append(
+                f"{int(row.get('qty', 1) or 1)} × {asset_id} - {asset_name}"
+            )
+        return "\n".join(details) if details else "No assets in this bundle"
+
+    def _refresh(self):
+        self.available_list.clear()
+        self.applied_table.setRowCount(0)
+        for bundle in self.bundles:
+            bundle_id = bundle["id"]
+            if bundle_id in self.applied:
+                row = self.applied_table.rowCount()
+                self.applied_table.insertRow(row)
+                item = QTableWidgetItem(self._bundle_label(bundle))
+                item.setData(Qt.UserRole, bundle_id)
+                item.setToolTip(self._bundle_tooltip(bundle))
+                self.applied_table.setItem(row, 0, item)
+                quantity = QSpinBox()
+                quantity.setRange(1, 100000)
+                quantity.setValue(max(1, int(self.applied[bundle_id] or 1)))
+                quantity.setToolTip(
+                    "Number of instances of this bundle applied to the room"
+                )
+                quantity.valueChanged.connect(
+                    lambda value, selected_id=bundle_id: self._quantity_changed(
+                        selected_id, value
+                    )
+                )
+                self.applied_table.setCellWidget(row, 1, quantity)
+            else:
+                item = QListWidgetItem(self._bundle_label(bundle))
+                item.setData(Qt.UserRole, bundle_id)
+                item.setToolTip(self._bundle_tooltip(bundle))
+                self.available_list.addItem(item)
+        has_available = self.available_list.count() > 0
+        has_applied = self.applied_table.rowCount() > 0
+        self.all_left_button.setEnabled(has_applied)
+        self.left_button.setEnabled(has_applied)
+        self.right_button.setEnabled(has_available)
+        self.all_right_button.setEnabled(has_available)
+
+    def _quantity_changed(self, bundle_id, value):
+        if bundle_id in self.applied:
+            self.applied[bundle_id] = max(1, int(value or 1))
+
+    def _selected_available_ids(self):
+        return {
+            str(item.data(Qt.UserRole) or "").strip()
+            for item in self.available_list.selectedItems()
+            if str(item.data(Qt.UserRole) or "").strip()
+        }
+
+    def _selected_applied_ids(self):
+        rows = {
+            index.row()
+            for index in self.applied_table.selectionModel().selectedRows()
+        }
+        if not rows and self.applied_table.currentRow() >= 0:
+            rows.add(self.applied_table.currentRow())
+        return {
+            str(self.applied_table.item(row, 0).data(Qt.UserRole) or "").strip()
+            for row in rows
+            if self.applied_table.item(row, 0) is not None
+            and str(
+                self.applied_table.item(row, 0).data(Qt.UserRole) or ""
+            ).strip()
+        }
+
+    def _move_all_left(self, *_):
+        self.applied.clear()
+        self._refresh()
+
+    def _move_left(self, *_):
+        for bundle_id in self._selected_applied_ids():
+            self.applied.pop(bundle_id, None)
+        self._refresh()
+
+    def _move_right(self, *_):
+        for bundle_id in self._selected_available_ids():
+            self.applied.setdefault(bundle_id, 1)
+        self._refresh()
+
+    def _move_all_right(self, *_):
+        for bundle in self.bundles:
+            self.applied.setdefault(bundle["id"], 1)
+        self._refresh()
+
+    def assignments(self):
+        ordered_ids = [
+            *self.original_order,
+            *[
+                bundle["id"]
+                for bundle in self.bundles
+                if bundle["id"] not in self.original_order
+            ],
+        ]
+        return clean_bundle_assignments(
+            [
+                {"bundle_id": bundle_id, "qty": self.applied[bundle_id]}
+                for bundle_id in ordered_ids
+                if bundle_id in self.applied
+            ],
+            self.bundles_by_id,
+        )
+
+    def accept(self):
+        assignments = self.assignments()
+        reason = str(self.reason_edit.toPlainText() or "").strip()
+        if assignments != self.original_assignments and not reason:
+            QMessageBox.information(
+                self,
+                "Manage Room Asset Bundles",
+                "Enter a reason for the bundle assignment changes.",
+            )
+            return
+        self.result = {
+            "assignments": assignments,
+            "reason": reason,
+        }
+        super().accept()
+
+
+class AssetBundleReplacementDialog(QDialog):
+    """Choose one linked bundle and the bundle that should replace it."""
+
+    def __init__(
+        self,
+        parent,
+        assignments=None,
+        bundles=None,
+        assets_by_id=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Replace Asset Bundle")
+        self.resize(620, 260)
+        self.assignments = clean_bundle_assignments(assignments)
+        self.bundles = normalise_asset_bundles(bundles or [])
+        self.bundles_by_id = {
+            bundle["id"]: bundle for bundle in self.bundles
+        }
+        self.assets_by_id = dict(assets_by_id or {})
+        self.result = None
+
+        layout = QVBoxLayout(self)
+        description = QLabel(
+            "Select the linked bundle to remove, then choose its replacement. "
+            "Only the original bundle's calculated asset and connection "
+            "contribution will be removed; unrelated room quantities are retained."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+        self.current_combo = QComboBox()
+        self.replacement_combo = QComboBox()
+        self.quantity_spin = QSpinBox()
+        self.quantity_spin.setRange(1, 100000)
+        form.addRow("Replace linked bundle", self.current_combo)
+        form.addRow("With bundle", self.replacement_combo)
+        form.addRow("Replacement quantity", self.quantity_spin)
+
+        self.contents_label = QLabel()
+        self.contents_label.setWordWrap(True)
+        layout.addWidget(self.contents_label)
+
+        for assignment in self.assignments:
+            bundle_id = assignment["bundle_id"]
+            bundle = self.bundles_by_id.get(bundle_id, {})
+            name = str(bundle.get("name", "") or bundle_id).strip()
+            self.current_combo.addItem(
+                f"{name} [{bundle_id}] × {assignment['qty']}",
+                bundle_id,
+            )
+        self.current_combo.currentIndexChanged.connect(
+            self._current_bundle_changed
+        )
+        self._current_bundle_changed()
+        self.replacement_combo.currentIndexChanged.connect(
+            self._refresh_replacement_contents
+        )
+        self._refresh_replacement_contents()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.button(QDialogButtonBox.Ok).setText("Replace bundle")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _current_bundle_changed(self, *_):
+        source_id = str(self.current_combo.currentData() or "").strip()
+        assignment = next(
+            (
+                item
+                for item in self.assignments
+                if item["bundle_id"] == source_id
+            ),
+            {},
+        )
+        self.quantity_spin.setValue(
+            max(1, int(assignment.get("qty", 1) or 1))
+        )
+        previous = str(self.replacement_combo.currentData() or "").strip()
+        self.replacement_combo.blockSignals(True)
+        self.replacement_combo.clear()
+        for bundle in self.bundles:
+            bundle_id = bundle["id"]
+            if bundle_id == source_id:
+                continue
+            self.replacement_combo.addItem(
+                f"{bundle.get('name') or bundle_id} [{bundle_id}]",
+                bundle_id,
+            )
+        if previous:
+            index = self.replacement_combo.findData(previous)
+            if index >= 0:
+                self.replacement_combo.setCurrentIndex(index)
+        self.replacement_combo.blockSignals(False)
+        self._refresh_replacement_contents()
+
+    def _refresh_replacement_contents(self, *_):
+        bundle_id = str(self.replacement_combo.currentData() or "").strip()
+        bundle = self.bundles_by_id.get(bundle_id, {})
+        details = []
+        for row in bundle.get("assets", []) or []:
+            asset_id = str(row.get("asset_id", "") or "").strip()
+            asset_name = str(
+                self.assets_by_id.get(asset_id, {}).get("name", asset_id)
+                or asset_id
+            ).strip()
+            details.append(
+                f"{int(row.get('qty', 1) or 1)} × {asset_id} - {asset_name}"
+            )
+        self.contents_label.setText(
+            "Replacement contents: "
+            + ("; ".join(details) if details else "No assets")
+        )
+
+    def accept(self):
+        source_id = str(self.current_combo.currentData() or "").strip()
+        replacement_id = str(
+            self.replacement_combo.currentData() or ""
+        ).strip()
+        if not source_id or not replacement_id:
+            QMessageBox.information(
+                self,
+                "Replace Asset Bundle",
+                "Choose both a linked bundle and a different replacement bundle.",
+            )
+            return
+        self.result = {
+            "replaced_bundle_id": source_id,
+            "replacement_bundle_id": replacement_id,
+            "replacement_qty": int(self.quantity_spin.value()),
+        }
         super().accept()
 
 
@@ -5390,6 +5840,7 @@ class RoomTypeEditorDialog(QDialog):
             text += " · " + "; ".join(typed_parts)
         text += _deferred_network_port_text(summary)
         self.total_label.setText(text)
+        self.total_label.setToolTip(_deferred_network_port_tooltip(summary))
 
     def accept(self):
         try:
@@ -6019,6 +6470,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         detail_layout.addWidget(self.asset_table, 1)
 
         self.summary_label = QLabel()
+        self.summary_label.setWordWrap(True)
         detail_layout.addWidget(self.summary_label)
 
         staging_group = QGroupBox("Staged assignment changes")
@@ -6038,6 +6490,9 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             column.addWidget(values)
             staging_columns.addLayout(column, 1)
             self.staged_lists[change_type] = values
+        self.staged_lists["removed"].itemDoubleClicked.connect(
+            self._revert_removed_asset_change
+        )
         staging_actions = QHBoxLayout()
         self.reset_room_button = QPushButton("Reset Current Room")
         self.clear_staged_button = QPushButton("Clear All Changes")
@@ -6182,6 +6637,40 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             for row in self._room_asset_rows(room_type)
         ]
 
+    def _asset_category_label(self, asset):
+        category_id = self._text(
+            asset.get(
+                "category_id",
+                asset.get("category", asset.get("Category", "")),
+            )
+        )
+        category = self.asset_categories_by_id.get(category_id, category_id)
+        if isinstance(category, dict):
+            category = (
+                category.get("name")
+                or category.get("label")
+                or category.get("id")
+                or category_id
+            )
+        return self._text(category) or "Uncategorised"
+
+    def _insert_asset_category_row(self, category, asset_count):
+        row = self.asset_table.rowCount()
+        self.asset_table.insertRow(row)
+        noun = "asset" if asset_count == 1 else "assets"
+        item = QTableWidgetItem(f"Category: {category} ({asset_count} {noun})")
+        item.setFlags(Qt.ItemIsEnabled)
+        item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        item.setBackground(Qt.GlobalColor.lightGray)
+        item.setData(Qt.UserRole, "category-header")
+        self.asset_table.setItem(row, 0, item)
+        self.asset_table.setSpan(row, 0, 1, self.asset_table.columnCount())
+        self.asset_table.setRowHeight(row, 28)
+        return row
+
     def _set_dirty(self, dirty=True):
         self._dirty = bool(dirty)
         if hasattr(self, "apply_button"):
@@ -6216,7 +6705,13 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
                     f" (data points {before.get('data_points', 0)}"
                     f" → {after.get('data_points', 0)})"
                 )
-            target.addItem(label)
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, deepcopy(change))
+            if change_type == "removed" and self._text(change.get("scope")) != "asset":
+                item.setToolTip(
+                    "Double-click to restore this asset assignment."
+                )
+            target.addItem(item)
         has_changes = any(values.count() for values in self.staged_lists.values())
         self.commit_button.setEnabled(has_changes and callable(self.on_commit_staging))
         current = self._current_room_type()
@@ -6232,6 +6727,68 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         self.rollback_commit_button.setEnabled(
             callable(self.on_rollback_commit) and bool(self.asset_commits)
         )
+
+    def _revert_removed_asset_change(self, item):
+        change = (
+            deepcopy(item.data(Qt.UserRole))
+            if isinstance(item, QListWidgetItem)
+            else {}
+        )
+        if (
+            not isinstance(change, dict)
+            or self._text(change.get("change_type")) != "removed"
+            or self._text(change.get("scope")) == "asset"
+        ):
+            return
+        room_type_id = self._text(change.get("room_type_id"))
+        asset_id = self._text(change.get("asset_id"))
+        restored_rows = self._room_asset_rows(
+            {"assets": [change.get("before", {})]}
+        )
+        if not room_type_id or not asset_id or not restored_rows:
+            return
+        restored_row = restored_rows[0]
+
+        if self._dirty:
+            self._apply_changes()
+        room_type = next(
+            (
+                row
+                for row in self.room_types
+                if self._room_id(row) == room_type_id
+            ),
+            None,
+        )
+        if not isinstance(room_type, dict):
+            return
+
+        staged_rooms = (
+            self.staging_state.get("rooms", {})
+            if isinstance(self.staging_state, dict)
+            else {}
+        )
+        staged_room = (
+            staged_rooms.get(room_type_id, {})
+            if isinstance(staged_rooms, dict)
+            else {}
+        )
+        rows = (
+            self._room_asset_rows({"assets": staged_room.get("after", [])})
+            if isinstance(staged_room, dict) and "after" in staged_room
+            else self._room_asset_rows(room_type)
+        )
+        rows_by_id = {row["asset_id"]: row for row in rows}
+        rows_by_id[asset_id] = restored_row
+        rows = sorted(
+            rows_by_id.values(),
+            key=lambda row: self._natural_key(row["asset_id"]),
+        )
+        room_type["assets"] = rows
+        room_type["asset_ids"] = [row["asset_id"] for row in rows]
+        self.review_state.pop(room_type_id, None)
+        self._capture_staging_state(room_type_id, rows, {})
+        self._emit_state_changed()
+        self._sync_sidebar_current()
 
     def _apply_staging_reset_result(self, result):
         if not isinstance(result, dict):
@@ -6269,6 +6826,27 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         self._sync_sidebar_current()
         self._refresh_staging_panel()
 
+    def _run_requested_action(self, label, callback):
+        """Show the active callback while the main window updates project data."""
+
+        status_label = getattr(self, "action_status_label", None)
+        if status_label is not None:
+            status_label.setText(f"Working: {label}...")
+            status_label.repaint()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            result = callback()
+        except Exception:
+            if status_label is not None:
+                status_label.setText(f"Failed: {label}")
+            raise
+        else:
+            if status_label is not None:
+                status_label.setText(f"Last action: {label}")
+            return result
+        finally:
+            QApplication.restoreOverrideCursor()
+
     def _reset_current_room_changes(self):
         if not callable(self.on_reset_staging):
             return
@@ -6285,7 +6863,11 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             "to their state before staging began?",
         ) != QMessageBox.Yes:
             return
-        self._apply_staging_reset_result(self.on_reset_staging(room_type_id))
+        result = self._run_requested_action(
+            "resetting current room changes",
+            lambda: self.on_reset_staging(room_type_id),
+        )
+        self._apply_staging_reset_result(result)
 
     def _clear_all_staged_changes(self):
         if not callable(self.on_reset_staging):
@@ -6298,7 +6880,11 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             "Restore all staged room-type asset changes to their original values?",
         ) != QMessageBox.Yes:
             return
-        self._apply_staging_reset_result(self.on_reset_staging(""))
+        result = self._run_requested_action(
+            "clearing staged asset changes",
+            lambda: self.on_reset_staging(""),
+        )
+        self._apply_staging_reset_result(result)
 
     def _rollback_asset_commit(self):
         if not callable(self.on_rollback_commit) or not self.asset_commits:
@@ -6334,7 +6920,11 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             f"Stage the inverse of {commit_id}? Existing staged changes will be retained.",
         ) != QMessageBox.Yes:
             return
-        self._apply_staging_reset_result(self.on_rollback_commit(commit_id))
+        result = self._run_requested_action(
+            f"rolling back asset commit {commit_id}",
+            lambda: self.on_rollback_commit(commit_id),
+        )
+        self._apply_staging_reset_result(result)
 
     def _capture_staging_state(
         self,
@@ -6347,27 +6937,15 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
     ):
         if not self.on_assignments_changed:
             return
-        if bundle_assignments is None and asset_connections is None:
-            updated = self.on_assignments_changed(
-                room_type_id,
-                asset_rows,
-                data_ports_by_asset_id,
-            )
-        elif asset_connections is None:
-            updated = self.on_assignments_changed(
-                room_type_id,
-                asset_rows,
-                data_ports_by_asset_id,
-                bundle_assignments,
-            )
-        else:
-            updated = self.on_assignments_changed(
-                room_type_id,
-                asset_rows,
-                data_ports_by_asset_id,
-                bundle_assignments,
-                asset_connections,
-            )
+        callback_args = [room_type_id, asset_rows, data_ports_by_asset_id]
+        if bundle_assignments is not None or asset_connections is not None:
+            callback_args.append(bundle_assignments)
+        if asset_connections is not None:
+            callback_args.append(asset_connections)
+        updated = self._run_requested_action(
+            "updating room asset assignments",
+            lambda: self.on_assignments_changed(*callback_args),
+        )
         if isinstance(updated, dict):
             self.staging_state = deepcopy(updated)
         self._refresh_staging_panel()
@@ -6384,7 +6962,10 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         if not commit_values:
             return
         message, resolve_rfi_ids = commit_values
-        updated = self.on_commit_staging(message, resolve_rfi_ids)
+        updated = self._run_requested_action(
+            "committing staged asset changes",
+            lambda: self.on_commit_staging(message, resolve_rfi_ids),
+        )
         if isinstance(updated, dict) and "staging" in updated:
             self._apply_staging_reset_result(updated)
         else:
@@ -6406,6 +6987,9 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         message_edit = QPlainTextEdit()
         message_edit.setPlaceholderText("A commit message is required...")
         message_edit.setMaximumHeight(120)
+        message_edit.setPlainText(
+            suggested_commit_message(self.staging_state.get("changes", []))
+        )
         layout.addWidget(message_edit)
 
         touched_room_ids = {
@@ -6588,6 +7172,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
 
     def _refresh_detail(self):
         room_type = self._current_room_type()
+        self.asset_table.clearSpans()
         self.asset_table.setRowCount(0)
         self._asset_row_widgets = []
         self._set_dirty(False)
@@ -6595,6 +7180,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             self.title_label.setText("No room types available")
             self.status_label.setText("Create room types before running this review.")
             self.summary_label.setText("")
+            self.summary_label.setToolTip("")
             self.mark_button.setEnabled(False)
             self.clear_button.setEnabled(False)
             self.apply_button.setEnabled(False)
@@ -6615,53 +7201,65 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             f"Reviewed {completed_at}" if completed and completed_at else ("Reviewed" if completed else "Not reviewed")
         )
 
+        grouped_rows = {}
+        for asset_row in rows:
+            asset = self.assets_by_id.get(asset_row["asset_id"], {})
+            category = self._asset_category_label(asset)
+            grouped_rows.setdefault(category, []).append(asset_row)
+
         total_assets = 0
         total_points = 0
-        for asset_row in rows:
-            asset_id = asset_row["asset_id"]
-            qty = max(1, int(asset_row.get("qty", 1) or 1))
-            asset = self.assets_by_id.get(asset_id, {})
-            data_points = asset_input_ports(asset)
-            total = qty * data_points
-            total_assets += qty
-            total_points += total
-            category_id = self._text(asset.get("category_id", asset.get("category", "")))
-            category = self.asset_categories_by_id.get(category_id, category_id)
-            values = [
-                asset_id,
-                self._text(asset.get("name")) or "(missing asset)",
-                category or "-",
-                self._text(asset.get("Group", asset.get("group", ""))) or "-",
-                self._text(asset.get("ADB_Code", asset.get("adb_code", ""))) or "-",
-                self._text(asset_row.get("requested_by", "")),
-                qty,
-                data_points,
-                total,
-            ]
-            row = self.asset_table.rowCount()
-            self.asset_table.insertRow(row)
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
-                if column in {8}:
-                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                self.asset_table.setItem(row, column, item)
-            qty_spin = self._spinbox(qty, 1)
-            ports_spin = self._spinbox(data_points, 0)
-            requested_by_edit = QLineEdit(self._text(asset_row.get("requested_by", "")))
-            requested_by_edit.setPlaceholderText("Name or team")
-            requested_by_edit.textChanged.connect(self._asset_values_changed)
-            self.asset_table.setCellWidget(row, 5, requested_by_edit)
-            self.asset_table.setCellWidget(row, 6, qty_spin)
-            self.asset_table.setCellWidget(row, 7, ports_spin)
-            self._asset_row_widgets.append(
-                {
-                    "row": row,
-                    "asset_id": asset_id,
-                    "requested_by_edit": requested_by_edit,
-                    "qty_spin": qty_spin,
-                    "ports_spin": ports_spin,
-                }
+        for category in sorted(grouped_rows, key=self._natural_key):
+            category_rows = sorted(
+                grouped_rows[category],
+                key=lambda item: self._natural_key(item["asset_id"]),
             )
+            self._insert_asset_category_row(category, len(category_rows))
+            for asset_row in category_rows:
+                asset_id = asset_row["asset_id"]
+                qty = max(1, int(asset_row.get("qty", 1) or 1))
+                asset = self.assets_by_id.get(asset_id, {})
+                data_points = asset_input_ports(asset)
+                total = qty * data_points
+                total_assets += qty
+                total_points += total
+                values = [
+                    asset_id,
+                    self._text(asset.get("name")) or "(missing asset)",
+                    category,
+                    self._text(asset.get("Group", asset.get("group", ""))) or "-",
+                    self._text(asset.get("ADB_Code", asset.get("adb_code", ""))) or "-",
+                    self._text(asset_row.get("requested_by", "")),
+                    qty,
+                    data_points,
+                    total,
+                ]
+                row = self.asset_table.rowCount()
+                self.asset_table.insertRow(row)
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(str(value))
+                    if column in {8}:
+                        item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    self.asset_table.setItem(row, column, item)
+                qty_spin = self._spinbox(qty, 1)
+                ports_spin = self._spinbox(data_points, 0)
+                requested_by_edit = QLineEdit(
+                    self._text(asset_row.get("requested_by", ""))
+                )
+                requested_by_edit.setPlaceholderText("Name or team")
+                requested_by_edit.textChanged.connect(self._asset_values_changed)
+                self.asset_table.setCellWidget(row, 5, requested_by_edit)
+                self.asset_table.setCellWidget(row, 6, qty_spin)
+                self.asset_table.setCellWidget(row, 7, ports_spin)
+                self._asset_row_widgets.append(
+                    {
+                        "row": row,
+                        "asset_id": asset_id,
+                        "requested_by_edit": requested_by_edit,
+                        "qty_spin": qty_spin,
+                        "ports_spin": ports_spin,
+                    }
+                )
 
         if not rows:
             self.asset_table.insertRow(0)
@@ -6708,6 +7306,9 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
                 else ""
             )
             + _deferred_network_port_text(port_summary)
+        )
+        self.summary_label.setToolTip(
+            _deferred_network_port_tooltip(port_summary)
         )
         self.mark_button.setEnabled(not completed)
         self.clear_button.setEnabled(completed)
@@ -6787,6 +7388,9 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             )
             + _deferred_network_port_text(port_summary)
         )
+        self.summary_label.setToolTip(
+            _deferred_network_port_tooltip(port_summary)
+        )
         self._set_dirty(True)
 
     def _current_assignment_values(self):
@@ -6805,6 +7409,27 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             asset_rows.append(asset_row)
             data_ports_by_asset_id[asset_id] = ports
         return asset_rows, data_ports_by_asset_id
+
+    def _current_review_asset_rows(self, room_type):
+        """Return the in-progress assignment state used by additive actions."""
+        if self._dirty:
+            return self._current_assignment_values()[0]
+        room_type_id = self._room_id(room_type)
+        staged_rooms = (
+            self.staging_state.get("rooms", {})
+            if isinstance(self.staging_state, dict)
+            else {}
+        )
+        staged_room = (
+            staged_rooms.get(room_type_id, {})
+            if isinstance(staged_rooms, dict)
+            else {}
+        )
+        if isinstance(staged_room, dict) and "after" in staged_room:
+            return self._room_asset_rows(
+                {"assets": staged_room.get("after", [])}
+            )
+        return self._current_assignment_values()[0]
 
     def _room_option_label(self, room_type):
         room_type_id = self._room_id(room_type)
@@ -6929,7 +7554,10 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
 
     def _emit_state_changed(self):
         if self.on_state_changed:
-            self.on_state_changed(deepcopy(self.review_state))
+            self._run_requested_action(
+                "updating room review status",
+                lambda: self.on_state_changed(deepcopy(self.review_state)),
+            )
 
     def _sync_sidebar_current(self):
         current_original = self.current_index
@@ -7258,17 +7886,26 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
 
         action_row = QHBoxLayout()
         self.add_asset_button = QPushButton("Add Assets...")
+        self.manage_bundle_button = QPushButton("Manage Bundles...")
+        # Retain the former controls as hidden compatibility handles for
+        # extensions that inspect their enabled state. Bundle changes are now
+        # performed only through the consolidated manager.
         self.add_bundle_button = QPushButton("Add Bundles...")
+        self.replace_bundle_button = QPushButton("Replace Bundle...")
         self.unlink_bundle_button = QPushButton("Unlink Bundle...")
+        self.add_bundle_button.hide()
+        self.replace_bundle_button.hide()
+        self.unlink_bundle_button.hide()
         self.remove_asset_button = QPushButton("Remove Selected Assets...")
         self.query_button = QPushButton("Add Asset RFI...")
         self.resolve_query_button = QPushButton("Resolve Asset RFI...")
         self.room_query_button = QPushButton("Add Room RFI for Selected...")
         self.resolve_room_query_button = QPushButton("Resolve Room RFI...")
         self.export_rfi_button = QPushButton("Export RFI PDF...")
+        self.action_status_label = QLabel("Ready")
+        self.action_status_label.setMinimumWidth(180)
         self.add_asset_button.clicked.connect(self._add_asset)
-        self.add_bundle_button.clicked.connect(self._add_asset_bundles)
-        self.unlink_bundle_button.clicked.connect(self._unlink_asset_bundle)
+        self.manage_bundle_button.clicked.connect(self._manage_asset_bundles)
         self.remove_asset_button.clicked.connect(self._remove_selected_asset)
         self.query_button.clicked.connect(self._raise_asset_query)
         self.resolve_query_button.clicked.connect(self._resolve_asset_query)
@@ -7277,8 +7914,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.export_rfi_button.clicked.connect(self._export_rfi)
         for widget in (
             self.add_asset_button,
-            self.add_bundle_button,
-            self.unlink_bundle_button,
+            self.manage_bundle_button,
             self.remove_asset_button,
             self.query_button,
             self.resolve_query_button,
@@ -7288,6 +7924,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         ):
             action_row.addWidget(widget)
         action_row.addStretch(1)
+        action_row.addWidget(self.action_status_label)
         action_row.addWidget(self.export_rfi_button)
         self.layout().insertLayout(2, action_row)
         self._rfi_ui_ready = True
@@ -7329,6 +7966,38 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                 highest = max(highest, int(match.group(1)))
         return f"RFI-{highest + 1:04d}"
 
+    def _uncommitted_added_asset_ids(self, room_type_id):
+        """Return assignments added after the room's last committed baseline."""
+
+        identity = self._text(room_type_id)
+        state = self.staging_state if isinstance(self.staging_state, dict) else {}
+        rooms = state.get("rooms", {})
+        record = rooms.get(identity, {}) if isinstance(rooms, dict) else {}
+        if isinstance(record, dict):
+            before_ids = {
+                row["asset_id"]
+                for row in self._room_asset_rows(
+                    {"assets": record.get("before", [])}
+                )
+            }
+            after_ids = {
+                row["asset_id"]
+                for row in self._room_asset_rows(
+                    {"assets": record.get("after", [])}
+                )
+            }
+            if before_ids or after_ids:
+                return after_ids - before_ids
+        return {
+            self._text(change.get("asset_id"))
+            for change in state.get("changes", []) or []
+            if isinstance(change, dict)
+            and self._text(change.get("scope") or "assignment") == "assignment"
+            and self._text(change.get("change_type")) == "added"
+            and self._text(change.get("room_type_id")) == identity
+            and self._text(change.get("asset_id"))
+        }
+
     def _append_rfi_history(
         self,
         action,
@@ -7354,7 +8023,12 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
 
     def _emit_rfi_changed(self):
         if self.on_rfi_changed:
-            self.on_rfi_changed(deepcopy(self.rfi_state))
+            # The receiver normalises into new dictionaries, so another full
+            # copy of a potentially long history is unnecessary.
+            self._run_requested_action(
+                "updating audit trail",
+                lambda: self.on_rfi_changed(self.rfi_state),
+            )
 
     def _required_reason(self, title, prompt, initial=""):
         value = self._text(initial)
@@ -7464,7 +8138,9 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         if not room_type:
             for button in (
                 self.add_asset_button,
+                self.manage_bundle_button,
                 self.add_bundle_button,
+                self.replace_bundle_button,
                 self.unlink_bundle_button,
                 self.remove_asset_button,
                 self.query_button,
@@ -7512,13 +8188,16 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             self.asset_table.clearSpans()
             self.asset_table.setSpan(0, 0, 1, 11)
         self.add_asset_button.setEnabled(bool(self.assets_by_id))
+        self.manage_bundle_button.setEnabled(bool(self.asset_bundles))
         self.add_bundle_button.setEnabled(bool(self.asset_bundles))
+        linked_bundle_assignments = clean_bundle_assignments(
+            room_type.get("asset_bundle_assignments", [])
+        )
+        self.replace_bundle_button.setEnabled(
+            bool(linked_bundle_assignments) and len(self.asset_bundles) > 1
+        )
         self.unlink_bundle_button.setEnabled(
-            bool(
-                clean_bundle_assignments(
-                    room_type.get("asset_bundle_assignments", [])
-                )
-            )
+            bool(linked_bundle_assignments)
         )
         self.remove_asset_button.setEnabled(bool(self._asset_row_widgets))
         self.query_button.setEnabled(bool(self._asset_row_widgets))
@@ -7593,6 +8272,236 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self._emit_state_changed()
         self._sync_sidebar_current()
 
+    def _manage_asset_bundles(self):
+        if self._dirty:
+            self._apply_changes()
+        room_type = self._current_room_type()
+        if not room_type or not self.asset_bundles:
+            return
+        before_assignments = clean_bundle_assignments(
+            room_type.get("asset_bundle_assignments", [])
+        )
+        dialog = AssetBundleAssignmentDialog(
+            self,
+            before_assignments,
+            self.asset_bundles,
+            self.assets_by_id,
+        )
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+        after_assignments = clean_bundle_assignments(
+            dialog.result.get("assignments", []),
+            {bundle["id"] for bundle in self.asset_bundles},
+        )
+        if after_assignments == before_assignments:
+            return
+
+        _, data_ports_by_asset_id = self._current_assignment_values()
+        try:
+            updated = reconcile_bundle_assignments(
+                room_type,
+                self.asset_bundles,
+                after_assignments,
+            )
+        except ValueError as exc:
+            QMessageBox.information(
+                self, "Manage Room Asset Bundles", str(exc)
+            )
+            return
+        room_type["assets"] = updated["assets"]
+        room_type["asset_ids"] = updated["asset_ids"]
+        room_type["asset_bundle_assignments"] = updated[
+            "asset_bundle_assignments"
+        ]
+        room_type["asset_connections"] = updated["asset_connections"]
+        final_asset_ids = set(room_type["asset_ids"])
+        data_ports_by_asset_id = {
+            asset_id: ports
+            for asset_id, ports in data_ports_by_asset_id.items()
+            if asset_id in final_asset_ids
+        }
+        room_type_id = self._room_id(room_type)
+        self.review_state.pop(room_type_id, None)
+        self._capture_staging_state(
+            room_type_id,
+            room_type["assets"],
+            data_ports_by_asset_id,
+            bundle_assignments=room_type["asset_bundle_assignments"],
+            asset_connections=room_type["asset_connections"],
+        )
+
+        before_by_id = {
+            assignment["bundle_id"]: assignment["qty"]
+            for assignment in before_assignments
+        }
+        after_by_id = {
+            assignment["bundle_id"]: assignment["qty"]
+            for assignment in after_assignments
+        }
+        bundles_by_id = {
+            bundle["id"]: bundle for bundle in self.asset_bundles
+        }
+        changes = []
+        for bundle_id in sorted(
+            set(before_by_id) | set(after_by_id),
+            key=self._natural_key,
+        ):
+            name = self._text(
+                bundles_by_id.get(bundle_id, {}).get("name")
+            ) or bundle_id
+            before_qty = before_by_id.get(bundle_id, 0)
+            after_qty = after_by_id.get(bundle_id, 0)
+            if before_qty == after_qty:
+                continue
+            if not before_qty:
+                changes.append(f"added {name} [{bundle_id}] × {after_qty}")
+            elif not after_qty:
+                changes.append(f"removed {name} [{bundle_id}] × {before_qty}")
+            else:
+                changes.append(
+                    f"changed {name} [{bundle_id}] quantity from "
+                    f"{before_qty} to {after_qty}"
+                )
+        reason = self._text(dialog.result.get("reason"))
+        note = "; ".join(changes)
+        if reason:
+            note += f". Reason: {reason}"
+        self._append_rfi_history(
+            "asset_bundles_updated",
+            room_type=room_type,
+            note=note,
+        )
+        self._emit_rfi_changed()
+        self._emit_state_changed()
+        self._set_dirty(False)
+        self._sync_sidebar_current()
+
+    def _replace_asset_bundle(self):
+        if self._dirty:
+            self._apply_changes()
+        room_type = self._current_room_type()
+        if not room_type:
+            return
+        assignments = clean_bundle_assignments(
+            room_type.get("asset_bundle_assignments", [])
+        )
+        if not assignments or len(self.asset_bundles) < 2:
+            QMessageBox.information(
+                self,
+                "Replace Asset Bundle",
+                "This room type needs a linked bundle and a different configured "
+                "bundle to use as its replacement.",
+            )
+            return
+
+        dialog = AssetBundleReplacementDialog(
+            self,
+            assignments,
+            self.asset_bundles,
+            self.assets_by_id,
+        )
+        if dialog.exec() != QDialog.Accepted or not dialog.result:
+            return
+        replaced_id = self._text(dialog.result.get("replaced_bundle_id"))
+        replacement_id = self._text(
+            dialog.result.get("replacement_bundle_id")
+        )
+        replacement_qty = max(
+            1, int(dialog.result.get("replacement_qty", 1) or 1)
+        )
+        bundles_by_id = {
+            bundle["id"]: bundle for bundle in self.asset_bundles
+        }
+        replaced_bundle = bundles_by_id.get(replaced_id, {})
+        replacement_bundle = bundles_by_id.get(replacement_id, {})
+        replaced_assignment = next(
+            (
+                assignment
+                for assignment in assignments
+                if assignment["bundle_id"] == replaced_id
+            ),
+            {},
+        )
+        replaced_qty = max(
+            1, int(replaced_assignment.get("qty", 1) or 1)
+        )
+        room_type_id = self._room_id(room_type)
+        replaced_asset_ids = {
+            self._text(row.get("asset_id"))
+            for row in replaced_bundle.get("assets", []) or []
+            if isinstance(row, dict) and self._text(row.get("asset_id"))
+        }
+        uncommitted_asset_ids = self._uncommitted_added_asset_ids(room_type_id)
+        replacing_uncommitted_bundle = bool(
+            replaced_asset_ids
+            and replaced_asset_ids <= uncommitted_asset_ids
+        )
+        reason = ""
+        if not replacing_uncommitted_bundle:
+            reason = self._required_reason(
+                "Replace Asset Bundle",
+                "Enter the reason for replacing the selected linked bundle.",
+            )
+            if not reason:
+                return
+
+        _, data_ports_by_asset_id = self._current_assignment_values()
+        try:
+            updated = replace_bundle_assignment(
+                room_type,
+                self.asset_bundles,
+                replaced_id,
+                replacement_id,
+                replacement_qty,
+            )
+        except ValueError as exc:
+            QMessageBox.information(
+                self, "Replace Asset Bundle", str(exc)
+            )
+            return
+        room_type["assets"] = updated["assets"]
+        room_type["asset_ids"] = updated["asset_ids"]
+        room_type["asset_bundle_assignments"] = updated[
+            "asset_bundle_assignments"
+        ]
+        room_type["asset_connections"] = updated["asset_connections"]
+        final_asset_ids = set(room_type["asset_ids"])
+        data_ports_by_asset_id = {
+            asset_id: ports
+            for asset_id, ports in data_ports_by_asset_id.items()
+            if asset_id in final_asset_ids
+        }
+        self.review_state.pop(room_type_id, None)
+        self._capture_staging_state(
+            room_type_id,
+            room_type["assets"],
+            data_ports_by_asset_id,
+            bundle_assignments=room_type["asset_bundle_assignments"],
+            asset_connections=room_type["asset_connections"],
+        )
+
+        replaced_name = self._text(replaced_bundle.get("name")) or replaced_id
+        replacement_name = (
+            self._text(replacement_bundle.get("name")) or replacement_id
+        )
+        note = (
+            f"Replaced {replaced_name} [{replaced_id}] × {replaced_qty} with "
+            f"{replacement_name} [{replacement_id}] × {replacement_qty}"
+        )
+        if reason:
+            note += f". Reason: {reason}"
+        else:
+            note += " before the original bundle addition was committed."
+        self._append_rfi_history(
+            "asset_bundle_replaced",
+            room_type=room_type,
+            note=note,
+        )
+        self._emit_rfi_changed()
+        self._emit_state_changed()
+        self._set_dirty(False)
+        self._sync_sidebar_current()
+
     def _unlink_asset_bundle(self):
         if self._dirty:
             self._apply_changes()
@@ -7659,11 +8568,11 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self._sync_sidebar_current()
 
     def _add_asset_bundles(self):
-        if self._dirty:
-            self._apply_changes()
         room_type = self._current_room_type()
         if not room_type or not self.asset_bundles:
             return
+        before_rows = self._current_review_asset_rows(room_type)
+        _, data_ports_by_asset_id = self._current_assignment_values()
         dialog = AssetBundleSelectionDialog(
             self, self.asset_bundles, self.assets_by_id
         )
@@ -7676,12 +8585,17 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         if not reason:
             return
 
-        before_rows = self._room_asset_rows(room_type)
         before_qty = {
             row["asset_id"]: int(row.get("qty", 1) or 1)
             for row in before_rows
         }
         rows = merge_selected_bundles(before_rows, dialog.result)
+        final_asset_ids = {row["asset_id"] for row in rows}
+        data_ports_by_asset_id = {
+            asset_id: ports
+            for asset_id, ports in data_ports_by_asset_id.items()
+            if asset_id in final_asset_ids
+        }
         after_qty = {
             row["asset_id"]: int(row.get("qty", 1) or 1)
             for row in rows
@@ -7700,12 +8614,16 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             dialog.result,
             existing_asset_rows=before_rows,
         )
+        for asset_id, ports in data_ports_by_asset_id.items():
+            asset = self.assets_by_id.get(asset_id)
+            if isinstance(asset, dict):
+                set_asset_network_port_count(asset, "input", ports)
         room_type_id = self._room_id(room_type)
         self.review_state.pop(room_type_id, None)
         self._capture_staging_state(
             room_type_id,
             rows,
-            {},
+            data_ports_by_asset_id,
             bundle_assignments=room_type["asset_bundle_assignments"],
             asset_connections=room_type["asset_connections"],
         )
@@ -7735,6 +8653,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             )
         self._emit_rfi_changed()
         self._emit_state_changed()
+        self._set_dirty(False)
         self._sync_sidebar_current()
 
     def _remove_selected_asset(self):
@@ -7764,6 +8683,11 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         if not removal_rows:
             return
         asset_ids = {row["asset_id"] for row in removal_rows}
+        room_type_id = self._room_id(room_type)
+        uncommitted_asset_ids = (
+            self._uncommitted_added_asset_ids(room_type_id) & asset_ids
+        )
+        committed_asset_ids = asset_ids - uncommitted_asset_ids
         shown_ids = ", ".join(sorted(asset_ids, key=self._natural_key))
         if QMessageBox.question(
             self,
@@ -7772,12 +8696,17 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             f"{self._room_option_label(room_type)}?\n\n{shown_ids}",
         ) != QMessageBox.Yes:
             return
-        reason = self._required_reason(
-            "Remove Assets",
-            "Enter the removal message to apply to every selected asset.",
-        )
-        if not reason:
-            return
+        reason = ""
+        if committed_asset_ids:
+            prompt = "Enter the removal message to apply to the committed asset(s)."
+            if uncommitted_asset_ids:
+                prompt += (
+                    "\n\nNo reason is required for the selected asset addition(s) "
+                    "that have not been committed."
+                )
+            reason = self._required_reason("Remove Assets", prompt)
+            if not reason:
+                return
         rows, ports = self._current_assignment_values()
         rows = [row for row in rows if row["asset_id"] not in asset_ids]
         room_type["assets"] = rows
@@ -7789,7 +8718,6 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             ),
             room_type["asset_ids"],
         )
-        room_type_id = self._room_id(room_type)
         self.review_state.pop(room_type_id, None)
         self._capture_staging_state(
             room_type_id,
@@ -7801,21 +8729,39 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         for removal in removal_rows:
             asset_id = removal["asset_id"]
             asset = removal["asset"]
+            uncommitted = asset_id in uncommitted_asset_ids
+            resolution = (
+                "Uncommitted asset addition cancelled"
+                if uncommitted
+                else reason
+            )
             self._append_rfi_history(
-                "asset_removed",
+                "uncommitted_asset_addition_cancelled"
+                if uncommitted
+                else "asset_removed",
                 room_type=room_type,
                 asset_id=asset_id,
                 asset_name=asset.get("name", ""),
                 note=(
-                    f"Removed (previous quantity {removal['quantity']}, data points each "
-                    f"{removal['ports']}, requested by "
-                    f"{removal['requested_by'] or '(blank)'}). Removal message: {reason}"
+                    (
+                        "Cancelled before commit "
+                        if uncommitted
+                        else "Removed "
+                    )
+                    + f"(previous quantity {removal['quantity']}, data points each "
+                    + f"{removal['ports']}, requested by "
+                    + f"{removal['requested_by'] or '(blank)'})"
+                    + (
+                        "."
+                        if uncommitted
+                        else f". Removal message: {reason}"
+                    )
                 ),
             )
             for query in self._outstanding_queries(room_type_id, asset_id):
                 query.update(
                     status="resolved",
-                    resolution=reason,
+                    resolution=resolution,
                     resolved_at=timestamp,
                     updated_at=timestamp,
                 )
@@ -7824,7 +8770,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                     room_type=room_type,
                     asset_id=asset_id,
                     asset_name=asset.get("name", ""),
-                    note=reason,
+                    note=resolution,
                     rfi_id=query.get("id", ""),
                 )
         self._emit_rfi_changed()

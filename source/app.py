@@ -1,5 +1,6 @@
 import os
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED, as_completed
+from contextlib import contextmanager
 from copy import deepcopy
 import re
 import subprocess
@@ -1512,8 +1513,6 @@ class RevisionHistoryDialog(QDialog):
         revisions = []
         if parent is not None and hasattr(parent, "store"):
             try:
-                if hasattr(parent, "refresh_data_point_quantities"):
-                    parent.refresh_data_point_quantities()
                 revisions = parent.store.revision_history()
             except Exception as exc:
                 QMessageBox.critical(self, "Revision history failed", str(exc))
@@ -2071,6 +2070,7 @@ class CableRouteEditor(QMainWindow):
         self.undo_stack = []
         self.redo_stack = []
         self.max_undo_steps = 50
+        self._busy_action_depth = 0
 
         self.store = JsonStore()
         self._checkout_live_store = None
@@ -2244,6 +2244,42 @@ class CableRouteEditor(QMainWindow):
             self.undo_stack.pop(0)
         self.redo_stack.clear()
 
+    def _section_undo_snapshot(self, keys) -> bytes:
+        payload = {
+            key: self.store.data[key]
+            for key in keys
+            if key in self.store.data
+        }
+        return zlib.compress(
+            pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL),
+            level=1,
+        )
+
+    def _restore_section_undo_snapshot(self, keys, snapshot: bytes) -> None:
+        payload = pickle.loads(zlib.decompress(snapshot))
+        for key in keys:
+            if key in payload:
+                self.store.data[key] = payload[key]
+            else:
+                self.store.data.pop(key, None)
+
+    def push_section_undo_state(self, label, keys):
+        """Capture only the project sections affected by a focused edit."""
+
+        keys = tuple(dict.fromkeys(str(key) for key in keys if str(key)))
+        self._render_data_revision += 1
+        self.undo_stack.append(
+            {
+                "label": label,
+                "scope": "sections",
+                "keys": keys,
+                "data": self._section_undo_snapshot(keys),
+            }
+        )
+        if len(self.undo_stack) > self.max_undo_steps:
+            self.undo_stack.pop(0)
+        self.redo_stack.clear()
+
     def _network_undo_snapshot(self) -> bytes:
         payload = {
             key: self.store.data.get(key)
@@ -2314,6 +2350,17 @@ class CableRouteEditor(QMainWindow):
                 }
             )
             self._restore_network_undo_snapshot(state["data"])
+        elif state.get("scope") == "sections":
+            keys = tuple(state.get("keys", ()))
+            self.redo_stack.append(
+                {
+                    "label": state.get("label", "Change"),
+                    "scope": "sections",
+                    "keys": keys,
+                    "data": self._section_undo_snapshot(keys),
+                }
+            )
+            self._restore_section_undo_snapshot(keys, state["data"])
         else:
             self.redo_stack.append(
                 {
@@ -2340,6 +2387,17 @@ class CableRouteEditor(QMainWindow):
                 }
             )
             self._restore_network_undo_snapshot(state["data"])
+        elif state.get("scope") == "sections":
+            keys = tuple(state.get("keys", ()))
+            self.undo_stack.append(
+                {
+                    "label": state.get("label", "Change"),
+                    "scope": "sections",
+                    "keys": keys,
+                    "data": self._section_undo_snapshot(keys),
+                }
+            )
+            self._restore_section_undo_snapshot(keys, state["data"])
         else:
             self.undo_stack.append(
                 {
@@ -3308,7 +3366,14 @@ class CableRouteEditor(QMainWindow):
 
     def _save_room_type_asset_review_state(self, review_state):
         before = deepcopy(self.store.data.get("room_type_asset_review", {}))
-        self.push_undo_state("Update room type asset review")
+        self.push_section_undo_state(
+            "Update room type asset review",
+            (
+                "room_type_asset_review",
+                "room_type_asset_rfi",
+                "revision_change_log",
+            ),
+        )
         valid_ids = {
             str(room_type.get("id", "") or "").strip()
             for room_type in self.store.data.get("room_types", []) or []
@@ -3398,7 +3463,16 @@ class CableRouteEditor(QMainWindow):
                 )
             except (TypeError, ValueError):
                 before_ports[asset_id] = 0
-        self.push_undo_state("Update room type asset assignments")
+        self.push_section_undo_state(
+            "Update room type asset assignments",
+            (
+                "room_types",
+                "assets",
+                "room_type_asset_review",
+                "room_type_asset_staging",
+                "revision_change_log",
+            ),
+        )
         cleaned_rows = []
         if isinstance(room_type, dict):
             for row in asset_rows or []:
@@ -3523,7 +3597,15 @@ class CableRouteEditor(QMainWindow):
             QMessageBox.information(self, "Commit Asset Changes", str(exc))
             return deepcopy(staging)
 
-        self.push_undo_state("Commit staged room type asset changes")
+        self.push_section_undo_state(
+            "Commit staged room type asset changes",
+            (
+                "room_type_asset_staging",
+                "room_type_asset_commits",
+                "room_type_asset_rfi",
+                "revision_change_log",
+            ),
+        )
         commits.append(commit)
         self.store.data["room_type_asset_staging"] = {}
         rfi_state, resolved_rfi_ids = resolve_rfis_with_commit(
@@ -3584,7 +3666,17 @@ class CableRouteEditor(QMainWindow):
                 self.store.data.get("room_type_asset_staging", {})
             )
 
-        self.push_undo_state(f"Rollback room type asset commit {identity}")
+        self.push_section_undo_state(
+            f"Rollback room type asset commit {identity}",
+            (
+                "room_types",
+                "assets",
+                "room_type_asset_staging",
+                "room_type_asset_commits",
+                "room_type_asset_rfi",
+                "revision_change_log",
+            ),
+        )
         staging = deepcopy(self.store.data.get("room_type_asset_staging", {}))
         room_types_by_id = {
             str(row.get("id", "") or "").strip(): row
@@ -3718,10 +3810,11 @@ class CableRouteEditor(QMainWindow):
         if not selected_room_ids and not selected_asset_ids:
             return self._room_type_asset_staging_result(staging)
 
-        self.push_undo_state(
+        self.push_section_undo_state(
             "Reset current room asset changes"
             if target_id
-            else "Clear all staged room type asset changes"
+            else "Clear all staged room type asset changes",
+            ("room_types", "assets", "room_type_asset_staging"),
         )
         room_types_by_id = {
             str(row.get("id", "") or "").strip(): row
@@ -3786,13 +3879,20 @@ class CableRouteEditor(QMainWindow):
         }
 
     def _save_room_type_asset_rfi_state(self, rfi_state):
+        with self._busy_action("updating the room type asset audit trail"):
+            return self._save_room_type_asset_rfi_state_now(rfi_state)
+
+    def _save_room_type_asset_rfi_state_now(self, rfi_state):
         old_state = self.store.data.get("room_type_asset_rfi", {})
         old_history = (
-            list(old_state.get("history", []) or [])
+            old_state.get("history", []) or []
             if isinstance(old_state, dict)
             else []
         )
-        self.push_undo_state("Update room type asset RFI list")
+        self.push_section_undo_state(
+            "Update room type asset RFI list",
+            ("room_type_asset_rfi", "revision_change_log"),
+        )
         state = rfi_state if isinstance(rfi_state, dict) else {}
         self.store.data["room_type_asset_rfi"] = {
             "queries": [
@@ -3807,7 +3907,15 @@ class CableRouteEditor(QMainWindow):
             ],
         }
         new_history = self.store.data["room_type_asset_rfi"]["history"]
-        appended = new_history[len(old_history):] if new_history[:len(old_history)] == old_history else []
+        old_count = len(old_history)
+        prefix_unchanged = (
+            len(new_history) >= old_count
+            and (
+                old_count == 0
+                or new_history[old_count - 1] == old_history[old_count - 1]
+            )
+        )
+        appended = new_history[old_count:] if prefix_unchanged else []
         for item in appended:
             if not should_mirror_rfi_audit_to_revision(item):
                 continue
@@ -5459,6 +5567,34 @@ class CableRouteEditor(QMainWindow):
 
     def set_status(self, text):
         self.status_label.setText(text)
+
+    @contextmanager
+    def _busy_action(self, action):
+        """Keep the most recently requested synchronous action visible."""
+
+        action = str(action or "Working").strip()
+        working_text = f"Working: {action}..."
+        outermost = self._busy_action_depth == 0
+        self._busy_action_depth += 1
+        self.set_status(working_text)
+        if outermost:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+        # Repaint only the status text. Pumping the complete Qt event queue
+        # here can re-enter the dialog callback and process a queued hide/close
+        # while the original operation is still running.
+        self.status_label.repaint()
+        try:
+            yield
+        except Exception:
+            self.set_status(f"Failed: {action}")
+            raise
+        else:
+            if self.status_label.text() == working_text:
+                self.set_status(f"Completed: {action}")
+        finally:
+            self._busy_action_depth = max(0, self._busy_action_depth - 1)
+            if outermost:
+                QApplication.restoreOverrideCursor()
 
     def on_floor_changed(self, *_):
         self.placement_zone_start = None
@@ -10768,12 +10904,11 @@ class CableRouteEditor(QMainWindow):
     def _save_project_to_path(self, path, status_prefix="Saved"):
         if self._historical_checkout_blocks_save():
             return False
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
+        with self._busy_action(
+            f"saving {Path(path).name} and recording its audit revision"
+        ):
             self.refresh_data_point_quantities()
             self.store.save(path)
-        finally:
-            QApplication.restoreOverrideCursor()
         self.current_json_path = self.store.storage_path or str(path)
         statistics = getattr(self.store, "last_save_statistics", None)
         detail = ""
@@ -10811,10 +10946,11 @@ class CableRouteEditor(QMainWindow):
         if dialog is None or not dialog.isVisible():
             dialog = RevisionHistoryDialog(self)
             self._revision_history_dialog = dialog
-        dialog.refresh_from_parent()
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        with self._busy_action("loading revision history"):
+            dialog.refresh_from_parent()
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
 
     def checkout_project_revision(self, revision_number):
         revision_number = int(revision_number)
@@ -10822,17 +10958,15 @@ class CableRouteEditor(QMainWindow):
         path = getattr(live_store, "storage_path", "") or self.current_json_path or ""
         if revision_number <= 0 or not path:
             return False
-        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            historical_data = live_store.revision_data(revision_number)
-            historical_store = JsonStore(historical_data)
-            historical_store.storage_path = str(path)
-            historical_store.storage_format = "sqlite"
+            with self._busy_action(f"loading revision {revision_number}"):
+                historical_data = live_store.revision_data(revision_number)
+                historical_store = JsonStore(historical_data)
+                historical_store.storage_path = str(path)
+                historical_store.storage_format = "sqlite"
         except Exception as exc:
             QMessageBox.critical(self, "Checkout revision failed", str(exc))
             return False
-        finally:
-            QApplication.restoreOverrideCursor()
 
         first_checkout = self._checkout_live_store is None
         if first_checkout:
@@ -10963,14 +11097,12 @@ class CableRouteEditor(QMainWindow):
         path = getattr(self.store, "storage_path", "") or self.current_json_path or ""
         if not path:
             return False
-        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            statistics = self.store.restore_revision(revision_number)
+            with self._busy_action(f"rolling back to revision {revision_number}"):
+                statistics = self.store.restore_revision(revision_number)
         except Exception as exc:
             QMessageBox.critical(self, "Rollback project failed", str(exc))
             return False
-        finally:
-            QApplication.restoreOverrideCursor()
 
         self.undo_stack.clear()
         self.redo_stack.clear()
@@ -12785,6 +12917,13 @@ class CableRouteEditor(QMainWindow):
             for asset in self.store.data.get("assets", []) or []
             if str(asset.get("id", "") or "").strip()
         ]
+        asset_categories_by_id = {
+            str(category.get("id", "") or "").strip(): str(
+                category.get("name", category.get("id", "")) or ""
+            ).strip()
+            for category in self.store.data.get("asset_categories", []) or []
+            if str(category.get("id", "") or "").strip()
+        }
         dialog = AssetBundleManagerDialog(
             self,
             self.store.data.get("asset_bundles", []),
@@ -12794,6 +12933,7 @@ class CableRouteEditor(QMainWindow):
                 for asset in self.store.data.get("assets", []) or []
                 if str(asset.get("id", "") or "").strip()
             },
+            asset_categories_by_id,
         )
         if dialog.exec() == QDialog.Accepted and dialog.result is not None:
             from asset_bundles import sync_room_types_for_bundle_updates

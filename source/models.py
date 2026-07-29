@@ -897,7 +897,10 @@ class JsonStore:
             compact_min_free_bytes=compact_min_free_bytes,
             compact_min_free_ratio=compact_min_free_ratio,
         )
-        errors = project.verify()
+        # The save itself is atomic and performs all writes in one transaction.
+        # Avoid rescanning the complete database and deduplicated audit history
+        # after every routine save; explicit validation still uses full verify().
+        errors = project.verify(full=False)
         if errors:
             raise ValueError("SQLite project verification failed: " + "; ".join(errors))
         self.storage_path = str(destination)
@@ -927,7 +930,7 @@ class JsonStore:
             raise ValueError("Save this project as a .crsdb database before rolling it back.")
         project = SQLiteProjectFile(self.storage_path)
         restored, statistics = project.restore_revision(revision_number)
-        errors = project.verify()
+        errors = project.verify(full=False)
         if errors:
             raise ValueError("SQLite project verification failed: " + "; ".join(errors))
         self.data = deepcopy(DEFAULT_JSON)
