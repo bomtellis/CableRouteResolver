@@ -115,7 +115,216 @@ def read_asset_pack(path, expected_library_type: str = "") -> dict:
     payload["assets"] = cleaned
     if not isinstance(payload.get("related"), dict):
         payload["related"] = {}
+    _validate_related_asset_bundles(
+        payload["related"].get("asset_bundles", []),
+        library_type=library_type,
+        asset_ids=seen,
+    )
     return payload
+
+
+def _bundle_asset_id(value) -> str:
+    if isinstance(value, dict):
+        value = value.get("asset_id", value.get("id", ""))
+    return str(value or "").strip()
+
+
+def _validate_related_asset_bundles(
+    bundles,
+    *,
+    library_type: str,
+    asset_ids,
+) -> None:
+    if bundles == []:
+        return
+    if library_type != "assets":
+        raise AssetPackError(
+            "Only project asset packs can contain related asset bundles."
+        )
+    if not isinstance(bundles, list):
+        raise AssetPackError(
+            "Asset pack 'related.asset_bundles' must be a list."
+        )
+    defined_asset_ids = set(asset_ids)
+    seen_bundle_ids = set()
+    for bundle_index, bundle in enumerate(bundles, start=1):
+        if not isinstance(bundle, dict):
+            raise AssetPackError(
+                f"Asset bundle row {bundle_index} is not an object."
+            )
+        bundle_id = str(bundle.get("id", "") or "").strip()
+        if not bundle_id:
+            raise AssetPackError(
+                f"Asset bundle row {bundle_index} has no ID."
+            )
+        if bundle_id in seen_bundle_ids:
+            raise AssetPackError(
+                f"Asset bundle ID {bundle_id} occurs more than once."
+            )
+        seen_bundle_ids.add(bundle_id)
+        rows = bundle.get("assets", bundle.get("asset_ids", []))
+        if not isinstance(rows, list):
+            raise AssetPackError(
+                f"Asset bundle {bundle_id} 'assets' must be a list."
+            )
+        bundle_asset_ids = []
+        for row_index, row in enumerate(rows, start=1):
+            if not isinstance(row, (dict, str)):
+                raise AssetPackError(
+                    f"Asset bundle {bundle_id} asset row {row_index} is invalid."
+                )
+            asset_id = _bundle_asset_id(row)
+            if not asset_id:
+                raise AssetPackError(
+                    f"Asset bundle {bundle_id} asset row {row_index} has no asset ID."
+                )
+            bundle_asset_ids.append(asset_id)
+            if isinstance(row, dict):
+                try:
+                    raw_quantity = row.get("qty", 1)
+                    quantity = (
+                        1
+                        if raw_quantity in (None, "")
+                        else int(raw_quantity)
+                    )
+                except (TypeError, ValueError):
+                    quantity = 0
+                if quantity < 1:
+                    raise AssetPackError(
+                        f"Asset bundle {bundle_id} asset row {row_index} "
+                        "must have a positive integer quantity."
+                    )
+        if len(bundle_asset_ids) != len(set(bundle_asset_ids)):
+            raise AssetPackError(
+                f"Asset bundle {bundle_id} contains an asset more than once."
+            )
+        connections = bundle.get(
+            "connections", bundle.get("asset_connections", [])
+        )
+        if not isinstance(connections, list):
+            raise AssetPackError(
+                f"Asset bundle {bundle_id} 'connections' must be a list."
+            )
+        if not all(isinstance(connection, dict) for connection in connections):
+            raise AssetPackError(
+                f"Asset bundle {bundle_id} contains an invalid connection."
+            )
+        missing = sorted(
+            asset_bundle_dependency_ids(bundle) - defined_asset_ids
+        )
+        if missing:
+            raise AssetPackError(
+                f"Asset bundle {bundle_id} references assets not included in the "
+                f"pack: {', '.join(missing)}."
+            )
+
+
+def asset_bundle_dependency_ids(bundle) -> set[str]:
+    """Return every project-asset ID needed by a bundle definition."""
+    if not isinstance(bundle, dict):
+        return set()
+    dependencies = {
+        _bundle_asset_id(row)
+        for row in bundle.get("assets", bundle.get("asset_ids", [])) or []
+    }
+    for connection in bundle.get(
+        "connections", bundle.get("asset_connections", [])
+    ) or []:
+        if not isinstance(connection, dict):
+            continue
+        for field in (
+            "from_asset_id",
+            "to_asset_id",
+            "connection_asset_id",
+        ):
+            asset_id = str(connection.get(field, "") or "").strip()
+            if asset_id:
+                dependencies.add(asset_id)
+    dependencies.discard("")
+    return dependencies
+
+
+def asset_bundles_for_export(
+    bundles,
+    exported_asset_ids,
+    *,
+    include_placeholders: bool = False,
+) -> list[dict]:
+    """Select self-contained bundle definitions for an asset-pack export."""
+    exported_ids = {
+        str(asset_id or "").strip()
+        for asset_id in exported_asset_ids
+        if str(asset_id or "").strip()
+    }
+    selected = []
+    for bundle in bundles or []:
+        if not isinstance(bundle, dict):
+            continue
+        dependencies = asset_bundle_dependency_ids(bundle)
+        if (dependencies or include_placeholders) and dependencies <= exported_ids:
+            selected.append(deepcopy(bundle))
+    return selected
+
+
+def remap_asset_bundles(bundles, source_to_target) -> tuple[list[dict], dict]:
+    """Remap bundle asset references after asset import marshalling.
+
+    A bundle is skipped atomically when any referenced source asset was rejected.
+    """
+    mapping = {
+        str(source_id or "").strip(): str(target_id or "").strip()
+        for source_id, target_id in dict(source_to_target or {}).items()
+        if str(source_id or "").strip() and str(target_id or "").strip()
+    }
+    remapped = []
+    skipped_ids = []
+    for bundle in bundles or []:
+        if not isinstance(bundle, dict):
+            continue
+        bundle_id = str(bundle.get("id", "") or "").strip()
+        dependencies = asset_bundle_dependency_ids(bundle)
+        if not dependencies <= set(mapping):
+            skipped_ids.append(bundle_id)
+            continue
+        row = deepcopy(bundle)
+        asset_rows = row.get("assets", row.get("asset_ids", [])) or []
+        remapped_rows = []
+        for source in asset_rows:
+            if isinstance(source, dict):
+                remapped_row = deepcopy(source)
+                source_id = _bundle_asset_id(source)
+                remapped_row["asset_id"] = mapping[source_id]
+                remapped_row.pop("id", None)
+            else:
+                remapped_row = {"asset_id": mapping[_bundle_asset_id(source)], "qty": 1}
+            remapped_rows.append(remapped_row)
+        row["assets"] = remapped_rows
+        row.pop("asset_ids", None)
+        connections = row.get(
+            "connections", row.get("asset_connections", [])
+        ) or []
+        remapped_connections = []
+        for source in connections:
+            if not isinstance(source, dict):
+                continue
+            connection = deepcopy(source)
+            for field in (
+                "from_asset_id",
+                "to_asset_id",
+                "connection_asset_id",
+            ):
+                source_id = str(connection.get(field, "") or "").strip()
+                if source_id:
+                    connection[field] = mapping[source_id]
+            remapped_connections.append(connection)
+        row["connections"] = remapped_connections
+        row.pop("asset_connections", None)
+        remapped.append(row)
+    return remapped, {
+        "remapped": len(remapped),
+        "skipped": len(skipped_ids),
+        "skipped_ids": skipped_ids,
+    }
 
 
 def merge_asset_rows(existing, incoming, *, replace_existing: bool) -> tuple:

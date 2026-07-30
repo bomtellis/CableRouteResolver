@@ -139,13 +139,16 @@ class AssetImportMarshallingDialog(QDialog):
         self.existing = [dict(row) for row in existing if isinstance(row, dict)]
         self.asset_label = asset_label
         self.match_adb_codes = bool(match_adb_codes)
+        self.asset_label_plural = (
+            "assets" if self.asset_label == "asset" else f"{self.asset_label}s"
+        )
         self.reserved_ids = {
             _text(asset_id) for asset_id in (reserved_ids or []) if _text(asset_id)
         }
         self.resolutions = []
         self._row_controls = []
 
-        self.setWindowTitle("Marshal imported assets")
+        self.setWindowTitle(f"Marshal imported {self.asset_label_plural}")
         self.resize(1180 if self.match_adb_codes else 980, 560)
         layout = QVBoxLayout(self)
         intro = QLabel(
@@ -174,10 +177,15 @@ class AssetImportMarshallingDialog(QDialog):
                     "ADB code",
                     "Existing match",
                     "Action",
-                    "Local asset",
+                    f"Local {self.asset_label}",
                 ]
                 if self.match_adb_codes
-                else ["Source ID", "Imported name", "Action", "Local asset"]
+                else [
+                    "Source ID",
+                    "Imported name",
+                    "Action",
+                    f"Local {self.asset_label}",
+                ]
             )
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -359,7 +367,7 @@ class AssetImportMarshallingDialog(QDialog):
         if errors:
             QMessageBox.warning(
                 self,
-                "Resolve asset import",
+                f"Resolve {self.asset_label} import",
                 "Correct these rows before importing:\n\n" + "\n".join(errors[:12]),
             )
             return

@@ -42,6 +42,66 @@ def clean_asset_rows(rows) -> list[dict]:
     return result
 
 
+def clean_bundle_asset_exclusions(values, valid_asset_ids=None) -> list[str]:
+    """Return unique room-specific asset IDs suppressed from bundle recipes."""
+
+    if isinstance(values, dict):
+        values = [
+            asset_id
+            for asset_id, excluded in values.items()
+            if bool(excluded)
+        ]
+    valid = (
+        {_text(asset_id) for asset_id in valid_asset_ids if _text(asset_id)}
+        if valid_asset_ids is not None
+        else None
+    )
+    result = []
+    for value in values or []:
+        asset_id = _text(
+            value.get("asset_id", value.get("id"))
+            if isinstance(value, dict)
+            else value
+        )
+        if (
+            not asset_id
+            or asset_id in result
+            or (valid is not None and asset_id not in valid)
+        ):
+            continue
+        result.append(asset_id)
+    return result
+
+
+def bundle_without_excluded_assets(bundle, excluded_asset_ids) -> dict:
+    """Copy a bundle recipe without room-excluded assets or connections."""
+
+    excluded = set(clean_bundle_asset_exclusions(excluded_asset_ids))
+    if not isinstance(bundle, dict) or not excluded:
+        return deepcopy(bundle) if isinstance(bundle, dict) else {}
+    result = deepcopy(bundle)
+    result["assets"] = [
+        row
+        for row in clean_asset_rows(bundle.get("assets", []))
+        if row["asset_id"] not in excluded
+    ]
+    result["connections"] = [
+        connection
+        for connection in clean_asset_connections(
+            bundle.get("connections", bundle.get("asset_connections", []))
+        )
+        if not any(
+            _text(connection.get(field)) in excluded
+            for field in (
+                "from_asset_id",
+                "to_asset_id",
+                "connection_asset_id",
+            )
+        )
+    ]
+    return result
+
+
 def normalise_asset_bundles(bundles, valid_asset_ids=None) -> list[dict]:
     """Normalise persisted bundles without involving scenario-group data."""
 
@@ -107,6 +167,204 @@ def clean_bundle_assignments(assignments, valid_bundle_ids=None) -> list[dict]:
         row = {"bundle_id": bundle_id, "qty": quantity}
         by_id[bundle_id] = row
         result.append(row)
+    return result
+
+
+def _bundle_asset_contributions(
+    assignments,
+    bundles,
+    excluded_asset_ids=None,
+) -> dict[str, list[dict]]:
+    excluded = set(clean_bundle_asset_exclusions(excluded_asset_ids))
+    normalised_bundles = normalise_asset_bundles(bundles)
+    bundles_by_id = {
+        bundle["id"]: bundle for bundle in normalised_bundles
+    }
+    overlaps_by_asset = {}
+    for assignment in clean_bundle_assignments(
+        assignments,
+        bundles_by_id,
+    ):
+        bundle_id = assignment["bundle_id"]
+        bundle = bundles_by_id.get(bundle_id)
+        if bundle is None:
+            continue
+        bundle_qty = int(assignment.get("qty", 1) or 1)
+        for asset_row in clean_asset_rows(bundle.get("assets", [])):
+            asset_id = asset_row["asset_id"]
+            if asset_id in excluded:
+                continue
+            asset_qty = int(asset_row.get("qty", 1) or 1)
+            contribution = {
+                "source_type": "bundle",
+                "bundle_id": bundle_id,
+                "bundle_name": _text(bundle.get("name")) or bundle_id,
+                "bundle_qty": bundle_qty,
+                "asset_qty": asset_qty,
+                "total_qty": bundle_qty * asset_qty,
+            }
+            overlaps_by_asset.setdefault(asset_id, []).append(contribution)
+    return overlaps_by_asset
+
+
+def bundle_asset_overlaps(assignments, bundles) -> list[dict]:
+    """Describe assets contributed by more than one assigned bundle.
+
+    Bundle and asset quantities are included in each contribution so callers
+    can show the combined room quantity without changing the established
+    additive merge behaviour.
+    """
+
+    result = []
+    for asset_id, contributions in _bundle_asset_contributions(
+        assignments,
+        bundles,
+    ).items():
+        if len(contributions) < 2:
+            continue
+        result.append(
+            {
+                "asset_id": asset_id,
+                "bundle_ids": [
+                    contribution["bundle_id"]
+                    for contribution in contributions
+                ],
+                "contributions": contributions,
+                "total_qty": sum(
+                    contribution["total_qty"]
+                    for contribution in contributions
+                ),
+            }
+        )
+    return result
+
+
+def room_bundle_asset_overlaps(
+    room_type,
+    assignments,
+    bundles,
+) -> list[dict]:
+    """Find bundle/bundle and bundle/manual asset overlaps for one room.
+
+    Saved room asset quantities already contain linked bundle contributions.
+    The manual quantity is therefore the saved total less the contribution
+    from the room's current bundle assignments. Requested assignments are then
+    checked against that stable manual remainder.
+    """
+
+    room_type = room_type if isinstance(room_type, dict) else {}
+    excluded_asset_ids = clean_bundle_asset_exclusions(
+        room_type.get("asset_bundle_excluded_asset_ids", [])
+    )
+    current_assignments = room_type.get("asset_bundle_assignments", [])
+    current_contributions = _bundle_asset_contributions(
+        current_assignments,
+        bundles,
+        excluded_asset_ids,
+    )
+    requested_contributions = _bundle_asset_contributions(
+        assignments,
+        bundles,
+        excluded_asset_ids,
+    )
+    current_bundle_totals = {
+        asset_id: sum(row["total_qty"] for row in contributions)
+        for asset_id, contributions in current_contributions.items()
+    }
+    manual_quantities = {}
+    for row in clean_asset_rows(room_type.get("assets", [])):
+        asset_id = row["asset_id"]
+        manual_qty = max(
+            0,
+            int(row.get("qty", 1) or 1)
+            - current_bundle_totals.get(asset_id, 0),
+        )
+        if manual_qty:
+            manual_quantities[asset_id] = manual_qty
+
+    result = []
+    asset_ids = list(requested_contributions)
+    asset_ids.extend(
+        asset_id
+        for asset_id in manual_quantities
+        if asset_id not in requested_contributions
+    )
+    for asset_id in asset_ids:
+        bundle_contributions = [
+            dict(row)
+            for row in requested_contributions.get(asset_id, [])
+        ]
+        manual_qty = manual_quantities.get(asset_id, 0)
+        overlap_types = []
+        if len(bundle_contributions) > 1:
+            overlap_types.append("multiple_bundles")
+        if bundle_contributions and manual_qty:
+            overlap_types.append("bundle_and_manual")
+        if not overlap_types:
+            continue
+        contributions = list(bundle_contributions)
+        if manual_qty:
+            contributions.append(
+                {
+                    "source_type": "manual",
+                    "bundle_id": "",
+                    "bundle_name": "Manually added",
+                    "bundle_qty": 1,
+                    "asset_qty": manual_qty,
+                    "total_qty": manual_qty,
+                }
+            )
+        result.append(
+            {
+                "asset_id": asset_id,
+                "bundle_ids": [
+                    contribution["bundle_id"]
+                    for contribution in bundle_contributions
+                ],
+                "contributions": contributions,
+                "manual_qty": manual_qty,
+                "overlap_types": overlap_types,
+                "total_qty": sum(
+                    contribution["total_qty"]
+                    for contribution in contributions
+                ),
+            }
+        )
+    return result
+
+
+def resolve_room_bundle_asset_overlaps(room_type, asset_ids) -> dict:
+    """Keep one room asset and suppress future bundle re-addition for it."""
+
+    if not isinstance(room_type, dict):
+        raise ValueError("A room type is required.")
+    result = deepcopy(room_type)
+    resolved_asset_ids = clean_bundle_asset_exclusions(asset_ids)
+    exclusions = clean_bundle_asset_exclusions(
+        [
+            *clean_bundle_asset_exclusions(
+                result.get("asset_bundle_excluded_asset_ids", [])
+            ),
+            *resolved_asset_ids,
+        ]
+    )
+    rows = clean_asset_rows(result.get("assets", []))
+    rows_by_id = {row["asset_id"]: row for row in rows}
+    for asset_id in resolved_asset_ids:
+        row = rows_by_id.get(asset_id)
+        if row is None:
+            row = {"asset_id": asset_id, "qty": 1}
+            rows.append(row)
+            rows_by_id[asset_id] = row
+        else:
+            row["qty"] = 1
+    result["assets"] = rows
+    result["asset_ids"] = [row["asset_id"] for row in rows]
+    result["asset_bundle_excluded_asset_ids"] = exclusions
+    result["asset_connections"] = clean_asset_connections(
+        result.get("asset_connections", result.get("connections", [])),
+        result["asset_ids"],
+    )
     return result
 
 
@@ -185,6 +443,9 @@ def reconcile_bundle_assignments(room_type, bundles, assignments) -> dict:
     bundles_by_id = {
         bundle["id"]: bundle for bundle in normalised_bundles
     }
+    excluded_asset_ids = clean_bundle_asset_exclusions(
+        room_type.get("asset_bundle_excluded_asset_ids", [])
+    )
     current_assignments = clean_bundle_assignments(
         room_type.get("asset_bundle_assignments", []),
         bundles_by_id,
@@ -199,6 +460,10 @@ def reconcile_bundle_assignments(room_type, bundles, assignments) -> dict:
         for assignment in values:
             bundle = bundles_by_id.get(assignment["bundle_id"])
             if bundle:
+                bundle = bundle_without_excluded_assets(
+                    bundle,
+                    excluded_asset_ids,
+                )
                 selected.append(
                     {**bundle, "bundle_qty": assignment["qty"]}
                 )
@@ -208,6 +473,10 @@ def reconcile_bundle_assignments(room_type, bundles, assignments) -> dict:
         contributions = {}
         for assignment in values:
             bundle = bundles_by_id.get(assignment["bundle_id"], {})
+            bundle = bundle_without_excluded_assets(
+                bundle,
+                excluded_asset_ids,
+            )
             multiplier = int(assignment.get("qty", 1) or 1)
             for row in clean_asset_rows(bundle.get("assets", [])):
                 asset_id = row["asset_id"]
@@ -286,6 +555,7 @@ def reconcile_bundle_assignments(room_type, bundles, assignments) -> dict:
     result["assets"] = rows
     result["asset_ids"] = [row["asset_id"] for row in rows]
     result["asset_bundle_assignments"] = requested_assignments
+    result["asset_bundle_excluded_asset_ids"] = excluded_asset_ids
     result["asset_connections"] = connections
     return result
 
@@ -304,6 +574,9 @@ def replace_bundle_assignment(
     bundles_by_id = {
         bundle["id"]: bundle for bundle in normalise_asset_bundles(bundles)
     }
+    excluded_asset_ids = clean_bundle_asset_exclusions(
+        room_type.get("asset_bundle_excluded_asset_ids", [])
+    )
     old_id = _text(replaced_bundle_id)
     new_id = _text(replacement_bundle_id)
     old_bundle = bundles_by_id.get(old_id)
@@ -312,6 +585,14 @@ def replace_bundle_assignment(
         raise ValueError(f"Linked bundle {old_id or '(blank)'} was not found.")
     if new_bundle is None:
         raise ValueError(f"Replacement bundle {new_id or '(blank)'} was not found.")
+    old_bundle = bundle_without_excluded_assets(
+        old_bundle,
+        excluded_asset_ids,
+    )
+    new_bundle = bundle_without_excluded_assets(
+        new_bundle,
+        excluded_asset_ids,
+    )
     try:
         new_qty = max(1, int(replacement_qty or 1))
     except (TypeError, ValueError):
@@ -420,6 +701,7 @@ def replace_bundle_assignment(
     result["assets"] = rows
     result["asset_ids"] = [row["asset_id"] for row in rows]
     result["asset_bundle_assignments"] = updated_assignments
+    result["asset_bundle_excluded_asset_ids"] = excluded_asset_ids
     result["asset_connections"] = connections
     return result
 
@@ -563,6 +845,9 @@ def resolve_room_type_asset_connections(room_type, asset_bundles=None) -> list[d
     )
     bundles = normalise_asset_bundles(asset_bundles)
     bundles_by_id = {bundle["id"]: bundle for bundle in bundles}
+    excluded_asset_ids = clean_bundle_asset_exclusions(
+        room_type.get("asset_bundle_excluded_asset_ids", [])
+    )
     selected = []
     for assignment in clean_bundle_assignments(
         room_type.get("asset_bundle_assignments", []),
@@ -570,6 +855,10 @@ def resolve_room_type_asset_connections(room_type, asset_bundles=None) -> list[d
     ):
         bundle = bundles_by_id.get(assignment["bundle_id"])
         if bundle:
+            bundle = bundle_without_excluded_assets(
+                bundle,
+                excluded_asset_ids,
+            )
             selected.append({**bundle, "bundle_qty": assignment["qty"]})
     expected = merge_selected_bundle_connections([], selected)
     if not expected:
@@ -621,6 +910,9 @@ def sync_room_types_for_bundle_updates(
         )
         if not assignments:
             continue
+        excluded_asset_ids = clean_bundle_asset_exclusions(
+            room_type.get("asset_bundle_excluded_asset_ids", [])
+        )
 
         deltas = {}
         old_selected_bundles = []
@@ -630,6 +922,14 @@ def sync_room_types_for_bundle_updates(
             multiplier = assignment["qty"]
             old_bundle = old_by_id.get(bundle_id)
             new_bundle = new_by_id.get(bundle_id)
+            old_bundle = bundle_without_excluded_assets(
+                old_bundle,
+                excluded_asset_ids,
+            )
+            new_bundle = bundle_without_excluded_assets(
+                new_bundle,
+                excluded_asset_ids,
+            )
             if old_bundle:
                 old_selected_bundles.append(
                     {**old_bundle, "bundle_qty": multiplier}

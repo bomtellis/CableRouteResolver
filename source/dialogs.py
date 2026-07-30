@@ -43,8 +43,10 @@ from PySide6.QtWidgets import (
 )
 from asset_library_io import (
     AssetPackError,
+    asset_bundles_for_export,
     marshal_asset_rows,
     read_asset_pack,
+    remap_asset_bundles,
     write_asset_pack,
 )
 from asset_import_dialog import AssetImportMarshallingDialog
@@ -60,6 +62,8 @@ from asset_ports import (
     set_asset_network_port_count,
 )
 from asset_bundles import (
+    bundle_without_excluded_assets,
+    clean_bundle_asset_exclusions,
     clean_bundle_assignments,
     merge_bundle_assignments,
     merge_selected_bundle_connections,
@@ -3626,6 +3630,8 @@ class AssetsEditorWindow(QMainWindow):
         on_condense_assets=None,
         on_expand_asset=None,
         retired_asset_ids=None,
+        bundle_items=None,
+        on_save_bundles=None,
     ):
         super().__init__(master)
         self.setWindowTitle("Assets")
@@ -3639,6 +3645,16 @@ class AssetsEditorWindow(QMainWindow):
         self.on_show_capability_overlap = on_show_capability_overlap
         self.on_condense_assets = on_condense_assets
         self.on_expand_asset = on_expand_asset
+        self.bundle_items = normalise_asset_bundles(
+            bundle_items or [],
+            [
+                item.get("id")
+                for item in self.items
+                if isinstance(item, dict)
+            ],
+        )
+        self.on_save_bundles = on_save_bundles
+        self.bundles_changed = False
         self.retired_asset_ids = {
             str(asset_id or "").strip()
             for asset_id in (retired_asset_ids or [])
@@ -3666,7 +3682,8 @@ class AssetsEditorWindow(QMainWindow):
 
         self.asset_search_edit = QLineEdit()
         self.asset_search_edit.setPlaceholderText(
-            "Type to filter by asset name, ID, ADB code, group, capability, category, connection type, or deployed count..."
+            "Type to filter by asset name, ID, ADB code, group, capability, "
+            "category, connection type, bundle, or deployed count..."
         )
         self.asset_search_edit.setClearButtonEnabled(True)
         search_row.addWidget(self.asset_search_edit, 1)
@@ -3677,7 +3694,7 @@ class AssetsEditorWindow(QMainWindow):
         search_row.addWidget(self.asset_filter_count_label)
         layout.addLayout(search_row)
 
-        self.table = QTableWidget(0, 13)
+        self.table = QTableWidget(0, 14)
         self.table.setHorizontalHeaderLabels(
             [
                 "Name",
@@ -3690,6 +3707,7 @@ class AssetsEditorWindow(QMainWindow):
                 "Output ports each",
                 "Library input total",
                 "Capabilities",
+                "Asset bundles",
                 "Deployed rooms",
                 "Deployed items",
                 "Deployed data points",
@@ -3746,8 +3764,36 @@ class AssetsEditorWindow(QMainWindow):
         self._refresh_table()
         self.show()
 
+    def _bundle_memberships_by_asset(self):
+        memberships = {}
+        for bundle in self.bundle_items:
+            bundle_id = str(bundle.get("id", "") or "").strip()
+            bundle_name = str(bundle.get("name", "") or "").strip() or bundle_id
+            label = (
+                bundle_id
+                if bundle_name.casefold() == bundle_id.casefold()
+                else f"{bundle_name} [{bundle_id}]"
+            )
+            for asset_row in bundle.get("assets", []) or []:
+                if not isinstance(asset_row, dict):
+                    continue
+                asset_id = str(asset_row.get("asset_id", "") or "").strip()
+                if not asset_id:
+                    continue
+                quantity = max(1, int(asset_row.get("qty", 1) or 1))
+                memberships.setdefault(asset_id, []).append(
+                    {
+                        "bundle_id": bundle_id,
+                        "bundle_name": bundle_name,
+                        "label": label,
+                        "qty": quantity,
+                    }
+                )
+        return memberships
+
     def _refresh_table(self):
         self.table.setRowCount(0)
+        self._bundle_memberships = self._bundle_memberships_by_asset()
 
         for asset in self.items:
             row = self.table.rowCount()
@@ -3798,6 +3844,7 @@ class AssetsEditorWindow(QMainWindow):
             deployed_rooms = int(deployed.get("deployed_rooms", 0) or 0)
             deployed_items = int(deployed.get("deployed_items", 0) or 0)
             deployed_data_points = int(deployed.get("deployed_data_points", 0) or 0)
+            bundle_memberships = self._bundle_memberships.get(asset_id, [])
 
             values = [
                 str(asset.get("name", "")),
@@ -3815,6 +3862,10 @@ class AssetsEditorWindow(QMainWindow):
                 str(output_ports),
                 str(qty * dp),
                 capabilities,
+                "; ".join(
+                    membership["label"]
+                    for membership in bundle_memberships
+                ),
                 str(deployed_rooms),
                 str(deployed_items),
                 str(deployed_data_points),
@@ -3822,7 +3873,16 @@ class AssetsEditorWindow(QMainWindow):
 
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                if col in (10, 11, 12):
+                if col == 10 and bundle_memberships:
+                    item.setToolTip(
+                        "Included in:\n"
+                        + "\n".join(
+                            f"{membership['label']} "
+                            f"(qty {membership['qty']})"
+                            for membership in bundle_memberships
+                        )
+                    )
+                elif col in (11, 12, 13):
                     item.setToolTip(
                         "Calculated from placed data points with a room type. "
                         "Deployed items = placed rooms using this asset × quantity in the room type."
@@ -3830,6 +3890,10 @@ class AssetsEditorWindow(QMainWindow):
                 self.table.setItem(row, col, item)
 
         self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(
+            10,
+            min(300, max(160, self.table.columnWidth(10))),
+        )
         self._apply_asset_filter()
 
     def _asset_search_text(self, asset):
@@ -3869,6 +3933,19 @@ class AssetsEditorWindow(QMainWindow):
         deployed_terms.extend(
             str(room_type_id) for room_type_id in deployed.get("room_type_ids", [])
         )
+        bundle_terms = []
+        for membership in getattr(
+            self,
+            "_bundle_memberships",
+            {},
+        ).get(asset_id, []):
+            bundle_terms.extend(
+                (
+                    membership["bundle_id"],
+                    membership["bundle_name"],
+                    membership["label"],
+                )
+            )
         return " ".join(
             (
                 asset_id,
@@ -3879,6 +3956,7 @@ class AssetsEditorWindow(QMainWindow):
                 connection_type,
                 category_id,
                 category_name,
+                *bundle_terms,
                 *deployed_terms,
             )
         ).casefold()
@@ -4087,7 +4165,7 @@ class AssetsEditorWindow(QMainWindow):
         if callable(self.on_show_capability_overlap):
             self.on_show_capability_overlap()
 
-    def _export_asset_rows(self, rows, title):
+    def _export_asset_rows(self, rows, title, *, include_all_bundles=False):
         if not rows:
             QMessageBox.information(
                 self, "Export assets", "Select at least one asset to export."
@@ -4104,6 +4182,16 @@ class AssetsEditorWindow(QMainWindow):
             if str(category.get("id", "") or "").strip()
             in selected_category_ids
         ]
+        selected_asset_ids = {
+            str(row.get("id", "") or "").strip()
+            for row in rows
+            if isinstance(row, dict) and str(row.get("id", "") or "").strip()
+        }
+        related_bundles = asset_bundles_for_export(
+            self.bundle_items,
+            selected_asset_ids,
+            include_placeholders=include_all_bundles,
+        )
         default_name = (
             f"{str(rows[0].get('id', 'asset')).strip()}.asset-pack.json"
             if len(rows) == 1
@@ -4127,7 +4215,10 @@ class AssetsEditorWindow(QMainWindow):
                     if len(rows) == 1
                     else "Project Asset Library"
                 ),
-                related={"asset_categories": related_categories},
+                related={
+                    "asset_categories": related_categories,
+                    "asset_bundles": related_bundles,
+                },
             )
         except (OSError, AssetPackError) as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
@@ -4135,7 +4226,8 @@ class AssetsEditorWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Export complete",
-            f"Exported {len(rows)} asset(s) to:\n{path}",
+            f"Exported {len(rows)} asset(s) and "
+            f"{len(related_bundles)} bundle(s) to:\n{path}",
         )
 
     def export_selected_assets(self):
@@ -4146,7 +4238,11 @@ class AssetsEditorWindow(QMainWindow):
         self._export_asset_rows(rows, "Export selected assets")
 
     def export_asset_library(self):
-        self._export_asset_rows(self.items, "Export Project Asset Library")
+        self._export_asset_rows(
+            self.items,
+            "Export Project Asset Library",
+            include_all_bundles=True,
+        )
 
     def export_assets_csv(self):
         path, _selected_filter = QFileDialog.getSaveFileName(
@@ -4203,7 +4299,49 @@ class AssetsEditorWindow(QMainWindow):
         except AssetPackError as exc:
             QMessageBox.critical(self, "Import failed", str(exc))
             return
+        imported_bundles = payload.get("related", {}).get(
+            "asset_bundles", []
+        )
+        remapped_bundles, bundle_remap_result = remap_asset_bundles(
+            imported_bundles,
+            result.get("source_to_target", {}),
+        )
+        bundle_result = {
+            "added": 0,
+            "mapped": 0,
+            "rejected": 0,
+        }
+        merged_bundles = list(self.bundle_items)
+        if remapped_bundles:
+            bundle_marshalling = AssetImportMarshallingDialog(
+                self,
+                remapped_bundles,
+                self.bundle_items,
+                asset_label="bundle",
+            )
+            if bundle_marshalling.exec() != QDialog.Accepted:
+                return
+            try:
+                merged_bundles, bundle_result = marshal_asset_rows(
+                    self.bundle_items,
+                    remapped_bundles,
+                    bundle_marshalling.resolutions,
+                )
+            except AssetPackError as exc:
+                QMessageBox.critical(self, "Import failed", str(exc))
+                return
+
         self.items = merged
+        if bundle_result.get("added", 0):
+            self.bundle_items = normalise_asset_bundles(
+                merged_bundles,
+                [
+                    row.get("id")
+                    for row in self.items
+                    if isinstance(row, dict)
+                ],
+            )
+            self.bundles_changed = True
 
         imported_categories = payload.get("related", {}).get(
             "asset_categories", []
@@ -4247,7 +4385,12 @@ class AssetsEditorWindow(QMainWindow):
             "Import complete",
             f"Created: {result['added']}\n"
             f"Mapped to existing: {result['mapped']}\n"
-            f"Rejected: {result['rejected']}",
+            f"Rejected: {result['rejected']}\n"
+            f"Bundles created: {bundle_result['added']}\n"
+            f"Bundles mapped to existing: {bundle_result['mapped']}\n"
+            f"Bundles rejected: {bundle_result['rejected']}\n"
+            f"Bundles skipped after asset rejection: "
+            f"{bundle_remap_result['skipped']}",
         )
 
     def _show_context_menu(self, pos):
@@ -4285,6 +4428,8 @@ class AssetsEditorWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.critical(self, "Save assets", str(exc))
             return
+        if self.bundles_changed and callable(self.on_save_bundles):
+            self.on_save_bundles(self.bundle_items)
         self.close()
 
 
@@ -5348,7 +5493,11 @@ class RoomTypeEditorDialog(QDialog):
             self.seed.get("asset_bundle_assignments", []),
             [bundle["id"] for bundle in self.asset_bundles],
         )
+        self.bundle_excluded_asset_ids = clean_bundle_asset_exclusions(
+            self.seed.get("asset_bundle_excluded_asset_ids", [])
+        )
         self.result = None
+        self._refreshing_total = False
 
         self.asset_rows_by_id = self._seed_asset_rows_by_id()
 
@@ -5564,11 +5713,18 @@ class RoomTypeEditorDialog(QDialog):
         )
         if dialog.exec() != QDialog.Accepted or not dialog.result:
             return
+        selected_bundles = [
+            bundle_without_excluded_assets(
+                bundle,
+                self.bundle_excluded_asset_ids,
+            )
+            for bundle in dialog.result
+        ]
         existing_rows = self._checked_asset_rows()
-        merged = merge_selected_bundles(existing_rows, dialog.result)
+        merged = merge_selected_bundles(existing_rows, selected_bundles)
         merged_connections = merge_selected_bundle_connections(
             self.connections_editor.connections(),
-            dialog.result,
+            selected_bundles,
             existing_asset_rows=existing_rows,
         )
         self.bundle_assignments = merge_bundle_assignments(
@@ -5741,6 +5897,16 @@ class RoomTypeEditorDialog(QDialog):
         return result
 
     def _refresh_total(self, *_):
+        if self._refreshing_total:
+            return
+
+        self._refreshing_total = True
+        try:
+            self._refresh_total_impl()
+        finally:
+            self._refreshing_total = False
+
+    def _refresh_total_impl(self):
         assignments = []
 
         self.assets_table.blockSignals(True)
@@ -5876,6 +6042,11 @@ class RoomTypeEditorDialog(QDialog):
                 "asset_bundle_assignments": clean_bundle_assignments(
                     self.bundle_assignments,
                     [bundle["id"] for bundle in self.asset_bundles],
+                ),
+                "asset_bundle_excluded_asset_ids": (
+                    clean_bundle_asset_exclusions(
+                        self.bundle_excluded_asset_ids
+                    )
                 ),
             }
             super().accept()
@@ -8892,6 +9063,9 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         room_type["asset_bundle_assignments"] = updated[
             "asset_bundle_assignments"
         ]
+        room_type["asset_bundle_excluded_asset_ids"] = updated[
+            "asset_bundle_excluded_asset_ids"
+        ]
         room_type["asset_connections"] = updated["asset_connections"]
         final_asset_ids = set(room_type["asset_ids"])
         data_ports_by_asset_id = {
@@ -9043,6 +9217,9 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         room_type["asset_bundle_assignments"] = updated[
             "asset_bundle_assignments"
         ]
+        room_type["asset_bundle_excluded_asset_ids"] = updated[
+            "asset_bundle_excluded_asset_ids"
+        ]
         room_type["asset_connections"] = updated["asset_connections"]
         final_asset_ids = set(room_type["asset_ids"])
         data_ports_by_asset_id = {
@@ -9163,12 +9340,19 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         )
         if not reason:
             return
+        excluded_asset_ids = clean_bundle_asset_exclusions(
+            room_type.get("asset_bundle_excluded_asset_ids", [])
+        )
+        selected_bundles = [
+            bundle_without_excluded_assets(bundle, excluded_asset_ids)
+            for bundle in dialog.result
+        ]
 
         before_qty = {
             row["asset_id"]: int(row.get("qty", 1) or 1)
             for row in before_rows
         }
-        rows = merge_selected_bundles(before_rows, dialog.result)
+        rows = merge_selected_bundles(before_rows, selected_bundles)
         final_asset_ids = {row["asset_id"] for row in rows}
         data_ports_by_asset_id = {
             asset_id: ports
@@ -9190,7 +9374,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                 "asset_connections",
                 room_type.get("connections", []),
             ),
-            dialog.result,
+            selected_bundles,
             existing_asset_rows=before_rows,
         )
         for asset_id, ports in data_ports_by_asset_id.items():

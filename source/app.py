@@ -130,6 +130,7 @@ from dialogs import (
     RoomTypeAssetScenarioDialog,
     AssetCapabilityOverlapDialog,
 )
+from room_bundle_assignment_dialog import RoomBundleAssignmentWizard
 from advanced_dialogs import (
     ConnectionEditorWindow,
     DataPointDepartmentsBulkDialog,
@@ -4124,6 +4125,17 @@ class CableRouteEditor(QMainWindow):
         asset_bundles_action = tools_menu.addAction("Asset Bundles")
         set_action_icon(asset_bundles_action, "collection")
         asset_bundles_action.triggered.connect(self.manage_asset_bundles)
+
+        room_bundle_assignment_action = tools_menu.addAction(
+            "Assign Asset Bundles to Room Types..."
+        )
+        set_action_icon(
+            room_bundle_assignment_action,
+            "file-earmark-spreadsheet",
+        )
+        room_bundle_assignment_action.triggered.connect(
+            self.assign_asset_bundles_to_room_types
+        )
 
         capability_overlap_action = tools_menu.addAction("Asset Capability Overlap Matrix")
         set_action_icon(capability_overlap_action, "tags")
@@ -12936,24 +12948,190 @@ class CableRouteEditor(QMainWindow):
             asset_categories_by_id,
         )
         if dialog.exec() == QDialog.Accepted and dialog.result is not None:
-            from asset_bundles import sync_room_types_for_bundle_updates
+            self._save_asset_bundles(dialog.result)
 
-            old_bundles = deepcopy(self.store.data.get("asset_bundles", []))
-            self.push_undo_state("Save asset bundles")
-            changed_room_ids = sync_room_types_for_bundle_updates(
-                self.store.data.get("room_types", []),
-                old_bundles,
-                dialog.result,
+    def _save_asset_bundles(self, items):
+        from asset_bundles import sync_room_types_for_bundle_updates
+
+        old_bundles = deepcopy(self.store.data.get("asset_bundles", []))
+        self.push_undo_state("Save asset bundles")
+        changed_room_ids = sync_room_types_for_bundle_updates(
+            self.store.data.get("room_types", []),
+            old_bundles,
+            items,
+        )
+        self.store.data["asset_bundles"] = items
+        if changed_room_ids:
+            self.store.sync_all_room_type_quantities()
+        status = f"Saved {len(items)} asset bundle(s)"
+        if changed_room_ids:
+            status += f"; updated {len(changed_room_ids)} linked room type(s)"
+        self.set_status(status)
+
+    def assign_asset_bundles_to_room_types(self):
+        room_types = self.store.data.get("room_types", []) or []
+        bundles = self.store.data.get("asset_bundles", []) or []
+        if not room_types:
+            QMessageBox.information(
+                self,
+                "Assign Asset Bundles",
+                "Create at least one room type before assigning bundles.",
             )
-            self.store.data["asset_bundles"] = dialog.result
-            if changed_room_ids:
-                self.store.sync_all_room_type_quantities()
-            status = f"Saved {len(dialog.result)} asset bundle(s)"
-            if changed_room_ids:
-                status += (
-                    f"; updated {len(changed_room_ids)} linked room type(s)"
+            return
+        if not bundles:
+            QMessageBox.information(
+                self,
+                "Assign Asset Bundles",
+                "Create or import at least one asset bundle first.",
+            )
+            return
+        assets_by_id = {
+            str(asset.get("id", "") or "").strip(): asset
+            for asset in self.store.data.get("assets", []) or []
+            if isinstance(asset, dict)
+            and str(asset.get("id", "") or "").strip()
+        }
+        dialog = RoomBundleAssignmentWizard(
+            self,
+            room_types,
+            bundles,
+            assets_by_id,
+        )
+        if dialog.exec() != QDialog.Accepted or dialog.result is None:
+            return
+        changes = dialog.result.get("rooms", [])
+        overlap_resolutions = dialog.result.get(
+            "overlap_resolutions", []
+        )
+        if not changes and not overlap_resolutions:
+            self.set_status("Room type bundle assignments were unchanged")
+            return
+
+        from asset_bundles import (
+            reconcile_bundle_assignments,
+            resolve_room_bundle_asset_overlaps,
+        )
+
+        prepared = []
+        try:
+            changes_by_index = {
+                int(change.get("room_index", -1)): change
+                for change in changes
+            }
+            resolutions_by_index = {}
+            for resolution in overlap_resolutions:
+                index = int(resolution.get("room_index", -1))
+                asset_id = str(
+                    resolution.get("asset_id", "") or ""
+                ).strip()
+                if asset_id:
+                    resolutions_by_index.setdefault(index, []).append(asset_id)
+            affected_indices = sorted(
+                set(changes_by_index) | set(resolutions_by_index)
+            )
+            for index in affected_indices:
+                if not 0 <= index < len(room_types):
+                    raise ValueError("A selected room type is no longer available.")
+                room_type = room_types[index]
+                change = changes_by_index.get(index)
+                updated = (
+                    reconcile_bundle_assignments(
+                        room_type,
+                        bundles,
+                        change.get("assignments", []),
+                    )
+                    if change is not None
+                    else deepcopy(room_type)
                 )
-            self.set_status(status)
+                resolved_asset_ids = resolutions_by_index.get(index, [])
+                if resolved_asset_ids:
+                    updated = resolve_room_bundle_asset_overlaps(
+                        updated,
+                        resolved_asset_ids,
+                    )
+                prepared.append(
+                    (
+                        room_type,
+                        updated,
+                        change,
+                        resolved_asset_ids,
+                    )
+                )
+        except (TypeError, ValueError) as exc:
+            QMessageBox.critical(self, "Assign Asset Bundles", str(exc))
+            return
+
+        reason = str(dialog.result.get("reason", "") or "").strip()
+        self.push_undo_state("Assign asset bundles to room types")
+        for room_type, updated, change, resolved_asset_ids in prepared:
+            before = {
+                row["bundle_id"]: int(row["qty"])
+                for row in (
+                    change.get("before_assignments", [])
+                    if change is not None
+                    else []
+                )
+            }
+            after = {
+                row["bundle_id"]: int(row["qty"])
+                for row in (
+                    change.get("assignments", [])
+                    if change is not None
+                    else []
+                )
+            }
+            details = []
+            for bundle_id in sorted(after.keys() - before.keys()):
+                details.append(
+                    f"added bundle {bundle_id} × {after[bundle_id]}"
+                )
+            for bundle_id in sorted(before.keys() - after.keys()):
+                details.append(
+                    f"removed bundle {bundle_id} × {before[bundle_id]}"
+                )
+            for bundle_id in sorted(before.keys() & after.keys()):
+                if before[bundle_id] != after[bundle_id]:
+                    details.append(
+                        f"changed bundle {bundle_id} quantity from "
+                        f"{before[bundle_id]} to {after[bundle_id]}"
+                    )
+            for asset_id in sorted(set(resolved_asset_ids)):
+                details.append(
+                    f"kept one {asset_id} and excluded future bundle "
+                    "re-addition for this room type"
+                )
+            if reason:
+                details.append(f"Reason: {reason}")
+            room_type_id = (
+                change.get("room_type_id", "")
+                if change is not None
+                else str(room_type.get("id", "") or "").strip()
+            )
+            room_type_name = (
+                change.get("room_type_name", "")
+                if change is not None
+                else str(room_type.get("name", "") or "").strip()
+            )
+            room_type.clear()
+            room_type.update(updated)
+            self._record_room_type_change(
+                "Room Type Bundle Assignment Matrix",
+                room_type_id,
+                room_type_name,
+                details,
+            )
+            self._append_room_type_audit_history(
+                "asset_bundles_bulk_assigned",
+                room_type_id,
+                room_type_name,
+                details,
+            )
+        self.store.sync_all_room_type_quantities()
+        self.refresh_canvas()
+        self.set_status(
+            f"Updated asset bundle assignments / overlaps for "
+            f"{len(prepared)} room type(s)"
+        )
 
     def manage_data_points(self):
         columns = [
@@ -17666,6 +17844,8 @@ class CableRouteEditor(QMainWindow):
             on_condense_assets=self._condense_assets,
             on_expand_asset=self._expand_asset,
             retired_asset_ids=self.store.data.get("retired_asset_ids", []),
+            bundle_items=self.store.data.get("asset_bundles", []),
+            on_save_bundles=self._save_asset_bundles,
         )
 
     def manage_asset_categories(self):
