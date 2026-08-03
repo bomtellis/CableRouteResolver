@@ -3426,6 +3426,7 @@ class CableRouteEditor(QMainWindow):
         data_ports_by_asset_id,
         bundle_assignments=None,
         asset_connections=None,
+        bundle_excluded_asset_ids=None,
     ):
         room_type_id = str(room_type_id or "").strip()
         if not room_type_id:
@@ -3446,6 +3447,11 @@ class CableRouteEditor(QMainWindow):
                     for asset_id in room_type.get("asset_ids", []) or []
                 ]
             )
+            if isinstance(room_type, dict)
+            else []
+        )
+        before_bundle_excluded_asset_ids = (
+            list(room_type.get("asset_bundle_excluded_asset_ids", []) or [])
             if isinstance(room_type, dict)
             else []
         )
@@ -3511,6 +3517,14 @@ class CableRouteEditor(QMainWindow):
                     asset_connections,
                     room_type["asset_ids"],
                 )
+            if bundle_excluded_asset_ids is not None:
+                from asset_bundles import clean_bundle_asset_exclusions
+
+                room_type["asset_bundle_excluded_asset_ids"] = (
+                    clean_bundle_asset_exclusions(
+                        bundle_excluded_asset_ids,
+                    )
+                )
 
         ports_by_asset = {
             str(asset_id or "").strip(): ports
@@ -3551,6 +3565,14 @@ class CableRouteEditor(QMainWindow):
             before_ports=before_ports,
             after_ports=ports_by_asset,
             asset_names=asset_names,
+            before_bundle_excluded_asset_ids=(
+                before_bundle_excluded_asset_ids
+            ),
+            after_bundle_excluded_asset_ids=(
+                room_type.get("asset_bundle_excluded_asset_ids", [])
+                if isinstance(room_type, dict)
+                else []
+            ),
         )
         self.store.data["room_type_asset_staging"] = staging
         details = self._room_assignment_change_details(
@@ -3716,6 +3738,12 @@ class CableRouteEditor(QMainWindow):
                     for value in room_type.get("asset_ids", []) or []
                 ]
             )
+            current_bundle_excluded_asset_ids = list(
+                room_type.get("asset_bundle_excluded_asset_ids", []) or []
+            )
+            target_bundle_excluded_asset_ids = list(
+                current_bundle_excluded_asset_ids
+            )
             target_by_id = {row["asset_id"]: row for row in before_rows}
             for change in changes:
                 asset_id = str(change.get("asset_id", "") or "").strip()
@@ -3726,6 +3754,13 @@ class CableRouteEditor(QMainWindow):
                         target_by_id[asset_id] = restored[0]
                 else:
                     target_by_id.pop(asset_id, None)
+                if "before_bundle_excluded_asset_ids" in change:
+                    target_bundle_excluded_asset_ids = list(
+                        change.get(
+                            "before_bundle_excluded_asset_ids", []
+                        )
+                        or []
+                    )
             after_rows = sorted(target_by_id.values(), key=lambda row: row["asset_id"].casefold())
             staging = update_room_type_asset_staging(
                 staging,
@@ -3736,9 +3771,26 @@ class CableRouteEditor(QMainWindow):
                 before_ports={},
                 after_ports={},
                 asset_names=asset_names,
+                before_bundle_excluded_asset_ids=(
+                    current_bundle_excluded_asset_ids
+                ),
+                after_bundle_excluded_asset_ids=(
+                    target_bundle_excluded_asset_ids
+                ),
             )
             room_type["assets"] = after_rows
             room_type["asset_ids"] = [row["asset_id"] for row in after_rows]
+            if any(
+                "before_bundle_excluded_asset_ids" in change
+                for change in changes
+            ):
+                from asset_bundles import clean_bundle_asset_exclusions
+
+                room_type["asset_bundle_excluded_asset_ids"] = (
+                    clean_bundle_asset_exclusions(
+                        target_bundle_excluded_asset_ids
+                    )
+                )
 
         for change in asset_changes:
             asset_id = str(change.get("asset_id", "") or "").strip()
@@ -3830,6 +3882,16 @@ class CableRouteEditor(QMainWindow):
             restored_rows = clean_assignment_rows(record.get("before", []))
             room_type["assets"] = restored_rows
             room_type["asset_ids"] = [row["asset_id"] for row in restored_rows]
+            if "before_bundle_excluded_asset_ids" in record:
+                from asset_bundles import clean_bundle_asset_exclusions
+
+                room_type["asset_bundle_excluded_asset_ids"] = (
+                    clean_bundle_asset_exclusions(
+                        record.get(
+                            "before_bundle_excluded_asset_ids", []
+                        )
+                    )
+                )
             rooms.pop(reset_room_id, None)
 
         assets_by_id = {

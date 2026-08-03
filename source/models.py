@@ -17,8 +17,8 @@ from project_sqlite import (
 )
 from room_type_asset_staging import staged_changes as room_type_asset_staged_changes
 from asset_bundles import (
-    clean_bundle_asset_exclusions,
     clean_bundle_assignments,
+    inferred_room_bundle_asset_exclusions,
     normalise_asset_bundles,
     resolve_room_type_asset_connections,
 )
@@ -479,8 +479,9 @@ class JsonStore:
                 ],
             )
             room_type["asset_bundle_excluded_asset_ids"] = (
-                clean_bundle_asset_exclusions(
-                    room_type.get("asset_bundle_excluded_asset_ids", [])
+                inferred_room_bundle_asset_exclusions(
+                    room_type,
+                    self.data.get("asset_bundles", []),
                 )
             )
 

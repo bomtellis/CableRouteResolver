@@ -207,6 +207,86 @@ def _bundle_asset_contributions(
     return overlaps_by_asset
 
 
+def room_asset_source_labels(room_type, bundles) -> dict[str, str]:
+    """Return display labels for each saved room asset's assignment source.
+
+    Linked bundle quantities are materialised into the room's saved asset
+    quantities. Any saved quantity beyond those linked contributions is a
+    manual assignment. Assets can therefore legitimately list more than one
+    bundle and ``Manual`` in the same cell.
+    """
+
+    room_type = room_type if isinstance(room_type, dict) else {}
+    saved_rows = clean_asset_rows(
+        room_type.get("assets", [])
+        or room_type.get("asset_ids", [])
+    )
+    contributions_by_asset = _bundle_asset_contributions(
+        room_type.get("asset_bundle_assignments", []),
+        bundles,
+        room_type.get("asset_bundle_excluded_asset_ids", []),
+    )
+    result = {}
+    for row in saved_rows:
+        asset_id = row["asset_id"]
+        contributions = contributions_by_asset.get(asset_id, [])
+        labels = []
+        bundle_total = 0
+        for contribution in contributions:
+            bundle_id = _text(contribution.get("bundle_id"))
+            bundle_name = _text(contribution.get("bundle_name")) or bundle_id
+            label = (
+                bundle_id
+                if bundle_name.casefold() == bundle_id.casefold()
+                else f"{bundle_name} [{bundle_id}]"
+            )
+            if label and label not in labels:
+                labels.append(label)
+            bundle_total += max(
+                0,
+                int(contribution.get("total_qty", 0) or 0),
+            )
+        saved_quantity = max(1, int(row.get("qty", 1) or 1))
+        if not labels or saved_quantity > bundle_total:
+            labels.append("Manual")
+        result[asset_id] = "; ".join(labels)
+    return result
+
+
+def inferred_room_bundle_asset_exclusions(room_type, bundles) -> list[str]:
+    """Preserve bundle assets that are already absent from a room type.
+
+    Bundle assignments are materialised into ``room_type["assets"]``. If an
+    assigned bundle contains an asset that is not present in those saved rows,
+    the missing asset represents a room-specific omission and must be recorded
+    so later bundle quantity or recipe changes do not silently restore it.
+    """
+
+    room_type = room_type if isinstance(room_type, dict) else {}
+    existing = clean_bundle_asset_exclusions(
+        room_type.get("asset_bundle_excluded_asset_ids", [])
+    )
+    expected_asset_ids = set(
+        _bundle_asset_contributions(
+            room_type.get("asset_bundle_assignments", []),
+            bundles,
+        )
+    )
+    present_asset_ids = {
+        row["asset_id"]
+        for row in clean_asset_rows(
+            room_type.get("assets", [])
+            or room_type.get("asset_ids", [])
+        )
+    }
+    return clean_bundle_asset_exclusions(
+        [
+            *existing,
+            *sorted(expected_asset_ids - present_asset_ids, key=str.casefold),
+        ]
+    )
+
+
 def bundle_asset_overlaps(assignments, bundles) -> list[dict]:
     """Describe assets contributed by more than one assigned bundle.
 

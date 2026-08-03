@@ -6,6 +6,8 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from time import monotonic
 
+from asset_bundles import clean_bundle_asset_exclusions
+
 
 def _text(value) -> str:
     return str(value if value is not None else "").strip()
@@ -124,6 +126,20 @@ def staged_changes(staging) -> list[dict]:
                     ),
                     "before": deepcopy(before.get(asset_id)),
                     "after": deepcopy(after.get(asset_id)),
+                    "before_bundle_excluded_asset_ids": (
+                        clean_bundle_asset_exclusions(
+                            record.get(
+                                "before_bundle_excluded_asset_ids", []
+                            )
+                        )
+                    ),
+                    "after_bundle_excluded_asset_ids": (
+                        clean_bundle_asset_exclusions(
+                            record.get(
+                                "after_bundle_excluded_asset_ids", []
+                            )
+                        )
+                    ),
                 }
             )
     for asset_id, record in (state.get("assets", {}) or {}).items():
@@ -262,6 +278,8 @@ def update_staging(
     before_ports,
     after_ports,
     asset_names,
+    before_bundle_excluded_asset_ids=None,
+    after_bundle_excluded_asset_ids=None,
 ) -> dict:
     state = deepcopy(staging) if isinstance(staging, dict) else {}
     state.setdefault("started_at", datetime.now(timezone.utc).isoformat())
@@ -278,8 +296,23 @@ def update_staging(
         "asset_names": {
             _text(key): _text(value) for key, value in (asset_names or {}).items()
         },
+        "before_bundle_excluded_asset_ids": clean_bundle_asset_exclusions(
+            (
+                original.get("before_bundle_excluded_asset_ids", [])
+                if original
+                else before_bundle_excluded_asset_ids
+            )
+            or []
+        ),
+        "after_bundle_excluded_asset_ids": clean_bundle_asset_exclusions(
+            after_bundle_excluded_asset_ids or []
+        ),
     }
-    if record["before"] == record["after"]:
+    if (
+        record["before"] == record["after"]
+        and record["before_bundle_excluded_asset_ids"]
+        == record["after_bundle_excluded_asset_ids"]
+    ):
         rooms.pop(room_id, None)
     else:
         rooms[room_id] = record
