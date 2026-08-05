@@ -1,0 +1,2228 @@
+{
+  "format": "cable-route-resolver-asset-pack",
+  "version": 1,
+  "library_type": "assets",
+  "name": "Use Case Component Bundles 2026-07-30",
+  "assets": [
+    {
+      "id": "A1",
+      "name": "Computer",
+      "ADB_Code": "COM949",
+      "Group": "3.2",
+      "connection_type": "wired",
+      "category_id": "AC8",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [
+        {
+          "connector_type": "RJ45",
+          "id": "input-network",
+          "name": "Network",
+          "port_type": "network",
+          "qty": 1
+        },
+        {
+          "connector_type": "IEC C14",
+          "id": "input-power-2",
+          "name": "Power",
+          "port_type": "power",
+          "qty": 1
+        },
+        {
+          "connector_type": "USB A",
+          "id": "input-peripheral-3",
+          "name": "Peripheral",
+          "port_type": "peripheral",
+          "qty": 4
+        },
+        {
+          "connector_type": "USB C",
+          "id": "input-peripheral-4",
+          "name": "Peripheral",
+          "port_type": "peripheral",
+          "qty": 2
+        }
+      ],
+      "output_port_definitions": [
+        {
+          "connector_type": "USB C",
+          "id": "output-video-1",
+          "name": "Video out",
+          "port_type": "video",
+          "qty": 1
+        },
+        {
+          "connector_type": "Displayport",
+          "id": "output-video-2",
+          "name": "Video out",
+          "port_type": "video",
+          "qty": 1
+        }
+      ],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "computer; monitor",
+      "capabilities": [
+        "computer",
+        "monitor"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 25.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 25.0,
+      "expected_packet_rate_pps": 2500.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A17",
+      "name": "Water flow sensor",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wired",
+      "category_id": "AC2",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "iot; water flow",
+      "capabilities": [
+        "iot",
+        "water flow"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.02,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.02,
+      "expected_packet_rate_pps": 10.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A18",
+      "name": "CAMERA, fish eye lens, 360º image sensor, lens rotation, tampering motion detection",
+      "ADB_Code": "CAM904",
+      "Group": "2.2",
+      "connection_type": "wired",
+      "category_id": "AC3",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "facility security; cctv",
+      "capabilities": [
+        "facility security",
+        "cctv"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 6.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 6.0,
+      "expected_packet_rate_pps": 750.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A19",
+      "name": "Smart Bed",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wired",
+      "category_id": "AC4",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "bed; smart bed",
+      "capabilities": [
+        "bed",
+        "smart bed"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.5,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.5,
+      "expected_packet_rate_pps": 100.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A23",
+      "name": "BOOKING SYSTEM, digital, wall mounted screen",
+      "ADB_Code": "COM9006",
+      "Group": "2.2",
+      "connection_type": "wired",
+      "category_id": "AC7",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "room booking; display; monitor; meeting room",
+      "capabilities": [
+        "room booking",
+        "display",
+        "monitor",
+        "meeting room"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 3.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 3.0,
+      "expected_packet_rate_pps": 300.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A24",
+      "name": "External room display",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wired",
+      "category_id": "AC7",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "room display; external",
+      "capabilities": [
+        "room display",
+        "external"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A25",
+      "name": "SCANNER, RFID",
+      "ADB_Code": "SCN9002",
+      "Group": "3.2",
+      "connection_type": "wireless",
+      "category_id": "AC7",
+      "qty": 1,
+      "input_ports": 0,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 0,
+      "capability_keywords": "rfid; scanner; rfid scanner",
+      "capabilities": [
+        "rfid",
+        "scanner",
+        "rfid scanner"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.1,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.1,
+      "expected_packet_rate_pps": 50.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A29",
+      "name": "Multi sensor",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wired",
+      "category_id": "AC2",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "iot; sensor; temperature; humidity; co2; sound; lux",
+      "capabilities": [
+        "iot",
+        "sensor",
+        "temperature",
+        "humidity",
+        "co2",
+        "sound",
+        "lux"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A30",
+      "name": "Refrigerator",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wired",
+      "category_id": "AC15",
+      "qty": 1,
+      "input_ports": 0,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 0,
+      "capability_keywords": "cold chain; refrigerator",
+      "capabilities": [
+        "cold chain",
+        "refrigerator"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.05,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.05,
+      "expected_packet_rate_pps": 20.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A31",
+      "name": "Freezer",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wired",
+      "category_id": "AC15",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "cold chain; freezer",
+      "capabilities": [
+        "cold chain",
+        "freezer"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.05,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.05,
+      "expected_packet_rate_pps": 20.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "Engineering planning estimate for average busy-hour traffic; revise against measured application/device telemetry when available.",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A45",
+      "name": "WIRELESS ACCESS POINT, ceiling mounted",
+      "ADB_Code": "WAP904",
+      "Group": "2.2",
+      "connection_type": "wired",
+      "category_id": "AC6",
+      "qty": 1,
+      "input_ports": 0,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 0,
+      "capability_keywords": "wireless access",
+      "capabilities": [
+        "wireless access"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A57",
+      "name": "RTLS",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wireless",
+      "category_id": "AC2",
+      "qty": 1,
+      "input_ports": 0,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 0,
+      "capability_keywords": "rtls",
+      "capabilities": [
+        "rtls"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A70",
+      "name": "Barcode scanner",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wireless",
+      "category_id": "AC7",
+      "qty": 1,
+      "input_ports": 0,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 0,
+      "capability_keywords": "scanner; barcode",
+      "capabilities": [
+        "scanner",
+        "barcode"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A72",
+      "name": "Self check-in Kiosk",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wired",
+      "category_id": "AC15",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "kiosk; check in; self-service",
+      "capabilities": [
+        "kiosk",
+        "check in",
+        "self-service"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A80",
+      "name": "Digital signage",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wired",
+      "category_id": "AC15",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "signage; digital signage; wayfinding; screen",
+      "capabilities": [
+        "signage",
+        "digital signage",
+        "wayfinding",
+        "screen"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A95",
+      "name": "Control room Intercom",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wired",
+      "category_id": "AC17",
+      "qty": 1,
+      "input_ports": 0,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 0,
+      "capability_keywords": "patient to control room; intercom",
+      "capabilities": [
+        "patient to control room",
+        "intercom"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A104",
+      "name": "Desktop Printer",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wired",
+      "category_id": "AC18",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [
+        {
+          "connector_type": "RJ45",
+          "id": "input-network",
+          "name": "Network",
+          "port_type": "network",
+          "qty": 1
+        }
+      ],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "printer",
+      "capabilities": [
+        "printer"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A122",
+      "name": "DETECTOR, movement",
+      "ADB_Code": "DET9003",
+      "Group": "1",
+      "connection_type": "wired",
+      "category_id": "AC2",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "",
+      "capabilities": [],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "A127",
+      "name": "Medical device integration box",
+      "ADB_Code": "",
+      "Group": "",
+      "connection_type": "wired",
+      "category_id": "AC4",
+      "qty": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "input_port_definitions": [],
+      "output_port_definitions": [],
+      "is_connection_asset": false,
+      "data_points": 1,
+      "capability_keywords": "medical; device; integration",
+      "capabilities": [
+        "medical",
+        "device",
+        "integration"
+      ],
+      "connection_method": "",
+      "east_west_concurrency_factor": 1.0,
+      "expected_bandwidth_mbps": 0.0,
+      "expected_east_west_bandwidth_mbps": 0.0,
+      "expected_north_south_bandwidth_mbps": 0.0,
+      "expected_packet_rate_pps": 0.0,
+      "north_south_concurrency_factor": 1.0,
+      "notes": "",
+      "review_flags": [],
+      "review_status": "",
+      "scenario_group": "",
+      "source_aldt_rooms_group": "",
+      "source_boq_group": "",
+      "source_categories": [],
+      "source_row": "",
+      "source_sheet": "",
+      "source_workbook": "",
+      "traffic_estimate_basis": "",
+      "usage_profile_id": ""
+    },
+    {
+      "id": "SB-A001",
+      "name": "BIM Data Integration Endpoint",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wired",
+      "connection_method": "",
+      "data_points": 0,
+      "input_ports": 0,
+      "output_ports": 0,
+      "capabilities": [
+        "bim",
+        "data integration",
+        "digital twin"
+      ],
+      "capability_keywords": "bim; data integration; digital twin",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "BIM data"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A002",
+      "name": "People Counting Sensor",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wired",
+      "connection_method": "PoE Ethernet (assumption)",
+      "data_points": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "capabilities": [
+        "iot",
+        "people counting",
+        "occupancy analytics"
+      ],
+      "capability_keywords": "iot; people counting; occupancy analytics",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "People counting sensors"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A003",
+      "name": "Networked DALI2 / KNX Controller",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wired",
+      "connection_method": "Ethernet building-controls interface (assumption)",
+      "data_points": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "capabilities": [
+        "building controls",
+        "dali2",
+        "knx",
+        "lighting control"
+      ],
+      "capability_keywords": "building controls; dali2; knx; lighting control",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "Networked DALI2 or KNX controller",
+        "Networked KNX or DALI2 controller"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A004",
+      "name": "IoT Temperature Sensor",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wireless",
+      "connection_method": "Wireless IoT (protocol to be confirmed)",
+      "data_points": 0,
+      "input_ports": 0,
+      "output_ports": 0,
+      "capabilities": [
+        "iot",
+        "temperature",
+        "environmental monitoring"
+      ],
+      "capability_keywords": "iot; temperature; environmental monitoring",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "Temperature sensors"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A005",
+      "name": "Bin Fill-Level IoT Sensor",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wireless",
+      "connection_method": "Wireless IoT (protocol to be confirmed)",
+      "data_points": 0,
+      "input_ports": 0,
+      "output_ports": 0,
+      "capabilities": [
+        "iot",
+        "bin fill level",
+        "waste monitoring"
+      ],
+      "capability_keywords": "iot; bin fill level; waste monitoring",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "Bin fill level IoT sensor"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A006",
+      "name": "Multi-Technology RTLS Tag",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wireless",
+      "connection_method": "BLE / UWB / RFID (variant to be confirmed)",
+      "data_points": 0,
+      "input_ports": 0,
+      "output_ports": 0,
+      "capabilities": [
+        "rtls",
+        "ble",
+        "uwb",
+        "rfid",
+        "location tag"
+      ],
+      "capability_keywords": "rtls; ble; uwb; rfid; location tag",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "RTLS tag",
+        "BLE tags / UWB tags / RFID tags",
+        "BLE tags"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A007",
+      "name": "Gas Manifold Telemetry IoT Sensor",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wireless",
+      "connection_method": "Wireless IoT (protocol to be confirmed)",
+      "data_points": 0,
+      "input_ports": 0,
+      "output_ports": 0,
+      "capabilities": [
+        "iot",
+        "medical gas",
+        "manifold",
+        "telemetry"
+      ],
+      "capability_keywords": "iot; medical gas; manifold; telemetry",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "Manifold telemetry IoT sensors"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A008",
+      "name": "Smart Enabled Gas Manifold",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wired",
+      "connection_method": "Ethernet (assumption)",
+      "data_points": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "capabilities": [
+        "medical gas",
+        "smart manifold",
+        "telemetry"
+      ],
+      "capability_keywords": "medical gas; smart manifold; telemetry",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "Smart enabled gas manifolds"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A009",
+      "name": "RFID Asset Tag",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wireless",
+      "connection_method": "Passive or active RFID (to be confirmed)",
+      "data_points": 0,
+      "input_ports": 0,
+      "output_ports": 0,
+      "capabilities": [
+        "rfid",
+        "asset tag",
+        "identification"
+      ],
+      "capability_keywords": "rfid; asset tag; identification",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "RFID tags"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A010",
+      "name": "Autonomous Mobile Robot",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wireless",
+      "connection_method": "Wi-Fi (assumption)",
+      "data_points": 0,
+      "input_ports": 0,
+      "output_ports": 0,
+      "capabilities": [
+        "amr",
+        "robotics",
+        "autonomous logistics"
+      ],
+      "capability_keywords": "amr; robotics; autonomous logistics",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "Autonomous mobile robots"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A011",
+      "name": "Digital Software Service Layer",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wired",
+      "connection_method": "",
+      "data_points": 0,
+      "input_ports": 0,
+      "output_ports": 0,
+      "capabilities": [
+        "software",
+        "integration",
+        "platform service"
+      ],
+      "capability_keywords": "software; integration; platform service",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "Software layer"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A012",
+      "name": "UV / HPV Disinfection Robot",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wireless",
+      "connection_method": "Wi-Fi (assumption)",
+      "data_points": 0,
+      "input_ports": 0,
+      "output_ports": 0,
+      "capabilities": [
+        "robotics",
+        "uv disinfection",
+        "hpv disinfection"
+      ],
+      "capability_keywords": "robotics; uv disinfection; hpv disinfection",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "UV or HPV robot"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A013",
+      "name": "RFID Staff Badge",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wireless",
+      "connection_method": "RFID (frequency and active/passive type to be confirmed)",
+      "data_points": 0,
+      "input_ports": 0,
+      "output_ports": 0,
+      "capabilities": [
+        "rfid",
+        "staff badge",
+        "identity",
+        "access control"
+      ],
+      "capability_keywords": "rfid; staff badge; identity; access control",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "RFID badges"
+      ],
+      "source_file": "pasted-text.txt"
+    },
+    {
+      "id": "SB-A014",
+      "name": "Networked Dynamic Escape Sign",
+      "ADB_Code": "",
+      "Group": "Smart Buildings",
+      "category_id": "CAT-SMART-BUILDINGS",
+      "qty": 1,
+      "connection_type": "wired",
+      "connection_method": "Ethernet or life-safety network (to be confirmed)",
+      "data_points": 1,
+      "input_ports": 1,
+      "output_ports": 0,
+      "capabilities": [
+        "life safety",
+        "dynamic escape signage",
+        "wayfinding"
+      ],
+      "capability_keywords": "life safety; dynamic escape signage; wayfinding",
+      "north_south_concurrency_factor": 1.0,
+      "east_west_concurrency_factor": 1.0,
+      "review_status": "technical_review_required",
+      "review_flags": [
+        "Confirm final device specification and connectivity.",
+        "Confirm bandwidth, power, quantity, and deployment assumptions."
+      ],
+      "notes": "New definition created from the supplied use-case component list. Technical specification and connectivity require design-team review.",
+      "source_components": [
+        "Dynamic escape signage"
+      ],
+      "source_file": "pasted-text.txt"
+    }
+  ],
+  "related": {
+    "asset_categories": [
+      {
+        "id": "AC15",
+        "name": "Specialist Equipment & Logistics"
+      },
+      {
+        "id": "AC17",
+        "name": "Audio Visual & Communications"
+      },
+      {
+        "id": "AC18",
+        "name": "Printing & Identification"
+      },
+      {
+        "id": "AC2",
+        "name": "IoT, Location & Sensors"
+      },
+      {
+        "id": "AC3",
+        "name": "Security, Access & Life Safety"
+      },
+      {
+        "id": "AC4",
+        "name": "Medical Equipment & Integration"
+      },
+      {
+        "id": "AC6",
+        "name": "Network Infrastructure"
+      },
+      {
+        "id": "AC7",
+        "name": "Digital Information Systems"
+      },
+      {
+        "id": "AC8",
+        "name": "Computing & Workstations"
+      },
+      {
+        "id": "CAT-SMART-BUILDINGS",
+        "name": "Smart Buildings"
+      }
+    ],
+    "asset_bundles": [
+      {
+        "id": "UC1-1",
+        "name": "UC1-1",
+        "description": "Digital wayfinding",
+        "assets": [
+          {
+            "asset_id": "A72",
+            "qty": 1
+          },
+          {
+            "asset_id": "A80",
+            "qty": 1
+          },
+          {
+            "asset_id": "A45",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Self-check in Kiosks",
+          "Wayfinding solution",
+          "Wireless access points with BLE"
+        ]
+      },
+      {
+        "id": "UC1-3",
+        "name": "UC1-3",
+        "description": "Visitor management & digital passes",
+        "assets": [
+          {
+            "asset_id": "SB-A001",
+            "qty": 1
+          },
+          {
+            "asset_id": "A95",
+            "qty": 1
+          },
+          {
+            "asset_id": "A104",
+            "qty": 1
+          },
+          {
+            "asset_id": "A70",
+            "qty": 1
+          },
+          {
+            "asset_id": "A72",
+            "qty": 1
+          },
+          {
+            "asset_id": "A80",
+            "qty": 1
+          },
+          {
+            "asset_id": "A45",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "BIM data",
+          "Intercom",
+          "Printer",
+          "QR readers at department entrances and exits",
+          "Self-check in kiosks",
+          "Wayfinding solution",
+          "Wireless access points with BLE"
+        ]
+      },
+      {
+        "id": "UC1-4",
+        "name": "UC1-4",
+        "description": "Live Information Dashboards",
+        "assets": [
+          {
+            "asset_id": "A80",
+            "qty": 1
+          },
+          {
+            "asset_id": "A1",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Digital signage displays",
+          "PC or integrated display content management system"
+        ]
+      },
+      {
+        "id": "UC3-1",
+        "name": "UC3-1",
+        "description": "Real-time occupancy & flow analytics",
+        "assets": [
+          {
+            "asset_id": "SB-A002",
+            "qty": 1
+          },
+          {
+            "asset_id": "A57",
+            "qty": 1
+          },
+          {
+            "asset_id": "A45",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "People counting sensors",
+          "RTLS Anchors / Beacons",
+          "Wireless access points with BLE"
+        ]
+      },
+      {
+        "id": "UC3-3",
+        "name": "UC3-3",
+        "description": "Dynamic room booking and scheduling",
+        "assets": [
+          {
+            "asset_id": "A24",
+            "qty": 1
+          },
+          {
+            "asset_id": "A23",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Room displays",
+          "Room scheduling system"
+        ]
+      },
+      {
+        "id": "UC3-5",
+        "name": "UC3-5",
+        "description": "Digital signage and live information boards",
+        "assets": [
+          {
+            "asset_id": "SB-A001",
+            "qty": 1
+          },
+          {
+            "asset_id": "A80",
+            "qty": 1
+          },
+          {
+            "asset_id": "A45",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "BIM data",
+          "Wayfinding solution",
+          "Wireless access points with BLE"
+        ]
+      },
+      {
+        "id": "UC3-6",
+        "name": "UC3-6",
+        "description": "Intelligent lift destination control",
+        "assets": [
+          {
+            "asset_id": "SB-A001",
+            "qty": 1
+          },
+          {
+            "asset_id": "A80",
+            "qty": 1
+          },
+          {
+            "asset_id": "A45",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "BIM data",
+          "Wayfinding solution",
+          "Wireless access points with BLE"
+        ]
+      },
+      {
+        "id": "UC3-7",
+        "name": "UC3-7",
+        "description": "Smart bed status and occupancy telemetry",
+        "assets": [
+          {
+            "asset_id": "A127",
+            "qty": 1
+          },
+          {
+            "asset_id": "A19",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Medical device integration hardware",
+          "Smart bed"
+        ]
+      },
+      {
+        "id": "UC3-9",
+        "name": "UC3-9",
+        "description": "Bed management system",
+        "assets": [
+          {
+            "asset_id": "A19",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Smart Bed"
+        ]
+      },
+      {
+        "id": "UC4-1",
+        "name": "UC4-1",
+        "description": "Intelligent lighting control",
+        "assets": [
+          {
+            "asset_id": "SB-A003",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Networked DALI2 or KNX controller"
+        ]
+      },
+      {
+        "id": "UC4-2",
+        "name": "UC4-2",
+        "description": "Circadian lighting and comfort scenes",
+        "assets": [
+          {
+            "asset_id": "SB-A003",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Networked KNX or DALI2 controller"
+        ]
+      },
+      {
+        "id": "UC4-3",
+        "name": "UC4-3",
+        "description": "Smart HVAC optimisation (BEMS)",
+        "assets": [
+          {
+            "asset_id": "A29",
+            "qty": 1
+          },
+          {
+            "asset_id": "A122",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Multi-sensor IoT devices",
+          "Occupancy sensors"
+        ]
+      },
+      {
+        "id": "UC4-4",
+        "name": "UC4-4",
+        "description": "Indoor air quality (IAQ) optimisation",
+        "assets": [
+          {
+            "asset_id": "A29",
+            "qty": 1
+          },
+          {
+            "asset_id": "A122",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Multi-sensor IoT devices",
+          "Occupancy sensors"
+        ]
+      },
+      {
+        "id": "UC5-1",
+        "name": "UC5-1",
+        "description": "Environmental monitoring & compliance",
+        "assets": [
+          {
+            "asset_id": "A29",
+            "qty": 1
+          },
+          {
+            "asset_id": "A30",
+            "qty": 1
+          },
+          {
+            "asset_id": "A31",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "IoT devices",
+          "Smart enabled fridges / freezers"
+        ]
+      },
+      {
+        "id": "UC5-2",
+        "name": "UC5-2",
+        "description": "Smart water management & legionella risk",
+        "assets": [
+          {
+            "asset_id": "A17",
+            "qty": 1
+          },
+          {
+            "asset_id": "SB-A004",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Flow sensors",
+          "Temperature sensors"
+        ]
+      },
+      {
+        "id": "UC5-4",
+        "name": "UC5-4",
+        "description": "Leak detection & flood prevention",
+        "assets": [
+          {
+            "asset_id": "A29",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "IoT sensor"
+        ]
+      },
+      {
+        "id": "UC5-6",
+        "name": "UC5-6",
+        "description": "Noise monitoring for healing environments",
+        "assets": [
+          {
+            "asset_id": "A29",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Acoustic IoT sensors"
+        ]
+      },
+      {
+        "id": "UC5-7",
+        "name": "UC5-7",
+        "description": "Smart waste tracking & collection",
+        "assets": [
+          {
+            "asset_id": "SB-A005",
+            "qty": 1
+          },
+          {
+            "asset_id": "SB-A006",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Bin fill level IoT sensor",
+          "RTLS tag"
+        ]
+      },
+      {
+        "id": "UC6-3",
+        "name": "UC6-3",
+        "description": "Real-time equipment tracking",
+        "assets": [
+          {
+            "asset_id": "SB-A006",
+            "qty": 1
+          },
+          {
+            "asset_id": "A57",
+            "qty": 1
+          },
+          {
+            "asset_id": "A45",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "BLE tags / UWB tags / RFID tags",
+          "RTLS beacons / anchors",
+          "Wireless access points with BLE"
+        ]
+      },
+      {
+        "id": "UC6-4",
+        "name": "UC6-4",
+        "description": "Medical gas cylinder tracking & manifold monitoring",
+        "assets": [
+          {
+            "asset_id": "SB-A007",
+            "qty": 1
+          },
+          {
+            "asset_id": "SB-A008",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Manifold telemetry IoT sensors",
+          "Smart enabled gas manifolds"
+        ]
+      },
+      {
+        "id": "UC7-1",
+        "name": "UC7-1",
+        "description": "Linen demand forecasting & dynamic par levels",
+        "assets": [
+          {
+            "asset_id": "A25",
+            "qty": 1
+          },
+          {
+            "asset_id": "SB-A009",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "RFID scanners",
+          "RFID tags"
+        ]
+      },
+      {
+        "id": "UC7-2",
+        "name": "UC7-2",
+        "description": "RFID laundry & linen tracking",
+        "assets": [
+          {
+            "asset_id": "A25",
+            "qty": 1
+          },
+          {
+            "asset_id": "SB-A009",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "RFID scanners",
+          "RFID tags"
+        ]
+      },
+      {
+        "id": "UC7-3",
+        "name": "UC7-3",
+        "description": "Autonomous mobile robots (logistics)",
+        "assets": [
+          {
+            "asset_id": "SB-A010",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Autonomous mobile robots"
+        ]
+      },
+      {
+        "id": "UC7-4",
+        "name": "UC7-4",
+        "description": "Transport & Portering Logistics Management",
+        "assets": [
+          {
+            "asset_id": "SB-A011",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Software layer"
+        ]
+      },
+      {
+        "id": "UC8-1",
+        "name": "UC8-1",
+        "description": "UV/HPV disinfectant robots",
+        "assets": [
+          {
+            "asset_id": "SB-A012",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "UV or HPV robot"
+        ]
+      },
+      {
+        "id": "UC8-2",
+        "name": "UC8-2",
+        "description": "Sensor-driven cleaning and hygiene scheduling",
+        "assets": [
+          {
+            "asset_id": "A57",
+            "qty": 1
+          },
+          {
+            "asset_id": "SB-A006",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "BLE beacons / anchors",
+          "BLE tags"
+        ]
+      },
+      {
+        "id": "UC9-2",
+        "name": "UC9-2",
+        "description": "Integrated access control",
+        "assets": [
+          {
+            "asset_id": "SB-A013",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "RFID badges"
+        ]
+      },
+      {
+        "id": "UC9-3",
+        "name": "UC9-3",
+        "description": "CCTV analytics and incident detection",
+        "assets": [
+          {
+            "asset_id": "A18",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "CCTV cameras"
+        ]
+      },
+      {
+        "id": "UC9-4",
+        "name": "UC9-4",
+        "description": "Emergency evacuation guidance",
+        "assets": [
+          {
+            "asset_id": "SB-A014",
+            "qty": 1
+          }
+        ],
+        "connections": [],
+        "source_components": [
+          "Dynamic escape signage"
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "created_date": "2026-07-30",
+    "source_asset_csv": "assets 20260730.csv",
+    "source_use_case_file": "pasted-text.txt",
+    "unique_source_pairs": 57,
+    "component_mappings": [
+      {
+        "component": "Acoustic IoT sensors",
+        "asset_ids": [
+          "A29"
+        ],
+        "match_type": "semantic",
+        "rationale": "Multi sensor includes IoT, temperature, humidity, CO2, sound, and lux."
+      },
+      {
+        "component": "Autonomous mobile robots",
+        "asset_ids": [
+          "SB-A010"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "BIM data",
+        "asset_ids": [
+          "SB-A001"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "Bin fill level IoT sensor",
+        "asset_ids": [
+          "SB-A005"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "BLE beacons / anchors",
+        "asset_ids": [
+          "A57"
+        ],
+        "match_type": "semantic",
+        "rationale": "Existing RTLS definition used for anchors/beacons."
+      },
+      {
+        "component": "BLE tags",
+        "asset_ids": [
+          "SB-A006"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "BLE tags / UWB tags / RFID tags",
+        "asset_ids": [
+          "SB-A006"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "CCTV cameras",
+        "asset_ids": [
+          "A18"
+        ],
+        "match_type": "semantic",
+        "rationale": "CCTV-capable camera in the current model."
+      },
+      {
+        "component": "Digital signage displays",
+        "asset_ids": [
+          "A80"
+        ],
+        "match_type": "semantic",
+        "rationale": "Digital signage with wayfinding capability."
+      },
+      {
+        "component": "Dynamic escape signage",
+        "asset_ids": [
+          "SB-A014"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "Flow sensors",
+        "asset_ids": [
+          "A17"
+        ],
+        "match_type": "semantic",
+        "rationale": "Direct match to Water flow sensor."
+      },
+      {
+        "component": "Intercom",
+        "asset_ids": [
+          "A95"
+        ],
+        "match_type": "semantic",
+        "rationale": "Direct match to Control room Intercom."
+      },
+      {
+        "component": "IoT devices",
+        "asset_ids": [
+          "A29"
+        ],
+        "match_type": "semantic",
+        "rationale": "Multi sensor includes IoT, temperature, humidity, CO2, sound, and lux."
+      },
+      {
+        "component": "IoT sensor",
+        "asset_ids": [
+          "A29"
+        ],
+        "match_type": "semantic",
+        "rationale": "Multi sensor includes IoT, temperature, humidity, CO2, sound, and lux."
+      },
+      {
+        "component": "Manifold telemetry IoT sensors",
+        "asset_ids": [
+          "SB-A007"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "Medical device integration hardware",
+        "asset_ids": [
+          "A127"
+        ],
+        "match_type": "semantic",
+        "rationale": "Direct match to Medical device integration box."
+      },
+      {
+        "component": "Multi-sensor IoT devices",
+        "asset_ids": [
+          "A29"
+        ],
+        "match_type": "semantic",
+        "rationale": "Multi sensor includes IoT, temperature, humidity, CO2, sound, and lux."
+      },
+      {
+        "component": "Networked DALI2 or KNX controller",
+        "asset_ids": [
+          "SB-A003"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "Networked KNX or DALI2 controller",
+        "asset_ids": [
+          "SB-A003"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "Occupancy sensors",
+        "asset_ids": [
+          "A122"
+        ],
+        "match_type": "semantic",
+        "rationale": "Movement detector used as the closest occupancy-sensor definition."
+      },
+      {
+        "component": "PC or integrated display content management system",
+        "asset_ids": [
+          "A1"
+        ],
+        "match_type": "semantic",
+        "rationale": "Semantic match to the model's Computer definition."
+      },
+      {
+        "component": "People counting sensors",
+        "asset_ids": [
+          "SB-A002"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "Printer",
+        "asset_ids": [
+          "A104"
+        ],
+        "match_type": "semantic",
+        "rationale": "Generic Desktop Printer is the closest current model definition."
+      },
+      {
+        "component": "QR readers at department entrances and exits",
+        "asset_ids": [
+          "A70"
+        ],
+        "match_type": "semantic",
+        "rationale": "QR readers are mapped to the existing wireless Barcode scanner."
+      },
+      {
+        "component": "RFID badges",
+        "asset_ids": [
+          "SB-A013"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "RFID scanners",
+        "asset_ids": [
+          "A25"
+        ],
+        "match_type": "semantic",
+        "rationale": "Direct match to RFID scanner."
+      },
+      {
+        "component": "RFID tags",
+        "asset_ids": [
+          "SB-A009"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "Room displays",
+        "asset_ids": [
+          "A24"
+        ],
+        "match_type": "semantic",
+        "rationale": "Direct semantic match to External room display."
+      },
+      {
+        "component": "Room scheduling system",
+        "asset_ids": [
+          "A23"
+        ],
+        "match_type": "semantic",
+        "rationale": "Room booking/scheduling display system."
+      },
+      {
+        "component": "RTLS Anchors / Beacons",
+        "asset_ids": [
+          "A57"
+        ],
+        "match_type": "semantic",
+        "rationale": "Existing RTLS definition used for anchors/beacons."
+      },
+      {
+        "component": "RTLS beacons / anchors",
+        "asset_ids": [
+          "A57"
+        ],
+        "match_type": "semantic",
+        "rationale": "Existing RTLS definition used for anchors/beacons."
+      },
+      {
+        "component": "RTLS tag",
+        "asset_ids": [
+          "SB-A006"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "Self-check in Kiosks",
+        "asset_ids": [
+          "A72"
+        ],
+        "match_type": "semantic",
+        "rationale": "Direct match to Self check-in Kiosk."
+      },
+      {
+        "component": "Self-check in kiosks",
+        "asset_ids": [
+          "A72"
+        ],
+        "match_type": "semantic",
+        "rationale": "Direct match to Self check-in Kiosk."
+      },
+      {
+        "component": "Smart Bed",
+        "asset_ids": [
+          "A19"
+        ],
+        "match_type": "semantic",
+        "rationale": "Direct match to Smart Bed."
+      },
+      {
+        "component": "Smart bed",
+        "asset_ids": [
+          "A19"
+        ],
+        "match_type": "semantic",
+        "rationale": "Direct match to Smart Bed."
+      },
+      {
+        "component": "Smart enabled fridges / freezers",
+        "asset_ids": [
+          "A30",
+          "A31"
+        ],
+        "match_type": "semantic",
+        "rationale": "Existing Refrigerator definition; paired with A31 for the plural source component. Existing Freezer definition; paired with A30 for the plural source component."
+      },
+      {
+        "component": "Smart enabled gas manifolds",
+        "asset_ids": [
+          "SB-A008"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "Software layer",
+        "asset_ids": [
+          "SB-A011"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "Temperature sensors",
+        "asset_ids": [
+          "SB-A004"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "UV or HPV robot",
+        "asset_ids": [
+          "SB-A012"
+        ],
+        "match_type": "new",
+        "rationale": "New Smart Buildings technical-review definition created for this component."
+      },
+      {
+        "component": "Wayfinding solution",
+        "asset_ids": [
+          "A80"
+        ],
+        "match_type": "semantic",
+        "rationale": "Digital signage with wayfinding capability."
+      },
+      {
+        "component": "Wireless access points with BLE",
+        "asset_ids": [
+          "A45"
+        ],
+        "match_type": "semantic",
+        "rationale": "Existing wireless access point; BLE capability requires confirmation."
+      }
+    ],
+    "review_note": "Semantic mappings and all SB-Axxx definitions require design-team confirmation before deployment quantities are committed."
+  }
+}
