@@ -18,9 +18,13 @@ from reportlab.platypus import (
 )
 
 from asset_bundles import resolve_room_type_asset_connections
-from asset_ports import asset_input_ports, room_asset_port_summary
+from asset_ports import (
+    asset_input_ports,
+    asset_output_ports,
+    room_asset_port_summary,
+)
 from project_summary_report import (
-    _room_asset_table_rows as _project_room_asset_table_rows,
+    _p as _project_report_paragraph,
     _styles as _project_report_styles,
     _table as _project_report_table,
 )
@@ -39,10 +43,12 @@ ROOM_ASSET_DETAIL_HEADERS = (
     "Group",
     "ADB Code",
     "Requested By",
-    "Quantity",
-    "Physical Inputs Each",
-    "Final Network Ports",
+    "Qty per room",
+    "Inputs per device",
+    "Outputs per device",
+    "Connected to device",
     "Network Port Detail",
+    "Final network port total",
 )
 
 
@@ -77,6 +83,29 @@ def _category_name(value, fallback: str) -> str:
     if isinstance(value, Mapping):
         return _text(value.get("name", value.get("description", fallback)))
     return _text(value) or fallback
+
+
+def _connected_to_devices(summary: Mapping) -> dict[str, str]:
+    """Return effective upstream device IDs for each receiving asset."""
+
+    upstream_by_target: dict[str, list[str]] = {}
+    for demand in summary.get("network_demands", []) or []:
+        if not isinstance(demand, Mapping):
+            continue
+        for connection in demand.get("asset_connections", []) or []:
+            if not isinstance(connection, Mapping):
+                continue
+            source_id = _text(connection.get("from_asset_id"))
+            target_id = _text(connection.get("to_asset_id"))
+            if not source_id or not target_id:
+                continue
+            sources = upstream_by_target.setdefault(target_id, [])
+            if source_id not in sources:
+                sources.append(source_id)
+    return {
+        target_id: ", ".join(source_ids)
+        for target_id, source_ids in upstream_by_target.items()
+    }
 
 
 def room_asset_detail_rows(
@@ -117,6 +146,7 @@ def room_asset_detail_rows(
             reason = _text(status.get("reason"))
             if reason and reason not in port_notes.setdefault(asset_id, []):
                 port_notes[asset_id].append(reason)
+        connected_to = _connected_to_devices(summary)
 
         room_type_id = _text(room_type.get("id"))
         room_type_name = _text(room_type.get("name"))
@@ -147,8 +177,10 @@ def room_asset_detail_rows(
                     _text(assignment.get("requested_by")),
                     _positive_int(assignment.get("qty")),
                     asset_input_ports(asset),
-                    final_counts.get(asset_id, 0),
+                    asset_output_ports(asset),
+                    connected_to.get(asset_id, ""),
                     " ".join(port_notes.get(asset_id, [])),
+                    final_counts.get(asset_id, 0),
                 ]
             )
         for asset_id, quantity in summary.get("connection_assets", {}).items():
@@ -179,7 +211,9 @@ def room_asset_detail_rows(
                     int(quantity),
                     0,
                     0,
+                    "",
                     "Calculated from effective room-type and bundle connections.",
+                    0,
                 ]
             )
         category_index = ROOM_ASSET_DETAIL_HEADERS.index("Category")
@@ -231,11 +265,24 @@ def categorised_room_asset_breakdowns(
             category_id = _text(detail_row[header_index["Category ID"]])
             quantity = max(
                 0,
-                int(detail_row[header_index["Quantity"]] or 0),
+                int(detail_row[header_index["Qty per room"]] or 0),
             )
-            ports_each = max(
+            inputs_per_device = max(
                 0,
-                int(detail_row[header_index["Physical Inputs Each"]] or 0),
+                int(detail_row[header_index["Inputs per device"]] or 0),
+            )
+            outputs_per_device = max(
+                0,
+                int(detail_row[header_index["Outputs per device"]] or 0),
+            )
+            final_network_ports = max(
+                0,
+                int(
+                    detail_row[
+                        header_index["Final network port total"]
+                    ]
+                    or 0
+                ),
             )
             manufacturer = _text(asset.get("manufacturer"))
             model = _text(asset.get("model"))
@@ -266,10 +313,13 @@ def categorised_room_asset_breakdowns(
                         part for part in (manufacturer, model) if part
                     ),
                     "qty_per_room": quantity,
-                    "ports_each": ports_each,
-                    "port_per_room": quantity * ports_each,
+                    "inputs_per_device": inputs_per_device,
+                    "outputs_per_device": outputs_per_device,
+                    "connected_to_device": _text(
+                        detail_row[header_index["Connected to device"]]
+                    ),
+                    "final_network_ports": final_network_ports,
                     "asset_subtotal": quantity,
-                    "port_subtotal": quantity * ports_each,
                     "record_type": (
                         "connection_cable"
                         if record_type == "Calculated connection cable"
@@ -296,13 +346,10 @@ def categorised_room_asset_breakdowns(
                 "assets_per_room": sum(
                     row["qty_per_room"] for row in assets
                 ),
-                "input_ports_per_room": sum(
-                    row["port_per_room"] for row in assets
+                "final_network_ports_per_room": sum(
+                    row["final_network_ports"] for row in assets
                 ),
                 "asset_total": sum(row["asset_subtotal"] for row in assets),
-                "input_port_total": sum(
-                    row["port_subtotal"] for row in assets
-                ),
             }
         )
     return result
@@ -315,10 +362,11 @@ _CATEGORISED_BREAKDOWN_HEADERS = (
     "Grouping",
     "Make / model",
     "Qty per room",
-    "Input ports each",
-    "Input ports per room",
+    "Inputs per device",
+    "Outputs per device",
+    "Connected to device",
     "Asset total",
-    "Input port total",
+    "Final network port total",
 )
 
 
@@ -356,10 +404,11 @@ def _categorised_breakdown_worksheet(room_breakdowns) -> WorksheetSpec:
                     asset["group"],
                     asset["make_model"],
                     asset["qty_per_room"],
-                    asset["ports_each"],
-                    asset["port_per_room"],
+                    asset["inputs_per_device"],
+                    asset["outputs_per_device"],
+                    asset["connected_to_device"],
                     asset["asset_subtotal"],
-                    asset["port_subtotal"],
+                    asset["final_network_ports"],
                 ]
             )
         if not room["assets"]:
@@ -374,9 +423,10 @@ def _categorised_breakdown_worksheet(room_breakdowns) -> WorksheetSpec:
                 "",
                 room["assets_per_room"],
                 "",
-                room["input_ports_per_room"],
+                "",
+                "",
                 room["asset_total"],
-                room["input_port_total"],
+                room["final_network_ports_per_room"],
             ]
         )
     return WorksheetSpec(
@@ -440,6 +490,66 @@ def _pdf_footer(canvas, document) -> None:
         f"Page {document.page}",
     )
     canvas.restoreState()
+
+
+def _pdf_room_asset_table_rows(room: Mapping, styles):
+    paragraph = _project_report_paragraph
+    rows = [[
+        paragraph("Asset ID", styles["header"]),
+        paragraph("Description", styles["header"]),
+        paragraph("ADB code", styles["header"]),
+        paragraph("Grouping", styles["header"]),
+        paragraph("Make / model", styles["header"]),
+        paragraph("Qty per room", styles["header"]),
+        paragraph("Inputs per device", styles["header"]),
+        paragraph("Outputs per device", styles["header"]),
+        paragraph("Connected to device", styles["header"]),
+        paragraph("Asset total", styles["header"]),
+        paragraph("Final network port total", styles["header"]),
+    ]]
+    group_rows = []
+    current_category_id = object()
+    for asset in room["assets"]:
+        category_id = asset["category_id"]
+        if category_id != current_category_id:
+            group_rows.append(len(rows))
+            rows.append(
+                [
+                    paragraph(
+                        f"Category: {asset['category_name']}",
+                        styles["group"],
+                    )
+                ]
+                + [paragraph("", styles["small"])] * 10
+            )
+            current_category_id = category_id
+        rows.append([
+            paragraph(asset["asset_id"], styles["small"]),
+            paragraph(asset["asset_name"], styles["small"]),
+            paragraph(asset["adb_code"], styles["small"]),
+            paragraph(asset["group"], styles["small"]),
+            paragraph(asset["make_model"], styles["small"]),
+            paragraph(asset["qty_per_room"], styles["small"]),
+            paragraph(asset["inputs_per_device"], styles["small"]),
+            paragraph(asset["outputs_per_device"], styles["small"]),
+            paragraph(asset["connected_to_device"], styles["small"]),
+            paragraph(asset["asset_subtotal"], styles["small"]),
+            paragraph(asset["final_network_ports"], styles["small"]),
+        ])
+    rows.append([
+        paragraph("Total", styles["header"]),
+        paragraph("", styles["header"]),
+        paragraph("", styles["header"]),
+        paragraph("", styles["header"]),
+        paragraph("", styles["header"]),
+        paragraph(room["assets_per_room"], styles["header"]),
+        paragraph("", styles["header"]),
+        paragraph("", styles["header"]),
+        paragraph("", styles["header"]),
+        paragraph(room["asset_total"], styles["header"]),
+        paragraph(room["final_network_ports_per_room"], styles["header"]),
+    ])
+    return rows, group_rows
 
 
 def export_room_asset_detail_pdf(
@@ -514,24 +624,25 @@ def export_room_asset_detail_pdf(
                     styles["body"],
                 )
             )
-        table_rows, group_rows = _project_room_asset_table_rows(room, styles)
+        table_rows, group_rows = _pdf_room_asset_table_rows(room, styles)
         story.append(
             _project_report_table(
                 table_rows,
                 [
+                    23 * mm,
+                    43 * mm,
+                    21 * mm,
+                    22 * mm,
+                    29 * mm,
+                    16 * mm,
+                    18 * mm,
+                    18 * mm,
                     27 * mm,
-                    48 * mm,
-                    24 * mm,
-                    28 * mm,
-                    34 * mm,
-                    18 * mm,
-                    18 * mm,
-                    22 * mm,
-                    22 * mm,
-                    22 * mm,
+                    17 * mm,
+                    29 * mm,
                 ],
                 styles,
-                numeric_columns=(5, 6, 7, 8, 9),
+                numeric_columns=(5, 6, 7, 9, 10),
                 total_rows=(-1,),
                 group_rows=group_rows,
             )

@@ -57,6 +57,7 @@ DEFAULT_JSON = {
     "locations": [],
     "equipment_room_placement_zones": [],
     "data_points": [],
+    "ad_hoc_assets": [],
     "corridors": {
         "nodes": [],
         "edges": [],
@@ -204,6 +205,14 @@ class JsonStore:
         self.data.setdefault("locations", [])
         self.data.setdefault("equipment_room_placement_zones", [])
         self.data.setdefault("data_points", [])
+        if not isinstance(self.data.get("ad_hoc_assets"), list):
+            self.data["ad_hoc_assets"] = []
+        else:
+            self.data["ad_hoc_assets"] = [
+                dict(item)
+                for item in self.data["ad_hoc_assets"]
+                if isinstance(item, dict)
+            ]
         self.data.setdefault("corridors", {}).setdefault("nodes", [])
         self.data.setdefault("corridors", {}).setdefault("edges", [])
         self.data.setdefault("transitions", [])
@@ -353,6 +362,41 @@ class JsonStore:
             ).strip()
             if legacy_asset_group:
                 asset["scenario_group"] = legacy_asset_group
+
+        normalised_ad_hoc_assets = []
+        for placement in self.data.get("ad_hoc_assets", []):
+            name = str(placement.get("name", "") or "").strip()
+            asset_id = str(placement.get("asset_id", "") or "").strip()
+            if not name or not asset_id:
+                continue
+            try:
+                normalised_ad_hoc_assets.append(
+                    {
+                        **placement,
+                        "name": name,
+                        "asset_id": asset_id,
+                        "scope": "building",
+                        "asset_qty": max(
+                            1, self._safe_int(placement.get("asset_qty", 1), 1)
+                        ),
+                        "floor": self._safe_int(placement.get("floor", 0), 0),
+                        "x": round(float(placement.get("x", 0.0) or 0.0), 3),
+                        "y": round(float(placement.get("y", 0.0) or 0.0), 3),
+                        "extension_distance_m": max(
+                            0.0,
+                            float(
+                                placement.get("extension_distance_m", 0.0) or 0.0
+                            ),
+                        ),
+                    }
+                )
+            except (TypeError, ValueError):
+                continue
+        self.data["ad_hoc_assets"] = normalised_ad_hoc_assets
+        for placement in self.data["ad_hoc_assets"]:
+            placement["qty"] = self.ad_hoc_asset_cable_qty(
+                placement["asset_id"], placement["asset_qty"]
+            )
 
         def normalise_name_list(value):
             if isinstance(value, (list, tuple, set)):
@@ -613,6 +657,16 @@ class JsonStore:
             self.data.get("asset_bundles", []),
             valid_asset_ids,
         )
+        original_ad_hoc_assets = list(self.data.get("ad_hoc_assets", []) or [])
+        removed_ad_hoc_assets = [
+            row
+            for row in original_ad_hoc_assets
+            if str(row.get("asset_id", "") or "").strip() not in valid_asset_ids
+        ]
+        for row in removed_ad_hoc_assets:
+            name = str(row.get("name", "") or "").strip()
+            if name:
+                self.delete_point(name)
 
         staging_purged_count = 0
         staging = self.data.get("room_type_asset_staging", {})
@@ -655,7 +709,7 @@ class JsonStore:
             staging["changes"] = room_type_asset_staged_changes(staging)
             self.data["room_type_asset_staging"] = staging if staging["changes"] else {}
 
-        if (purged or staging_purged_count) and record_change:
+        if (purged or staging_purged_count or removed_ad_hoc_assets) and record_change:
             self.record_revision_change(
                 "Asset Library",
                 f"Purged {sum(len(row['asset_ids']) for row in purged)} missing asset assignment(s) from room types",
@@ -663,6 +717,12 @@ class JsonStore:
                     f"{row['room_type_id'] or row['room_type_name']}: removed "
                     + ", ".join(row["asset_ids"])
                     for row in purged
+                ]
+                + [
+                    f"{str(row.get('name', '') or '').strip()}: removed ad hoc "
+                    f"placement of missing asset "
+                    f"{str(row.get('asset_id', '') or '').strip()}"
+                    for row in removed_ad_hoc_assets
                 ]
                 + (
                     [
@@ -676,6 +736,7 @@ class JsonStore:
             "purged": purged,
             "count": sum(len(row["asset_ids"]) for row in purged),
             "staging_purged_count": staging_purged_count,
+            "ad_hoc_placement_count": len(removed_ad_hoc_assets),
         }
 
     def replace_assets(self, items) -> dict:
@@ -724,6 +785,11 @@ class JsonStore:
                 + ", ".join(row["asset_ids"])
                 for row in purge_result["purged"]
             )
+            if purge_result["ad_hoc_placement_count"]:
+                details.append(
+                    f"Removed {purge_result['ad_hoc_placement_count']} ad hoc "
+                    "building asset placement(s)"
+                )
             summary_parts = []
             if removed_ids:
                 summary_parts.append(
@@ -744,6 +810,7 @@ class JsonStore:
             "retired_ids": sorted(retired_ids, key=str.casefold),
             "purged_assignments": purge_result["purged"],
             "purged_count": purge_result["count"],
+            "ad_hoc_placement_count": purge_result["ad_hoc_placement_count"],
         }
 
     def _normalise_group_collection(self, collection_key: str, member_key: str, valid_member_ids, legacy_members_by_group=None) -> None:
@@ -1143,6 +1210,11 @@ class JsonStore:
         for item in self.data.get("data_points", []):
             result[item["name"]] = {**item, "kind": "data_point"}
 
+        for item in self.data.get("ad_hoc_assets", []):
+            name = str(item.get("name", "") or "").strip()
+            if name:
+                result[name] = {**item, "name": name, "kind": "ad_hoc_asset"}
+
         for item in self.data.get("corridors", {}).get("nodes", []):
             result[item["name"]] = {**item, "kind": "corridor_node"}
 
@@ -1257,6 +1329,52 @@ class JsonStore:
             }
         )
 
+    def ad_hoc_asset_cable_qty(self, asset_id: str, asset_qty: int = 1) -> int:
+        """Return upstream cable demand for a directly placed building asset."""
+        asset_id = str(asset_id or "").strip()
+        if not asset_id:
+            return 0
+        assets_by_id = {
+            str(asset.get("id", "") or "").strip(): asset
+            for asset in self.data.get("assets", [])
+            if isinstance(asset, dict) and str(asset.get("id", "") or "").strip()
+        }
+        if asset_id not in assets_by_id:
+            return 0
+        summary = room_asset_port_summary(
+            [{"asset_id": asset_id, "qty": max(1, self._safe_int(asset_qty, 1))}],
+            assets_by_id,
+            [],
+        )
+        return max(0, int(summary.get("upstream_ports", 0) or 0))
+
+    def add_ad_hoc_asset(
+        self,
+        name: str,
+        asset_id: str,
+        floor: int,
+        x: float,
+        y: float,
+        asset_qty: int = 1,
+        extension_distance_m: float = 0.0,
+    ) -> None:
+        """Place an individual building asset without creating a room type."""
+        asset_id = str(asset_id or "").strip()
+        asset_qty = max(1, self._safe_int(asset_qty, 1))
+        self.data.setdefault("ad_hoc_assets", []).append(
+            {
+                "name": str(name or "").strip(),
+                "asset_id": asset_id,
+                "scope": "building",
+                "asset_qty": asset_qty,
+                "qty": self.ad_hoc_asset_cable_qty(asset_id, asset_qty),
+                "floor": int(floor),
+                "x": round(float(x), 3),
+                "y": round(float(y), 3),
+                "extension_distance_m": max(0.0, float(extension_distance_m)),
+            }
+        )
+
     def add_edge(self, from_name: str, to_name: str) -> None:
         edges = self.data["corridors"]["edges"]
         if not any(e["from"] == from_name and e["to"] == to_name for e in edges):
@@ -1286,6 +1404,11 @@ class JsonStore:
                 return
         for item in self.data.get("data_points", []):
             if item["name"] == name:
+                item["x"] = x
+                item["y"] = y
+                return
+        for item in self.data.get("ad_hoc_assets", []):
+            if item.get("name") == name:
                 item["x"] = x
                 item["y"] = y
                 return
@@ -1362,6 +1485,7 @@ class JsonStore:
         for collection in (
             self.data.get("locations", []),
             self.data.get("data_points", []),
+            self.data.get("ad_hoc_assets", []),
             self.data.get("corridors", {}).get("nodes", []),
         ):
             for item in collection:
@@ -1396,6 +1520,11 @@ class JsonStore:
         ]
         self.data["data_points"] = [
             x for x in self.data.get("data_points", []) if x["name"] != name
+        ]
+        self.data["ad_hoc_assets"] = [
+            x
+            for x in self.data.get("ad_hoc_assets", [])
+            if str(x.get("name", "") or "").strip() != name
         ]
         self.data["corridors"]["nodes"] = [
             x
@@ -1819,6 +1948,15 @@ class JsonStore:
                     nums.append(int(tail))
         return f"DP{floor}-{max(nums, default=0) + 1}"
 
+    def suggest_next_ad_hoc_asset_name(self, floor: int) -> str:
+        prefix = f"AH{int(floor)}-"
+        nums = []
+        for item in self.data.get("ad_hoc_assets", []):
+            name = str(item.get("name", "") or "")
+            if name.startswith(prefix) and name[len(prefix) :].isdigit():
+                nums.append(int(name[len(prefix) :]))
+        return f"{prefix}{max(nums, default=0) + 1}"
+
     def suggest_next_transition_id(self) -> str:
         nums = []
         for item in self.data.get("transitions", []):
@@ -1851,6 +1989,10 @@ class JsonStore:
         for item in self.data.get("data_points", []):
             if str(item.get("name", "")).strip() == name:
                 return "data_point", item
+
+        for item in self.data.get("ad_hoc_assets", []):
+            if str(item.get("name", "")).strip() == name:
+                return "ad_hoc_asset", item
 
         return None, None
 
@@ -2371,7 +2513,7 @@ class JsonStore:
         return counts
 
     def asset_deployment_summary(self) -> Dict[str, dict]:
-        """Count deployed endpoint assets from placed room-type assignments.
+        """Count deployed endpoint assets from rooms and direct placements.
 
         ``deployed_items`` counts physical asset units.  ``deployed_data_points``
         multiplies those units by the asset's data-points-per-item value.
@@ -2429,6 +2571,36 @@ class JsonStore:
                 record["deployed_data_points"] += deployed_items * data_points_each
                 record["room_type_ids"].add(room_type_id)
 
+        for placement in self.data.get("ad_hoc_assets", []) or []:
+            if not isinstance(placement, dict):
+                continue
+            asset_id = str(placement.get("asset_id", "") or "").strip()
+            if not asset_id:
+                continue
+            asset = assets_by_id.get(asset_id, {})
+            asset_qty = max(1, self._safe_int(placement.get("asset_qty", 1), 1))
+            data_points_each = max(
+                0,
+                self._safe_int(
+                    asset.get(
+                        "data_points",
+                        asset.get("data_points_each", asset.get("cables", 1)),
+                    ),
+                    1,
+                ),
+            )
+            record = summary.setdefault(
+                asset_id,
+                {
+                    "deployed_rooms": 0,
+                    "deployed_items": 0,
+                    "deployed_data_points": 0,
+                    "room_type_ids": set(),
+                },
+            )
+            record["deployed_items"] += asset_qty
+            record["deployed_data_points"] += asset_qty * data_points_each
+
         for record in summary.values():
             room_type_ids = record.get("room_type_ids", set())
             if isinstance(room_type_ids, set):
@@ -2439,9 +2611,8 @@ class JsonStore:
     def asset_deployment_locations(self) -> Dict[str, List[dict]]:
         """Return placed rooms/data-points where each endpoint asset is deployed.
 
-        Deployment is derived from the standard room-type asset assignments and
-        the placed data points that reference those room types.  Each row is a
-        room/data-point instance, so it can be shown directly in the asset
+        Deployment includes standard room-type assignments and building-level
+        ad hoc asset placements. Each row can be shown directly in the asset
         viewer and navigated to on the canvas.
         """
         assets_by_id = {
@@ -2513,6 +2684,44 @@ class JsonStore:
                         ],
                     }
                 )
+
+        for placement in self.data.get("ad_hoc_assets", []) or []:
+            if not isinstance(placement, dict):
+                continue
+            asset_id = str(placement.get("asset_id", "") or "").strip()
+            name = str(placement.get("name", "") or "").strip()
+            if not asset_id or not name:
+                continue
+            asset = assets_by_id.get(asset_id, {})
+            asset_qty = max(1, self._safe_int(placement.get("asset_qty", 1), 1))
+            data_points_each = max(
+                0,
+                self._safe_int(
+                    asset.get(
+                        "data_points",
+                        asset.get("data_points_each", asset.get("cables", 1)),
+                    ),
+                    1,
+                ),
+            )
+            locations.setdefault(asset_id, []).append(
+                {
+                    "asset_id": asset_id,
+                    "asset_name": str(asset.get("name", asset_id) or asset_id).strip(),
+                    "room_name": name,
+                    "floor": self._safe_int(placement.get("floor", 0), 0),
+                    "x": placement.get("x", ""),
+                    "y": placement.get("y", ""),
+                    "room_type_id": "",
+                    "room_type_name": "Building-level ad hoc asset",
+                    "qty_per_room": asset_qty,
+                    "deployed_items": asset_qty,
+                    "deployed_data_points": asset_qty * data_points_each,
+                    "data_points_each": data_points_each,
+                    "department_ids": [],
+                    "placement_type": "ad_hoc_asset",
+                }
+            )
 
         for rows in locations.values():
             rows.sort(
@@ -2638,6 +2847,28 @@ class JsonStore:
                         previous_connection_qty, current_connection_qty
                     )
                 )
+        for placement in self.data.get("ad_hoc_assets", []) or []:
+            if not isinstance(placement, dict):
+                continue
+            name = str(placement.get("name", "") or "").strip()
+            if not name:
+                continue
+            previous_qty = placement.get("qty", 0)
+            current_qty = self.ad_hoc_asset_cable_qty(
+                placement.get("asset_id", ""),
+                placement.get("asset_qty", 1),
+            )
+            placement["qty"] = current_qty
+            if previous_qty != current_qty:
+                changed += 1
+            for connection in self.data.get("connections", []) or []:
+                if (
+                    str(connection.get("to", "") or "").strip() == name
+                    or str(connection.get("from", "") or "").strip() == name
+                ):
+                    if connection.get("qty", 0) != current_qty:
+                        connection["qty"] = current_qty
+                        changed += 1
         return changed
 
     def room_type_options(self) -> List[Tuple[str, str]]:
@@ -2858,6 +3089,16 @@ class JsonStore:
             if room_type_id:
                 point["qty"] = max(0, self.room_type_cable_qty(room_type_id))
             return max(0, int(point.get("qty", 1) or 0))
+
+        for placement in self.data.get("ad_hoc_assets", []):
+            if str(placement.get("name", "") or "").strip() != data_point_name:
+                continue
+            qty = self.ad_hoc_asset_cable_qty(
+                placement.get("asset_id", ""),
+                placement.get("asset_qty", 1),
+            )
+            placement["qty"] = qty
+            return qty
 
         return 1
 

@@ -104,6 +104,7 @@ from ui_theme import (
 )
 
 from dialogs import (
+    AdHocAssetEditorDialog,
     BulkDataPointPlacementDialog,
     BulkLocationPlacementDialog,
     DataPointEditorDialog,
@@ -691,6 +692,7 @@ class LayerVisibilityDialog(QDialog):
         ("Routing graph", "Edges", "show_edges_check"),
         ("Routing graph", "Corridor nodes", "show_nodes_check"),
         ("Routing graph", "Data points", "show_data_points_check"),
+        ("Routing graph", "Ad hoc assets", "show_ad_hoc_assets_check"),
         ("Routing graph", "Locations", "show_locations_check"),
         ("Routing graph", "Comms rooms", "show_comms_rooms_check"),
         ("Routing graph", "Equipment room placement zones", "show_placement_zones_check"),
@@ -2185,6 +2187,7 @@ class CableRouteEditor(QMainWindow):
             if str(point.get("kind", "")).strip() not in {
                 "corridor_node",
                 "data_point",
+                "ad_hoc_asset",
             }:
                 continue
 
@@ -2418,6 +2421,7 @@ class CableRouteEditor(QMainWindow):
             ("location", "Location", "location"),
             ("department", "Dept", "department"),
             ("data_point", "Data Point", "data_point"),
+            ("ad_hoc_asset", "Ad Hoc Asset", "ad_hoc_asset"),
             ("transition", "Transition", "transition_node"),
             ("placement_zone", "Room Zone", "placement_zone"),
             ("edge", "Edge", "edge"),
@@ -2433,6 +2437,7 @@ class CableRouteEditor(QMainWindow):
             "location": "geo-alt",
             "department": "building",
             "data_point": "hdd-network",
+            "ad_hoc_asset": "box-seam",
             "transition_node": "arrow-up",
             "placement_zone": "bounding-box",
             "edge": "diagram-3",
@@ -4368,6 +4373,15 @@ class CableRouteEditor(QMainWindow):
             True,
         )
 
+        self.show_ad_hoc_assets_check = self._ribbon_toggle_button(
+            "Ad Hoc",
+            QStyle.SP_FileDialogNewFolder,
+            True,
+        )
+        self.show_ad_hoc_assets_check.setToolTip(
+            "Show building-level assets placed independently of room types."
+        )
+
         self.show_unassigned_room_types_only_check = self._ribbon_toggle_button(
             "Unassigned",
             QStyle.SP_MessageBoxWarning,
@@ -4430,6 +4444,7 @@ class CableRouteEditor(QMainWindow):
             self.show_edges_check,
             self.show_nodes_check,
             self.show_data_points_check,
+            self.show_ad_hoc_assets_check,
             self.show_unassigned_room_types_only_check,
             self.hide_connected_data_points_check,
             self.show_unconnected_data_points_only_check,
@@ -5078,6 +5093,7 @@ class CableRouteEditor(QMainWindow):
                 self.store.delete_point(name)
             deleted += 1
 
+        self._render_data_revision += 1
         self.selected_point_name = None
         self._clear_canvas_multi_selection()
         if hasattr(self.canvas, "invalidate_dxf_cache"):
@@ -5163,6 +5179,7 @@ class CableRouteEditor(QMainWindow):
             if kind not in {
                 "corridor_node",
                 "data_point",
+                "ad_hoc_asset",
                 "location",
                 "comms_room",
                 "distributed_equipment_room",
@@ -5266,6 +5283,20 @@ class CableRouteEditor(QMainWindow):
 
                 self.store.data.setdefault("data_points", []).append(new_record)
 
+            elif kind == "ad_hoc_asset":
+                new_name = self.store.suggest_next_ad_hoc_asset_name(target_floor)
+                while new_name in used_names:
+                    new_name = f"{new_name}_copy"
+                used_names.add(new_name)
+
+                new_record = deepcopy(record)
+                new_record["name"] = new_name
+                new_record["floor"] = int(target_floor)
+                new_record["x"] = x
+                new_record["y"] = y
+
+                self.store.data.setdefault("ad_hoc_assets", []).append(new_record)
+
             elif kind in {"location", "comms_room", "distributed_equipment_room"}:
                 if kind in {"comms_room", "distributed_equipment_room"}:
                     new_name = self.store._suggest_next_comms_room_name_for_floor(
@@ -5309,6 +5340,8 @@ class CableRouteEditor(QMainWindow):
         if created_edges:
             self._mark_routing_graph_changed()
 
+        if created_names:
+            self._render_data_revision += 1
         self.selected_point_name = None
         self._set_canvas_multi_selection(created_names, append=False)
         if hasattr(self.canvas, "invalidate_dxf_cache"):
@@ -5938,7 +5971,11 @@ class CableRouteEditor(QMainWindow):
         result = set()
 
         for name, point in self.store.points_for_floor(floor).items():
-            if point.get("kind") not in {"corridor_node", "data_point"}:
+            if point.get("kind") not in {
+                "corridor_node",
+                "data_point",
+                "ad_hoc_asset",
+            }:
                 continue
             point = {**point, "name": name}
             if not self._is_point_kind_visible(point):
@@ -6012,7 +6049,11 @@ class CableRouteEditor(QMainWindow):
         selected = []
 
         for name, point in self.store.points_for_floor(floor).items():
-            if point.get("kind") not in {"corridor_node", "data_point"}:
+            if point.get("kind") not in {
+                "corridor_node",
+                "data_point",
+                "ad_hoc_asset",
+            }:
                 continue
 
             if not self._is_point_kind_visible(point):
@@ -6036,14 +6077,24 @@ class CableRouteEditor(QMainWindow):
         boxed_data_point_names = [
             name for name in selected if name in data_point_names
         ]
+        ad_hoc_names = {
+            str(point.get("name", "") or "").strip()
+            for point in self.store.data.get("ad_hoc_assets", []) or []
+            if isinstance(point, dict) and str(point.get("name", "") or "").strip()
+        }
+        boxed_ad_hoc_names = [name for name in selected if name in ad_hoc_names]
         deployed_data_points = self.store.count_deployed_data_points(
             boxed_data_point_names
         )
-        corridor_nodes = len(selected) - len(boxed_data_point_names)
+        corridor_nodes = (
+            len(selected) - len(boxed_data_point_names) - len(boxed_ad_hoc_names)
+        )
         status = (
             f"Selection box: {deployed_data_points} deployed data point(s) across "
             f"{len(boxed_data_point_names)} placed marker(s)"
         )
+        if boxed_ad_hoc_names:
+            status += f", {len(boxed_ad_hoc_names)} ad hoc asset(s)"
         if corridor_nodes:
             status += f", plus {corridor_nodes} corridor node(s)"
         self.set_status(status)
@@ -6181,6 +6232,7 @@ class CableRouteEditor(QMainWindow):
             show_edges=self.show_edges_check.isChecked(),
             show_nodes=self.show_nodes_check.isChecked(),
             show_data_points=self.show_data_points_check.isChecked(),
+            show_ad_hoc_assets=self.show_ad_hoc_assets_check.isChecked(),
             show_unconnected_data_points_only=(
                 self.show_unconnected_data_points_only_check.isChecked()
             ),
@@ -6421,6 +6473,12 @@ class CableRouteEditor(QMainWindow):
                 continue
 
             if (
+                kind == "ad_hoc_asset"
+                and not self.show_ad_hoc_assets_check.isChecked()
+            ):
+                continue
+
+            if (
                 self.show_unassigned_room_types_only_check.isChecked()
                 and point.get("kind") == "data_point"
                 and str(point.get("room_type_id", "")).strip()
@@ -6536,6 +6594,26 @@ class CableRouteEditor(QMainWindow):
                 label_color = QColor("#eadcff")
 
                 self._draw_data_point_assignment_marks(pos, point, visible_rect)
+            elif kind == "ad_hoc_asset":
+                r = 0.48
+                poly = QPolygonF(
+                    [
+                        QPointF(pos.x() - r, pos.y() - r),
+                        QPointF(pos.x() + r, pos.y() - r),
+                        QPointF(pos.x() + r, pos.y() + r),
+                        QPointF(pos.x() - r, pos.y() + r),
+                    ]
+                )
+                item = QGraphicsPolygonItem(poly)
+                item.setBrush(QBrush(QColor("#ff9f43")))
+                item.setPen(
+                    QPen(
+                        QColor("#ffffff") if selected else QColor("#ffd0a1"),
+                        0.08,
+                    )
+                )
+                self.scene.addItem(item)
+                label_color = QColor("#ffd7ad")
             else:
                 poly = QPolygonF(
                     [
@@ -6560,6 +6638,27 @@ class CableRouteEditor(QMainWindow):
             if kind == "data_point":
                 item.setAcceptHoverEvents(True)
                 item.setToolTip(self._data_point_tooltip(name, point))
+            elif kind == "ad_hoc_asset":
+                assets = {
+                    str(asset.get("id", "") or "").strip(): str(
+                        asset.get("name", "") or ""
+                    ).strip()
+                    for asset in self.store.data.get("assets", [])
+                    if isinstance(asset, dict)
+                }
+                asset_id = str(point.get("asset_id", "") or "").strip()
+                item.setAcceptHoverEvents(True)
+                item.setToolTip(
+                    "\n".join(
+                        [
+                            f"Ad hoc asset: {name}",
+                            f"Asset: {(asset_id + ' - ' + assets.get(asset_id, '')).strip(' -')}",
+                            f"Asset quantity: {int(point.get('asset_qty', 1) or 1)}",
+                            f"Upstream ports: {int(point.get('qty', 0) or 0)}",
+                            "Ownership: Building",
+                        ]
+                    )
+                )
 
             if self.show_labels_check.isChecked():
                 label = self.scene.addText(name)
@@ -6705,6 +6804,9 @@ class CableRouteEditor(QMainWindow):
 
             return True
 
+        if kind == "ad_hoc_asset":
+            return self.show_ad_hoc_assets_check.isChecked()
+
         if kind == "location":
             return self.show_locations_check.isChecked()
 
@@ -6785,6 +6887,8 @@ class CableRouteEditor(QMainWindow):
         for item in store.get("locations", []):
             floor_map[item["name"]] = int(item["floor"])
         for item in store.get("data_points", []):
+            floor_map[item["name"]] = int(item["floor"])
+        for item in store.get("ad_hoc_assets", []):
             floor_map[item["name"]] = int(item["floor"])
         for item in store.get("corridors", {}).get("nodes", []):
             floor_map[item["name"]] = int(item["floor"])
@@ -13339,6 +13443,17 @@ class CableRouteEditor(QMainWindow):
             name for name in self.selected_template_names if name in data_point_names
         )
 
+    def _selected_routable_endpoint_names(self):
+        endpoint_names = {
+            str(item.get("name", "") or "").strip()
+            for key in ("data_points", "ad_hoc_assets")
+            for item in self.store.data.get(key, [])
+            if isinstance(item, dict) and str(item.get("name", "") or "").strip()
+        }
+        return sorted(
+            name for name in self.selected_template_names if name in endpoint_names
+        )
+
     def _connection_port_estimate_for_data_points(
         self, data_point_names, exclude_connected=True
     ):
@@ -13347,6 +13462,13 @@ class CableRouteEditor(QMainWindow):
             for item in self.store.data.get("data_points", [])
             if str(item.get("name", "") or "").strip()
         }
+        records.update(
+            {
+                str(item.get("name", "") or "").strip(): item
+                for item in self.store.data.get("ad_hoc_assets", [])
+                if str(item.get("name", "") or "").strip()
+            }
+        )
         connected = (
             self._existing_connection_targets() if exclude_connected else set()
         )
@@ -13358,7 +13480,11 @@ class CableRouteEditor(QMainWindow):
         quantities = {
             name: max(
                 0,
-                int(self.store.data_point_required_port_count(records[name]) or 0),
+                int(
+                    records[name].get("qty", 0)
+                    if str(records[name].get("asset_id", "") or "").strip()
+                    else self.store.data_point_required_port_count(records[name])
+                ),
             )
             for name in eligible_names
         }
@@ -14596,6 +14722,7 @@ class CableRouteEditor(QMainWindow):
                     ):
                         self.push_undo_state("Delete point")
                         self.store.delete_point(picked)
+                        self._render_data_revision += 1
                         self.selected_point_name = None
                         self.set_status(f"Deleted {picked}")
                 self.refresh_canvas()
@@ -14858,6 +14985,46 @@ class CableRouteEditor(QMainWindow):
                 self.refresh_canvas()
             return
 
+        if mode == "ad_hoc_asset":
+            asset_options = self.store.asset_options()
+            if not asset_options:
+                QMessageBox.information(
+                    self,
+                    "Ad Hoc Building Asset",
+                    "Create or import an asset in the asset library before placing it.",
+                )
+                return
+            dialog = AdHocAssetEditorDialog(
+                self,
+                asset_options=asset_options,
+                default_floor=floor,
+                default_x=x,
+                default_y=y,
+                default_name=self.store.suggest_next_ad_hoc_asset_name(floor),
+            )
+            if dialog.exec() == QDialog.Accepted and dialog.result:
+                if dialog.result["name"] in self.store.names_in_use():
+                    QMessageBox.critical(self, "Duplicate name", "Name already exists")
+                    return
+                self.push_undo_state("Add ad hoc building asset")
+                self.store.add_ad_hoc_asset(
+                    dialog.result["name"],
+                    dialog.result["asset_id"],
+                    dialog.result["floor"],
+                    dialog.result["x"],
+                    dialog.result["y"],
+                    dialog.result["asset_qty"],
+                    dialog.result["extension_distance_m"],
+                )
+                self._render_data_revision += 1
+                self.selected_point_name = dialog.result["name"]
+                self.set_status(
+                    f"Added building asset {dialog.result['name']} "
+                    f"({dialog.result['asset_id']})"
+                )
+                self.refresh_canvas()
+            return
+
         if mode == "edge":
             if not picked:
                 self.set_status("No nearby point found")
@@ -14998,6 +15165,50 @@ class CableRouteEditor(QMainWindow):
                     dialog.result["cable_limit"],
                 )
                 self.set_status(f"Edited {dialog.result['id']}")
+                self.refresh_canvas()
+            return
+
+        if point.get("kind") == "ad_hoc_asset":
+            dialog = AdHocAssetEditorDialog(
+                self,
+                seed=point,
+                asset_options=self.store.asset_options(),
+                default_floor=floor,
+                default_x=point["x"],
+                default_y=point["y"],
+                default_name=picked,
+            )
+            if dialog.exec() == QDialog.Accepted and dialog.result:
+                new_name = dialog.result["name"]
+                if new_name != picked and new_name in self.store.names_in_use():
+                    QMessageBox.critical(self, "Duplicate name", "Name already exists")
+                    return
+                self.push_undo_state("Edit ad hoc building asset")
+                self.store.set_point_position(
+                    picked, dialog.result["x"], dialog.result["y"]
+                )
+                self.store.rename_point(picked, new_name)
+                for placement in self.store.data.get("ad_hoc_assets", []):
+                    if str(placement.get("name", "") or "").strip() != new_name:
+                        continue
+                    placement.update(
+                        {
+                            "asset_id": dialog.result["asset_id"],
+                            "asset_qty": dialog.result["asset_qty"],
+                            "extension_distance_m": dialog.result[
+                                "extension_distance_m"
+                            ],
+                            "qty": self.store.ad_hoc_asset_cable_qty(
+                                dialog.result["asset_id"],
+                                dialog.result["asset_qty"],
+                            ),
+                        }
+                    )
+                    self.store.sync_connection_qty_for_data_point(new_name)
+                    break
+                self._render_data_revision += 1
+                self.selected_point_name = new_name
+                self.set_status(f"Edited building asset {new_name}")
                 self.refresh_canvas()
             return
 
@@ -15283,6 +15494,7 @@ class CableRouteEditor(QMainWindow):
             delete_action = menu.addAction("Delete")
 
             selected_data_points = self._selected_data_point_names()
+            selected_routable_endpoints = self._selected_routable_endpoint_names()
             similar_seed_names = self._similar_data_point_seed_names(picked)
             select_similar_dp_action = None
             update_selected_dp_qty_action = None
@@ -15311,26 +15523,30 @@ class CableRouteEditor(QMainWindow):
                 update_selected_dp_qty_action = menu.addAction(
                     f"Update qty for {len(selected_data_points)} selected data points"
                 )
+
+            if selected_routable_endpoints:
                 menu.addSeparator()
                 (
                     pending_connection_names,
                     estimated_connection_ports,
                     _estimated_quantities,
                 ) = self._connection_port_estimate_for_data_points(
-                    selected_data_points
+                    selected_routable_endpoints
                 )
                 create_selected_dp_connections_action = menu.addAction(
-                    f"Create connection(s) for {len(selected_data_points)} selected "
-                    f"data point(s) - estimated {estimated_connection_ports} new port(s)"
+                    f"Create connection(s) for {len(selected_routable_endpoints)} "
+                    f"selected endpoint(s) - estimated {estimated_connection_ports} new port(s)"
                 )
                 create_selected_dp_connections_action.setToolTip(
-                    f"{len(pending_connection_names)} unconnected data point(s) require "
+                    f"{len(pending_connection_names)} unconnected endpoint(s) require "
                     f"an estimated {estimated_connection_ports} port(s). The estimate "
-                    "includes manual quantities and room-type asset demand."
+                    "includes manual, room-type and ad hoc asset demand."
                 )
                 disconnect_selected_dp_connections_action = menu.addAction(
-                    f"Disconnect connection(s) for {len(selected_data_points)} selected data point(s)"
+                    f"Disconnect connection(s) for {len(selected_routable_endpoints)} selected endpoint(s)"
                 )
+
+            if selected_data_points:
                 assign_selected_dp_departments_action = menu.addAction(
                     f"Assign department(s) for {len(selected_data_points)} selected data point(s)"
                 )
@@ -15384,6 +15600,7 @@ class CableRouteEditor(QMainWindow):
                 "location",
                 "comms_room",
                 "data_point",
+                "ad_hoc_asset",
             }:
                 estimate_cables_action.setEnabled(False)
 
@@ -15768,6 +15985,15 @@ class CableRouteEditor(QMainWindow):
             for item in self.store.data.get("data_points", [])
             if str(item.get("name", "")).strip()
         }
+        data_point_qty_by_name.update(
+            {
+                str(item.get("name", "") or "").strip(): max(
+                    0, int(item.get("qty", 0) or 0)
+                )
+                for item in self.store.data.get("ad_hoc_assets", [])
+                if str(item.get("name", "") or "").strip()
+            }
+        )
 
         total_cables = 0
         matching_connections = 0
@@ -17180,6 +17406,9 @@ class CableRouteEditor(QMainWindow):
         for item in self.store.data.get("data_points", []):
             floors.add(int(item.get("floor", 0)))
 
+        for item in self.store.data.get("ad_hoc_assets", []):
+            floors.add(int(item.get("floor", 0)))
+
         for item in self.store.data.get("locations", []):
             floors.add(int(item.get("floor", 0)))
 
@@ -17206,6 +17435,15 @@ class CableRouteEditor(QMainWindow):
             for item in self.store.data.get("data_points", [])
             if str(item.get("name", "")).strip()
         }
+        data_point_qty_by_name.update(
+            {
+                str(item.get("name", "") or "").strip(): max(
+                    0, int(item.get("qty", 0) or 0)
+                )
+                for item in self.store.data.get("ad_hoc_assets", [])
+                if str(item.get("name", "") or "").strip()
+            }
+        )
 
         route_cache = {}
 
@@ -17302,6 +17540,7 @@ class CableRouteEditor(QMainWindow):
             "10_CORRIDOR_EDGES": 5,
             "20_CORRIDOR_NODES": 2,
             "30_TRANSITIONS": 1,
+            "35_AD_HOC_ASSETS": 30,
             "40_COMMS_ROOMS": 3,
             "45_LOCATIONS": 4,
             "50_DATA_POINTS": 6,
@@ -17550,6 +17789,46 @@ class CableRouteEditor(QMainWindow):
                 0.35 * TEXT_SCALE,
             )
 
+        # Building-level assets placed independently of room types
+        assets_by_id = {
+            str(asset.get("id", "") or "").strip(): str(
+                asset.get("name", "") or ""
+            ).strip()
+            for asset in self.store.data.get("assets", [])
+            if isinstance(asset, dict)
+        }
+        for item in self.store.data.get("ad_hoc_assets", []):
+            if int(item.get("floor", 0)) != int(floor):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            asset_id = str(item.get("asset_id", "") or "").strip()
+            x = float(item.get("x", 0.0)) * EXPORT_SCALE
+            y = float(item.get("y", 0.0)) * EXPORT_SCALE
+            qty = max(1, int(item.get("asset_qty", 1) or 1))
+            ports = max(0, int(item.get("qty", 0) or 0))
+            count = cable_counts.get(name, 0)
+            self._add_square(
+                msp, x, y, 0.9 * SYMBOL_SCALE, "35_AD_HOC_ASSETS"
+            )
+            self._add_label(
+                msp,
+                f"{name} | {asset_id} - {assets_by_id.get(asset_id, '')}".strip(
+                    " -"
+                ),
+                x + 0.65 * EXPORT_SCALE,
+                y + 0.4 * EXPORT_SCALE,
+                "35_AD_HOC_ASSETS",
+                0.45 * TEXT_SCALE,
+            )
+            self._add_label(
+                msp,
+                f"Assets: {qty} | Ports: {ports} | Cables: {count}",
+                x + 0.65 * EXPORT_SCALE,
+                y - 0.4 * EXPORT_SCALE,
+                "60_CABLE_COUNTS",
+                0.35 * TEXT_SCALE,
+            )
+
         doc.saveas(str(out_path))
 
     def export_floor_dxfs(self):
@@ -17651,13 +17930,13 @@ class CableRouteEditor(QMainWindow):
         )
 
     def create_connections_for_selected_data_points(self):
-        selected = self._selected_data_point_names()
+        selected = self._selected_routable_endpoint_names()
 
         if not selected:
             QMessageBox.information(
                 self,
                 "Create Connections",
-                "No selected data points found.",
+                "No selected data points or ad hoc assets found.",
             )
             return
 
@@ -17671,7 +17950,7 @@ class CableRouteEditor(QMainWindow):
             QMessageBox.information(
                 self,
                 "Create Connections",
-                "All selected data points already have connections.",
+                "All selected endpoints already have connections.",
             )
             return
 
@@ -17687,9 +17966,9 @@ class CableRouteEditor(QMainWindow):
         room_name, ok = QInputDialog.getItem(
             self,
             "Create Connections",
-            "Connect selected data points from comms room:\n\n"
+            "Connect selected endpoints from comms room:\n\n"
             f"Estimated ports required: {estimated_ports} across "
-            f"{len(targets)} unconnected data point(s).",
+            f"{len(targets)} unconnected endpoint(s).",
             comms_rooms,
             0,
             False,
@@ -17735,7 +18014,7 @@ class CableRouteEditor(QMainWindow):
 
         if skipped_existing:
             lines.append(
-                f"Skipped {len(skipped_existing)} already-connected data point(s)."
+                f"Skipped {len(skipped_existing)} already-connected endpoint(s)."
             )
 
         QMessageBox.information(
@@ -17747,13 +18026,13 @@ class CableRouteEditor(QMainWindow):
         self.set_status(f"Created {created} connection(s) from {room_name}")
 
     def disconnect_selected_data_point_connections(self):
-        selected = self._selected_data_point_names()
+        selected = self._selected_routable_endpoint_names()
 
         if not selected:
             QMessageBox.information(
                 self,
                 "Disconnect Connections",
-                "No selected data points found.",
+                "No selected data points or ad hoc assets found.",
             )
             return
 
@@ -17769,7 +18048,7 @@ class CableRouteEditor(QMainWindow):
             QMessageBox.information(
                 self,
                 "Disconnect Connections",
-                "No connections found for the selected data point(s).",
+                "No connections found for the selected endpoint(s).",
             )
             return
 
@@ -17777,7 +18056,7 @@ class CableRouteEditor(QMainWindow):
             QMessageBox.question(
                 self,
                 "Disconnect Connections",
-                f"Remove {len(matching)} connection(s) from selected data point(s)?",
+                f"Remove {len(matching)} connection(s) from selected endpoint(s)?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -17795,7 +18074,7 @@ class CableRouteEditor(QMainWindow):
 
         self.refresh_canvas()
         self.set_status(
-            f"Disconnected {len(matching)} connection(s) from {len(selected)} data point(s)"
+            f"Disconnected {len(matching)} connection(s) from {len(selected)} endpoint(s)"
         )
 
     def _existing_comms_rooms_near_candidate(
@@ -17869,10 +18148,12 @@ class CableRouteEditor(QMainWindow):
                 self.undo_stack.pop()
             raise
         self.store.sync_all_room_type_quantities()
+        self._render_data_revision += 1
 
         self.set_status(
             f"Assets updated; retired {len(result['removed_ids'])} ID(s) and purged "
-            f"{result['purged_count']} missing room-type assignment(s)"
+            f"{result['purged_count']} missing room-type assignment(s), "
+            f"{result.get('ad_hoc_placement_count', 0)} ad hoc placement(s)"
         )
         self.refresh_canvas()
 

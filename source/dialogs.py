@@ -1513,6 +1513,133 @@ class DataPointEditorDialog(QDialog):
             QMessageBox.critical(self, "Invalid data point", str(exc))
 
 
+class AdHocAssetEditorDialog(QDialog):
+    """Edit a building-level asset placement that is not tied to a room type."""
+
+    def __init__(
+        self,
+        parent,
+        *,
+        seed=None,
+        asset_options=None,
+        default_floor=0,
+        default_x=0.0,
+        default_y=0.0,
+        default_name="",
+    ):
+        super().__init__(parent)
+        self.seed = dict(seed or {})
+        self.asset_options = list(asset_options or [])
+        self.result = None
+        self.setWindowTitle("Ad Hoc Building Asset")
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Place an individual asset owned by the building. This placement is "
+            "independent of room types and appears on the Ad hoc assets layer."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+        self.name_edit = QLineEdit(
+            str(self.seed.get("name", default_name) or default_name)
+        )
+        self.asset_combo = QComboBox()
+        self.asset_combo.setEditable(True)
+        self.asset_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.asset_combo.setMaxVisibleItems(24)
+        for asset_id, asset_name in self.asset_options:
+            asset_id = str(asset_id or "").strip()
+            asset_name = str(asset_name or "").strip()
+            if not asset_id:
+                continue
+            self.asset_combo.addItem(
+                f"{asset_id} - {asset_name}" if asset_name else asset_id,
+                asset_id,
+            )
+        completer = QCompleter(self.asset_combo.model(), self.asset_combo)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.setFilterMode(Qt.MatchContains)
+        self.asset_combo.setCompleter(completer)
+        selected_asset_id = str(self.seed.get("asset_id", "") or "").strip()
+        selected_index = self.asset_combo.findData(selected_asset_id)
+        if selected_index >= 0:
+            self.asset_combo.setCurrentIndex(selected_index)
+
+        self.asset_qty_spin = QSpinBox()
+        self.asset_qty_spin.setRange(1, 1000000)
+        self.asset_qty_spin.setValue(
+            max(1, int(self.seed.get("asset_qty", 1) or 1))
+        )
+        self.x_edit = QLineEdit(str(self.seed.get("x", default_x)))
+        self.y_edit = QLineEdit(str(self.seed.get("y", default_y)))
+        self.extension_spin = QDoubleSpinBox()
+        self.extension_spin.setRange(0.0, 100000.0)
+        self.extension_spin.setDecimals(2)
+        self.extension_spin.setSuffix(" m")
+        self.extension_spin.setValue(
+            max(0.0, float(self.seed.get("extension_distance_m", 0.0) or 0.0))
+        )
+        self.floor = int(self.seed.get("floor", default_floor))
+
+        form.addRow("Placement name", self.name_edit)
+        form.addRow("Asset", self.asset_combo)
+        form.addRow("Asset quantity", self.asset_qty_spin)
+        form.addRow("X", self.x_edit)
+        form.addRow("Y", self.y_edit)
+        form.addRow("Floor", QLabel(str(self.floor)))
+        form.addRow("Extension distance", self.extension_spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(560, 330)
+
+    def _selected_asset_id(self):
+        text = self.asset_combo.currentText().strip()
+        for index in range(self.asset_combo.count()):
+            asset_id = str(self.asset_combo.itemData(index) or "").strip()
+            label = self.asset_combo.itemText(index).strip()
+            if text.casefold() in {asset_id.casefold(), label.casefold()}:
+                return asset_id
+            if asset_id and text.casefold().startswith(asset_id.casefold() + " -"):
+                return asset_id
+        current = str(self.asset_combo.currentData() or "").strip()
+        if (
+            current
+            and self.asset_combo.currentIndex() >= 0
+            and text
+            == self.asset_combo.itemText(self.asset_combo.currentIndex()).strip()
+        ):
+            return current
+        return ""
+
+    def accept(self):
+        try:
+            name = self.name_edit.text().strip()
+            asset_id = self._selected_asset_id()
+            if not name:
+                raise ValueError("Placement name is required.")
+            if not asset_id:
+                raise ValueError("Select an asset from the asset library.")
+            self.result = {
+                "name": name,
+                "asset_id": asset_id,
+                "asset_qty": int(self.asset_qty_spin.value()),
+                "floor": self.floor,
+                "x": float(self.x_edit.text()),
+                "y": float(self.y_edit.text()),
+                "extension_distance_m": float(self.extension_spin.value()),
+            }
+            super().accept()
+        except Exception as exc:
+            QMessageBox.critical(self, "Invalid ad hoc asset", str(exc))
+
+
 class PlacementZoneEditorDialog(QDialog):
     """Edit one rectangular equipment-room placement allowance."""
 
@@ -6115,11 +6242,23 @@ class RoomTypeExportSelectionDialog(QDialog):
         paste_actions = QVBoxLayout()
         paste_actions.addWidget(QLabel(""))
         self.add_list_button = QPushButton("Add Listed Room Types")
+        self.open_list_button = QPushButton("Open List...")
+        self.save_list_button = QPushButton("Save List...")
         self.clear_list_button = QPushButton("Clear List")
         self.add_list_button.setMinimumWidth(150)
+        self.open_list_button.setMinimumWidth(150)
+        self.save_list_button.setMinimumWidth(150)
         self.clear_list_button.setMinimumWidth(150)
         self.add_list_button.setEnabled(False)
+        self.open_list_button.setToolTip(
+            "Open a saved room type selection list"
+        )
+        self.save_list_button.setToolTip(
+            "Save the currently selected room type IDs as a reusable list"
+        )
         paste_actions.addWidget(self.add_list_button)
+        paste_actions.addWidget(self.open_list_button)
+        paste_actions.addWidget(self.save_list_button)
         paste_actions.addWidget(self.clear_list_button)
         paste_actions.addStretch(1)
         paste_layout.addLayout(paste_actions)
@@ -6191,6 +6330,8 @@ class RoomTypeExportSelectionDialog(QDialog):
         self.search_edit.textChanged.connect(self._apply_filter)
         self.room_list_edit.textChanged.connect(self._refresh_list_button)
         self.add_list_button.clicked.connect(self._add_listed_room_types)
+        self.open_list_button.clicked.connect(self._open_room_type_list)
+        self.save_list_button.clicked.connect(self._save_room_type_list)
         self.clear_list_button.clicked.connect(self._clear_room_list)
         self.add_button.clicked.connect(self._move_selected_right)
         self.add_all_button.clicked.connect(self._move_all_right)
@@ -6280,9 +6421,17 @@ class RoomTypeExportSelectionDialog(QDialog):
         self.list_match_status_label.setStyleSheet("")
 
     def _add_listed_room_types(self):
-        matched, unmatched, ambiguous = self._match_pasted_room_types(
-            self.room_list_edit.toPlainText()
+        self._apply_room_type_list(
+            self.room_list_edit.toPlainText(),
+            replace_selection=False,
         )
+
+    def _apply_room_type_list(self, value, *, replace_selection):
+        matched, unmatched, ambiguous = self._match_pasted_room_types(
+            value
+        )
+        if replace_selection:
+            self._selected_indices = []
         for index in matched:
             if index not in self._selected_indices:
                 self._selected_indices.append(index)
@@ -6332,6 +6481,72 @@ class RoomTypeExportSelectionDialog(QDialog):
             "\n\n".join(details),
         )
 
+    def _open_room_type_list(self):
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Open Room Type Selection List",
+            "",
+            "Room type lists (*.txt);;All files (*.*)",
+        )
+        if not path:
+            return
+        try:
+            value = Path(path).read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError) as exc:
+            QMessageBox.critical(
+                self,
+                "Open list failed",
+                f"Could not open the room type selection list:\n{exc}",
+            )
+            return
+        self.room_list_edit.setPlainText(value)
+        self._apply_room_type_list(value, replace_selection=True)
+
+    def _save_room_type_list(self):
+        if not self._selected_indices:
+            QMessageBox.information(
+                self,
+                "Save Room Type Selection List",
+                "Select at least one room type before saving the list.",
+            )
+            return
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Room Type Selection List",
+            "selected_room_types.txt",
+            "Room type lists (*.txt);;All files (*.*)",
+        )
+        if not path:
+            return
+        destination = Path(path)
+        if not destination.suffix:
+            destination = destination.with_suffix(".txt")
+        values = []
+        for index in self._selected_indices:
+            room_type = self.room_types[index]
+            room_type_id = str(room_type.get("id", "") or "").strip()
+            name = str(room_type.get("name", "") or "").strip()
+            value = room_type_id or name
+            if value:
+                values.append(value)
+        try:
+            destination.write_text(
+                "\n".join(values) + "\n",
+                encoding="utf-8",
+            )
+        except (OSError, UnicodeError) as exc:
+            QMessageBox.critical(
+                self,
+                "Save list failed",
+                f"Could not save the room type selection list:\n{exc}",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "List saved",
+            f"Saved {len(values)} room type(s) to:\n{destination}",
+        )
+
     def _refresh_tables(self):
         self.available_table.setRowCount(0)
         self.selected_table.setRowCount(0)
@@ -6350,6 +6565,7 @@ class RoomTypeExportSelectionDialog(QDialog):
             item = QTableWidgetItem(self._room_label(index))
             item.setData(Qt.UserRole, index)
             self.selected_table.setItem(row, 0, item)
+        self.save_list_button.setEnabled(bool(self._selected_indices))
         self._apply_filter(self.search_edit.text())
 
     def _apply_filter(self, text):

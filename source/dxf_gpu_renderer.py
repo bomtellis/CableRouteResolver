@@ -344,6 +344,7 @@ class GpuDxfGraphView(_ViewBase):
         self.show_edges = True
         self.show_nodes = True
         self.show_data_points = True
+        self.show_ad_hoc_assets = True
         self.show_unconnected_data_points_only = False
         self.unconnected_data_point_names: set[str] = set()
         self.show_routing_unconnected_data_points_only = False
@@ -999,6 +1000,7 @@ class GpuDxfGraphView(_ViewBase):
         show_edges: Optional[bool] = None,
         show_nodes: Optional[bool] = None,
         show_data_points: Optional[bool] = None,
+        show_ad_hoc_assets: Optional[bool] = None,
         show_unconnected_data_points_only: Optional[bool] = None,
         unconnected_data_point_names: Optional[Sequence[str]] = None,
         show_routing_unconnected_data_points_only: Optional[bool] = None,
@@ -1035,6 +1037,7 @@ class GpuDxfGraphView(_ViewBase):
         assign("show_edges", show_edges, DirtyLayer.EDGES)
         assign("show_nodes", show_nodes, DirtyLayer.OBJECTS)
         assign("show_data_points", show_data_points, DirtyLayer.OBJECTS)
+        assign("show_ad_hoc_assets", show_ad_hoc_assets, DirtyLayer.OBJECTS)
         assign(
             "show_unconnected_data_points_only",
             show_unconnected_data_points_only,
@@ -1318,6 +1321,8 @@ class GpuDxfGraphView(_ViewBase):
                     and str(name) in self.connected_data_point_names
                 ):
                     continue
+            if kind == "ad_hoc_asset" and not self.show_ad_hoc_assets:
+                continue
             if kind == "comms_room" and not self.show_comms_rooms:
                 continue
             if kind in {
@@ -2077,6 +2082,8 @@ class GpuDxfGraphView(_ViewBase):
                 continue
             if kind == "data_point" and not self.show_data_points:
                 continue
+            if kind == "ad_hoc_asset" and not self.show_ad_hoc_assets:
+                continue
             if (
                 kind == "data_point"
                 and self.show_unconnected_data_points_only
@@ -2135,6 +2142,19 @@ class GpuDxfGraphView(_ViewBase):
                     QColor("#ffffff") if selected else QColor("#d5bbff"),
                 )
                 label_color = QColor("#eadcff")
+            elif kind == "ad_hoc_asset":
+                painter.setPen(
+                    QPen(
+                        QColor("#ffffff") if selected else QColor("#ffd0a1"),
+                        0.08,
+                    )
+                )
+                painter.setBrush(QBrush(QColor("#ff9f43")))
+                r = 0.48
+                painter.drawRect(
+                    QRectF(pos.x() - r, pos.y() - r, r * 2.0, r * 2.0)
+                )
+                label_color = QColor("#ffd7ad")
             else:
                 self._draw_diamond(painter, pos, 0.5, QColor("#ff7b72"), QColor("#ffffff") if selected else QColor("#ffb3ae"))
                 label_color = QColor("#ffb3ae")
