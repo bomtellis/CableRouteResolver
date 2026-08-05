@@ -22,6 +22,7 @@ from reportlab.platypus import (
 )
 from reportlab.platypus.tableofcontents import TableOfContents
 
+from asset_bundles import room_asset_source_labels
 from models import JsonStore
 
 PROJECT_SUMMARY_SECTIONS = [
@@ -335,6 +336,10 @@ def _room_type_sections(store: JsonStore):
         room_assets_per_room = 0
         room_ports_per_room = 0
         rows = []
+        source_labels = room_asset_source_labels(
+            room_type,
+            data.get("asset_bundles", []),
+        )
         port_summary = store.room_type_port_summary(room_type_id)
         for asset_row in store.room_type_asset_rows(room_type):
             asset_id = _text(asset_row.get("asset_id"))
@@ -369,6 +374,7 @@ def _room_type_sections(store: JsonStore):
                     "adb_code": _text(asset.get("ADB_Code", asset.get("adb_code"))),
                     "group": _text(asset.get("Group", asset.get("group"))),
                     "make_model": _asset_make_model(asset),
+                    "bundle": source_labels.get(asset_id, "Manual"),
                     "qty_per_room": qty_per_room,
                     "ports_each": ports_each,
                     "port_per_room": port_per_room,
@@ -409,6 +415,7 @@ def _room_type_sections(store: JsonStore):
                     "group": _text(asset.get("Group", asset.get("group")))
                     or "Calculated connection cable",
                     "make_model": _asset_make_model(asset),
+                    "bundle": "",
                     "qty_per_room": qty_per_room,
                     "ports_each": 0,
                     "port_per_room": 0,
@@ -473,6 +480,7 @@ def _room_asset_table_rows(room: Mapping, styles):
     rows = [[
         _p("Asset ID", styles["header"]),
         _p("Description", styles["header"]),
+        _p("Bundle", styles["header"]),
         _p("ADB code", styles["header"]),
         _p("Grouping", styles["header"]),
         _p("Make / model", styles["header"]),
@@ -490,12 +498,13 @@ def _room_asset_table_rows(room: Mapping, styles):
             group_rows.append(len(rows))
             rows.append(
                 [_p(f"Category: {asset['category_name']}", styles["group"])]
-                + [_p("", styles["small"])] * 9
+                + [_p("", styles["small"])] * 10
             )
             current_category_id = category_id
         rows.append([
             _p(asset["asset_id"], styles["small"]),
             _p(asset["asset_name"], styles["small"]),
+            _p(asset.get("bundle", ""), styles["small"]),
             _p(asset["adb_code"], styles["small"]),
             _p(asset["group"], styles["small"]),
             _p(asset["make_model"], styles["small"]),
@@ -507,6 +516,7 @@ def _room_asset_table_rows(room: Mapping, styles):
         ])
     rows.append([
         _p("Total", styles["header"]),
+        _p("", styles["header"]),
         _p("", styles["header"]),
         _p("", styles["header"]),
         _p("", styles["header"]),
@@ -1129,19 +1139,20 @@ def export_project_summary_pdf(
                 _table(
                     rows,
                     [
-                        27 * mm,
-                        48 * mm,
-                        24 * mm,
-                        28 * mm,
+                        23 * mm,
+                        40 * mm,
                         34 * mm,
-                        18 * mm,
-                        18 * mm,
+                        20 * mm,
+                        24 * mm,
+                        29 * mm,
+                        20 * mm,
+                        16 * mm,
                         22 * mm,
-                        22 * mm,
-                        22 * mm,
+                        19 * mm,
+                        19 * mm,
                     ],
                     styles,
-                    numeric_columns=(5, 6, 7, 8, 9),
+                    numeric_columns=(6, 7, 8, 9, 10),
                     total_rows=(-1,),
                     group_rows=group_rows,
                 )

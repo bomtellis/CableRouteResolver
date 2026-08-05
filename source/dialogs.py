@@ -65,12 +65,14 @@ from asset_bundles import (
     bundle_without_excluded_assets,
     clean_bundle_asset_exclusions,
     clean_bundle_assignments,
+    inferred_room_bundle_asset_exclusions,
     merge_bundle_assignments,
     merge_selected_bundle_connections,
     merge_selected_bundles,
     normalise_asset_bundles,
     reconcile_bundle_assignments,
     replace_bundle_assignment,
+    room_asset_source_labels,
     unlink_bundle_assignment,
 )
 from library_csv import (
@@ -6184,7 +6186,13 @@ class RoomTypeEditorDialog(QDialog):
 class RoomTypeExportSelectionDialog(QDialog):
     """Choose room types for an asset-breakdown export."""
 
-    def __init__(self, parent, room_types, preselected_indices=None):
+    def __init__(
+        self,
+        parent,
+        room_types,
+        preselected_indices=None,
+        include_connection_assets=True,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Select Room Types to Export")
         self.resize(900, 520)
@@ -6320,6 +6328,19 @@ class RoomTypeExportSelectionDialog(QDialog):
         chooser_layout.addLayout(selected_layout, 1)
 
         layout.addLayout(chooser_layout, 1)
+
+        self.include_connection_assets_check = QCheckBox(
+            "Include cables and connection assets"
+        )
+        self.include_connection_assets_check.setChecked(
+            bool(include_connection_assets)
+        )
+        self.include_connection_assets_check.setToolTip(
+            "Include assigned assets identified as cables or connection "
+            "accessories, plus calculated connection-cable rows. Clear this "
+            "option to export endpoint assets only."
+        )
+        layout.addWidget(self.include_connection_assets_check)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Continue to Export")
@@ -6635,6 +6656,9 @@ class RoomTypeExportSelectionDialog(QDialog):
     def selected_room_types(self):
         return [self.room_types[index] for index in self._selected_indices]
 
+    def should_include_connection_assets(self):
+        return self.include_connection_assets_check.isChecked()
+
     def _accept_selection(self):
         if not self._selected_indices:
             QMessageBox.information(
@@ -6671,6 +6695,7 @@ class RoomTypesEditorWindow(QMainWindow):
         self.asset_bundles = normalise_asset_bundles(
             asset_bundles or [], self.assets_by_id
         )
+        self._room_asset_export_include_connection_assets = True
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -7075,9 +7100,15 @@ class RoomTypesEditorWindow(QMainWindow):
             self,
             self.items,
             preselected_indices=preselected_indices,
+            include_connection_assets=(
+                self._room_asset_export_include_connection_assets
+            ),
         )
         if dialog.exec() != QDialog.Accepted:
             return []
+        self._room_asset_export_include_connection_assets = (
+            dialog.should_include_connection_assets()
+        )
         return dialog.selected_room_types()
 
     def export_selected_room_asset_detail_pdf(self):
@@ -7099,6 +7130,7 @@ class RoomTypesEditorWindow(QMainWindow):
                 self.assets_by_id,
                 self.asset_categories_by_id,
                 self.asset_bundles,
+                self._room_asset_export_include_connection_assets,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
@@ -7129,6 +7161,7 @@ class RoomTypesEditorWindow(QMainWindow):
                 self.assets_by_id,
                 self.asset_categories_by_id,
                 self.asset_bundles,
+                self._room_asset_export_include_connection_assets,
             )
         except (OSError, ValueError, XlsxError) as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
@@ -7275,7 +7308,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         self.status_label = QLabel()
         detail_layout.addWidget(self.status_label)
 
-        self.asset_table = QTableWidget(0, 9)
+        self.asset_table = QTableWidget(0, 10)
         self.asset_table.setHorizontalHeaderLabels(
             [
                 "Asset ID",
@@ -7287,6 +7320,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
                 "Qty",
                 "Physical inputs each",
                 "Final network ports",
+                "Bundle",
             ]
         )
         self.asset_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -7301,6 +7335,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         self.asset_table.setColumnWidth(6, 70)
         self.asset_table.setColumnWidth(7, 115)
         self.asset_table.setColumnWidth(8, 150)
+        self.asset_table.setColumnWidth(9, 210)
         detail_layout.addWidget(self.asset_table, 1)
 
         self.summary_label = QLabel()
@@ -7768,14 +7803,21 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         *,
         bundle_assignments=None,
         asset_connections=None,
+        bundle_excluded_asset_ids=None,
     ):
         if not self.on_assignments_changed:
             return
         callback_args = [room_type_id, asset_rows, data_ports_by_asset_id]
-        if bundle_assignments is not None or asset_connections is not None:
+        if (
+            bundle_assignments is not None
+            or asset_connections is not None
+            or bundle_excluded_asset_ids is not None
+        ):
             callback_args.append(bundle_assignments)
-        if asset_connections is not None:
+        if asset_connections is not None or bundle_excluded_asset_ids is not None:
             callback_args.append(asset_connections)
+        if bundle_excluded_asset_ids is not None:
+            callback_args.append(bundle_excluded_asset_ids)
         updated = self._run_requested_action(
             "updating room asset assignments",
             lambda: self.on_assignments_changed(*callback_args),
@@ -8036,6 +8078,10 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         )
 
         grouped_rows = {}
+        source_labels = room_asset_source_labels(
+            room_type,
+            self.asset_bundles,
+        )
         for asset_row in rows:
             asset = self.assets_by_id.get(asset_row["asset_id"], {})
             category = self._asset_category_label(asset)
@@ -8067,6 +8113,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
                     qty,
                     data_points,
                     total,
+                    source_labels.get(asset_id, "Manual"),
                 ]
                 row = self.asset_table.rowCount()
                 self.asset_table.insertRow(row)
@@ -8098,7 +8145,12 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         if not rows:
             self.asset_table.insertRow(0)
             self.asset_table.setItem(0, 0, QTableWidgetItem("No assets assigned"))
-            self.asset_table.setSpan(0, 0, 1, 9)
+            self.asset_table.setSpan(
+                0,
+                0,
+                1,
+                self.asset_table.columnCount(),
+            )
 
         port_summary = room_asset_port_summary(
             rows,
@@ -8189,6 +8241,12 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             if self._current_room_type()
             else [],
         )
+        preview_room_type = dict(self._current_room_type() or {})
+        preview_room_type["assets"] = assignments
+        source_labels = room_asset_source_labels(
+            preview_room_type,
+            self.asset_bundles,
+        )
         final_counts, deferred_by_asset = _final_network_ports_by_asset(
             port_summary
         )
@@ -8211,6 +8269,15 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             if reasons:
                 tooltip += "\nDeferred: " + "\n".join(reasons)
             total_item.setToolTip(tooltip)
+            source_item = self.asset_table.item(int(metadata["row"]), 9)
+            if source_item is None:
+                source_item = QTableWidgetItem()
+                self.asset_table.setItem(
+                    int(metadata["row"]),
+                    9,
+                    source_item,
+                )
+            source_item.setText(source_labels.get(asset_id, "Manual"))
         self.summary_label.setText(
             f"{len(self._asset_row_widgets)} asset line(s) | {total_assets} asset instance(s) per room type | "
             f"{port_summary['upstream_ports']} final network port(s) | "
@@ -8831,7 +8898,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.resize(1380, 760)
         self.room_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.asset_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.asset_table.setColumnCount(11)
+        self.asset_table.setColumnCount(12)
         self.asset_table.setHorizontalHeaderLabels(
             [
                 "Asset ID",
@@ -8843,12 +8910,14 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                 "Qty",
                 "Physical inputs each",
                 "Final network ports",
+                "Bundle",
                 "Open RFIs",
                 "RFI queries",
             ]
         )
-        self.asset_table.setColumnWidth(9, 120)
-        self.asset_table.setColumnWidth(10, 320)
+        self.asset_table.setColumnWidth(9, 210)
+        self.asset_table.setColumnWidth(10, 120)
+        self.asset_table.setColumnWidth(11, 320)
 
         action_row = QHBoxLayout()
         self.add_asset_button = QPushButton("Add Assets...")
@@ -9145,14 +9214,19 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                 f"{self._text(item.get('id'))}: {self._text(item.get('reason'))}"
                 for item in outstanding
             )
-            self.asset_table.setItem(row, 9, QTableWidgetItem(rfi_ids))
-            self.asset_table.setItem(row, 10, QTableWidgetItem(reasons))
+            self.asset_table.setItem(row, 10, QTableWidgetItem(rfi_ids))
+            self.asset_table.setItem(row, 11, QTableWidgetItem(reasons))
             if outstanding:
-                self.asset_table.item(row, 9).setBackground(Qt.GlobalColor.yellow)
                 self.asset_table.item(row, 10).setBackground(Qt.GlobalColor.yellow)
+                self.asset_table.item(row, 11).setBackground(Qt.GlobalColor.yellow)
         if not self._asset_row_widgets and self.asset_table.rowCount():
             self.asset_table.clearSpans()
-            self.asset_table.setSpan(0, 0, 1, 11)
+            self.asset_table.setSpan(
+                0,
+                0,
+                1,
+                self.asset_table.columnCount(),
+            )
         self.add_asset_button.setEnabled(bool(self.assets_by_id))
         self.manage_bundle_button.setEnabled(bool(self.asset_bundles))
         self.add_bundle_button.setEnabled(bool(self.asset_bundles))
@@ -9697,12 +9771,24 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             ),
             room_type["asset_ids"],
         )
+        room_type["asset_bundle_excluded_asset_ids"] = (
+            inferred_room_bundle_asset_exclusions(
+                room_type,
+                self.asset_bundles,
+            )
+        )
         self.review_state.pop(room_type_id, None)
         self._capture_staging_state(
             room_type_id,
             rows,
             ports,
+            bundle_assignments=room_type.get(
+                "asset_bundle_assignments", []
+            ),
             asset_connections=room_type["asset_connections"],
+            bundle_excluded_asset_ids=room_type[
+                "asset_bundle_excluded_asset_ids"
+            ],
         )
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         for removal in removal_rows:

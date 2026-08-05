@@ -113,6 +113,7 @@ def room_asset_detail_rows(
     assets_by_id=None,
     asset_categories_by_id=None,
     asset_bundles=None,
+    include_connection_assets=True,
 ) -> list[list[object]]:
     """Flatten assigned assets and calculated connection cables into rows."""
 
@@ -123,6 +124,22 @@ def room_asset_detail_rows(
         if not isinstance(room_type, Mapping):
             continue
         assignments = _room_assignments(room_type)
+        if not include_connection_assets:
+            assignments = [
+                assignment
+                for assignment in assignments
+                if not is_connection_asset(
+                    assets_by_id.get(
+                        _text(
+                            assignment.get(
+                                "asset_id",
+                                assignment.get("id"),
+                            )
+                        ),
+                        {},
+                    )
+                )
+            ]
         if not assignments:
             continue
         summary = room_asset_port_summary(
@@ -151,6 +168,10 @@ def room_asset_detail_rows(
         room_type_id = _text(room_type.get("id"))
         room_type_name = _text(room_type.get("name"))
         scenario_group = _text(room_type.get("scenario_group"))
+        source_labels = room_asset_source_labels(
+            dict(room_type),
+            asset_bundles,
+        )
         room_rows: list[list[object]] = []
         for assignment in assignments:
             asset_id = _text(assignment.get("asset_id", assignment.get("id")))
@@ -175,6 +196,7 @@ def room_asset_detail_rows(
                     _text(asset.get("Group", asset.get("group"))),
                     _text(asset.get("ADB_Code", asset.get("adb_code"))),
                     _text(assignment.get("requested_by")),
+                    source_labels.get(asset_id, "Manual"),
                     _positive_int(assignment.get("qty")),
                     asset_input_ports(asset),
                     asset_output_ports(asset),
@@ -183,7 +205,11 @@ def room_asset_detail_rows(
                     final_counts.get(asset_id, 0),
                 ]
             )
-        for asset_id, quantity in summary.get("connection_assets", {}).items():
+        for asset_id, quantity in (
+            summary.get("connection_assets", {}).items()
+            if include_connection_assets
+            else ()
+        ):
             asset_id = _text(asset_id)
             if not asset_id or int(quantity or 0) <= 0:
                 continue
@@ -207,6 +233,7 @@ def room_asset_detail_rows(
                     category_name,
                     _text(asset.get("Group", asset.get("group"))),
                     _text(asset.get("ADB_Code", asset.get("adb_code"))),
+                    "",
                     "",
                     int(quantity),
                     0,
@@ -235,6 +262,7 @@ def categorised_room_asset_breakdowns(
     assets_by_id=None,
     asset_categories_by_id=None,
     asset_bundles=None,
+    include_connection_assets=True,
 ) -> list[dict]:
     """Return room details in the project report's categorised table shape."""
 
@@ -257,6 +285,7 @@ def categorised_room_asset_breakdowns(
             assets_by_id,
             asset_categories_by_id,
             asset_bundles,
+            include_connection_assets,
         )
         assets = []
         for detail_row in detail_rows:
@@ -312,6 +341,9 @@ def categorised_room_asset_breakdowns(
                     "make_model": " ".join(
                         part for part in (manufacturer, model) if part
                     ),
+                    "bundle": _text(
+                        detail_row[header_index["Bundle"]]
+                    ),
                     "qty_per_room": quantity,
                     "inputs_per_device": inputs_per_device,
                     "outputs_per_device": outputs_per_device,
@@ -358,6 +390,7 @@ def categorised_room_asset_breakdowns(
 _CATEGORISED_BREAKDOWN_HEADERS = (
     "Asset ID",
     "Description",
+    "Bundle",
     "ADB code",
     "Grouping",
     "Make / model",
@@ -400,6 +433,7 @@ def _categorised_breakdown_worksheet(room_breakdowns) -> WorksheetSpec:
                 [
                     asset["asset_id"],
                     asset["asset_name"],
+                    asset["bundle"],
                     asset["adb_code"],
                     asset["group"],
                     asset["make_model"],
@@ -417,6 +451,7 @@ def _categorised_breakdown_worksheet(room_breakdowns) -> WorksheetSpec:
         rows.append(
             [
                 "Total",
+                "",
                 "",
                 "",
                 "",
@@ -444,6 +479,7 @@ def export_room_asset_detail_xlsx(
     assets_by_id=None,
     asset_categories_by_id=None,
     asset_bundles=None,
+    include_connection_assets=True,
 ) -> tuple[str, int]:
     """Write the long-table room asset detail workbook."""
 
@@ -452,12 +488,14 @@ def export_room_asset_detail_xlsx(
         assets_by_id,
         asset_categories_by_id,
         asset_bundles,
+        include_connection_assets,
     )
     room_breakdowns = categorised_room_asset_breakdowns(
         room_types,
         assets_by_id,
         asset_categories_by_id,
         asset_bundles,
+        include_connection_assets,
     )
     destination = write_xlsx(
         path,
@@ -558,6 +596,7 @@ def export_room_asset_detail_pdf(
     assets_by_id=None,
     asset_categories_by_id=None,
     asset_bundles=None,
+    include_connection_assets=True,
 ) -> tuple[str, int]:
     """Write a room-by-room PDF asset breakdown."""
 
@@ -571,6 +610,7 @@ def export_room_asset_detail_pdf(
         assets_by_id,
         asset_categories_by_id,
         asset_bundles,
+        include_connection_assets,
     )
     destination = Path(path)
     if destination.suffix.casefold() != ".pdf":
