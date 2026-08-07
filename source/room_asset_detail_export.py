@@ -17,10 +17,14 @@ from reportlab.platypus import (
     Spacer,
 )
 
-from asset_bundles import resolve_room_type_asset_connections
+from asset_bundles import (
+    resolve_room_type_asset_connections,
+    room_asset_source_labels,
+)
 from asset_ports import (
     asset_input_ports,
     asset_output_ports,
+    is_connection_asset,
     room_asset_port_summary,
 )
 from project_summary_report import (
@@ -43,6 +47,7 @@ ROOM_ASSET_DETAIL_HEADERS = (
     "Group",
     "ADB Code",
     "Requested By",
+    "Bundle",
     "Qty per room",
     "Inputs per device",
     "Outputs per device",

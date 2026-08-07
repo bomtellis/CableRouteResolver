@@ -640,6 +640,88 @@ def reconcile_bundle_assignments(room_type, bundles, assignments) -> dict:
     return result
 
 
+def force_room_bundle_assignments(room_type, bundles) -> dict:
+    """Rebuild a room exclusively from its assigned bundle definitions.
+
+    Unlike delta reconciliation, this intentionally discards room-level asset
+    and connection edits, restores excluded bundle assets, and reapplies each
+    saved bundle multiplier to the current recipe.
+    """
+
+    if not isinstance(room_type, dict):
+        raise ValueError("A room type is required.")
+    normalised_bundles = normalise_asset_bundles(bundles)
+    bundles_by_id = {
+        bundle["id"]: bundle for bundle in normalised_bundles
+    }
+    # Force update treats the saved quantity as authoritative. Historical
+    # projects can contain repeated rows for one bundle; the normal additive
+    # cleaner would sum those rows and duplicate every bundled asset. Collapse
+    # them with last-write-wins semantics instead.
+    assignments_by_id = {}
+    assignment_order = []
+    for raw_assignment in room_type.get("asset_bundle_assignments", []) or []:
+        cleaned = clean_bundle_assignments(
+            [raw_assignment],
+            bundles_by_id,
+        )
+        if not cleaned:
+            continue
+        assignment = cleaned[0]
+        bundle_id = assignment["bundle_id"]
+        if bundle_id not in assignments_by_id:
+            assignment_order.append(bundle_id)
+        assignments_by_id[bundle_id] = assignment
+    assignments = [
+        assignments_by_id[bundle_id] for bundle_id in assignment_order
+    ]
+    if not assignments:
+        raise ValueError("This room type has no valid assigned asset bundles.")
+
+    selected_bundles = [
+        {
+            **bundles_by_id[assignment["bundle_id"]],
+            "bundle_qty": assignment["qty"],
+        }
+        for assignment in assignments
+    ]
+    quantities_by_asset_id = {}
+    asset_order = []
+    for bundle in selected_bundles:
+        bundle_qty = int(bundle.get("bundle_qty", 1) or 1)
+        for asset_row in clean_asset_rows(bundle.get("assets", [])):
+            asset_id = asset_row["asset_id"]
+            if asset_id not in quantities_by_asset_id:
+                asset_order.append(asset_id)
+                quantities_by_asset_id[asset_id] = 0
+            quantities_by_asset_id[asset_id] += (
+                int(asset_row.get("qty", 1) or 1) * bundle_qty
+            )
+    rows = [
+        {
+            "asset_id": asset_id,
+            "qty": quantities_by_asset_id[asset_id],
+        }
+        for asset_id in asset_order
+    ]
+    connections = merge_selected_bundle_connections(
+        [],
+        selected_bundles,
+        existing_asset_rows=[],
+    )
+
+    result = deepcopy(room_type)
+    result["assets"] = rows
+    result["asset_ids"] = [row["asset_id"] for row in rows]
+    result["asset_bundle_assignments"] = assignments
+    result["asset_bundle_excluded_asset_ids"] = []
+    result["asset_connections"] = clean_asset_connections(
+        connections,
+        result["asset_ids"],
+    )
+    return result
+
+
 def replace_bundle_assignment(
     room_type,
     bundles,

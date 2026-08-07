@@ -8,6 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QItemSelectionModel, QSortFilterProxyModel, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -70,6 +71,7 @@ from asset_bundles import (
     merge_selected_bundle_connections,
     merge_selected_bundles,
     normalise_asset_bundles,
+    force_room_bundle_assignments,
     reconcile_bundle_assignments,
     replace_bundle_assignment,
     room_asset_source_labels,
@@ -7325,6 +7327,10 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         )
         self.asset_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.asset_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.asset_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.asset_table.customContextMenuRequested.connect(
+            self._show_asset_review_context_menu
+        )
         self.asset_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.asset_table.setColumnWidth(0, 110)
         self.asset_table.setColumnWidth(1, 260)
@@ -7469,6 +7475,233 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
 
     def _is_complete(self, room_type_id):
         return bool(self._review_record(room_type_id).get("complete", False))
+
+    def _acknowledged_asset_ids(self, room_type_id):
+        values = self._review_record(room_type_id).get(
+            "acknowledged_asset_ids", []
+        )
+        result = []
+        for value in values if isinstance(values, (list, tuple, set)) else []:
+            asset_id = self._text(value)
+            if asset_id and asset_id not in result:
+                result.append(asset_id)
+        return result
+
+    def _clear_completion_preserving_line_acknowledgements(
+        self,
+        room_type_id,
+        valid_asset_ids=None,
+    ):
+        """Invalidate room completion without clearing valid checked lines."""
+
+        room_type_id = self._text(room_type_id)
+        if not room_type_id:
+            return
+        record = deepcopy(self._review_record(room_type_id))
+        acknowledged_ids = self._acknowledged_asset_ids(room_type_id)
+        if valid_asset_ids is not None:
+            valid = {
+                self._text(asset_id)
+                for asset_id in valid_asset_ids
+                if self._text(asset_id)
+            }
+            acknowledged_ids = [
+                asset_id
+                for asset_id in acknowledged_ids
+                if asset_id in valid
+            ]
+        record.pop("complete", None)
+        record.pop("completed_at", None)
+        record.pop("asset_signature", None)
+        if acknowledged_ids:
+            record["acknowledged_asset_ids"] = acknowledged_ids
+        else:
+            record.pop("acknowledged_asset_ids", None)
+        if record:
+            self.review_state[room_type_id] = record
+        else:
+            self.review_state.pop(room_type_id, None)
+
+    def _set_line_acknowledgements(
+        self,
+        asset_ids,
+        acknowledged=True,
+    ):
+        room_type = self._current_room_type()
+        if not room_type:
+            return False
+        room_type_id = self._room_id(room_type)
+        valid_asset_ids = {
+            row["asset_id"] for row in self._room_asset_rows(room_type)
+        }
+        requested_ids = [
+            self._text(asset_id)
+            for asset_id in asset_ids or []
+            if self._text(asset_id) in valid_asset_ids
+        ]
+        if not requested_ids:
+            return False
+
+        record = deepcopy(self._review_record(room_type_id))
+        acknowledged_ids = self._acknowledged_asset_ids(room_type_id)
+        changed = False
+        for asset_id in requested_ids:
+            if acknowledged and asset_id not in acknowledged_ids:
+                acknowledged_ids.append(asset_id)
+                changed = True
+            elif not acknowledged and asset_id in acknowledged_ids:
+                acknowledged_ids.remove(asset_id)
+                changed = True
+        if not changed:
+            return False
+
+        if acknowledged_ids:
+            record["acknowledged_asset_ids"] = acknowledged_ids
+        else:
+            record.pop("acknowledged_asset_ids", None)
+        if record:
+            self.review_state[room_type_id] = record
+        else:
+            self.review_state.pop(room_type_id, None)
+        self._emit_state_changed()
+        self._apply_line_acknowledgement_styles()
+        return True
+
+    def _set_line_acknowledgement(self, asset_id, acknowledged=True):
+        return self._set_line_acknowledgements(
+            [asset_id],
+            acknowledged,
+        )
+
+    def _selected_asset_review_metadata(self):
+        selected_rows = {
+            index.row()
+            for index in self.asset_table.selectionModel().selectedRows()
+        }
+        if not selected_rows and self.asset_table.currentRow() >= 0:
+            selected_rows.add(self.asset_table.currentRow())
+        return [
+            item
+            for item in self._asset_row_widgets
+            if int(item.get("row", -1)) in selected_rows
+        ]
+
+    def acknowledge_selected_line_item(self, acknowledged=True):
+        """Acknowledge or clear every selected asset review line."""
+
+        return self._set_line_acknowledgements(
+            [
+                metadata.get("asset_id")
+                for metadata in self._selected_asset_review_metadata()
+            ],
+            acknowledged,
+        )
+
+    def acknowledge_selected_line_items(self, acknowledged=True):
+        """Plural public alias for multi-line context-menu actions."""
+
+        return self.acknowledge_selected_line_item(acknowledged)
+
+    def _show_asset_review_context_menu(self, pos):
+        row = self.asset_table.rowAt(pos.y())
+        metadata = next(
+            (
+                item
+                for item in self._asset_row_widgets
+                if int(item.get("row", -1)) == row
+            ),
+            None,
+        )
+        if not metadata:
+            return
+        selected_rows = {
+            index.row()
+            for index in self.asset_table.selectionModel().selectedRows()
+        }
+        if row not in selected_rows:
+            self.asset_table.selectRow(row)
+        selected_metadata = self._selected_asset_review_metadata()
+        selected_asset_ids = [
+            self._text(item.get("asset_id"))
+            for item in selected_metadata
+            if self._text(item.get("asset_id"))
+        ]
+        room_type_id = self._room_id(self._current_room_type() or {})
+        acknowledged_ids = set(
+            self._acknowledged_asset_ids(room_type_id)
+        )
+        menu = QMenu(self)
+        plural = len(selected_asset_ids) != 1
+        acknowledge_action = menu.addAction(
+            "Acknowledge selected line items"
+            if plural
+            else "Acknowledge line item"
+        )
+        clear_action = menu.addAction(
+            "Clear selected line acknowledgements"
+            if plural
+            else "Clear line acknowledgement"
+        )
+        acknowledge_action.setEnabled(
+            any(
+                asset_id not in acknowledged_ids
+                for asset_id in selected_asset_ids
+            )
+        )
+        clear_action.setEnabled(
+            any(
+                asset_id in acknowledged_ids
+                for asset_id in selected_asset_ids
+            )
+        )
+        selected = menu.exec(
+            self.asset_table.viewport().mapToGlobal(pos)
+        )
+        if selected == acknowledge_action:
+            self._set_line_acknowledgements(
+                selected_asset_ids,
+                True,
+            )
+        elif selected == clear_action:
+            self._set_line_acknowledgements(
+                selected_asset_ids,
+                False,
+            )
+
+    def _apply_line_acknowledgement_styles(self):
+        room_type = self._current_room_type()
+        room_type_id = self._room_id(room_type or {})
+        acknowledged_ids = set(
+            self._acknowledged_asset_ids(room_type_id)
+        )
+        acknowledged_colour = QColor("#d9ead3")
+        default_colour = QColor(Qt.GlobalColor.transparent)
+        for metadata in self._asset_row_widgets:
+            row = int(metadata.get("row", -1))
+            acknowledged = (
+                self._text(metadata.get("asset_id"))
+                in acknowledged_ids
+            )
+            colour = (
+                acknowledged_colour if acknowledged else default_colour
+            )
+            # RFI columns retain their alert colouring; the review columns
+            # provide the acknowledgement highlight for the complete line.
+            for column in range(min(10, self.asset_table.columnCount())):
+                item = self.asset_table.item(row, column)
+                if item is not None:
+                    item.setBackground(colour)
+            widget_style = (
+                "background-color: #d9ead3;" if acknowledged else ""
+            )
+            for key in (
+                "requested_by_edit",
+                "qty_spin",
+                "ports_spin",
+            ):
+                widget = metadata.get(key)
+                if widget is not None:
+                    widget.setStyleSheet(widget_style)
 
     def _room_asset_rows(self, room_type):
         rows = []
@@ -7654,7 +7887,10 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         )
         room_type["assets"] = rows
         room_type["asset_ids"] = [row["asset_id"] for row in rows]
-        self.review_state.pop(room_type_id, None)
+        self._clear_completion_preserving_line_acknowledgements(
+            room_type_id,
+            room_type["asset_ids"],
+        )
         self._capture_staging_state(room_type_id, rows, {})
         self._emit_state_changed()
         self._sync_sidebar_current()
@@ -8076,6 +8312,15 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         self.status_label.setText(
             f"Reviewed {completed_at}" if completed and completed_at else ("Reviewed" if completed else "Not reviewed")
         )
+        acknowledged_count = len(
+            set(self._acknowledged_asset_ids(room_type_id))
+            & {row["asset_id"] for row in rows}
+        )
+        if rows:
+            self.status_label.setText(
+                f"{self.status_label.text()} | "
+                f"{acknowledged_count} of {len(rows)} line items acknowledged"
+            )
 
         grouped_rows = {}
         source_labels = room_asset_source_labels(
@@ -8201,6 +8446,7 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         self.apply_button.setEnabled(False)
         self.prev_button.setEnabled(len(self.room_types) > 1)
         self.next_button.setEnabled(len(self.room_types) > 1)
+        self._apply_line_acknowledgement_styles()
         self._refresh_staging_panel()
         self._apply_room_filter()
 
@@ -8419,7 +8665,10 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             [row["asset_id"] for row in copied_rows],
         )
         if target_id in self.review_state:
-            self.review_state.pop(target_id, None)
+            self._clear_completion_preserving_line_acknowledgements(
+                target_id,
+                target["asset_ids"],
+            )
             self._emit_state_changed()
         self._capture_staging_state(
             target_id,
@@ -8445,8 +8694,10 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             asset = self.assets_by_id.get(asset_id)
             if isinstance(asset, dict):
                 set_asset_network_port_count(asset, "input", ports)
-        if room_type_id in self.review_state:
-            self.review_state.pop(room_type_id, None)
+        self._clear_completion_preserving_line_acknowledgements(
+            room_type_id,
+            room_type["asset_ids"],
+        )
         self._capture_staging_state(
             room_type_id, asset_rows, data_ports_by_asset_id
         )
@@ -8483,11 +8734,15 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
         room_type_id = self._room_id(room_type)
         if not room_type_id:
             return
-        self.review_state[room_type_id] = {
-            "complete": True,
-            "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "asset_signature": self._asset_signature(room_type),
-        }
+        record = deepcopy(self._review_record(room_type_id))
+        record.update(
+            {
+                "complete": True,
+                "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "asset_signature": self._asset_signature(room_type),
+            }
+        )
+        self.review_state[room_type_id] = record
         self._emit_state_changed()
         self._sync_sidebar_current()
 
@@ -8497,7 +8752,14 @@ class _BaseRoomTypeAssetReviewWizard(QDialog):
             return
         room_type_id = self._room_id(room_type)
         if room_type_id in self.review_state:
-            self.review_state.pop(room_type_id, None)
+            record = deepcopy(self._review_record(room_type_id))
+            record.pop("complete", None)
+            record.pop("completed_at", None)
+            record.pop("asset_signature", None)
+            if record:
+                self.review_state[room_type_id] = record
+            else:
+                self.review_state.pop(room_type_id, None)
             self._emit_state_changed()
         self._sync_sidebar_current()
 
@@ -8920,8 +9182,10 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.asset_table.setColumnWidth(11, 320)
 
         action_row = QHBoxLayout()
+        self.refresh_button = QPushButton("Refresh")
         self.add_asset_button = QPushButton("Add Assets...")
         self.manage_bundle_button = QPushButton("Manage Bundles...")
+        self.force_update_bundle_button = QPushButton("Force Update Bundles")
         # Retain the former controls as hidden compatibility handles for
         # extensions that inspect their enabled state. Bundle changes are now
         # performed only through the consolidated manager.
@@ -8939,8 +9203,19 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.export_rfi_button = QPushButton("Export RFI PDF...")
         self.action_status_label = QLabel("Ready")
         self.action_status_label.setMinimumWidth(180)
+        self.refresh_button.setToolTip(
+            "Reload room types and their assigned bundles from the project"
+        )
+        self.force_update_bundle_button.setToolTip(
+            "Rebuild this room type from its assigned bundle definitions and "
+            "clear all room-level asset, quantity, connection, and exclusion overrides"
+        )
+        self.refresh_button.clicked.connect(self.refresh_from_parent)
         self.add_asset_button.clicked.connect(self._add_asset)
         self.manage_bundle_button.clicked.connect(self._manage_asset_bundles)
+        self.force_update_bundle_button.clicked.connect(
+            self._force_update_asset_bundles
+        )
         self.remove_asset_button.clicked.connect(self._remove_selected_asset)
         self.query_button.clicked.connect(self._raise_asset_query)
         self.resolve_query_button.clicked.connect(self._resolve_asset_query)
@@ -8948,8 +9223,10 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.resolve_room_query_button.clicked.connect(self._resolve_room_query)
         self.export_rfi_button.clicked.connect(self._export_rfi)
         for widget in (
+            self.refresh_button,
             self.add_asset_button,
             self.manage_bundle_button,
+            self.force_update_bundle_button,
             self.remove_asset_button,
             self.query_button,
             self.resolve_query_button,
@@ -8964,6 +9241,78 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.layout().insertLayout(2, action_row)
         self._rfi_ui_ready = True
         self._sync_sidebar_current()
+
+    def refresh_from_parent(self):
+        """Reload room assignments and bundle definitions from project data."""
+
+        parent = self.parent()
+        store = getattr(parent, "store", None)
+        data = getattr(store, "data", None) if store is not None else None
+        if not isinstance(data, dict):
+            self.action_status_label.setText("Project data unavailable")
+            return False
+        if self._dirty and QMessageBox.question(
+            self,
+            "Refresh Room Type Asset Review",
+            "Discard the current unstaged cell edits and reload the room type "
+            "asset and bundle assignments from the project?",
+        ) != QMessageBox.Yes:
+            return False
+
+        current_room_id = self._room_id(self._current_room_type() or {})
+        self.room_types = [
+            deepcopy(item)
+            for item in data.get("room_types", []) or []
+            if isinstance(item, dict)
+        ]
+        self.assets_by_id = {
+            self._text(asset.get("id")): deepcopy(asset)
+            for asset in data.get("assets", []) or []
+            if isinstance(asset, dict) and self._text(asset.get("id"))
+        }
+        self.asset_categories_by_id = {
+            self._text(category.get("id")): self._text(
+                category.get("name", category.get("id", ""))
+            )
+            for category in data.get("asset_categories", []) or []
+            if isinstance(category, dict) and self._text(category.get("id"))
+        }
+        self.asset_bundles = normalise_asset_bundles(
+            data.get("asset_bundles", []) or [],
+            self.assets_by_id,
+        )
+        review_state = data.get("room_type_asset_review", {})
+        self.review_state = (
+            deepcopy(review_state) if isinstance(review_state, dict) else {}
+        )
+        staging_state = data.get("room_type_asset_staging", {})
+        self.staging_state = (
+            deepcopy(staging_state) if isinstance(staging_state, dict) else {}
+        )
+        self.asset_commits = [
+            deepcopy(item)
+            for item in data.get("room_type_asset_commits", []) or []
+            if isinstance(item, dict)
+        ]
+        rfi_state = data.get("room_type_asset_rfi", {})
+        self.rfi_state = (
+            deepcopy(rfi_state)
+            if isinstance(rfi_state, dict)
+            else {"queries": [], "history": []}
+        )
+        self.rfi_state.setdefault("queries", [])
+        self.rfi_state.setdefault("history", [])
+
+        self.current_index = 0
+        if current_room_id:
+            for index, room_type in enumerate(self.room_types):
+                if self._room_id(room_type) == current_room_id:
+                    self.current_index = index
+                    break
+        self._set_dirty(False)
+        self._sync_sidebar_current()
+        self.action_status_label.setText("Refreshed from project")
+        return True
 
     def _queries(self):
         values = self.rfi_state.get("queries", [])
@@ -9174,6 +9523,7 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             for button in (
                 self.add_asset_button,
                 self.manage_bundle_button,
+                self.force_update_bundle_button,
                 self.add_bundle_button,
                 self.replace_bundle_button,
                 self.unlink_bundle_button,
@@ -9231,7 +9581,11 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.manage_bundle_button.setEnabled(bool(self.asset_bundles))
         self.add_bundle_button.setEnabled(bool(self.asset_bundles))
         linked_bundle_assignments = clean_bundle_assignments(
-            room_type.get("asset_bundle_assignments", [])
+            room_type.get("asset_bundle_assignments", []),
+            {bundle["id"] for bundle in self.asset_bundles},
+        )
+        self.force_update_bundle_button.setEnabled(
+            bool(linked_bundle_assignments)
         )
         self.replace_bundle_button.setEnabled(
             bool(linked_bundle_assignments) and len(self.asset_bundles) > 1
@@ -9246,6 +9600,94 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         self.resolve_room_query_button.setEnabled(bool(room_queries))
         self.export_rfi_button.setEnabled(callable(self.on_export_rfi))
         self.asset_table.resizeRowsToContents()
+
+    def _force_update_asset_bundles(self):
+        room_type = self._current_room_type()
+        if not room_type:
+            return
+        try:
+            updated = force_room_bundle_assignments(
+                room_type,
+                self.asset_bundles,
+            )
+        except ValueError as exc:
+            QMessageBox.information(
+                self,
+                "Force Update Asset Bundles",
+                str(exc),
+            )
+            return
+        assignments = updated["asset_bundle_assignments"]
+
+        bundle_count = len(assignments)
+        if QMessageBox.question(
+            self,
+            "Force Update Asset Bundles",
+            f"Rebuild {self._room_option_label(room_type)} from its "
+            f"{bundle_count} assigned asset bundle"
+            f"{'s' if bundle_count != 1 else ''}?\n\n"
+            "This replaces every room asset and connection with the current "
+            "bundle definitions and assigned multipliers. Manual assets, "
+            "quantity/requester edits, connection edits, and bundle exclusions "
+            "will be removed.",
+        ) != QMessageBox.Yes:
+            return
+        reason = self._required_reason(
+            "Force Update Asset Bundles",
+            "Record why the assigned bundle definitions are being enforced.",
+        )
+        if not reason:
+            return
+
+        room_type["assets"] = updated["assets"]
+        room_type["asset_ids"] = updated["asset_ids"]
+        room_type["asset_bundle_assignments"] = updated[
+            "asset_bundle_assignments"
+        ]
+        room_type["asset_bundle_excluded_asset_ids"] = []
+        room_type["asset_connections"] = updated["asset_connections"]
+        room_type_id = self._room_id(room_type)
+        self._clear_completion_preserving_line_acknowledgements(
+            room_type_id,
+            room_type["asset_ids"],
+        )
+        self._capture_staging_state(
+            room_type_id,
+            room_type["assets"],
+            {},
+            bundle_assignments=room_type["asset_bundle_assignments"],
+            asset_connections=room_type["asset_connections"],
+            bundle_excluded_asset_ids=[],
+        )
+
+        bundles_by_id = {
+            bundle["id"]: bundle for bundle in self.asset_bundles
+        }
+        bundle_summary = ", ".join(
+            (
+                self._text(
+                    bundles_by_id.get(
+                        assignment["bundle_id"], {}
+                    ).get("name")
+                )
+                or assignment["bundle_id"]
+            )
+            + f" [{assignment['bundle_id']}] × {assignment['qty']}"
+            for assignment in assignments
+        )
+        self._append_rfi_history(
+            "asset_bundles_force_updated",
+            room_type=room_type,
+            note=(
+                f"Rebuilt room assets and connections from {bundle_summary}; "
+                f"cleared all room-level bundle overrides. Reason: {reason}"
+            ),
+        )
+        self._emit_rfi_changed()
+        self._emit_state_changed()
+        self._set_dirty(False)
+        self._sync_sidebar_current()
+        self.action_status_label.setText("Bundle definitions enforced")
 
     def _add_asset(self):
         if self._dirty:
@@ -9292,7 +9734,10 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
         room_type["assets"] = rows
         room_type["asset_ids"] = [row["asset_id"] for row in rows]
         room_type_id = self._room_id(room_type)
-        self.review_state.pop(room_type_id, None)
+        self._clear_completion_preserving_line_acknowledgements(
+            room_type_id,
+            room_type["asset_ids"],
+        )
         self._capture_staging_state(room_type_id, rows, {})
         for selected_asset in selected_assets:
             asset_id = selected_asset["asset_id"]
@@ -9364,7 +9809,10 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             if asset_id in final_asset_ids
         }
         room_type_id = self._room_id(room_type)
-        self.review_state.pop(room_type_id, None)
+        self._clear_completion_preserving_line_acknowledgements(
+            room_type_id,
+            room_type["asset_ids"],
+        )
         self._capture_staging_state(
             room_type_id,
             room_type["assets"],
@@ -9517,7 +9965,10 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             for asset_id, ports in data_ports_by_asset_id.items()
             if asset_id in final_asset_ids
         }
-        self.review_state.pop(room_type_id, None)
+        self._clear_completion_preserving_line_acknowledgements(
+            room_type_id,
+            room_type["asset_ids"],
+        )
         self._capture_staging_state(
             room_type_id,
             room_type["assets"],
@@ -9672,7 +10123,10 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             if isinstance(asset, dict):
                 set_asset_network_port_count(asset, "input", ports)
         room_type_id = self._room_id(room_type)
-        self.review_state.pop(room_type_id, None)
+        self._clear_completion_preserving_line_acknowledgements(
+            room_type_id,
+            room_type["asset_ids"],
+        )
         self._capture_staging_state(
             room_type_id,
             rows,
@@ -9777,7 +10231,10 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
                 self.asset_bundles,
             )
         )
-        self.review_state.pop(room_type_id, None)
+        self._clear_completion_preserving_line_acknowledgements(
+            room_type_id,
+            room_type["asset_ids"],
+        )
         self._capture_staging_state(
             room_type_id,
             rows,
@@ -9868,7 +10325,13 @@ class RoomTypeAssetReviewWizard(_BaseRoomTypeAssetReviewWizard):
             note=reason,
             rfi_id=query["id"],
         )
-        self.review_state.pop(self._room_id(room_type), None)
+        self._clear_completion_preserving_line_acknowledgements(
+            self._room_id(room_type),
+            [
+                row["asset_id"]
+                for row in self._room_asset_rows(room_type)
+            ],
+        )
         return query
 
     def _raise_asset_query(self):

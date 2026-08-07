@@ -1470,8 +1470,13 @@ class RevisionHistoryDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
-        self.table.setWordWrap(True)
-        self.table.verticalHeader().setVisible(False)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideRight)
+        vertical_header = self.table.verticalHeader()
+        vertical_header.setVisible(False)
+        vertical_header.setSectionResizeMode(QHeaderView.Fixed)
+        vertical_header.setDefaultSectionSize(30)
+        vertical_header.setMinimumSectionSize(30)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -1553,13 +1558,18 @@ class RevisionHistoryDialog(QDialog):
                 revision.get("indexed_records", 0),
             ]
             for column, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
+                text = str(value)
+                if column == 2:
+                    display_text = " ".join(text.split())
+                    item = QTableWidgetItem(display_text)
+                    item.setToolTip(text)
+                else:
+                    item = QTableWidgetItem(text)
                 if column in {0, 3, 4, 5}:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 if column == 0:
                     item.setData(Qt.UserRole, dict(revision))
                 self.table.setItem(row, column, item)
-        self.table.resizeRowsToContents()
         if revisions:
             self.table.selectRow(0)
         self._update_revision_actions()
@@ -3598,7 +3608,36 @@ class CableRouteEditor(QMainWindow):
 
         review_state = self.store.data.get("room_type_asset_review", {})
         if isinstance(review_state, dict):
-            review_state.pop(room_type_id, None)
+            review_record = review_state.get(room_type_id, {})
+            review_record = (
+                dict(review_record)
+                if isinstance(review_record, dict)
+                else {}
+            )
+            acknowledged_ids = []
+            for value in review_record.get(
+                "acknowledged_asset_ids", []
+            ) or []:
+                asset_id = str(value or "").strip()
+                if (
+                    asset_id
+                    and asset_id in room_type.get("asset_ids", [])
+                    and asset_id not in acknowledged_ids
+                ):
+                    acknowledged_ids.append(asset_id)
+            review_record.pop("complete", None)
+            review_record.pop("completed_at", None)
+            review_record.pop("asset_signature", None)
+            if acknowledged_ids:
+                review_record["acknowledged_asset_ids"] = (
+                    acknowledged_ids
+                )
+            else:
+                review_record.pop("acknowledged_asset_ids", None)
+            if review_record:
+                review_state[room_type_id] = review_record
+            else:
+                review_state.pop(room_type_id, None)
         self.store.sync_all_room_type_quantities()
         self.set_status(f"Updated asset quantities and data ports for room type {room_type_id}")
         return deepcopy(staging)
@@ -10743,7 +10782,13 @@ class CableRouteEditor(QMainWindow):
         return changed
 
     def _activate_loaded_project(
-        self, store, path, status_message, *, preserve_checkout=False
+        self,
+        store,
+        path,
+        status_message,
+        *,
+        preserve_checkout=False,
+        preserve_drawing_context=False,
     ):
         if not preserve_checkout:
             self._checkout_live_store = None
@@ -10757,13 +10802,18 @@ class CableRouteEditor(QMainWindow):
         self.bulk_location_session = None
         self.bulk_data_point_session = None
         self.current_json_path = str(path)
-        self._clear_dxf_cache()
+        if not preserve_drawing_context:
+            self._clear_dxf_cache()
         current_floor = self.floor_spin.value()
-        self._pending_fit_after_load = bool(self.get_floor_dxf_path(current_floor))
+        self._pending_fit_after_load = bool(
+            not preserve_drawing_context
+            and self.get_floor_dxf_path(current_floor)
+        )
         self._queue_all_floor_dxf_loads(active_floor=current_floor, force_reload=False)
         self.set_status(status_message)
         self.refresh_canvas()
-        self.fit_view()
+        if not preserve_drawing_context:
+            self.fit_view()
 
     def _open_project_path(self, path):
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -11157,6 +11207,7 @@ class CableRouteEditor(QMainWindow):
             path,
             f"Viewing historical revision {revision_number} - project saves are disabled",
             preserve_checkout=True,
+            preserve_drawing_context=True,
         )
         self.setWindowTitle(
             f"Cable Routing Graph Editor - Historical Revision {revision_number}"
@@ -11185,6 +11236,7 @@ class CableRouteEditor(QMainWindow):
             path,
             "Returned to the current project",
             preserve_checkout=True,
+            preserve_drawing_context=True,
         )
         self.setWindowTitle("Cable Routing Graph Editor")
         return True

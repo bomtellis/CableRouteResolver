@@ -28,11 +28,25 @@ class FieldDefinition:
 
 
 MAIN_FIELDS = (
-    FieldDefinition("room_code", "Room code", ("room code", "room id", "room type code", "room number")),
+    FieldDefinition(
+        "room_code",
+        "Room code",
+        ("room code", "room id", "room type id", "room type code", "room number"),
+    ),
     FieldDefinition("room_name", "Room name", ("room name", "room type", "room", "space name")),
-    FieldDefinition("asset_code", "Asset code", ("code", "asset code", "equipment code", "item code", "adb code"), True),
+    FieldDefinition(
+        "asset_code",
+        "Asset code",
+        ("code", "asset id", "asset code", "equipment code", "item code", "adb code"),
+        True,
+    ),
     FieldDefinition("description", "Description", ("description", "asset description", "equipment description", "item description")),
-    FieldDefinition("quantity", "Quantity", ("count", "quantity", "qty", "asset quantity", "item quantity"), True),
+    FieldDefinition(
+        "quantity",
+        "Quantity",
+        ("count", "quantity", "qty", "qty per room", "asset quantity", "item quantity"),
+        True,
+    ),
     FieldDefinition("assembly_id", "Assembly ID", ("assembly id", "assembly", "assembly identifier")),
     FieldDefinition("assembly_parent_code", "Assembly parent code", ("parent code", "assembly code", "parent asset code")),
 )
@@ -174,21 +188,35 @@ def _alias_score(header: str, definition: FieldDefinition) -> float:
     )
 
 
+def _alias_rank(header: str, definition: FieldDefinition) -> int:
+    candidate = normalise(header)
+    aliases = [normalise(value) for value in definition.aliases]
+    try:
+        return aliases.index(candidate)
+    except ValueError:
+        return len(aliases)
+
+
 def suggest_columns(
     headers: Sequence[str], definitions: Sequence[FieldDefinition]
 ) -> dict[str, int | None]:
     result: dict[str, int | None] = {}
     used: set[int] = set()
     for definition in definitions:
-        candidates = sorted(
+        candidates = max(
             (
-                (_alias_score(header, definition), index)
+                (
+                    _alias_score(header, definition),
+                    -_alias_rank(header, definition),
+                    -index,
+                    index,
+                )
                 for index, header in enumerate(headers)
                 if index not in used
             ),
-            reverse=True,
+            default=(0.0, 0, 0, -1),
         )
-        score, index = candidates[0] if candidates else (0.0, -1)
+        score, _rank, _position, index = candidates
         if score >= 0.72:
             result[definition.key] = index
             used.add(index)
@@ -258,7 +286,7 @@ def suggest_schema(workbook: WorkbookData) -> SchemaMapping:
                 4
                 if any(
                     hint in normalise(item[1])
-                    for hint in ("equipment", "assetlist", "schedule")
+                    for hint in ("equipment", "assetlist", "assetdetail", "schedule")
                 )
                 else 0
             )
