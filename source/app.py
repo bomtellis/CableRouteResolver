@@ -2,6 +2,7 @@ import os
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED, as_completed
 from contextlib import contextmanager
 from copy import deepcopy
+from difflib import SequenceMatcher
 import re
 import subprocess
 import csv
@@ -169,6 +170,538 @@ except Exception:
 _COMMS_CANDIDATES = None
 _COMMS_ALL_MASK = None
 _COMMS_POINT_COUNT = None
+
+
+def _plain_dxf_text(value):
+    """Return useful visible text from a DXF TEXT/MTEXT value."""
+    text = str(value or "")
+    text = text.replace("\\P", " ").replace("\\p", " ")
+    text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    text = re.sub(r"\\[A-Za-z]+[^;]*;", " ", text)
+    text = text.replace("{", " ").replace("}", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalise_room_description(value):
+    text = _plain_dxf_text(value).casefold().replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _room_type_text_mapping_lookup(records):
+    lookup = {}
+    if isinstance(records, dict):
+        records = [
+            {"normalised_text": text, "room_type_id": room_type_id}
+            for text, room_type_id in records.items()
+        ]
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        key = _normalise_room_description(
+            record.get("normalised_text", record.get("text", ""))
+        )
+        room_type_id = str(record.get("room_type_id", "") or "").strip()
+        if key and room_type_id:
+            lookup[key] = room_type_id
+    return lookup
+
+
+def _match_room_type_from_text(text, room_types, saved_mappings):
+    """Return ``(room_type_id, source, confidence)`` for one text label."""
+    normalised = _normalise_room_description(text)
+    if not normalised:
+        return "", "No room type match", 0.0
+
+    valid_ids = {
+        str(room_type_id or "").strip()
+        for room_type_id, _room_type_name in room_types
+        if str(room_type_id or "").strip()
+    }
+    saved_room_type_id = saved_mappings.get(normalised, "")
+    if saved_room_type_id in valid_ids:
+        return saved_room_type_id, "Saved text mapping", 1.0
+
+    text_words = {
+        word for word in normalised.split() if not word.isdigit() and len(word) > 1
+    }
+    best = ("", "No room type match", 0.0)
+    for room_type_id, room_type_name in room_types:
+        room_type_id = str(room_type_id or "").strip()
+        if not room_type_id:
+            continue
+        variants = {
+            _normalise_room_description(room_type_id),
+            _normalise_room_description(room_type_name),
+        }
+        variants.discard("")
+        for variant in variants:
+            variant_words = {
+                word
+                for word in variant.split()
+                if not word.isdigit() and len(word) > 1
+            }
+            if normalised == variant:
+                score = 0.99
+            elif len(variant) >= 3 and variant in normalised:
+                score = 0.94
+            elif len(normalised) >= 3 and normalised in variant:
+                score = 0.88
+            elif variant_words and variant_words.issubset(text_words):
+                score = 0.86
+            else:
+                token_score = (
+                    len(text_words & variant_words) / len(text_words | variant_words)
+                    if text_words and variant_words
+                    else 0.0
+                )
+                sequence_score = SequenceMatcher(None, normalised, variant).ratio()
+                score = max(token_score * 0.82, sequence_score * 0.78)
+            if score > best[2]:
+                best = (room_type_id, "Room type name match", score)
+
+    if best[2] < 0.62:
+        return "", "No room type match", best[2]
+    return best
+
+
+def _distance_to_dxf_text(point, entity):
+    x = float(point.get("x", 0.0) or 0.0)
+    y = float(point.get("y", 0.0) or 0.0)
+    bbox = entity.get("bbox")
+    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+        min_x, min_y, max_x, max_y = (float(value) for value in bbox[:4])
+        dx = max(min_x - x, 0.0, x - max_x)
+        dy = max(min_y - y, 0.0, y - max_y)
+        return math.hypot(dx, dy)
+    insert = entity.get("insert", (0.0, 0.0))
+    try:
+        return math.hypot(x - float(insert[0]), y - float(insert[1]))
+    except (TypeError, ValueError, IndexError):
+        return float("inf")
+
+
+def _room_type_text_proposals(
+    data_points, text_entities_by_floor, room_types, mapping_records, radius_m
+):
+    saved_mappings = _room_type_text_mapping_lookup(mapping_records)
+    radius_m = max(0.0, float(radius_m))
+    proposals = []
+    for point in data_points:
+        floor = int(point.get("floor", 0) or 0)
+        candidates = []
+        for entity in text_entities_by_floor.get(floor, []):
+            text = _plain_dxf_text(entity.get("text", ""))
+            if not text:
+                continue
+            distance = _distance_to_dxf_text(point, entity)
+            if distance <= radius_m:
+                room_type_id, source, confidence = _match_room_type_from_text(
+                    text, room_types, saved_mappings
+                )
+                candidates.append(
+                    {
+                        "text": text,
+                        "normalised_text": _normalise_room_description(text),
+                        "distance_m": distance,
+                        "room_type_id": room_type_id,
+                        "source": source,
+                        "confidence": confidence,
+                    }
+                )
+
+        matched = [candidate for candidate in candidates if candidate["room_type_id"]]
+        if matched:
+            # Prefer strong and learned matches, but keep spatial proximity in
+            # the decision so a label in an adjacent room cannot beat a nearly
+            # identical label beside the data point merely because it was seen
+            # in an earlier run.
+            chosen = max(
+                matched,
+                key=lambda candidate: candidate["confidence"]
+                + (0.08 if candidate["source"] == "Saved text mapping" else 0.0)
+                - (0.20 * candidate["distance_m"] / max(radius_m, 0.001)),
+            )
+        elif candidates:
+            chosen = min(candidates, key=lambda candidate: candidate["distance_m"])
+        else:
+            chosen = {
+                "text": "",
+                "normalised_text": "",
+                "distance_m": None,
+                "room_type_id": "",
+                "source": "No nearby DXF text",
+                "confidence": 0.0,
+            }
+        proposals.append(
+            {
+                **chosen,
+                "name": str(point.get("name", "") or "").strip(),
+                "floor": floor,
+            }
+        )
+    return proposals
+
+
+def _dxf_text_position(entity):
+    """Return a useful placement point centred on a DXF text label."""
+    bbox = entity.get("bbox") if isinstance(entity, dict) else None
+    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+        try:
+            return (
+                (float(bbox[0]) + float(bbox[2])) / 2.0,
+                (float(bbox[1]) + float(bbox[3])) / 2.0,
+            )
+        except (TypeError, ValueError):
+            pass
+    insert = entity.get("insert", (0.0, 0.0)) if isinstance(entity, dict) else (0, 0)
+    try:
+        return float(insert[0]), float(insert[1])
+    except (TypeError, ValueError, IndexError):
+        return 0.0, 0.0
+
+
+def _rdp_simplify(points, tolerance):
+    """Simplify a painted polyline while retaining its meaningful turns."""
+    clean = []
+    for point in points or []:
+        value = (float(point[0]), float(point[1]))
+        if not clean or math.hypot(value[0] - clean[-1][0], value[1] - clean[-1][1]) > 1e-6:
+            clean.append(value)
+    if len(clean) <= 2:
+        return clean
+
+    start = clean[0]
+    end = clean[-1]
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    segment_length_sq = (dx * dx) + (dy * dy)
+    furthest_index = 0
+    furthest_distance = -1.0
+    for index, point in enumerate(clean[1:-1], start=1):
+        if segment_length_sq <= 1e-12:
+            distance = math.hypot(point[0] - start[0], point[1] - start[1])
+        else:
+            projection = max(
+                0.0,
+                min(
+                    1.0,
+                    ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy)
+                    / segment_length_sq,
+                ),
+            )
+            nearest_x = start[0] + projection * dx
+            nearest_y = start[1] + projection * dy
+            distance = math.hypot(point[0] - nearest_x, point[1] - nearest_y)
+        if distance > furthest_distance:
+            furthest_distance = distance
+            furthest_index = index
+
+    if furthest_distance <= max(0.0, float(tolerance)):
+        return [start, end]
+    left = _rdp_simplify(clean[: furthest_index + 1], tolerance)
+    right = _rdp_simplify(clean[furthest_index:], tolerance)
+    return left[:-1] + right
+
+
+def _densify_polyline(points, maximum_spacing):
+    maximum_spacing = max(0.1, float(maximum_spacing))
+    result = []
+    for start, end in zip(points or [], (points or [])[1:]):
+        if not result:
+            result.append((float(start[0]), float(start[1])))
+        dx = float(end[0]) - float(start[0])
+        dy = float(end[1]) - float(start[1])
+        length = math.hypot(dx, dy)
+        steps = max(1, int(math.ceil(length / maximum_spacing)))
+        for step in range(1, steps + 1):
+            ratio = step / steps
+            result.append(
+                (float(start[0]) + dx * ratio, float(start[1]) + dy * ratio)
+            )
+    if not result and points:
+        result.append((float(points[0][0]), float(points[0][1])))
+    return result
+
+
+def _painted_corridor_nodes(points, simplification_m, maximum_spacing_m):
+    return _densify_polyline(
+        _rdp_simplify(points, simplification_m), maximum_spacing_m
+    )
+
+
+def _nearest_dxf_doorway(point, entities, maximum_distance_m=12.0):
+    """Infer the nearest open-door hinge from door-sized DXF arcs and leaves."""
+    px = float(point.get("x", 0.0) or 0.0)
+    py = float(point.get("y", 0.0) or 0.0)
+    short_line_endpoints = []
+    for entity in entities or []:
+        if not isinstance(entity, dict) or str(entity.get("type", "")).upper() != "LINE":
+            continue
+        try:
+            start = (float(entity["start"][0]), float(entity["start"][1]))
+            end = (float(entity["end"][0]), float(entity["end"][1]))
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        length = math.hypot(end[0] - start[0], end[1] - start[1])
+        if 0.4 <= length <= 2.5:
+            short_line_endpoints.extend((start, end))
+
+    candidates = []
+    for entity in entities or []:
+        if not isinstance(entity, dict) or str(entity.get("type", "")).upper() != "ARC":
+            continue
+        try:
+            centre = (float(entity["center"][0]), float(entity["center"][1]))
+            radius = abs(float(entity.get("radius", 0.0) or 0.0))
+            start_angle = float(entity.get("start_angle", 0.0) or 0.0)
+            end_angle = float(entity.get("end_angle", 0.0) or 0.0)
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        sweep = (end_angle - start_angle) % 360.0
+        if sweep > 180.0:
+            sweep = 360.0 - sweep
+        if not (0.45 <= radius <= 2.0 and 40.0 <= sweep <= 140.0):
+            continue
+        distance = math.hypot(px - centre[0], py - centre[1])
+        if distance > float(maximum_distance_m):
+            continue
+        has_leaf = any(
+            math.hypot(endpoint[0] - centre[0], endpoint[1] - centre[1]) <= 0.25
+            for endpoint in short_line_endpoints
+        )
+        # A matching short leaf is a strong open-door signature. A standalone
+        # near-90-degree, door-width arc remains a lower-confidence fallback.
+        shape_penalty = 0.0 if has_leaf else 2.5
+        shape_penalty += abs(sweep - 90.0) / 90.0
+        shape_penalty += abs(radius - 0.9)
+        candidates.append((distance + shape_penalty, centre, has_leaf))
+
+    if not candidates:
+        return None
+    _score, centre, has_leaf = min(candidates, key=lambda item: item[0])
+    return {"x": centre[0], "y": centre[1], "confirmed_leaf": has_leaf}
+
+
+def _dxf_barrier_segments(entities, bounds=None):
+    segments = []
+    if bounds is not None:
+        min_x, min_y, max_x, max_y = (float(value) for value in bounds)
+    for entity in entities or []:
+        if not isinstance(entity, dict):
+            continue
+        entity_type = str(entity.get("type", "")).upper()
+        if entity_type == "LINE":
+            pairs = [(entity.get("start"), entity.get("end"))]
+        elif entity_type == "POLYLINE":
+            points = list(entity.get("points", []) or [])
+            pairs = list(zip(points, points[1:]))
+            if entity.get("closed") and len(points) > 2:
+                pairs.append((points[-1], points[0]))
+        else:
+            continue
+        for start, end in pairs:
+            try:
+                a = (float(start[0]), float(start[1]))
+                b = (float(end[0]), float(end[1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+            if math.hypot(b[0] - a[0], b[1] - a[1]) <= 1e-6:
+                continue
+            if bounds is not None and (
+                max(a[0], b[0]) < min_x
+                or min(a[0], b[0]) > max_x
+                or max(a[1], b[1]) < min_y
+                or min(a[1], b[1]) > max_y
+            ):
+                continue
+            segments.append((a, b))
+    return segments
+
+
+def _ray_segment_distance(origin, direction, segment):
+    ox, oy = origin
+    dx, dy = direction
+    (ax, ay), (bx, by) = segment
+    sx = bx - ax
+    sy = by - ay
+    denominator = (dx * sy) - (dy * sx)
+    if abs(denominator) <= 1e-9:
+        return None
+    qx = ax - ox
+    qy = ay - oy
+    ray_distance = ((qx * sy) - (qy * sx)) / denominator
+    segment_ratio = ((qx * dy) - (qy * dx)) / denominator
+    if ray_distance >= 0.0 and 0.0 <= segment_ratio <= 1.0:
+        return ray_distance
+    return None
+
+
+def _corridor_fill_polygons(strokes, width_m, entities):
+    """Create stroke fill quads whose sides stop at nearby DXF linework."""
+    half_width = max(0.1, float(width_m) / 2.0)
+    centreline_segments = []
+    for stroke in strokes or []:
+        centreline = _rdp_simplify(stroke, 0.08)
+        for start, end in zip(centreline, centreline[1:]):
+            try:
+                start = (float(start[0]), float(start[1]))
+                end = (float(end[0]), float(end[1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+            if math.hypot(end[0] - start[0], end[1] - start[1]) > 1e-6:
+                centreline_segments.append((start, end))
+    if not centreline_segments:
+        return []
+
+    corridor_x = [point[0] for segment in centreline_segments for point in segment]
+    corridor_y = [point[1] for segment in centreline_segments for point in segment]
+    search_bounds = (
+        min(corridor_x) - half_width,
+        min(corridor_y) - half_width,
+        max(corridor_x) + half_width,
+        max(corridor_y) + half_width,
+    )
+    barriers = _dxf_barrier_segments(entities, search_bounds)
+
+    # DXFs can contain hundreds of thousands of wall segments. Index the small
+    # subset near the new corridor lines so each fill edge only checks local
+    # geometry instead of repeatedly scanning the entire drawing.
+    cell_size = max(5.0, half_width * 2.0)
+    grid = {}
+    spanning_barriers = []
+    min_x, min_y, max_x, max_y = search_bounds
+    for barrier_index, (a, b) in enumerate(barriers):
+        barrier_min_x = max(min(a[0], b[0]), min_x)
+        barrier_max_x = min(max(a[0], b[0]), max_x)
+        barrier_min_y = max(min(a[1], b[1]), min_y)
+        barrier_max_y = min(max(a[1], b[1]), max_y)
+        first_col = math.floor(barrier_min_x / cell_size)
+        last_col = math.floor(barrier_max_x / cell_size)
+        first_row = math.floor(barrier_min_y / cell_size)
+        last_row = math.floor(barrier_max_y / cell_size)
+        covered_cells = (last_col - first_col + 1) * (last_row - first_row + 1)
+        if covered_cells > 4096:
+            # A malformed or site-wide diagonal must not allocate millions of
+            # grid entries. These rare segments are checked directly instead.
+            spanning_barriers.append(barrier_index)
+            continue
+        for col in range(first_col, last_col + 1):
+            for row in range(first_row, last_row + 1):
+                grid.setdefault((col, row), []).append(barrier_index)
+    polygons = []
+
+    def limited_width(origin, normal):
+        first_col = math.floor((origin[0] - half_width) / cell_size)
+        last_col = math.floor((origin[0] + half_width) / cell_size)
+        first_row = math.floor((origin[1] - half_width) / cell_size)
+        last_row = math.floor((origin[1] + half_width) / cell_size)
+        candidate_indices = set(spanning_barriers)
+        candidate_indices.update(
+            {
+            barrier_index
+            for col in range(first_col, last_col + 1)
+            for row in range(first_row, last_row + 1)
+            for barrier_index in grid.get((col, row), ())
+            }
+        )
+        nearest = None
+        for barrier_index in candidate_indices:
+            distance = _ray_segment_distance(
+                origin, normal, barriers[barrier_index]
+            )
+            if distance is None or distance > half_width:
+                continue
+            if nearest is None or distance < nearest:
+                nearest = distance
+        if nearest is None:
+            return half_width
+        return max(0.05, nearest - 0.03)
+
+    for start, end in centreline_segments:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = math.hypot(dx, dy)
+        normal = (-dy / length, dx / length)
+        reverse = (-normal[0], -normal[1])
+        start_left = limited_width(start, normal)
+        start_right = limited_width(start, reverse)
+        end_left = limited_width(end, normal)
+        end_right = limited_width(end, reverse)
+        polygons.append(
+            [
+                (start[0] + normal[0] * start_left, start[1] + normal[1] * start_left),
+                (end[0] + normal[0] * end_left, end[1] + normal[1] * end_left),
+                (end[0] - normal[0] * end_right, end[1] - normal[1] * end_right),
+                (start[0] - normal[0] * start_right, start[1] - normal[1] * start_right),
+            ]
+        )
+    return polygons
+
+
+def _point_in_polygon(point, polygon):
+    x, y = float(point[0]), float(point[1])
+    inside = False
+    count = len(polygon or [])
+    for index in range(count):
+        x1, y1 = polygon[index]
+        x2, y2 = polygon[(index + 1) % count]
+        if (y1 > y) == (y2 > y):
+            continue
+        intersect_x = x1 + ((y - y1) * (x2 - x1) / (y2 - y1))
+        if x < intersect_x:
+            inside = not inside
+    return inside
+
+
+def _project_point_to_polyline(point, polyline):
+    best = None
+    distance_along = 0.0
+    for segment_index, (start, end) in enumerate(zip(polyline or [], (polyline or [])[1:])):
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length_sq = (dx * dx) + (dy * dy)
+        length = math.sqrt(length_sq)
+        if length_sq <= 1e-12:
+            continue
+        ratio = max(
+            0.0,
+            min(
+                1.0,
+                ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy)
+                / length_sq,
+            ),
+        )
+        projected = (start[0] + dx * ratio, start[1] + dy * ratio)
+        distance = math.hypot(point[0] - projected[0], point[1] - projected[1])
+        candidate = {
+            "distance": distance,
+            "point": projected,
+            "segment_index": segment_index,
+            "ratio": ratio,
+            "distance_along": distance_along + length * ratio,
+        }
+        if best is None or distance < best["distance"]:
+            best = candidate
+        distance_along += length
+    return best
+
+
+def _segment_intersection_point(a1, a2, b1, b2):
+    ax = a2[0] - a1[0]
+    ay = a2[1] - a1[1]
+    bx = b2[0] - b1[0]
+    by = b2[1] - b1[1]
+    denominator = (ax * by) - (ay * bx)
+    if abs(denominator) <= 1e-9:
+        return None
+    qx = b1[0] - a1[0]
+    qy = b1[1] - a1[1]
+    a_ratio = ((qx * by) - (qy * bx)) / denominator
+    b_ratio = ((qx * ay) - (qy * ax)) / denominator
+    if 0.0 <= a_ratio <= 1.0 and 0.0 <= b_ratio <= 1.0:
+        return (a1[0] + ax * a_ratio, a1[1] + ay * a_ratio)
+    return None
 
 
 def _init_comms_process(candidate_payload, all_mask, point_count):
@@ -1025,6 +1558,363 @@ class FindDataPointDialog(QDialog):
 
     def set_status(self, text):
         self.status_label.setText(text)
+
+
+class RoomTypeFromNearbyTextDialog(QDialog):
+    """Review room-type suggestions derived from nearby floor-plan text."""
+
+    def __init__(
+        self,
+        data_points,
+        text_entities_by_floor,
+        room_types,
+        mapping_records,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Assign Room Types from Nearby Text")
+        self.resize(1120, 620)
+        self._data_points = list(data_points)
+        self._text_entities_by_floor = dict(text_entities_by_floor)
+        self._room_types = list(room_types)
+        self._mapping_records = list(mapping_records or [])
+        self._proposals = []
+        self._room_type_combos = []
+
+        layout = QVBoxLayout(self)
+        description = QLabel(
+            "The selected data points are compared with DXF text on the same floor. "
+            "Review each suggested room type before applying it."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Search radius"))
+        self.radius_spin = QDoubleSpinBox()
+        self.radius_spin.setRange(0.5, 250.0)
+        self.radius_spin.setDecimals(1)
+        self.radius_spin.setSingleStep(1.0)
+        self.radius_spin.setSuffix(" m")
+        self.radius_spin.setValue(12.0)
+        controls.addWidget(self.radius_spin)
+        rescan_button = QPushButton("Search again")
+        rescan_button.clicked.connect(self.rescan)
+        controls.addWidget(rescan_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Apply",
+                "Data point",
+                "Floor",
+                "Nearby DXF text",
+                "Distance",
+                "Room type",
+                "Match",
+            ]
+        )
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(
+            6, QHeaderView.ResizeToContents
+        )
+        layout.addWidget(self.table, 1)
+
+        self.summary_label = QLabel()
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        self.remember_check = QCheckBox(
+            "Remember confirmed DXF text to room type assignments for future searches"
+        )
+        self.remember_check.setChecked(True)
+        layout.addWidget(self.remember_check)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Apply assignments")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.rescan()
+
+    def _new_room_type_combo(self, selected_room_type_id):
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.addItem("No assignment", "")
+        selected_index = 0
+        for room_type_id, room_type_name in self._room_types:
+            room_type_id = str(room_type_id or "").strip()
+            room_type_name = str(room_type_name or "").strip()
+            label = (
+                f"{room_type_id} - {room_type_name}" if room_type_name else room_type_id
+            )
+            combo.addItem(label, room_type_id)
+            if room_type_id == selected_room_type_id:
+                selected_index = combo.count() - 1
+        combo.setCurrentIndex(selected_index)
+        completer = QCompleter(combo)
+        completer.setModel(combo.model())
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.setFilterMode(Qt.MatchContains)
+        combo.setCompleter(completer)
+        return combo
+
+    def rescan(self, *_):
+        self._proposals = _room_type_text_proposals(
+            self._data_points,
+            self._text_entities_by_floor,
+            self._room_types,
+            self._mapping_records,
+            self.radius_spin.value(),
+        )
+        self._room_type_combos = []
+        self.table.setRowCount(len(self._proposals))
+        matched_count = 0
+        saved_count = 0
+        for row, proposal in enumerate(self._proposals):
+            proposed_room_type_id = str(proposal.get("room_type_id", "") or "")
+            apply_item = QTableWidgetItem()
+            apply_item.setFlags(
+                Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+            )
+            apply_item.setCheckState(
+                Qt.Checked if proposed_room_type_id else Qt.Unchecked
+            )
+            self.table.setItem(row, 0, apply_item)
+            self.table.setItem(row, 1, QTableWidgetItem(proposal["name"]))
+            self.table.setItem(row, 2, QTableWidgetItem(str(proposal["floor"])))
+            self.table.setItem(
+                row, 3, QTableWidgetItem(proposal.get("text", "") or "—")
+            )
+            distance = proposal.get("distance_m")
+            self.table.setItem(
+                row,
+                4,
+                QTableWidgetItem("—" if distance is None else f"{distance:.1f} m"),
+            )
+            combo = self._new_room_type_combo(proposed_room_type_id)
+            combo.currentIndexChanged.connect(
+                lambda _index, table_row=row: self._room_type_changed(table_row)
+            )
+            self._room_type_combos.append(combo)
+            self.table.setCellWidget(row, 5, combo)
+            source = proposal.get("source", "")
+            confidence = float(proposal.get("confidence", 0.0) or 0.0)
+            if source == "Room type name match":
+                source = f"{source} ({confidence:.0%})"
+            self.table.setItem(row, 6, QTableWidgetItem(source))
+            if proposed_room_type_id:
+                matched_count += 1
+            if proposal.get("source") == "Saved text mapping":
+                saved_count += 1
+
+        summary = (
+            f"Suggested room types for {matched_count} of {len(self._proposals)} "
+            "selected data points."
+        )
+        if saved_count:
+            summary += f" {saved_count} suggestion(s) used saved text mappings."
+        self.summary_label.setText(summary)
+
+    def _room_type_changed(self, row):
+        item = self.table.item(row, 0)
+        if item is None:
+            return
+        room_type_id = str(self._room_type_combos[row].currentData() or "").strip()
+        item.setCheckState(Qt.Checked if room_type_id else Qt.Unchecked)
+
+    def selected_assignments(self):
+        assignments = []
+        for row, proposal in enumerate(self._proposals):
+            apply_item = self.table.item(row, 0)
+            if apply_item is None or apply_item.checkState() != Qt.Checked:
+                continue
+            room_type_id = str(
+                self._room_type_combos[row].currentData() or ""
+            ).strip()
+            if not room_type_id:
+                continue
+            assignments.append(
+                {
+                    "name": proposal["name"],
+                    "room_type_id": room_type_id,
+                    "text": proposal.get("text", ""),
+                    "normalised_text": proposal.get("normalised_text", ""),
+                }
+            )
+        return assignments
+
+    def remember_mappings(self):
+        return self.remember_check.isChecked()
+
+
+class DataPointsFromTextDialog(QDialog):
+    """Review DXF text labels before creating data points on them."""
+
+    def __init__(self, candidates, room_types, mapping_records, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Place Data Points on DXF Text")
+        self.resize(1060, 620)
+        self._candidates = list(candidates)
+        self._room_types = list(room_types)
+        self._room_type_combos = []
+        saved_mappings = _room_type_text_mapping_lookup(mapping_records)
+
+        layout = QVBoxLayout(self)
+        description = QLabel(
+            "Choose which text labels in the selected area represent rooms or "
+            "data-point locations. A data point will be placed at the centre of "
+            "each checked label."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        defaults = QHBoxLayout()
+        defaults.addWidget(QLabel("Manual quantity"))
+        self.qty_spin = QSpinBox()
+        self.qty_spin.setRange(0, 1000000)
+        self.qty_spin.setValue(1)
+        defaults.addWidget(self.qty_spin)
+        defaults.addWidget(QLabel("Extension distance"))
+        self.extension_spin = QDoubleSpinBox()
+        self.extension_spin.setRange(0.0, 100000.0)
+        self.extension_spin.setDecimals(2)
+        self.extension_spin.setSuffix(" m")
+        defaults.addWidget(self.extension_spin)
+        defaults.addStretch(1)
+        layout.addLayout(defaults)
+
+        self.table = QTableWidget(len(self._candidates), 6)
+        self.table.setHorizontalHeaderLabels(
+            ["Place", "Data point", "DXF text", "Position", "Room type", "Match"]
+        )
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(
+            5, QHeaderView.ResizeToContents
+        )
+        layout.addWidget(self.table, 1)
+
+        for row, candidate in enumerate(self._candidates):
+            room_type_id, source, confidence = _match_room_type_from_text(
+                candidate["text"], self._room_types, saved_mappings
+            )
+            candidate["room_type_id"] = room_type_id
+            candidate["normalised_text"] = _normalise_room_description(
+                candidate["text"]
+            )
+            place_item = QTableWidgetItem()
+            place_item.setFlags(
+                Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+            )
+            place_item.setCheckState(Qt.Checked)
+            self.table.setItem(row, 0, place_item)
+
+            name_item = QTableWidgetItem(candidate["name"])
+            self.table.setItem(row, 1, name_item)
+            text_item = QTableWidgetItem(candidate["text"])
+            text_item.setFlags(text_item.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(row, 2, text_item)
+            position_item = QTableWidgetItem(
+                f"{candidate['x']:.2f}, {candidate['y']:.2f}"
+            )
+            position_item.setFlags(position_item.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(row, 3, position_item)
+
+            combo = QComboBox()
+            combo.addItem("Manual / no room type", "")
+            selected_index = 0
+            for option_id, option_name in self._room_types:
+                option_id = str(option_id or "").strip()
+                option_name = str(option_name or "").strip()
+                label = f"{option_id} - {option_name}" if option_name else option_id
+                combo.addItem(label, option_id)
+                if option_id == room_type_id:
+                    selected_index = combo.count() - 1
+            combo.setCurrentIndex(selected_index)
+            self._room_type_combos.append(combo)
+            self.table.setCellWidget(row, 4, combo)
+            if source == "Room type name match":
+                source = f"{source} ({confidence:.0%})"
+            match_item = QTableWidgetItem(source)
+            match_item.setFlags(match_item.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(row, 5, match_item)
+
+        self.summary_label = QLabel(
+            f"Found {len(self._candidates)} unoccupied text label(s) in the selected area."
+        )
+        layout.addWidget(self.summary_label)
+
+        self.remember_check = QCheckBox(
+            "Remember selected text to room type assignments"
+        )
+        self.remember_check.setChecked(True)
+        layout.addWidget(self.remember_check)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Place data points")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_data_points(self):
+        result = []
+        for row, candidate in enumerate(self._candidates):
+            place_item = self.table.item(row, 0)
+            if place_item is None or place_item.checkState() != Qt.Checked:
+                continue
+            name = str(self.table.item(row, 1).text() or "").strip()
+            if not name:
+                continue
+            result.append(
+                {
+                    **candidate,
+                    "name": name,
+                    "room_type_id": str(
+                        self._room_type_combos[row].currentData() or ""
+                    ).strip(),
+                    "qty": self.qty_spin.value(),
+                    "extension_distance_m": self.extension_spin.value(),
+                }
+            )
+        return result
+
+    def remember_mappings(self):
+        return self.remember_check.isChecked()
 
 
 class RoomTypeCountsDialog(QDialog):
@@ -2125,6 +3015,17 @@ class CableRouteEditor(QMainWindow):
         self.selection_rect_origin = None
         self.selection_rect_current = None
         self._rubber_band = None
+        self._corridor_paint_points = []
+        self._corridor_painting = False
+        self._active_corridor_paint_region_id = None
+        self._selected_corridor_paint_region_id = None
+        self._corridor_paint_settings = {
+            "simplification_m": 0.35,
+            "maximum_spacing_m": 5.0,
+            "join_distance_m": 1.0,
+            "fill_width_m": 2.5,
+            "realign_distance_m": 2.0,
+        }
         self.edge_delete_start = None
         self._item_lookup = {}
         self._point_item_lookup = {}
@@ -2140,6 +3041,7 @@ class CableRouteEditor(QMainWindow):
         self.placement_zone_drag_start = None
         self.placement_zone_drag_original = None
         self._pinned_equipment_room_extent_name = None
+        self._equipment_room_extent_overlay = None
         self._comms_optimisation_dialog = None
         self._clear_canvas_multi_selection()
 
@@ -2431,10 +3333,12 @@ class CableRouteEditor(QMainWindow):
             ("location", "Location", "location"),
             ("department", "Dept", "department"),
             ("data_point", "Data Point", "data_point"),
+            ("data_point_text_area", "Text Area", "text_area"),
             ("ad_hoc_asset", "Ad Hoc Asset", "ad_hoc_asset"),
             ("transition", "Transition", "transition_node"),
             ("placement_zone", "Room Zone", "placement_zone"),
             ("edge", "Edge", "edge"),
+            ("corridor_paint", "Paint Path", "corridor_paint"),
             ("measure_data_room", "Measure", "measure"),
             ("pan", "Pan", "pan"),
             ("delete", "Delete", "delete"),
@@ -2447,10 +3351,12 @@ class CableRouteEditor(QMainWindow):
             "location": "geo-alt",
             "department": "building",
             "data_point": "hdd-network",
+            "text_area": "bounding-box",
             "ad_hoc_asset": "box-seam",
             "transition_node": "arrow-up",
             "placement_zone": "bounding-box",
             "edge": "diagram-3",
+            "corridor_paint": "pencil",
             "pan": "arrows-fullscreen",
             "delete": "trash3",
         }
@@ -2563,6 +3469,19 @@ class CableRouteEditor(QMainWindow):
 
     def _set_editor_mode(self, mode):
         previous_mode = self.mode_combo.currentText()
+        if previous_mode == "corridor_paint" and mode != "corridor_paint":
+            self._corridor_paint_points = []
+            self._corridor_painting = False
+            self._refresh_corridor_paint_layer()
+            self._prompt_to_fill_completed_corridor_lines(
+                self._active_corridor_paint_region_id
+            )
+        if previous_mode == "data_point_text_area" and mode != "data_point_text_area":
+            self.selection_rect_active = False
+            self.selection_rect_origin = None
+            self.selection_rect_current = None
+            if self._rubber_band is not None:
+                self._rubber_band.hide()
         if mode == "placement_zone" and hasattr(self, "show_placement_zones_check"):
             self.show_placement_zones_check.setChecked(True)
         if mode != "placement_zone":
@@ -2576,6 +3495,16 @@ class CableRouteEditor(QMainWindow):
         if mode != "measure_data_room" or previous_mode != mode:
             self._measure_data_point_name = None
             self._clear_data_room_measurement_overlay()
+        if mode != "location" and previous_mode == "location":
+            overlay = getattr(self, "_equipment_room_extent_overlay", None)
+            if isinstance(overlay, dict) and overlay.get("preview"):
+                if self._pinned_equipment_room_extent_name:
+                    self.show_equipment_room_extents(
+                        self._pinned_equipment_room_extent_name,
+                        display_floor=self.floor_spin.value(),
+                    )
+                else:
+                    self._clear_equipment_room_extent_overlay()
         self.mode_combo.setCurrentText(mode)
 
         for button_mode, button in getattr(self, "_mode_buttons", {}).items():
@@ -2586,6 +3515,10 @@ class CableRouteEditor(QMainWindow):
         if hasattr(self, "status_label"):
             if mode == "measure_data_room":
                 self.set_status("Measure mode: click a data point first")
+            elif mode == "data_point_text_area":
+                self.set_status("Text area mode: drag a box around DXF text labels")
+            elif mode == "corridor_paint":
+                self.set_status("Corridor paint mode: drag along the containment route")
             else:
                 self.set_status(f"Mode: {mode}")
 
@@ -2600,7 +3533,15 @@ class CableRouteEditor(QMainWindow):
             "Measure routed cable distance: click a data point, then a comms "
             "room or DER"
             if mode == "measure_data_room"
-            else f"Set mode: {text}"
+            else (
+                "Drag an area and review DXF text labels before placing data points"
+                if mode == "data_point_text_area"
+                else (
+                    "Draw persistent corridor fills with multiple straight lines; build containment when ready"
+                    if mode == "corridor_paint"
+                    else f"Set mode: {text}"
+                )
+            )
         )
         self._configure_ribbon_button(btn)
         btn.clicked.connect(lambda checked=False, m=mode: self._set_editor_mode(m))
@@ -2704,6 +3645,10 @@ class CableRouteEditor(QMainWindow):
                 except RuntimeError:
                     pass
 
+        properties_dock = getattr(self, "properties_dock", None)
+        if properties_dock is not None:
+            properties_dock.setMinimumWidth(240 if compact else 270)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         timer = getattr(self, "_responsive_layout_timer", None)
@@ -2734,6 +3679,7 @@ class CableRouteEditor(QMainWindow):
         main_layout.addWidget(self.canvas, 1)
 
         self._build_rhs_search_sidebar()
+        self._build_properties_sidebar()
 
         self.canvas.leftClicked.connect(self.on_left_click)
         self.canvas.leftDoubleClicked.connect(self.on_double_click)
@@ -2941,6 +3887,424 @@ class CableRouteEditor(QMainWindow):
             self._view_menu.addAction(toggle_action)
 
         self.refresh_rhs_search_sidebar()
+
+    def _build_properties_sidebar(self):
+        self.properties_dock = QDockWidget("Properties", self)
+        self.properties_dock.setObjectName("PropertiesDock")
+        self.properties_dock.setAllowedAreas(
+            Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea
+        )
+        self.properties_dock.setMinimumWidth(270)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        type_label = QLabel("Filter by type")
+        type_label.setObjectName("StatusCaption")
+        layout.addWidget(type_label)
+
+        self.properties_type_combo = QComboBox()
+        for label, key in [
+            ("All item types", "all"),
+            ("Corridor nodes", "corridor_node"),
+            ("Data points", "data_point"),
+            ("Locations", "location"),
+            ("Comms rooms / DERs", "comms_room"),
+            ("Ad hoc assets", "ad_hoc_asset"),
+            ("Transitions", "transition_node"),
+            ("Departments", "department"),
+        ]:
+            self.properties_type_combo.addItem(label, key)
+        self.properties_type_combo.currentIndexChanged.connect(
+            self.refresh_properties_sidebar
+        )
+        layout.addWidget(self.properties_type_combo)
+
+        item_label = QLabel("Item")
+        item_label.setObjectName("StatusCaption")
+        layout.addWidget(item_label)
+
+        self.properties_item_combo = QComboBox()
+        self.properties_item_combo.setEditable(True)
+        self.properties_item_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.properties_item_combo.setPlaceholderText("Select an item on this floor")
+        self.properties_item_combo.completer().setCaseSensitivity(
+            Qt.CaseInsensitive
+        )
+        self.properties_item_combo.currentIndexChanged.connect(
+            self._properties_item_activated
+        )
+        layout.addWidget(self.properties_item_combo)
+
+        self.properties_selection_label = QLabel("No item selected")
+        self.properties_selection_label.setObjectName("StatusValue")
+        self.properties_selection_label.setWordWrap(True)
+        layout.addWidget(self.properties_selection_label)
+
+        self.properties_table = QTableWidget(0, 2)
+        self.properties_table.setHorizontalHeaderLabels(["Property", "Value"])
+        self.properties_table.verticalHeader().setVisible(False)
+        self.properties_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.properties_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.properties_table.setAlternatingRowColors(True)
+        self.properties_table.setWordWrap(True)
+        self.properties_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.properties_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.Stretch
+        )
+        layout.addWidget(self.properties_table, 1)
+
+        self.properties_dock.setWidget(container)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.properties_dock)
+        if hasattr(self, "search_dock"):
+            self.tabifyDockWidget(self.search_dock, self.properties_dock)
+            self.properties_dock.raise_()
+
+        toggle_action = self.properties_dock.toggleViewAction()
+        toggle_action.setText("Properties panel")
+        if hasattr(self, "_view_menu"):
+            self._view_menu.addAction(toggle_action)
+
+        self._properties_entry_signature = None
+        self.refresh_properties_sidebar()
+
+    @staticmethod
+    def _properties_type_for_point(point):
+        kind = str((point or {}).get("kind", "") or "").strip()
+        if kind in {
+            "comms_room",
+            "distributed_equipment_room",
+            "mer",
+            "main_equipment_room",
+            "polan",
+            "polan_location",
+        }:
+            return "comms_room"
+        return kind or "location"
+
+    @staticmethod
+    def _properties_type_label(kind):
+        return {
+            "corridor_node": "Corridor node",
+            "data_point": "Data point",
+            "location": "Location",
+            "comms_room": "Comms room / DER",
+            "ad_hoc_asset": "Ad hoc asset",
+            "transition_node": "Transition",
+            "department": "Department",
+        }.get(str(kind), str(kind).replace("_", " ").title() or "Item")
+
+    def _properties_entries(self):
+        floor = int(self.floor_spin.value())
+        filter_key = str(self.properties_type_combo.currentData() or "all")
+        entries = []
+
+        for name, point in self.store.points_for_floor(floor).items():
+            kind = self._properties_type_for_point(point)
+            is_location = kind in {"location", "comms_room"}
+            if filter_key != "all" and not (
+                filter_key == kind or (filter_key == "location" and is_location)
+            ):
+                continue
+            entries.append((str(name), kind))
+
+        if filter_key in {"all", "department"}:
+            for department_id in self.store.departments_for_floor(floor):
+                entries.append((str(department_id), "department"))
+
+        return sorted(
+            entries,
+            key=lambda item: (
+                self._properties_type_label(item[1]).casefold(),
+                item[0].casefold(),
+            ),
+        )
+
+    def _properties_record(self, name):
+        name = str(name or "").strip()
+        point = self.store.all_points().get(name)
+        if point is not None:
+            return dict(point), self._properties_type_for_point(point)
+        for department in self.store.data.get("departments", []) or []:
+            if str(department.get("id", "") or "").strip() == name:
+                return dict(department), "department"
+        return None, ""
+
+    def _connected_comms_rooms_for_item(self, name):
+        name = str(name or "").strip()
+        comms_rooms = set(self.comms_room_names())
+        connected = set()
+        for connection in self.store.data.get("connections", []) or []:
+            if not isinstance(connection, dict):
+                continue
+            left = str(connection.get("from", "") or "").strip()
+            right = str(connection.get("to", "") or "").strip()
+            if left == name and right in comms_rooms:
+                connected.add(right)
+            elif right == name and left in comms_rooms:
+                connected.add(left)
+        return sorted(connected, key=str.casefold)
+
+    def _room_type_property_summary(self, record):
+        room_type_id = str(record.get("room_type_id", "") or "").strip()
+        if not room_type_id:
+            return "Manual / unassigned", 0, 0
+        room_type = next(
+            (
+                item
+                for item in self.store.data.get("room_types", []) or []
+                if str(item.get("id", "") or "").strip() == room_type_id
+            ),
+            None,
+        )
+        if room_type is None:
+            return room_type_id, 0, 0
+        room_type_name = str(room_type.get("name", room_type_id) or room_type_id).strip()
+        asset_rows = self.store.room_type_asset_rows(room_type)
+        asset_count = sum(max(0, int(row.get("qty", 0) or 0)) for row in asset_rows)
+        asset_types = len(
+            {
+                str(row.get("asset_id", "") or "").strip()
+                for row in asset_rows
+                if str(row.get("asset_id", "") or "").strip()
+            }
+        )
+        return f"{room_type_id} - {room_type_name}", asset_count, asset_types
+
+    def _asset_count_for_property_item(self, name, record, kind):
+        if kind == "data_point":
+            _room_type, asset_count, asset_types = self._room_type_property_summary(
+                record
+            )
+            return asset_count, asset_types
+        if kind == "ad_hoc_asset":
+            return max(0, int(record.get("asset_qty", 1) or 0)), 1
+        if kind in {"location", "comms_room"}:
+            instances = [
+                item
+                for item in self.store.data.get("network_asset_instances", []) or []
+                if isinstance(item, dict)
+                and str(item.get("location_name", "") or "").strip() == str(name)
+            ]
+            asset_types = {
+                str(item.get("asset_id", "") or "").strip()
+                for item in instances
+                if str(item.get("asset_id", "") or "").strip()
+            }
+            return len(instances), len(asset_types)
+        return 0, 0
+
+    def _properties_rows(self, name, record, kind):
+        def number(value):
+            try:
+                return f"{float(value):.3f}".rstrip("0").rstrip(".")
+            except (TypeError, ValueError):
+                return str(value or "-")
+
+        rows = [
+            ("Name", name),
+            ("Type", self._properties_type_label(kind)),
+            ("Floor", str(record.get("floor", "-"))),
+        ]
+        if "x" in record and "y" in record:
+            rows.extend([("X", number(record.get("x"))), ("Y", number(record.get("y")))])
+
+        if kind == "data_point":
+            room_type_label, _asset_count, _asset_types = (
+                self._room_type_property_summary(record)
+            )
+            rows.append(("Room type", room_type_label))
+
+        if kind in {"data_point", "ad_hoc_asset"}:
+            connected_rooms = self._connected_comms_rooms_for_item(name)
+            rows.append(
+                (
+                    "Connected comms room",
+                    ", ".join(connected_rooms) or "Not connected",
+                )
+            )
+
+        if kind in {"data_point", "ad_hoc_asset", "location", "comms_room"}:
+            asset_count, asset_types = self._asset_count_for_property_item(
+                name, record, kind
+            )
+            asset_text = str(asset_count)
+            if asset_types:
+                asset_text += f" ({asset_types} type{'s' if asset_types != 1 else ''})"
+            rows.append(("Assets", asset_text))
+
+        if kind == "data_point":
+            rows.extend(
+                [
+                    ("Cable / port quantity", str(record.get("qty", 1))),
+                    (
+                        "Extension distance",
+                        f"{number(record.get('extension_distance_m', 0))} m",
+                    ),
+                ]
+            )
+        elif kind == "corridor_node":
+            rows.extend(
+                [
+                    ("Height AFFL", f"{number(record.get('height', 0))} m"),
+                    ("Cable limit", str(record.get("cable_limit", "-"))),
+                    ("Restricted", "Yes" if record.get("restricted") else "No"),
+                ]
+            )
+        elif kind in {"location", "comms_room"}:
+            rows.extend(
+                [
+                    (
+                        "Maximum cable distance",
+                        f"{number(record.get('max_cable_length_m', 90))} m",
+                    ),
+                    ("Cabinet type", str(record.get("cabinet_type", "standard"))),
+                ]
+            )
+        elif kind == "ad_hoc_asset":
+            rows.extend(
+                [
+                    ("Asset ID", str(record.get("asset_id", "-"))),
+                    ("Cable / port quantity", str(record.get("qty", 0))),
+                ]
+            )
+
+        department_ids = [
+            str(value).strip()
+            for value in record.get("department_ids", []) or []
+            if str(value).strip()
+        ]
+        if kind in {"data_point", "location", "comms_room"}:
+            rows.append(("Departments", ", ".join(department_ids) or "None"))
+        elif kind == "department":
+            rows.append(("Department name", str(record.get("name", name) or name)))
+        return rows
+
+    def _selected_property_items(self):
+        names = sorted(
+            {
+                str(name).strip()
+                for name in self.selected_template_names
+                if str(name).strip()
+            },
+            key=str.casefold,
+        )
+        if not names:
+            selected_name = str(self.selected_point_name or "").strip()
+            if selected_name:
+                names = [selected_name]
+
+        result = []
+        for name in names:
+            record, kind = self._properties_record(name)
+            if record is not None:
+                result.append((name, record, kind))
+        return result
+
+    def _aggregate_property_rows(self, selected_items):
+        item_rows = [
+            self._properties_rows(name, record, kind)
+            for name, record, kind in selected_items
+        ]
+        if not item_rows:
+            return []
+        if len(item_rows) == 1:
+            return item_rows[0]
+
+        value_maps = [dict(rows) for rows in item_rows]
+        common_labels = [
+            label
+            for label, _value in item_rows[0]
+            if all(label in values for values in value_maps[1:])
+        ]
+        aggregated = []
+        for label in common_labels:
+            values = [str(value_map[label]) for value_map in value_maps]
+            value = values[0] if all(value == values[0] for value in values[1:]) else "multiple"
+            aggregated.append((label, value))
+        return aggregated
+
+    def refresh_properties_sidebar(self, *_):
+        if not hasattr(self, "properties_item_combo"):
+            return
+
+        entries = self._properties_entries()
+        signature = tuple(entries)
+        selected_items = self._selected_property_items()
+        selected_name = selected_items[0][0] if len(selected_items) == 1 else ""
+
+        self.properties_item_combo.blockSignals(True)
+        if signature != self._properties_entry_signature:
+            self.properties_item_combo.clear()
+            for name, kind in entries:
+                label = f"{name}  ·  {self._properties_type_label(kind)}"
+                self.properties_item_combo.addItem(label, (name, kind))
+            self._properties_entry_signature = signature
+
+        selected_index = -1
+        for index in range(self.properties_item_combo.count()):
+            item_data = self.properties_item_combo.itemData(index)
+            if item_data and str(item_data[0]) == selected_name:
+                selected_index = index
+                break
+        self.properties_item_combo.setCurrentIndex(selected_index)
+        if selected_index < 0:
+            self.properties_item_combo.setEditText("")
+        self.properties_item_combo.blockSignals(False)
+
+        if not selected_items:
+            self.properties_selection_label.setText("No item selected")
+            self.properties_table.setRowCount(0)
+            return
+
+        if len(selected_items) == 1:
+            name, _record, kind = selected_items[0]
+            self.properties_selection_label.setText(
+                f"{name} · {self._properties_type_label(kind)}"
+            )
+        else:
+            kinds = {kind for _name, _record, kind in selected_items}
+            item_type = (
+                self._properties_type_label(next(iter(kinds))).lower()
+                if len(kinds) == 1
+                else "item"
+            )
+            self.properties_selection_label.setText(
+                f"{len(selected_items)} {item_type}"
+                f"{'s' if len(selected_items) != 1 else ''} selected"
+            )
+
+        rows = self._aggregate_property_rows(selected_items)
+        self.properties_table.setRowCount(len(rows))
+        for row_index, (label, value) in enumerate(rows):
+            self.properties_table.setItem(row_index, 0, QTableWidgetItem(str(label)))
+            self.properties_table.setItem(row_index, 1, QTableWidgetItem(str(value)))
+        self.properties_table.resizeRowsToContents()
+
+    def _properties_item_activated(self, index):
+        if index < 0:
+            return
+        item_data = self.properties_item_combo.itemData(index)
+        if not item_data:
+            return
+        name, kind = item_data
+        record, _record_kind = self._properties_record(name)
+        if record is None:
+            return
+        floor = int(record.get("floor", self.floor_spin.value()))
+        if self.floor_spin.value() != floor:
+            self.floor_spin.setValue(floor)
+        self.selected_point_name = str(name)
+        if kind in {"corridor_node", "data_point", "ad_hoc_asset"}:
+            self._set_canvas_multi_selection([name], append=False)
+        else:
+            self._clear_canvas_multi_selection()
+        self.refresh_canvas()
+        self.set_status(f"Selected {name} from Properties")
 
     def refresh_rhs_search_sidebar(self):
         if not hasattr(self, "search_lists"):
@@ -4089,6 +5453,8 @@ class CableRouteEditor(QMainWindow):
             if self.floor_spin.value() != floor:
                 self.floor_spin.setValue(floor)
 
+            self.selected_point_name = str(department_id).strip()
+            self._clear_canvas_multi_selection()
             self.refresh_canvas()
 
             scene_pos = self.world_to_scene(item.get("x", 0.0), item.get("y", 0.0))
@@ -4122,6 +5488,8 @@ class CableRouteEditor(QMainWindow):
             if self.floor_spin.value() != floor:
                 self.floor_spin.setValue(floor)
 
+            self.selected_point_name = f"{transition_id}-F{floor}"
+            self._clear_canvas_multi_selection()
             self.refresh_canvas()
 
             scene_pos = self.world_to_scene(pos.get("x", 0.0), pos.get("y", 0.0))
@@ -4165,6 +5533,7 @@ class CableRouteEditor(QMainWindow):
             ("Open PDF in Report Studio...", "pencil-square", self.open_pdf_in_report_studio),
             ("Export Project JSON", "box-arrow-right", self.export_json),
             ("Map DXF to Floor", "geo-alt", self.load_dxf),
+            ("View Floor DXF Mappings...", "list-task", self.show_floor_dxf_mappings),
             ("Clear Floor DXF", "trash3", self.clear_floor_dxf),
             ("Export Floor DXFs", "database", self.export_floor_dxfs),
         ]:
@@ -4860,6 +6229,18 @@ class CableRouteEditor(QMainWindow):
                     self.manage_data_point_departments,
                 ),
                 self._ribbon_icon_button(
+                    "Text → RT",
+                    "Assign room types to selected data points from nearby DXF text",
+                    QStyle.SP_FileDialogContentsView,
+                    self.assign_room_types_from_nearby_text,
+                ),
+                self._ribbon_icon_button(
+                    "DP on Text",
+                    "Drag an area and place data points on reviewed DXF text labels",
+                    QStyle.SP_FileDialogListView,
+                    lambda: self._set_editor_mode("data_point_text_area"),
+                ),
+                self._ribbon_icon_button(
                     "Mass Loc",
                     "Mass create locations",
                     QStyle.SP_FileDialogNewFolder,
@@ -4982,6 +6363,26 @@ class CableRouteEditor(QMainWindow):
                     "Autoroute data points",
                     QStyle.SP_BrowserReload,
                     self.autoroute_data_points,
+                ),
+                self._ribbon_icon_button(
+                    "Connect DPs",
+                    "Connect selected data points to the nearest corridor path "
+                    "with a shortest straight spur; selected corridor nodes are "
+                    "used as explicit targets",
+                    QStyle.SP_ArrowForward,
+                    self.auto_connect_data_points_to_graph,
+                ),
+                self._ribbon_icon_button(
+                    "Paint Paths",
+                    "Create or continue a persistent multi-line corridor fill",
+                    QStyle.SP_DialogApplyButton,
+                    self.start_corridor_drawing_assistant,
+                ),
+                self._ribbon_icon_button(
+                    "Build Fills",
+                    "Create or realign containment nodes from saved painted fills",
+                    QStyle.SP_ArrowForward,
+                    self.build_corridor_paths_from_painted_fills,
                 ),
                 self.autoroute_same_floor_check,
                 self.autoroute_follow_existing_check,
@@ -5162,9 +6563,8 @@ class CableRouteEditor(QMainWindow):
         else:
             names_to_delete = [picked]
 
-        names_to_delete = [
-            name for name in names_to_delete if name in self.store.names_in_use()
-        ]
+        deletable_names = self.store.names_in_use() | self.store.department_ids()
+        names_to_delete = [name for name in names_to_delete if name in deletable_names]
 
         if not names_to_delete:
             return
@@ -5186,9 +6586,12 @@ class CableRouteEditor(QMainWindow):
         }
 
         deleted = 0
+        department_ids = self.store.department_ids()
 
         for name in names_to_delete:
-            if "-F" in name and name.rsplit("-F", 1)[0] in transition_ids:
+            if name in department_ids:
+                self.store.delete_department(name)
+            elif "-F" in name and name.rsplit("-F", 1)[0] in transition_ids:
                 self.store.delete_transition(name.rsplit("-F", 1)[0])
             else:
                 self.store.delete_point(name)
@@ -5249,6 +6652,13 @@ class CableRouteEditor(QMainWindow):
             if self.delete_placement_zone(self.selected_placement_zone_id):
                 event.accept()
                 return
+        if (
+            event.key() in {Qt.Key_Delete, Qt.Key_Backspace}
+            and self.selected_point_name
+        ):
+            self.delete_right_clicked_items(self.selected_point_name)
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def _selected_copyable_names(self):
@@ -5710,6 +7120,414 @@ class CableRouteEditor(QMainWindow):
                 result.add(name)
 
         return result
+
+    def _selected_auto_connect_names(self):
+        points = self.store.all_points()
+        selected_data_points = []
+        selected_nodes = []
+        for name in sorted(self.selected_template_names, key=str.casefold):
+            point = points.get(str(name), {})
+            kind = str(point.get("kind", "") or "").strip()
+            if kind == "data_point":
+                selected_data_points.append(str(name))
+            elif kind == "corridor_node":
+                selected_nodes.append(str(name))
+        return selected_data_points, selected_nodes
+
+    def _auto_connect_data_points_dialog(self):
+        points = self.store.all_points()
+        selected_data_points, selected_nodes = self._selected_auto_connect_names()
+        current_floor = int(self.floor_spin.value())
+        unconnected = self._unconnected_data_point_names()
+        floor_data_points = sorted(
+            (
+                name
+                for name in unconnected
+                if name in points
+                and int(points[name].get("floor", 0)) == current_floor
+            ),
+            key=str.casefold,
+        )
+        all_nodes = sorted(
+            (
+                name
+                for name, point in points.items()
+                if str(point.get("kind", "")).strip()
+                == "corridor_node"
+            ),
+            key=str.casefold,
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Connect Data Points to Graph")
+        dialog.setMinimumWidth(500)
+        layout = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "Create the shortest straight edge from each chosen data point to "
+            "the nearest same-floor corridor path. A node is inserted where the "
+            "edge meets the path. If corridor nodes are selected, those nodes are "
+            "used as the explicit targets instead."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        data_scope_combo = QComboBox()
+        if selected_data_points:
+            data_scope_combo.addItem(
+                f"Selected data points ({len(selected_data_points)})",
+                ("selected", len(selected_data_points)),
+            )
+        data_scope_combo.addItem(
+            f"All unconnected data points on floor {current_floor} "
+            f"({len(floor_data_points)})",
+            ("floor", len(floor_data_points)),
+        )
+        form.addRow("Data points", data_scope_combo)
+
+        node_scope_combo = QComboBox()
+        if selected_nodes:
+            node_scope_combo.addItem(
+                f"Selected corridor nodes ({len(selected_nodes)})",
+                ("selected", len(selected_nodes)),
+            )
+        node_scope_combo.addItem(
+            f"Nearest corridor path ({len(all_nodes)} nodes)",
+            ("all", len(all_nodes)),
+        )
+        form.addRow("Connection target", node_scope_combo)
+
+        summary = QLabel()
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        connect_button = buttons.button(QDialogButtonBox.Ok)
+        connect_button.setText("Connect")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def update_summary(*_):
+            data_mode, data_count = data_scope_combo.currentData()
+            node_mode, node_count = node_scope_combo.currentData()
+            summary.setText(
+                f"Ready to connect {data_count} data point(s) using "
+                f"{node_count} corridor node(s). Existing attachments are skipped."
+            )
+            connect_button.setEnabled(bool(data_count and node_count))
+
+        data_scope_combo.currentIndexChanged.connect(update_summary)
+        node_scope_combo.currentIndexChanged.connect(update_summary)
+        update_summary()
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        data_mode, _data_count = data_scope_combo.currentData()
+        node_mode, _node_count = node_scope_combo.currentData()
+        data_names = selected_data_points if data_mode == "selected" else floor_data_points
+        selected_node_names = selected_nodes if node_mode == "selected" else []
+        return data_names, selected_node_names, False
+
+    def auto_connect_data_points_to_graph(
+        self, data_point_names=None, node_names=None, prefer_doorways=None
+    ):
+        """Attach each data point to the nearest point on a corridor path."""
+
+        button_invocation = isinstance(data_point_names, bool)
+        if button_invocation:
+            data_point_names = None
+        if isinstance(node_names, bool):
+            node_names = None
+
+        if button_invocation:
+            dialog_result = self._auto_connect_data_points_dialog()
+            if dialog_result is None:
+                return
+            data_point_names, node_names, prefer_doorways = dialog_result
+
+        points = self.store.all_points()
+        selected_data_points, selected_nodes = self._selected_auto_connect_names()
+
+        if data_point_names is None:
+            data_point_names = selected_data_points
+        else:
+            data_point_names = [str(name).strip() for name in data_point_names]
+        if node_names is None:
+            node_names = selected_nodes
+        else:
+            node_names = [str(name).strip() for name in node_names]
+
+        current_floor = int(self.floor_spin.value())
+        unconnected = self._unconnected_data_point_names()
+        if not data_point_names:
+            data_point_names = sorted(
+                (
+                    name
+                    for name in unconnected
+                    if name in points
+                    and int(points[name].get("floor", 0)) == current_floor
+                ),
+                key=str.casefold,
+            )
+
+        data_point_names = list(
+            dict.fromkeys(
+                name
+                for name in data_point_names
+                if name in points
+                and str(points[name].get("kind", "")).strip() == "data_point"
+            )
+        )
+
+        already_connected = [
+            name for name in data_point_names if name not in unconnected
+        ]
+        targets = [name for name in data_point_names if name in unconnected]
+        if not targets:
+            QMessageBox.information(
+                self,
+                "Auto-connect Data Points",
+                "No unconnected data points matched the current selection and floor.",
+            )
+            return
+
+        if node_names:
+            eligible_nodes = {
+                name
+                for name in node_names
+                if name in points
+                and str(points[name].get("kind", "")).strip() == "corridor_node"
+            }
+            node_scope = "selected corridor nodes"
+        else:
+            eligible_nodes = {
+                name
+                for name, point in points.items()
+                if str(point.get("kind", "")).strip() == "corridor_node"
+            }
+            node_scope = "the nearest corridor paths"
+
+        if not eligible_nodes:
+            QMessageBox.information(
+                self,
+                "Auto-connect Data Points",
+                "No eligible corridor nodes were found. Add corridor nodes or "
+                "select one or more nodes before running auto-connect.",
+            )
+            return
+
+        edges = self.store.data.setdefault("corridors", {}).setdefault("edges", [])
+        selected_node_scope = bool(node_names)
+        created_anchor_names = []
+        path_attachments = 0
+        assignments = []
+        skipped_no_node = []
+
+        def point_xy(name):
+            record = points[name]
+            return (
+                float(record.get("x", 0.0) or 0.0),
+                float(record.get("y", 0.0) or 0.0),
+            )
+
+        def corridor_segments(floor):
+            if selected_node_scope:
+                return []
+            segments = []
+            seen = set()
+            for edge in edges:
+                start_name = str(edge.get("from", "") or "").strip()
+                end_name = str(edge.get("to", "") or "").strip()
+                if start_name not in points or end_name not in points:
+                    continue
+                start = points[start_name]
+                end = points[end_name]
+                if (
+                    str(start.get("kind", "") or "") != "corridor_node"
+                    or str(end.get("kind", "") or "") != "corridor_node"
+                    or int(start.get("floor", 0) or 0) != int(floor)
+                    or int(end.get("floor", 0) or 0) != int(floor)
+                ):
+                    continue
+                pair_key = tuple(sorted((start_name, end_name), key=str.casefold))
+                if start_name == end_name or pair_key in seen:
+                    continue
+                seen.add(pair_key)
+                segments.append((start_name, end_name))
+            return segments
+
+        def nearest_anchor(point_name):
+            point = points[point_name]
+            floor = int(point.get("floor", 0) or 0)
+            position = point_xy(point_name)
+            path_candidates = []
+            for start_name, end_name in corridor_segments(floor):
+                projection = _project_point_to_polyline(
+                    position, [point_xy(start_name), point_xy(end_name)]
+                )
+                if projection is not None:
+                    path_candidates.append(
+                        (
+                            float(projection["distance"]),
+                            start_name.casefold(),
+                            end_name.casefold(),
+                            start_name,
+                            end_name,
+                            projection,
+                        )
+                    )
+            if path_candidates:
+                return ("path", min(path_candidates))
+
+            node_candidates = [
+                (
+                    math.hypot(
+                        point_xy(node_name)[0] - position[0],
+                        point_xy(node_name)[1] - position[1],
+                    ),
+                    node_name.casefold(),
+                    node_name,
+                )
+                for node_name in eligible_nodes
+                if node_name in points
+                and int(points[node_name].get("floor", 0) or 0) == floor
+            ]
+            if node_candidates:
+                return ("node", min(node_candidates))
+            return None
+
+        def split_segment(start_name, end_name, anchor_name):
+            replacement_edges = []
+            for edge in edges:
+                edge_start = str(edge.get("from", "") or "").strip()
+                edge_end = str(edge.get("to", "") or "").strip()
+                if edge_start == start_name and edge_end == end_name:
+                    first = dict(edge)
+                    second = dict(edge)
+                    first["to"] = anchor_name
+                    second["from"] = anchor_name
+                    replacement_edges.extend((first, second))
+                elif edge_start == end_name and edge_end == start_name:
+                    first = dict(edge)
+                    second = dict(edge)
+                    first["to"] = anchor_name
+                    second["from"] = anchor_name
+                    replacement_edges.extend((first, second))
+                else:
+                    replacement_edges.append(edge)
+            unique_edges = []
+            seen_pairs = set()
+            for edge in replacement_edges:
+                pair = (
+                    str(edge.get("from", "") or "").strip(),
+                    str(edge.get("to", "") or "").strip(),
+                )
+                if not all(pair) or pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                unique_edges.append(edge)
+            edges[:] = unique_edges
+
+        initial_distances = {}
+        for point_name in targets:
+            anchor = nearest_anchor(point_name)
+            initial_distances[point_name] = (
+                float(anchor[1][0]) if anchor is not None else math.inf
+            )
+        connectable = [name for name in targets if math.isfinite(initial_distances[name])]
+        skipped_no_node.extend(name for name in targets if name not in connectable)
+
+        if connectable:
+            self.push_undo_state("Auto-connect data points to nearest corridor path")
+
+        for point_name in sorted(
+            connectable, key=lambda name: (initial_distances[name], name.casefold())
+        ):
+            anchor = nearest_anchor(point_name)
+            if anchor is None:
+                skipped_no_node.append(point_name)
+                continue
+            anchor_kind, candidate = anchor
+            if anchor_kind == "node":
+                chosen_node = candidate[2]
+            else:
+                _distance, _start_key, _end_key, start_name, end_name, projection = candidate
+                ratio = float(projection.get("ratio", 0.0))
+                if ratio <= 1e-6:
+                    chosen_node = start_name
+                elif ratio >= 1.0 - 1e-6:
+                    chosen_node = end_name
+                else:
+                    projected_x, projected_y = projection["point"]
+                    chosen_node = next(
+                        (
+                            node_name
+                            for node_name in eligible_nodes
+                            if node_name in points
+                            and int(points[node_name].get("floor", 0) or 0)
+                            == int(points[point_name].get("floor", 0) or 0)
+                            and math.hypot(
+                                point_xy(node_name)[0] - projected_x,
+                                point_xy(node_name)[1] - projected_y,
+                            )
+                            <= 0.05
+                        ),
+                        None,
+                    )
+                    if chosen_node is None:
+                        floor = int(points[point_name].get("floor", 0) or 0)
+                        chosen_node = self.store.suggest_next_corridor_name(floor)
+                        self.store.add_corridor_node(
+                            chosen_node,
+                            floor,
+                            projected_x,
+                            projected_y,
+                            float(self.default_corridor_height_spin.value()),
+                            int(self.default_corridor_cable_limit_spin.value()),
+                        )
+                        node = self.store.data["corridors"]["nodes"][-1]
+                        node["restricted"] = False
+                        points[chosen_node] = node
+                        eligible_nodes.add(chosen_node)
+                        created_anchor_names.append(chosen_node)
+                    split_segment(start_name, end_name, chosen_node)
+                path_attachments += 1
+
+            pair = (point_name, chosen_node)
+            if not any(
+                str(edge.get("from", "") or "").strip() == pair[0]
+                and str(edge.get("to", "") or "").strip() == pair[1]
+                for edge in edges
+            ):
+                edges.append({"from": point_name, "to": chosen_node})
+            assignments.append(pair)
+
+        if assignments:
+            self._mark_routing_graph_changed()
+            self.refresh_canvas()
+
+        lines = [
+            f"Created {len(assignments)} shortest straight data-point edge(s) using {node_scope}."
+        ]
+        if path_attachments:
+            lines.append(
+                f"Connected {path_attachments} point(s) to the nearest corridor path; "
+                f"inserted {len(created_anchor_names)} junction node(s)."
+            )
+        if already_connected:
+            lines.append(f"Skipped {len(already_connected)} already-connected point(s).")
+        if skipped_no_node:
+            lines.append(
+                f"No same-floor candidate node: {len(skipped_no_node)} point(s)."
+            )
+        summary = "\n".join(lines)
+        self.set_status(lines[0])
+        QMessageBox.information(self, "Auto-connect Data Points", summary)
 
     def set_status(self, text):
         self.status_label.setText(text)
@@ -6354,6 +8172,11 @@ class CableRouteEditor(QMainWindow):
             self.selected_template_names,
             self.selected_for_edge,
         )
+        if hasattr(self.canvas, "set_corridor_paint_overlay"):
+            self.canvas.set_corridor_paint_overlay(
+                self._selected_corridor_paint_region_id,
+                self._corridor_paint_points,
+            )
         if hasattr(self.canvas, "set_placement_zone_selection"):
             self.canvas.set_placement_zone_selection(
                 self.selected_placement_zone_id
@@ -6366,6 +8189,18 @@ class CableRouteEditor(QMainWindow):
             self.mode_combo.currentText(),
             self.selected_for_edge,
             tuple(sorted(self.selected_template_names)),
+            self._selected_corridor_paint_region_id,
+            tuple(
+                (
+                    str(region.get("id", "")),
+                    len(region.get("strokes", []) or []),
+                    len(region.get("fill_polygons", []) or []),
+                    float(region.get("fill_width_m", 0.0) or 0.0),
+                )
+                for region in self.store.data.get("corridor_paint_regions", []) or []
+                if isinstance(region, dict)
+                and int(region.get("floor", 0) or 0) == int(floor)
+            ),
             self.get_floor_dxf_path(floor),
             self.canvas.target_fps() if hasattr(self.canvas, "target_fps") else 0,
             bool(self._show_render_stats),
@@ -6374,6 +8209,7 @@ class CableRouteEditor(QMainWindow):
             self._last_overlay_signature = overlay_signature
             if hasattr(self.canvas, "invalidate_overlay"):
                 self.canvas.invalidate_overlay()
+        self.refresh_properties_sidebar()
         self._refresh_workflow_guidance()
 
     def draw_edges(self, floor, visible_rect=None):
@@ -6813,7 +8649,92 @@ class CableRouteEditor(QMainWindow):
 
     def draw_overlay_panels(self, painter, viewport_rect):
         # The canvas legend was visually competing with the drawing area.
-        # Keep the overlay hook in place, but do not paint the legend panel.
+        # Keep the overlay hook for focused interaction previews only.
+        # The retained GPU canvas renders corridor fills in its world-space
+        # object layer so they share the exact live pan/zoom transform with the
+        # DXF. This screen-space fallback is only for the legacy canvas.
+        if hasattr(self.canvas, "set_corridor_paint_overlay"):
+            return
+        floor = int(self.floor_spin.value()) if hasattr(self, "floor_spin") else 0
+        regions = [
+            region
+            for region in self.store.data.get("corridor_paint_regions", []) or []
+            if isinstance(region, dict)
+            and int(region.get("floor", 0) or 0) == floor
+        ]
+        if regions:
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            for region in regions:
+                selected = str(region.get("id", "")) == str(
+                    self._selected_corridor_paint_region_id or ""
+                )
+                fill = QColor("#38bdf8" if selected else "#22c55e")
+                fill.setAlpha(82 if selected else 48)
+                outline = QColor("#e0f2fe" if selected else "#86efac")
+                outline.setAlpha(230 if selected else 145)
+                painter.setBrush(QBrush(fill))
+                painter.setPen(QPen(outline, 2.5 if selected else 1.25))
+                for polygon in region.get("fill_polygons", []) or []:
+                    screen_polygon = []
+                    for x, y in polygon:
+                        if hasattr(self.canvas, "world_to_screen"):
+                            screen_polygon.append(self.canvas.world_to_screen(x, y))
+                        else:
+                            try:
+                                screen_polygon.append(
+                                    self.canvas.mapFromScene(self.world_to_scene(x, y))
+                                )
+                            except (AttributeError, TypeError):
+                                continue
+                    if len(screen_polygon) >= 3:
+                        painter.drawPolygon(QPolygonF(screen_polygon))
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(
+                    QPen(
+                        outline,
+                        2.5 if selected else 1.75,
+                        Qt.SolidLine,
+                        Qt.RoundCap,
+                        Qt.RoundJoin,
+                    )
+                )
+                for line in region.get("strokes", []) or []:
+                    screen_line = []
+                    for x, y in line:
+                        if hasattr(self.canvas, "world_to_screen"):
+                            screen_line.append(self.canvas.world_to_screen(x, y))
+                        else:
+                            try:
+                                screen_line.append(
+                                    self.canvas.mapFromScene(self.world_to_scene(x, y))
+                                )
+                            except (AttributeError, TypeError):
+                                continue
+                    if len(screen_line) >= 2:
+                        painter.drawPolyline(QPolygonF(screen_line))
+            painter.restore()
+        paint_points = getattr(self, "_corridor_paint_points", [])
+        if paint_points:
+            screen_points = []
+            for x, y in paint_points:
+                if hasattr(self.canvas, "world_to_screen"):
+                    screen_points.append(self.canvas.world_to_screen(x, y))
+                else:
+                    scene_point = self.world_to_scene(x, y)
+                    try:
+                        screen_points.append(self.canvas.mapFromScene(scene_point))
+                    except (AttributeError, TypeError):
+                        continue
+            if len(screen_points) >= 2:
+                painter.save()
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setPen(
+                    QPen(QColor("#ff9f1c"), 4.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                )
+                painter.setBrush(Qt.NoBrush)
+                painter.drawPolyline(QPolygonF(screen_points))
+                painter.restore()
         return
         floor = self.floor_spin.value()
         mapped_path = self.get_floor_dxf_path(floor)
@@ -6937,9 +8858,22 @@ class CableRouteEditor(QMainWindow):
         return bool(QApplication.keyboardModifiers() & Qt.AltModifier)
 
     def _select_pick_radius(self):
-        if self._is_alt_pressed():
-            return 0.35
-        return 3.0
+        # Hit testing used to use a fixed three-metre radius.  Once zoomed in,
+        # that could cover a large part of the viewport, so pressing on empty
+        # space selected and dragged a visually distant item instead of
+        # starting a rubber-band selection.  Keep the tolerance tied to the
+        # rendered marker size in screen pixels while retaining a small world
+        # minimum for the largest point symbols.
+        precise = self._is_alt_pressed()
+        pixel_radius = 4.0 if precise else 9.0
+        minimum_world_radius = 0.18 if precise else 0.5
+        try:
+            scale = abs(float(self.canvas.transform().m11()))
+        except (AttributeError, TypeError, ValueError):
+            scale = 1.0
+        if scale <= 1e-9:
+            scale = 1.0
+        return max(minimum_world_radius, pixel_radius / scale)
 
     def find_nearest_selectable_name(
         self,
@@ -12251,6 +14185,60 @@ class CableRouteEditor(QMainWindow):
         self.refresh_canvas()
         self.set_status(f"Mapped DXF {Path(path).name} to floor {floor}")
 
+    def show_floor_dxf_mappings(self):
+        mappings = []
+        for entry in self.store.data.get("floor_dxf_files", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("filepath", "") or "").strip()
+            if not path:
+                continue
+            try:
+                floor = int(entry.get("floor", 0))
+            except (TypeError, ValueError):
+                continue
+            mappings.append((floor, path))
+        mappings.sort(key=lambda item: (item[0], item[1].casefold()))
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Floor DXF Mappings")
+        dialog.resize(820, max(260, min(640, 150 + len(mappings) * 34)))
+        layout = QVBoxLayout(dialog)
+
+        summary = QLabel(
+            f"{len(mappings)} floor DXF mapping{'s' if len(mappings) != 1 else ''}"
+            if mappings
+            else "No DXF files are currently mapped to floors."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        table = QTableWidget(len(mappings), 2)
+        table.setHorizontalHeaderLabels(["Floor", "DXF path"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        for row, (floor, path) in enumerate(mappings):
+            floor_item = QTableWidgetItem(str(floor))
+            floor_item.setTextAlignment(Qt.AlignCenter)
+            path_item = QTableWidgetItem(path)
+            path_item.setToolTip(path)
+            table.setItem(row, 0, floor_item)
+            table.setItem(row, 1, path_item)
+        table.setEnabled(bool(mappings))
+        layout.addWidget(table, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+
     def clear_floor_dxf(self):
         floor = self.floor_spin.value()
         existing = self.get_floor_dxf_path(floor)
@@ -12864,13 +14852,22 @@ class CableRouteEditor(QMainWindow):
             self,
             "Departments",
             columns,
-            self.store.data.get("departments", []),
+            deepcopy(self.store.data.get("departments", [])),
             self._save_departments,
         )
 
     def _save_departments(self, items):
         self.push_undo_state("Save departments")
-        self.store.data["departments"] = items
+        saved_items = deepcopy(items)
+        retained_ids = {
+            str(item.get("id", "") or "").strip()
+            for item in saved_items
+            if isinstance(item, dict) and str(item.get("id", "") or "").strip()
+        }
+        removed_ids = self.store.department_ids() - retained_ids
+        for department_id in removed_ids:
+            self.store.delete_department(department_id)
+        self.store.data["departments"] = saved_items
         self.set_status("Departments updated")
         self.refresh_canvas()
 
@@ -13861,6 +15858,942 @@ class CableRouteEditor(QMainWindow):
         )
         self.refresh_canvas()
 
+    def _dxf_text_entities_for_floors(self, floors):
+        text_entities_by_floor = {}
+        for floor in sorted({int(value) for value in floors}):
+            entities = None
+            cached = self._dxf_cache.get(floor)
+            mapped_path = self.get_floor_dxf_path(floor)
+            if cached and (not mapped_path or cached.get("path") == mapped_path):
+                entities = cached.get("entities", [])
+            elif self.loaded_dxf_floor == floor:
+                entities = self.dxf_scene.entities
+            text_entities_by_floor[floor] = [
+                entity
+                for entity in entities or []
+                if isinstance(entity, dict)
+                and str(entity.get("type", "")).upper() == "TEXT"
+                and _plain_dxf_text(entity.get("text", ""))
+            ]
+        return text_entities_by_floor
+
+    def _remember_room_type_text_assignments(self, assignments):
+        existing = self.store.data.get("room_type_text_mappings", [])
+        if not isinstance(existing, list):
+            existing = []
+        records_by_key = {}
+        for record in existing:
+            if not isinstance(record, dict):
+                continue
+            key = _normalise_room_description(
+                record.get("normalised_text", record.get("text", ""))
+            )
+            if key:
+                records_by_key[key] = dict(record)
+
+        remembered = 0
+        for assignment in assignments:
+            key = _normalise_room_description(
+                assignment.get("normalised_text", assignment.get("text", ""))
+            )
+            room_type_id = str(assignment.get("room_type_id", "") or "").strip()
+            text = _plain_dxf_text(assignment.get("text", ""))
+            if not key or not room_type_id or not text:
+                continue
+            previous = records_by_key.get(key, {})
+            try:
+                usage_count = int(previous.get("usage_count", 0) or 0) + 1
+            except (TypeError, ValueError):
+                usage_count = 1
+            records_by_key[key] = {
+                **previous,
+                "text": text,
+                "normalised_text": key,
+                "room_type_id": room_type_id,
+                "usage_count": usage_count,
+            }
+            remembered += 1
+
+        self.store.data["room_type_text_mappings"] = sorted(
+            records_by_key.values(),
+            key=lambda record: str(record.get("normalised_text", "")).casefold(),
+        )
+        return remembered
+
+    def assign_room_types_from_nearby_text(self, *_):
+        selected = self._selected_data_point_names()
+        if not selected:
+            QMessageBox.information(
+                self,
+                "Assign Room Types from Nearby Text",
+                "Select one or more data points first.",
+            )
+            return
+
+        room_types = self.store.room_type_options()
+        if not room_types:
+            QMessageBox.information(
+                self,
+                "Assign Room Types from Nearby Text",
+                "Create at least one room type before using nearby text assignment.",
+            )
+            return
+
+        selected_set = set(selected)
+        data_points = [
+            point
+            for point in self.store.data.get("data_points", [])
+            if str(point.get("name", "") or "").strip() in selected_set
+        ]
+        text_entities_by_floor = self._dxf_text_entities_for_floors(
+            point.get("floor", 0) for point in data_points
+        )
+        if not any(text_entities_by_floor.values()):
+            QMessageBox.information(
+                self,
+                "Assign Room Types from Nearby Text",
+                "No DXF text is loaded for the selected data points' floors. "
+                "Map or finish loading the floor DXF, then try again.",
+            )
+            return
+
+        dialog = RoomTypeFromNearbyTextDialog(
+            data_points,
+            text_entities_by_floor,
+            room_types,
+            self.store.data.get("room_type_text_mappings", []),
+            self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        assignments = dialog.selected_assignments()
+        if not assignments:
+            QMessageBox.information(
+                self,
+                "Assign Room Types from Nearby Text",
+                "No reviewed room type assignments were selected.",
+            )
+            return
+
+        self.push_undo_state("Assign room types from nearby DXF text")
+        assignment_by_name = {
+            assignment["name"]: assignment for assignment in assignments
+        }
+        updated = 0
+        for point in self.store.data.get("data_points", []):
+            name = str(point.get("name", "") or "").strip()
+            assignment = assignment_by_name.get(name)
+            if assignment is None:
+                continue
+            room_type_id = assignment["room_type_id"]
+            point["room_type_id"] = room_type_id
+            point["qty"] = self.store.room_type_cable_qty(room_type_id)
+            self.store.sync_connection_qty_for_data_point(name)
+            updated += 1
+
+        remembered = 0
+        if dialog.remember_mappings():
+            remembered = self._remember_room_type_text_assignments(assignments)
+
+        status = f"Assigned room types to {updated} selected data point(s)"
+        if remembered:
+            status += f" and remembered {remembered} text assignment(s)"
+        self.set_status(status)
+        self.refresh_canvas()
+
+    def _suggest_data_point_names(self, floor, count):
+        floor = int(floor)
+        prefix = f"DP{floor}-"
+        used = set(self.store.names_in_use())
+        numbers = []
+        for name in used:
+            name = str(name)
+            if name.startswith(prefix) and name[len(prefix) :].isdigit():
+                numbers.append(int(name[len(prefix) :]))
+        next_number = max(numbers, default=0) + 1
+        result = []
+        while len(result) < int(count):
+            name = f"{prefix}{next_number}"
+            next_number += 1
+            if name in used:
+                continue
+            used.add(name)
+            result.append(name)
+        return result
+
+    def _data_point_text_candidates_in_scene_rect(self, scene_rect, floor):
+        entities = self._dxf_text_entities_for_floors([floor]).get(int(floor), [])
+        existing_points = [
+            point
+            for point in self.store.data.get("data_points", [])
+            if int(point.get("floor", 0) or 0) == int(floor)
+        ]
+        candidates = []
+        seen = set()
+        for entity in entities:
+            text = _plain_dxf_text(entity.get("text", ""))
+            if not text:
+                continue
+            x, y = _dxf_text_position(entity)
+            bbox = entity.get("bbox")
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                try:
+                    text_scene_rect = QRectF(
+                        QPointF(float(bbox[0]), -float(bbox[3])),
+                        QPointF(float(bbox[2]), -float(bbox[1])),
+                    ).normalized()
+                    selected = scene_rect.intersects(text_scene_rect)
+                except (TypeError, ValueError):
+                    selected = scene_rect.contains(self.world_to_scene(x, y))
+            else:
+                selected = scene_rect.contains(self.world_to_scene(x, y))
+            if not selected:
+                continue
+            key = (round(x, 2), round(y, 2), _normalise_room_description(text))
+            if key in seen:
+                continue
+            seen.add(key)
+            if any(
+                math.hypot(
+                    x - float(point.get("x", 0.0) or 0.0),
+                    y - float(point.get("y", 0.0) or 0.0),
+                )
+                <= 0.6
+                for point in existing_points
+            ):
+                continue
+            candidates.append({"text": text, "x": x, "y": y, "floor": int(floor)})
+
+        candidates.sort(key=lambda item: (-item["y"], item["x"], item["text"].casefold()))
+        names = self._suggest_data_point_names(floor, len(candidates))
+        for candidate, name in zip(candidates, names):
+            candidate["name"] = name
+        return candidates
+
+    def _place_data_points_from_text_scene_rect(self, scene_rect, floor):
+        candidates = self._data_point_text_candidates_in_scene_rect(scene_rect, floor)
+        if not candidates:
+            QMessageBox.information(
+                self,
+                "Place Data Points on DXF Text",
+                "No unoccupied DXF text labels were found in the selected area.",
+            )
+            return
+
+        dialog = DataPointsFromTextDialog(
+            candidates,
+            self.store.room_type_options(),
+            self.store.data.get("room_type_text_mappings", []),
+            self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        selected = dialog.selected_data_points()
+        if not selected:
+            return
+
+        existing_names = set(self.store.names_in_use())
+        accepted = []
+        for item in selected:
+            name = str(item.get("name", "") or "").strip()
+            if not name or name in existing_names:
+                continue
+            existing_names.add(name)
+            accepted.append(item)
+        if not accepted:
+            QMessageBox.warning(
+                self,
+                "Place Data Points on DXF Text",
+                "Every selected row had a blank or duplicate data-point name.",
+            )
+            return
+
+        self.push_undo_state("Place data points on DXF text")
+        created_names = []
+        for item in accepted:
+            self.store.add_data_point(
+                item["name"],
+                int(floor),
+                item["x"],
+                item["y"],
+                item["qty"],
+                item["extension_distance_m"],
+                department_ids=[],
+                room_type_id=item.get("room_type_id", ""),
+            )
+            created_names.append(item["name"])
+        remembered = 0
+        if dialog.remember_mappings():
+            remembered = self._remember_room_type_text_assignments(accepted)
+
+        self._set_canvas_multi_selection(created_names, append=False)
+        self._set_editor_mode("select_move")
+        status = f"Placed {len(created_names)} data point(s) on DXF text"
+        if remembered:
+            status += f" and remembered {remembered} room-text assignment(s)"
+        self.set_status(status)
+        self.refresh_canvas()
+
+    def _finish_data_point_text_area(self, event):
+        if not self.selection_rect_active or self.selection_rect_origin is None:
+            return False
+        end_point = event.position().toPoint()
+        rect = QRect(self.selection_rect_origin, end_point).normalized()
+        if self._rubber_band is not None:
+            self._rubber_band.hide()
+        self.selection_rect_active = False
+        self.selection_rect_origin = None
+        self.selection_rect_current = None
+        if rect.width() < 4 and rect.height() < 4:
+            self.set_status("Drag a larger area around DXF text labels")
+            return False
+        scene_rect = self._viewport_rect_to_scene_rect(rect)
+        if scene_rect.isEmpty():
+            return False
+        self._place_data_points_from_text_scene_rect(
+            scene_rect, self.floor_spin.value()
+        )
+        return True
+
+    def _corridor_paint_regions(self):
+        return self.store.data.setdefault("corridor_paint_regions", [])
+
+    def _corridor_paint_region_by_id(self, region_id):
+        region_id = str(region_id or "").strip()
+        return next(
+            (
+                region
+                for region in self._corridor_paint_regions()
+                if str(region.get("id", "") or "").strip() == region_id
+            ),
+            None,
+        )
+
+    def _next_corridor_paint_region_id(self):
+        used = {
+            str(region.get("id", "") or "").strip()
+            for region in self._corridor_paint_regions()
+        }
+        number = 1
+        while f"CPF-{number}" in used:
+            number += 1
+        return f"CPF-{number}"
+
+    def _floor_dxf_entities(self, floor):
+        floor = int(floor)
+        cached = self._dxf_cache.get(floor)
+        if cached:
+            return list(cached.get("entities", []) or [])
+        if self.loaded_dxf_floor == floor:
+            return list(self.dxf_scene.entities or [])
+        return []
+
+    def _rebuild_corridor_paint_region_fill(self, region):
+        strokes = list(region.get("strokes", []) or [])
+        filled_line_count = region.get("filled_line_count")
+        if filled_line_count is None:
+            # Existing projects predate the explicit fill confirmation and all
+            # of their saved lines were already represented by fills.
+            filled_line_count = len(strokes)
+        filled_line_count = max(0, min(int(filled_line_count), len(strokes)))
+        region["filled_line_count"] = filled_line_count
+        region["fill_polygons"] = [
+            [[round(float(x), 3), round(float(y), 3)] for x, y in polygon]
+            for polygon in _corridor_fill_polygons(
+                strokes[:filled_line_count],
+                region.get("fill_width_m", 2.5),
+                [],
+            )
+        ]
+
+    def start_corridor_drawing_assistant(self, region_id=None):
+        if isinstance(region_id, bool):
+            region_id = None
+        floor = int(self.floor_spin.value())
+        selected_id = str(
+            region_id or self._selected_corridor_paint_region_id or ""
+        ).strip()
+        floor_regions = [
+            region
+            for region in self._corridor_paint_regions()
+            if int(region.get("floor", 0) or 0) == floor
+        ]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Corridor Fill Drawing Assistant")
+        layout = QVBoxLayout(dialog)
+        description = QLabel(
+            "Create a persistent fill or continue an existing one. You can add "
+            "multiple straight lines, edit or delete the fill, then build containment "
+            "nodes only when the painted plan is ready."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        target_combo = QComboBox()
+        target_combo.addItem("New painted fill", "")
+        selected_index = 0
+        for region in floor_regions:
+            rid = str(region.get("id", "") or "").strip()
+            target_combo.addItem(
+                f"{region.get('name', rid)} ({len(region.get('strokes', []))} line(s))",
+                rid,
+            )
+            if rid == selected_id:
+                selected_index = target_combo.count() - 1
+        target_combo.setCurrentIndex(selected_index)
+        form.addRow("Paint target", target_combo)
+
+        name_edit = QLineEdit()
+        form.addRow("Fill name", name_edit)
+
+        fill_width_spin = QDoubleSpinBox()
+        fill_width_spin.setRange(0.2, 50.0)
+        fill_width_spin.setDecimals(2)
+        fill_width_spin.setSuffix(" m")
+        form.addRow("Painted corridor width", fill_width_spin)
+
+        simplification_spin = QDoubleSpinBox()
+        simplification_spin.setRange(0.05, 10.0)
+        simplification_spin.setDecimals(2)
+        simplification_spin.setSuffix(" m")
+        form.addRow("Straightening tolerance", simplification_spin)
+
+        spacing_spin = QDoubleSpinBox()
+        spacing_spin.setRange(0.5, 100.0)
+        spacing_spin.setDecimals(1)
+        spacing_spin.setSuffix(" m")
+        form.addRow("Maximum node spacing", spacing_spin)
+
+        join_spin = QDoubleSpinBox()
+        join_spin.setRange(0.0, 20.0)
+        join_spin.setDecimals(2)
+        join_spin.setSuffix(" m")
+        form.addRow("Reuse nodes within", join_spin)
+
+        realign_spin = QDoubleSpinBox()
+        realign_spin.setRange(0.0, 20.0)
+        realign_spin.setDecimals(2)
+        realign_spin.setSuffix(" m")
+        form.addRow("Realign existing nodes within", realign_spin)
+
+        def load_target(*_):
+            region = self._corridor_paint_region_by_id(target_combo.currentData())
+            settings = region or self._corridor_paint_settings
+            name_edit.setText(
+                str(
+                    region.get("name", region.get("id", "Corridor fill"))
+                    if region is not None
+                    else f"Corridor fill {len(floor_regions) + 1}"
+                )
+            )
+            fill_width_spin.setValue(float(settings.get("fill_width_m", 2.5)))
+            simplification_spin.setValue(
+                float(settings.get("simplification_m", 0.35))
+            )
+            spacing_spin.setValue(float(settings.get("maximum_spacing_m", 5.0)))
+            join_spin.setValue(float(settings.get("join_distance_m", 1.0)))
+            realign_spin.setValue(float(settings.get("realign_distance_m", 2.0)))
+
+        target_combo.currentIndexChanged.connect(load_target)
+        load_target()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Continue painting")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        settings = {
+            "name": name_edit.text().strip() or "Corridor fill",
+            "fill_width_m": fill_width_spin.value(),
+            "simplification_m": simplification_spin.value(),
+            "maximum_spacing_m": spacing_spin.value(),
+            "join_distance_m": join_spin.value(),
+            "realign_distance_m": realign_spin.value(),
+        }
+        self._corridor_paint_settings = dict(settings)
+        region = self._corridor_paint_region_by_id(target_combo.currentData())
+        self.push_undo_state(
+            "Edit corridor painted fill" if region is not None else "Create corridor painted fill"
+        )
+        if region is None:
+            region = {
+                "id": self._next_corridor_paint_region_id(),
+                "floor": floor,
+                "strokes": [],
+                "filled_line_count": 0,
+                "fill_polygons": [],
+                "generated_node_names": [],
+            }
+            self._corridor_paint_regions().append(region)
+        region.update(settings)
+        self._rebuild_corridor_paint_region_fill(region)
+        region_id = str(region["id"])
+        self._active_corridor_paint_region_id = region_id
+        self._selected_corridor_paint_region_id = region_id
+        self._set_editor_mode("corridor_paint")
+        self.refresh_canvas()
+
+    def _refresh_corridor_paint_layer(self):
+        if hasattr(self.canvas, "set_corridor_paint_overlay"):
+            self.canvas.set_corridor_paint_overlay(
+                self._selected_corridor_paint_region_id,
+                self._corridor_paint_points,
+            )
+        elif hasattr(self.canvas, "invalidate_overlay"):
+            self.canvas.invalidate_overlay()
+
+    def _begin_corridor_paint(self, x, y):
+        point = (float(x), float(y))
+        self._corridor_paint_points = [point, point]
+        self._corridor_painting = True
+        self.set_status("Corridor line started — click its end point")
+        self._refresh_corridor_paint_layer()
+
+    def _update_corridor_paint(self, x, y):
+        if not self._corridor_painting:
+            return
+        point = (float(x), float(y))
+        if not self._corridor_paint_points:
+            self._corridor_paint_points = [point, point]
+        elif len(self._corridor_paint_points) == 1:
+            self._corridor_paint_points.append(point)
+        else:
+            self._corridor_paint_points[1] = point
+        self._refresh_corridor_paint_layer()
+
+    def _finish_corridor_paint(self):
+        raw_points = list(self._corridor_paint_points)
+        self._corridor_paint_points = []
+        self._corridor_painting = False
+        self._refresh_corridor_paint_layer()
+        if len(raw_points) < 2:
+            self.set_status("Corridor line was too short")
+            return False
+        if self.snap_check.isChecked():
+            raw_points = [self.snap(x, y) for x, y in raw_points]
+        raw_points = [
+            point
+            for index, point in enumerate(raw_points)
+            if index == 0
+            or math.hypot(
+                point[0] - raw_points[index - 1][0],
+                point[1] - raw_points[index - 1][1],
+            )
+            > 1e-6
+        ]
+        if len(raw_points) < 2:
+            self.set_status("Corridor line collapsed to one snapped point")
+            return False
+        region = self._corridor_paint_region_by_id(
+            self._active_corridor_paint_region_id
+        )
+        if region is not None and int(region.get("floor", 0) or 0) != int(
+            self.floor_spin.value()
+        ):
+            region = None
+        if region is None:
+            region = {
+                "id": self._next_corridor_paint_region_id(),
+                "name": "Corridor fill",
+                "floor": int(self.floor_spin.value()),
+                "strokes": [],
+                "filled_line_count": 0,
+                "fill_polygons": [],
+                "generated_node_names": [],
+                **self._corridor_paint_settings,
+            }
+            self._corridor_paint_regions().append(region)
+            self._active_corridor_paint_region_id = region["id"]
+            self._selected_corridor_paint_region_id = region["id"]
+        strokes = region.setdefault("strokes", [])
+        if region.get("filled_line_count") is None:
+            region["filled_line_count"] = len(strokes)
+        self.push_undo_state("Add corridor painted line")
+        strokes.append(
+            [[round(float(x), 3), round(float(y), 3)] for x, y in raw_points]
+        )
+        stroke_count = len(region.get("strokes", []))
+        self.set_status(
+            f"Saved line {stroke_count} in {region.get('name', region['id'])}. "
+            "Click the next end point to continue, right-click to end the chain, "
+            "or use Build Fills when ready."
+        )
+        self.refresh_canvas()
+        return True
+
+    def _prompt_to_fill_completed_corridor_lines(self, region_id):
+        region = self._corridor_paint_region_by_id(region_id)
+        if region is None:
+            return False
+        strokes = list(region.get("strokes", []) or [])
+        filled_count = region.get("filled_line_count")
+        if filled_count is None:
+            filled_count = len(strokes)
+            region["filled_line_count"] = filled_count
+        filled_count = max(0, min(int(filled_count), len(strokes)))
+        pending_count = len(strokes) - filled_count
+        if pending_count <= 0:
+            return False
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Fill Completed Corridor Lines")
+        layout = QVBoxLayout(dialog)
+        message = QLabel(
+            f"{pending_count} new straight line(s) were completed in "
+            f"{region.get('name', region.get('id'))}. Fill these lines now?"
+        )
+        message.setWordWrap(True)
+        layout.addWidget(message)
+        form = QFormLayout()
+        layout.addLayout(form)
+        width_spin = QDoubleSpinBox()
+        width_spin.setRange(0.2, 50.0)
+        width_spin.setDecimals(2)
+        width_spin.setSuffix(" m")
+        width_spin.setValue(float(region.get("fill_width_m", 2.5) or 2.5))
+        form.addRow("Fill width", width_spin)
+        note = QLabel(
+            "The fill follows the corridor centre-lines at the selected width. "
+            "DXF linework is currently ignored. Choosing Keep Lines Only retains "
+            "the centre-lines so they can be filled later."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Yes | QDialogButtonBox.No)
+        buttons.button(QDialogButtonBox.Yes).setText("Fill lines")
+        buttons.button(QDialogButtonBox.No).setText("Keep lines only")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() == QDialog.Accepted:
+            self.push_undo_state("Fill completed corridor lines")
+            region["fill_width_m"] = width_spin.value()
+            region["filled_line_count"] = len(strokes)
+            self._rebuild_corridor_paint_region_fill(region)
+            self.set_status(
+                f"Filled {pending_count} completed corridor line(s) in "
+                f"{region.get('name', region.get('id'))}"
+            )
+        else:
+            self.set_status(
+                f"Kept {pending_count} completed corridor line(s) without fill"
+            )
+        self.refresh_canvas()
+        return True
+
+    def _find_corridor_paint_region_at(self, x, y, floor):
+        for region in reversed(self._corridor_paint_regions()):
+            if int(region.get("floor", 0) or 0) != int(floor):
+                continue
+            if any(
+                _point_in_polygon((x, y), polygon)
+                for polygon in region.get("fill_polygons", []) or []
+            ):
+                return region
+        return None
+
+    def delete_corridor_paint_region(self, region_id):
+        region = self._corridor_paint_region_by_id(region_id)
+        if region is None:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Delete Painted Corridor Fill",
+                f"Delete {region.get('name', region_id)} and all of its saved lines? "
+                "Containment nodes already built from it will remain.",
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        self.push_undo_state("Delete corridor painted fill")
+        self.store.data["corridor_paint_regions"] = [
+            item
+            for item in self._corridor_paint_regions()
+            if str(item.get("id", "") or "") != str(region_id)
+        ]
+        if self._active_corridor_paint_region_id == region_id:
+            self._active_corridor_paint_region_id = None
+        if self._selected_corridor_paint_region_id == region_id:
+            self._selected_corridor_paint_region_id = None
+        self.set_status(f"Deleted painted fill {region.get('name', region_id)}")
+        self.refresh_canvas()
+
+    def remove_last_corridor_paint_stroke(self, region_id):
+        region = self._corridor_paint_region_by_id(region_id)
+        if region is None or not region.get("strokes"):
+            return
+        self.push_undo_state("Remove corridor painted line")
+        region["strokes"].pop()
+        region["filled_line_count"] = min(
+            int(region.get("filled_line_count", len(region["strokes"])) or 0),
+            len(region["strokes"]),
+        )
+        self._rebuild_corridor_paint_region_fill(region)
+        self.set_status(
+            f"Removed the last line from {region.get('name', region_id)}; "
+            f"{len(region.get('strokes', []))} line(s) remain"
+        )
+        self.refresh_canvas()
+
+    def build_corridor_paths_from_painted_fills(self, region_ids=None):
+        if isinstance(region_ids, bool):
+            region_ids = None
+        floor = int(self.floor_spin.value())
+        if region_ids is None:
+            selected = self._corridor_paint_region_by_id(
+                self._selected_corridor_paint_region_id
+            )
+            candidates = [
+                region
+                for region in self._corridor_paint_regions()
+                if int(region.get("floor", 0) or 0) == floor
+                and region.get("strokes")
+            ]
+            if not candidates:
+                QMessageBox.information(
+                    self, "Build Painted Corridor Fills", "No painted fills exist on this floor."
+                )
+                return
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Build Painted Corridor Fills")
+            layout = QVBoxLayout(dialog)
+            scope_combo = QComboBox()
+            if selected is not None and selected in candidates:
+                scope_combo.addItem(
+                    f"Selected fill: {selected.get('name', selected.get('id'))}",
+                    [selected.get("id")],
+                )
+            scope_combo.addItem(
+                f"All painted fills on floor {floor} ({len(candidates)})",
+                [region.get("id") for region in candidates],
+            )
+            layout.addWidget(QLabel("Choose which retained fills should update containment:"))
+            layout.addWidget(scope_combo)
+            note = QLabel(
+                "Existing corridor nodes near a painted centreline are projected onto it. "
+                "Turns, line intersections, data-point alignments and existing corridor "
+                "junctions are retained."
+            )
+            note.setWordWrap(True)
+            layout.addWidget(note)
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.button(QDialogButtonBox.Ok).setText("Build containment")
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            region_ids = scope_combo.currentData()
+        selected_ids = {str(value) for value in region_ids or []}
+        regions = [
+            region
+            for region in self._corridor_paint_regions()
+            if str(region.get("id", "")) in selected_ids and region.get("strokes")
+        ]
+        if not regions:
+            return
+        self._build_corridor_graph_from_regions(regions)
+
+    def _build_corridor_graph_from_regions(self, regions):
+        all_strokes = []
+        for region in regions:
+            for stroke_index, stroke in enumerate(region.get("strokes", [])):
+                centreline = _painted_corridor_nodes(
+                    stroke,
+                    region.get("simplification_m", 0.35),
+                    region.get("maximum_spacing_m", 5.0),
+                )
+                if len(centreline) >= 2:
+                    all_strokes.append((region, stroke_index, centreline))
+        if not all_strokes:
+            return
+
+        intersections = {index: [] for index in range(len(all_strokes))}
+        for first_index, (_r1, _s1, first) in enumerate(all_strokes):
+            for second_index in range(first_index + 1, len(all_strokes)):
+                second = all_strokes[second_index][2]
+                for a1, a2 in zip(first, first[1:]):
+                    for b1, b2 in zip(second, second[1:]):
+                        crossing = _segment_intersection_point(a1, a2, b1, b2)
+                        if crossing is not None:
+                            intersections[first_index].append(crossing)
+                            intersections[second_index].append(crossing)
+
+        floor = int(regions[0].get("floor", 0) or 0)
+        existing_nodes = [
+            node
+            for node in self.store.data.get("corridors", {}).get("nodes", [])
+            if int(node.get("floor", 0) or 0) == floor
+        ]
+        node_by_name = {
+            str(node.get("name", "") or "").strip(): node for node in existing_nodes
+        }
+        corridor_names = set(node_by_name)
+        corridor_edges = self.store.data.get("corridors", {}).get("edges", [])
+        connected_corridor_names = {
+            endpoint
+            for edge in corridor_edges
+            for endpoint in (
+                str(edge.get("from", "") or "").strip(),
+                str(edge.get("to", "") or "").strip(),
+            )
+            if endpoint in corridor_names
+        }
+        data_points = [
+            point
+            for point in self.store.data.get("data_points", [])
+            if int(point.get("floor", 0) or 0) == floor
+        ]
+        alignments_by_stroke = {index: [] for index in range(len(all_strokes))}
+        for data_point in data_points:
+            data_position = (
+                float(data_point.get("x", 0.0) or 0.0),
+                float(data_point.get("y", 0.0) or 0.0),
+            )
+            nearest_alignment = None
+            for stroke_number, (_region, _stroke_index, centreline) in enumerate(
+                all_strokes
+            ):
+                projection = _project_point_to_polyline(data_position, centreline)
+                if projection is None:
+                    continue
+                candidate = (float(projection["distance"]), stroke_number, projection)
+                if nearest_alignment is None or candidate[:2] < nearest_alignment[:2]:
+                    nearest_alignment = candidate
+            if nearest_alignment is not None:
+                _distance, stroke_number, projection = nearest_alignment
+                alignments_by_stroke[stroke_number].append(projection)
+        self.push_undo_state("Build containment from painted fills")
+        created_names = []
+        realigned_names = set()
+        aligned_data_points = 0
+        all_path_names = []
+        before_edges = len(corridor_edges)
+
+        for stroke_number, (region, _stroke_index, centreline) in enumerate(all_strokes):
+            entries = []
+            distance_along = 0.0
+            for index, point in enumerate(centreline):
+                if index:
+                    distance_along += math.hypot(
+                        point[0] - centreline[index - 1][0],
+                        point[1] - centreline[index - 1][1],
+                    )
+                entries.append({"distance_along": distance_along, "point": point, "name": None})
+
+            for crossing in intersections.get(stroke_number, []):
+                projection = _project_point_to_polyline(crossing, centreline)
+                if projection:
+                    entries.append({**projection, "name": None})
+
+            realign_distance = max(
+                0.0, float(region.get("realign_distance_m", 2.0) or 0.0)
+            )
+            follow_distance = max(
+                realign_distance,
+                float(region.get("fill_width_m", 2.5) or 2.5) / 2.0,
+            )
+            for node in existing_nodes:
+                name = str(node.get("name", "") or "").strip()
+                if not name or name in realigned_names:
+                    continue
+                projection = _project_point_to_polyline(
+                    (float(node.get("x", 0.0)), float(node.get("y", 0.0))),
+                    centreline,
+                )
+                threshold = follow_distance if name in connected_corridor_names else realign_distance
+                if projection and projection["distance"] <= threshold:
+                    entries.append({**projection, "name": name})
+
+            for projection in alignments_by_stroke.get(stroke_number, []):
+                entries.append({**projection, "name": None, "data_alignment": True})
+                aligned_data_points += 1
+
+            entries.sort(key=lambda entry: float(entry.get("distance_along", 0.0)))
+            merged = []
+            for entry in entries:
+                if merged and math.hypot(
+                    entry["point"][0] - merged[-1]["point"][0],
+                    entry["point"][1] - merged[-1]["point"][1],
+                ) < 0.2:
+                    if entry.get("name") and not merged[-1].get("name"):
+                        merged[-1] = entry
+                    continue
+                merged.append(entry)
+
+            join_distance = max(0.0, float(region.get("join_distance_m", 1.0)))
+            path_names = []
+            for entry in merged:
+                x, y = entry["point"]
+                name = str(entry.get("name") or "").strip()
+                node = node_by_name.get(name) if name else None
+                if node is None:
+                    nearest = min(
+                        existing_nodes,
+                        key=lambda candidate: math.hypot(
+                            x - float(candidate.get("x", 0.0)),
+                            y - float(candidate.get("y", 0.0)),
+                        ),
+                        default=None,
+                    )
+                    if nearest is not None and math.hypot(
+                        x - float(nearest.get("x", 0.0)),
+                        y - float(nearest.get("y", 0.0)),
+                    ) <= join_distance:
+                        node = nearest
+                        name = str(node.get("name", "") or "").strip()
+                    else:
+                        name = self.store.suggest_next_corridor_name(floor)
+                        self.store.add_corridor_node(
+                            name,
+                            floor,
+                            x,
+                            y,
+                            float(self.default_corridor_height_spin.value()),
+                            int(self.default_corridor_cable_limit_spin.value()),
+                        )
+                        node = self.store.data["corridors"]["nodes"][-1]
+                        node["restricted"] = False
+                        existing_nodes.append(node)
+                        node_by_name[name] = node
+                        created_names.append(name)
+                node["x"] = round(float(x), 3)
+                node["y"] = round(float(y), 3)
+                realigned_names.add(name)
+                if not path_names or name != path_names[-1]:
+                    path_names.append(name)
+
+            for start_name, end_name in zip(path_names, path_names[1:]):
+                if start_name == end_name:
+                    continue
+                self.store.add_edge(start_name, end_name)
+                if self.bidirectional_check.isChecked():
+                    self.store.add_edge(end_name, start_name)
+            all_path_names.extend(path_names)
+            generated = set(region.get("generated_node_names", []) or [])
+            generated.update(path_names)
+            region["generated_node_names"] = sorted(generated, key=str.casefold)
+
+        created_edges = len(self.store.data["corridors"]["edges"]) - before_edges
+        self._mark_routing_graph_changed()
+        self._set_canvas_multi_selection(all_path_names, append=False)
+        self.set_status(
+            f"Built {len(regions)} painted fill(s): {len(created_names)} new node(s), "
+            f"{len(realigned_names) - len(created_names)} realigned node(s), "
+            f"{created_edges} edge(s), {aligned_data_points} data-point alignment(s)."
+        )
+        self.refresh_canvas()
+        QMessageBox.information(self, "Build Painted Corridor Fills", self.status_label.text())
+
     def update_selected_data_point_qty(self):
         selected = self._selected_data_point_names()
 
@@ -14037,6 +16970,7 @@ class CableRouteEditor(QMainWindow):
             self.canvas.set_placement_zone_preview(None)
 
     def _set_equipment_room_extent_overlay(self, overlay):
+        self._equipment_room_extent_overlay = overlay
         if hasattr(self, "canvas") and hasattr(
             self.canvas, "set_equipment_room_extent_overlay"
         ):
@@ -14601,6 +17535,10 @@ class CableRouteEditor(QMainWindow):
 
     def on_mouse_move(self, _event, sx, sy):
         mode = self.mode_combo.currentText()
+        if mode == "corridor_paint" and self._corridor_painting:
+            x, y = self.snap(sx, sy)
+            self._update_corridor_paint(x, y)
+            return
         if mode == "location":
             session = self.bulk_location_session or {}
             kind = str(session.get("kind", "")).strip()
@@ -14639,6 +17577,23 @@ class CableRouteEditor(QMainWindow):
         floor = self.floor_spin.value()
         x, y = sx, sy
         x, y = self.snap(x, y)
+
+        if mode == "data_point_text_area":
+            self._begin_selection_rect(event)
+            self.set_status("Drag around the DXF text labels to place data points")
+            return
+
+        if mode == "corridor_paint":
+            if self._corridor_painting:
+                self._update_corridor_paint(x, y)
+                self._finish_corridor_paint()
+                self._begin_corridor_paint(x, y)
+                self.set_status(
+                    "Corridor line saved — click the next end point or right-click to end the chain"
+                )
+            else:
+                self._begin_corridor_paint(x, y)
+            return
 
         if mode == "pan":
             self.last_pan = event.position().toPoint()
@@ -14755,6 +17710,24 @@ class CableRouteEditor(QMainWindow):
             picked = self.find_nearest_selectable_name(x, y, floor)
 
         if mode == "select_move":
+            painted_region = (
+                self._find_corridor_paint_region_at(x, y, floor)
+                if not picked
+                else None
+            )
+            if painted_region is not None:
+                self._selected_corridor_paint_region_id = str(
+                    painted_region.get("id", "")
+                )
+                self.selected_point_name = None
+                self._clear_canvas_multi_selection()
+                self.set_status(
+                    f"Selected painted fill {painted_region.get('name', painted_region.get('id'))}: "
+                    f"{len(painted_region.get('strokes', []))} line(s)"
+                )
+                self.refresh_canvas()
+                return
+            self._selected_corridor_paint_region_id = None
             self.selected_placement_zone_id = None
             modifiers = Qt.KeyboardModifiers(QApplication.keyboardModifiers())
             template_eligible = (
@@ -14773,6 +17746,7 @@ class CableRouteEditor(QMainWindow):
                 else:
                     if not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier)):
                         self._clear_canvas_multi_selection()
+                    self.selected_point_name = picked
 
                 self.dragging_point_name = picked
                 self.alt_move_locked = self._is_alt_pressed()
@@ -14801,6 +17775,10 @@ class CableRouteEditor(QMainWindow):
             zone, _zone_handle = self._find_placement_zone_hit(x, y, floor)
             if zone is not None:
                 self.delete_placement_zone(zone.get("id", ""))
+                return
+            painted_region = self._find_corridor_paint_region_at(x, y, floor)
+            if painted_region is not None and not picked:
+                self.delete_corridor_paint_region(painted_region.get("id"))
                 return
             if picked:
                 department_ids = self.store.department_ids()
@@ -15085,6 +18063,7 @@ class CableRouteEditor(QMainWindow):
                 if dialog.result["name"] in self.store.names_in_use():
                     QMessageBox.critical(self, "Duplicate name", "Name already exists")
                     return
+                self.push_undo_state("Add data point")
                 self.store.add_data_point(
                     dialog.result["name"],
                     floor,
@@ -15452,6 +18431,10 @@ class CableRouteEditor(QMainWindow):
             self.refresh_canvas()
 
     def on_left_release(self, event):
+        mode = self.mode_combo.currentText()
+        if mode == "data_point_text_area" and self.selection_rect_active:
+            self._finish_data_point_text_area(event)
+            return
         if self.dragging_placement_zone_id:
             zone_id = self.dragging_placement_zone_id
             self.dragging_placement_zone_id = None
@@ -15488,6 +18471,26 @@ class CableRouteEditor(QMainWindow):
 
     def on_right_click(self, event, sx, sy):
         mode = self.mode_combo.currentText()
+        if mode == "data_point_text_area" and self.selection_rect_active:
+            self.selection_rect_active = False
+            self.selection_rect_origin = None
+            self.selection_rect_current = None
+            if self._rubber_band is not None:
+                self._rubber_band.hide()
+            self.set_status("DXF text area selection cancelled")
+            return
+        if mode == "corridor_paint":
+            self._corridor_paint_points = []
+            self._corridor_painting = False
+            self._refresh_corridor_paint_layer()
+            prompted = self._prompt_to_fill_completed_corridor_lines(
+                self._active_corridor_paint_region_id
+            )
+            if not prompted:
+                self.set_status(
+                    "Corridor line chain ended; click to start a separate line"
+                )
+            return
         if mode == "placement_zone" and self.placement_zone_start is not None:
             self.placement_zone_start = None
             self._clear_placement_zone_preview()
@@ -15570,6 +18573,32 @@ class CableRouteEditor(QMainWindow):
                 self.delete_placement_zone(zone_id)
             return
 
+        painted_region = (
+            self._find_corridor_paint_region_at(x, y, floor)
+            if mode == "select_move" and not picked
+            else None
+        )
+        if painted_region is not None:
+            region_id = str(painted_region.get("id", "") or "")
+            self._selected_corridor_paint_region_id = region_id
+            self.refresh_canvas()
+            menu = QMenu(self)
+            continue_action = menu.addAction("Edit / continue painting this fill")
+            remove_stroke_action = menu.addAction("Remove last line")
+            remove_stroke_action.setEnabled(bool(painted_region.get("strokes")))
+            build_action = menu.addAction("Build containment from this fill")
+            delete_action = menu.addAction("Delete painted fill")
+            action = menu.exec(event.globalPosition().toPoint())
+            if action == continue_action:
+                self.start_corridor_drawing_assistant(region_id)
+            elif action == remove_stroke_action:
+                self.remove_last_corridor_paint_stroke(region_id)
+            elif action == build_action:
+                self.build_corridor_paths_from_painted_fills([region_id])
+            elif action == delete_action:
+                self.delete_corridor_paint_region(region_id)
+            return
+
         if picked:
             # A context menu is not a model or camera change. Keep the current
             # visual selection untouched so opening the menu does not trigger a
@@ -15612,12 +18641,14 @@ class CableRouteEditor(QMainWindow):
             similar_seed_names = self._similar_data_point_seed_names(picked)
             select_similar_dp_action = None
             update_selected_dp_qty_action = None
+            auto_connect_selected_dp_action = None
 
             create_selected_dp_connections_action = None
             disconnect_selected_dp_connections_action = None
 
             assign_selected_dp_departments_action = None
             assign_selected_dp_room_type_action = None
+            infer_selected_dp_room_type_action = None
 
             if kind == "data_point" and similar_seed_names:
                 menu.addSeparator()
@@ -15634,6 +18665,9 @@ class CableRouteEditor(QMainWindow):
 
             if selected_data_points:
                 menu.addSeparator()
+                auto_connect_selected_dp_action = menu.addAction(
+                    f"Auto-connect {len(selected_data_points)} selected data point(s) to graph"
+                )
                 update_selected_dp_qty_action = menu.addAction(
                     f"Update qty for {len(selected_data_points)} selected data points"
                 )
@@ -15666,6 +18700,9 @@ class CableRouteEditor(QMainWindow):
                 )
                 assign_selected_dp_room_type_action = menu.addAction(
                     f"Assign room type for {len(selected_data_points)} selected data point(s)"
+                )
+                infer_selected_dp_room_type_action = menu.addAction(
+                    "Assign room types from nearby DXF text"
                 )
 
             selected_corridor_nodes = self._selected_corridor_node_names()
@@ -15758,6 +18795,11 @@ class CableRouteEditor(QMainWindow):
                 and action == update_selected_dp_qty_action
             ):
                 self.update_selected_data_point_qty()
+            elif (
+                auto_connect_selected_dp_action is not None
+                and action == auto_connect_selected_dp_action
+            ):
+                self.auto_connect_data_points_to_graph(selected_data_points)
             elif restrict_nodes_action is not None and action == restrict_nodes_action:
                 self.set_selected_corridor_restricted(True)
             elif (
@@ -15785,6 +18827,11 @@ class CableRouteEditor(QMainWindow):
                 and action == assign_selected_dp_room_type_action
             ):
                 self.assign_room_type_to_selected_data_points()
+            elif (
+                infer_selected_dp_room_type_action is not None
+                and action == infer_selected_dp_room_type_action
+            ):
+                self.assign_room_types_from_nearby_text()
 
         elif self.selection_clipboard:
             menu = QMenu(self)
@@ -15796,6 +18843,13 @@ class CableRouteEditor(QMainWindow):
 
     def on_drag(self, event, sx, sy):
         mode = self.mode_combo.currentText()
+        if mode == "data_point_text_area":
+            self._update_selection_rect(event)
+            return
+        if mode == "corridor_paint":
+            x, y = self.snap(sx, sy)
+            self._update_corridor_paint(x, y)
+            return
         if mode == "pan":
             current = event.position().toPoint()
             if self.last_pan is None:

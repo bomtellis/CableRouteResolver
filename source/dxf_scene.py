@@ -378,6 +378,24 @@ class DXFScene:
                         add_polyline(
                             points, closed=bool(getattr(child, "closed", False))
                         )
+                    elif dtype == "CIRCLE":
+                        centre = child.dxf.center
+                        transformed_centre = transform_point(centre.x, centre.y)
+                        radius_scale = (abs(sx) + abs(sy)) / 2.0
+                        add_circle(
+                            transformed_centre,
+                            float(child.dxf.radius) * radius_scale,
+                        )
+                    elif dtype == "ARC":
+                        centre = child.dxf.center
+                        transformed_centre = transform_point(centre.x, centre.y)
+                        radius_scale = (abs(sx) + abs(sy)) / 2.0
+                        add_arc(
+                            transformed_centre,
+                            float(child.dxf.radius) * radius_scale,
+                            float(child.dxf.start_angle) + math.degrees(rotation),
+                            float(child.dxf.end_angle) + math.degrees(rotation),
+                        )
                     elif dtype == "TEXT":
                         p = child.dxf.insert
                         tx, ty = transform_point(p.x, p.y)
@@ -396,6 +414,22 @@ class DXFScene:
                             child.dxf.char_height,
                             float(getattr(child.dxf, "rotation", 0.0) or 0.0),
                         )
+                except Exception:
+                    continue
+
+            # Room names and room numbers in architectural drawings are often
+            # attached to a block as ATTRIB values rather than stored as TEXT
+            # inside the block definition. Attribute insert positions are
+            # already expressed in model-space coordinates by ezdxf.
+            for attribute in getattr(entity, "attribs", []) or []:
+                try:
+                    insert_point = attribute.dxf.insert
+                    add_text_entity(
+                        (insert_point.x, insert_point.y),
+                        attribute.dxf.text,
+                        attribute.dxf.height,
+                        float(getattr(attribute.dxf, "rotation", 0.0) or 0.0),
+                    )
                 except Exception:
                     continue
 

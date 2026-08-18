@@ -366,6 +366,8 @@ class GpuDxfGraphView(_ViewBase):
         self.selected_template_names: set[str] = set()
         self.edge_chain_start: Optional[str] = None
         self.selected_placement_zone_id: Optional[str] = None
+        self.selected_corridor_paint_region_id: Optional[str] = None
+        self.corridor_paint_line_preview: List[PointTuple] = []
         self.placement_zone_preview: Optional[Dict[str, Any]] = None
         self.equipment_room_extent_overlay: Optional[Dict[str, Any]] = None
         self.data_room_measurement_overlay: Optional[Dict[str, Any]] = None
@@ -1110,6 +1112,25 @@ class GpuDxfGraphView(_ViewBase):
         self.selected_placement_zone_id = zone_id
         self.request_redraw(DirtyLayer.OBJECTS | DirtyLayer.OVERLAY)
 
+    def set_corridor_paint_overlay(
+        self,
+        selected_region_id: Optional[str],
+        line_preview: Optional[Iterable[Tuple[float, float]]] = None,
+    ) -> None:
+        selected_region_id = str(selected_region_id or "").strip() or None
+        preview = [
+            (float(point[0]), float(point[1]))
+            for point in (line_preview or [])
+        ]
+        if (
+            selected_region_id == self.selected_corridor_paint_region_id
+            and preview == self.corridor_paint_line_preview
+        ):
+            return
+        self.selected_corridor_paint_region_id = selected_region_id
+        self.corridor_paint_line_preview = preview
+        self.request_redraw(DirtyLayer.OBJECTS)
+
     def set_placement_zone_preview(self, zone: Optional[Dict[str, Any]]) -> None:
         preview = dict(zone) if isinstance(zone, dict) else None
         if preview == self.placement_zone_preview:
@@ -1529,6 +1550,7 @@ class GpuDxfGraphView(_ViewBase):
             painter.save()
             painter.translate(self._cache_margin_x, self._cache_margin_y)
             if self.show_graph:
+                self._draw_corridor_paint_regions(painter)
                 self._draw_equipment_room_placement_zones(painter)
                 self._draw_equipment_room_extents(painter)
                 self._draw_data_room_measurement(painter)
@@ -1799,7 +1821,75 @@ class GpuDxfGraphView(_ViewBase):
             painter.drawPath(same_path)
         if not cross_path.isEmpty():
             painter.setPen(self._cross_floor_edge_pen)
-            painter.drawPath(cross_path)
+        painter.drawPath(cross_path)
+        painter.restore()
+
+    def _draw_corridor_paint_regions(self, painter: QPainter) -> None:
+        snapshot = self._ensure_frame_snapshot()
+        regions = [
+            region
+            for region in snapshot.data.get("corridor_paint_regions", []) or []
+            if isinstance(region, dict)
+            and int(region.get("floor", 0) or 0) == int(self.floor)
+        ]
+        if not regions and not self.corridor_paint_line_preview:
+            return
+        painter.save()
+        self._apply_world_transform(painter)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        for region in regions:
+            selected = str(region.get("id", "") or "") == str(
+                self.selected_corridor_paint_region_id or ""
+            )
+            fill = QColor("#38bdf8" if selected else "#22c55e")
+            fill.setAlpha(82 if selected else 48)
+            outline = QColor("#e0f2fe" if selected else "#86efac")
+            outline.setAlpha(230 if selected else 145)
+            painter.setBrush(QBrush(fill))
+            painter.setPen(QPen(outline, 0.0))
+            for polygon in region.get("fill_polygons", []) or []:
+                try:
+                    scene_polygon = QPolygonF(
+                        [
+                            self.world_to_scene(float(point[0]), float(point[1]))
+                            for point in polygon
+                        ]
+                    )
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if len(scene_polygon) >= 3:
+                    painter.drawPolygon(scene_polygon)
+            centreline = QColor("#e0f2fe" if selected else "#86efac")
+            centreline.setAlpha(245 if selected else 190)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(centreline, 0.08))
+            for line in region.get("strokes", []) or []:
+                if len(line) < 2:
+                    continue
+                try:
+                    line_path = QPainterPath()
+                    line_path.moveTo(
+                        self.world_to_scene(float(line[0][0]), float(line[0][1]))
+                    )
+                    for point in line[1:]:
+                        line_path.lineTo(
+                            self.world_to_scene(float(point[0]), float(point[1]))
+                        )
+                    painter.drawPath(line_path)
+                except (TypeError, ValueError, IndexError):
+                    continue
+
+        if len(self.corridor_paint_line_preview) >= 2:
+            preview_path = QPainterPath()
+            start = self.corridor_paint_line_preview[0]
+            preview_path.moveTo(self.world_to_scene(start[0], start[1]))
+            for x, y in self.corridor_paint_line_preview[1:]:
+                preview_path.lineTo(self.world_to_scene(x, y))
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(
+                QPen(QColor("#ff9f1c"), 0.16, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            )
+            painter.drawPath(preview_path)
         painter.restore()
 
     def _draw_departments(self, painter: QPainter) -> None:

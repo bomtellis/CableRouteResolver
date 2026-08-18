@@ -40,6 +40,7 @@ DEFAULT_JSON = {
     },
     "departments": [],
     "room_types": [],
+    "room_type_text_mappings": [],
     "room_type_asset_review": {},
     "room_type_asset_staging": {},
     "room_type_asset_commits": [],
@@ -56,6 +57,7 @@ DEFAULT_JSON = {
     "retired_asset_ids": [],
     "locations": [],
     "equipment_room_placement_zones": [],
+    "corridor_paint_regions": [],
     "data_points": [],
     "ad_hoc_assets": [],
     "corridors": {
@@ -140,6 +142,27 @@ class JsonStore:
 
         self.data.setdefault("departments", [])
         self.data.setdefault("room_types", [])
+        room_type_text_mappings = self.data.get("room_type_text_mappings", [])
+        if isinstance(room_type_text_mappings, dict):
+            room_type_text_mappings = [
+                {
+                    "text": str(text),
+                    "normalised_text": str(text),
+                    "room_type_id": str(room_type_id),
+                }
+                for text, room_type_id in room_type_text_mappings.items()
+            ]
+        if not isinstance(room_type_text_mappings, list):
+            room_type_text_mappings = []
+        self.data["room_type_text_mappings"] = [
+            dict(item)
+            for item in room_type_text_mappings
+            if isinstance(item, dict)
+            and str(item.get("room_type_id", "") or "").strip()
+            and str(
+                item.get("normalised_text", item.get("text", "")) or ""
+            ).strip()
+        ]
         if not isinstance(self.data.get("room_type_asset_review"), dict):
             self.data["room_type_asset_review"] = {}
         self.data.setdefault("room_type_asset_review", {})
@@ -204,6 +227,14 @@ class JsonStore:
         )
         self.data.setdefault("locations", [])
         self.data.setdefault("equipment_room_placement_zones", [])
+        corridor_paint_regions = self.data.get("corridor_paint_regions", [])
+        if not isinstance(corridor_paint_regions, list):
+            corridor_paint_regions = []
+        self.data["corridor_paint_regions"] = [
+            dict(item)
+            for item in corridor_paint_regions
+            if isinstance(item, dict) and str(item.get("id", "") or "").strip()
+        ]
         self.data.setdefault("data_points", [])
         if not isinstance(self.data.get("ad_hoc_assets"), list):
             self.data["ad_hoc_assets"] = []
@@ -1580,12 +1611,27 @@ class JsonStore:
             if str(item.get("id", "")).strip() != department_id
         ]
 
-        for location in self.data.get("locations", []):
-            location["department_ids"] = [
-                str(x).strip()
-                for x in location.get("department_ids", [])
-                if str(x).strip() != department_id
-            ]
+        for collection_name in (
+            "locations",
+            "data_points",
+            "network_asset_instances",
+        ):
+            for item in self.data.get(collection_name, []):
+                if not isinstance(item, dict):
+                    continue
+                item["department_ids"] = [
+                    str(x).strip()
+                    for x in item.get("department_ids", [])
+                    if str(x).strip() != department_id
+                ]
+                if str(item.get("department_id", "")).strip() == department_id:
+                    item["department_id"] = ""
+
+        for assignment in self.data.get("network_endpoint_assignments", []):
+            if not isinstance(assignment, dict):
+                continue
+            if str(assignment.get("department_id", "")).strip() == department_id:
+                assignment["department_id"] = ""
 
     def upsert_transition(
         self,
